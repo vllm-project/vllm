@@ -226,9 +226,7 @@ class LogprobTokenIdsState:
         self.max_num_reqs = max_num_reqs
         self.num_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_LOGPROB_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+            (max_num_reqs, MAX_LOGPROB_TOKEN_IDS), dtype=torch.int32, device=device
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:

@@ -568,9 +568,7 @@ class HunYuanDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states, ori_kv_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_states=kv_states,
+            positions=positions, hidden_states=hidden_states, kv_states=kv_states
         )
 
         # Fully Connected
@@ -610,9 +608,7 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -661,10 +657,7 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual, kv_states = layer(
-                positions,
-                hidden_states,
-                residual,
-                prev_kv_states,
+                positions, hidden_states, residual, prev_kv_states
             )
 
             if getattr(self.config, "use_cla", False) and i % cla_factor == 0:
@@ -811,13 +804,7 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             if is_found:
                 continue
 
-            for (
-                param_name,
-                weight_name,
-                den,
-                split_param,
-                func,
-            ) in split_params_mapping:
+            for param_name, weight_name, den, split_param, func in split_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -911,15 +898,8 @@ class HunyuanV1ModelBase(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -931,8 +911,7 @@ class HunyuanV1ModelBase(
         self.quant_config = quant_config
 
         self.model = HunYuanModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -963,10 +942,7 @@ class HunyuanV1ModelBase(
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -1024,9 +1000,7 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         self.num_redundant_experts = example_layer.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts

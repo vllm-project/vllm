@@ -122,8 +122,7 @@ def test_tp2_ar_rms_fp8_fusions(
     [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
 )
 @pytest.mark.parametrize(
-    "attn_backend",
-    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
+    "attn_backend", [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN]
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
@@ -154,17 +153,11 @@ def test_tp2_ar_rms_fp4_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
-            fuse_act_quant=True,
-            fuse_attn_quant=True,
-            fuse_allreduce_rms=True,
+            fuse_act_quant=True, fuse_attn_quant=True, fuse_allreduce_rms=True
         ),
     )
 
-    matches_check = [
-        "act_quant_fusion",
-        "attn_quant_fusion",
-        "ar_rms_fusion",
-    ]
+    matches_check = ["act_quant_fusion", "attn_quant_fusion", "ar_rms_fusion"]
 
     run_e2e_fusion_test(
         model_name,
@@ -183,13 +176,7 @@ def test_tp2_ar_rms_fp4_fusions(
     [llama3_8b, qwen3_a3b, gpt_oss_20b],
 )
 @pytest.mark.parametrize(
-    "attn_backend",
-    [
-        TRITON_ATTN,
-        FLASHINFER_ATTN,
-        ROCM_ATTN,
-        ROCM_AITER_UNIFIED_ATTN,
-    ],
+    "attn_backend", [TRITON_ATTN, FLASHINFER_ATTN, ROCM_ATTN, ROCM_AITER_UNIFIED_ATTN]
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", tuple(custom_ops_combos("rms_norm")))
@@ -218,15 +205,11 @@ def test_tp2_ar_rms_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
-            enable_qk_norm_rope_fusion=True,
-            fuse_allreduce_rms=True,
+            enable_qk_norm_rope_fusion=True, fuse_allreduce_rms=True
         ),
     )
 
-    matches_check = [
-        "norm_rope_fusion",
-        "ar_rms_fusion",
-    ]
+    matches_check = ["norm_rope_fusion", "ar_rms_fusion"]
 
     run_e2e_fusion_test(
         model_name,

@@ -315,9 +315,7 @@ class CustomAllreduce:
 
     @staticmethod
     def free_shared_buffer(
-        pointers: list[int],
-        group: ProcessGroup | None = None,
-        rank: int | None = None,
+        pointers: list[int], group: ProcessGroup | None = None, rank: int | None = None
     ) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)

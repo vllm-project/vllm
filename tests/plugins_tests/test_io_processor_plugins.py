@@ -17,10 +17,7 @@ class DummyIOProcessor(IOProcessor):
     """Minimal IOProcessor used as the target of the mocked plugin entry point."""
 
     def pre_process(
-        self,
-        prompt: object,
-        request_id: str | None = None,
-        **kwargs,
+        self, prompt: object, request_id: str | None = None, **kwargs
     ) -> PromptType | Sequence[PromptType]:
         raise NotImplementedError
 

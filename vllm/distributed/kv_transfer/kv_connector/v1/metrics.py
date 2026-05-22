@@ -163,10 +163,7 @@ class KVConnectorProm:
                 Histogram: self._histogram_cls,
             }
             self.prom_metrics = connector_cls.build_prom_metrics(
-                vllm_config,
-                metric_types,
-                labelnames,
-                per_engine_labelvalues,
+                vllm_config, metric_types, labelnames, per_engine_labelvalues
             )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):

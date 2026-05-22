@@ -176,8 +176,7 @@ def populate_loras(
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
                 sublora = DummyLoRAManager(layer_weights.device).init_random_lora(
-                    module_name=f"fake_{i}",
-                    weight=layer_weights,
+                    module_name=f"fake_{i}", weight=layer_weights
                 )
                 sublora.lora_b = sublora.lora_b[
                     (sublora_len * i) : (sublora_len * (i + 1)), :
@@ -187,11 +186,7 @@ def populate_loras(
 
             lora = PackedLoRALayerWeights.pack(subloras) if repeats > 1 else subloras[0]
 
-            layer.set_lora(
-                slot_idx,
-                lora_a=lora.lora_a,
-                lora_b=lora.lora_b,
-            )
+            layer.set_lora(slot_idx, lora_a=lora.lora_a, lora_b=lora.lora_b)
 
             lora_dict[lora_id] = lora
             sublora_dict[lora_id] = subloras
@@ -299,9 +294,7 @@ def test_embeddings(
         embedding, lora_embedding = create_random_embedding_layer()
         lora_embedding.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_embedding,
-            layer_weights=embedding.weight.T,
+            id_to_index, layer=lora_embedding, layer_weights=embedding.weight.T
         )
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -312,12 +305,7 @@ def test_embeddings(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size)
 
         lora_result = lora_embedding(torch.cat(inputs))
 
@@ -325,10 +313,7 @@ def test_embeddings(
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = embedding(input_)
-            after_a = F.embedding(
-                input_,
-                lora.lora_a.T,
-            )
+            after_a = F.embedding(input_, lora.lora_a.T)
             result += after_a @ lora.lora_b.T
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
@@ -349,12 +334,7 @@ def test_embeddings(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size)
 
         lora_result = lora_embedding(torch.cat(inputs))
         expected_result = embedding(torch.cat(inputs))
@@ -384,9 +364,7 @@ def test_lm_head_logits_processor(
 
     def _pretest():
         linear = ParallelLMHead(
-            num_embeddings=vocab_size,
-            embedding_dim=1024,
-            params_dtype=torch.float16,
+            num_embeddings=vocab_size, embedding_dim=1024, params_dtype=torch.float16
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, vocab_size:] = 0
@@ -406,9 +384,7 @@ def test_lm_head_logits_processor(
         lora_logits_processor.set_mapping(punica_wrapper)
 
         lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_logits_processor,
-            layer_weights=linear.weight,
+            id_to_index, layer=lora_logits_processor, layer_weights=linear.weight
         )
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -420,12 +396,7 @@ def test_lm_head_logits_processor(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size)
         input_ = torch.rand(20, 1024)
 
         lora_result = lora_logits_processor._get_logits(
@@ -459,12 +430,7 @@ def test_lm_head_logits_processor(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size)
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
@@ -511,11 +477,7 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_linear_replicated(
-    default_vllm_config,
-    dist_init,
-    num_loras,
-    device,
-    stage,
+    default_vllm_config, dist_init, num_loras, device, stage
 ) -> None:
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
@@ -523,9 +485,7 @@ def test_linear_replicated(
     max_loras = 8
     torch.set_default_device(device)
     lora_config = LoRAConfig(
-        max_loras=max_loras,
-        max_lora_rank=8,
-        lora_dtype=torch.float16,
+        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
     )
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
@@ -554,9 +514,7 @@ def test_linear_replicated(
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_linear,
-            layer_weights=linear.weight,
+            id_to_index, layer=lora_linear, layer_weights=linear.weight
         )
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -568,12 +526,7 @@ def test_linear_replicated(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
@@ -603,12 +556,7 @@ def test_linear_replicated(
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -687,9 +635,7 @@ def test_linear_parallel(
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_linear,
-            layer_weights=linear.weight,
+            id_to_index, layer=lora_linear, layer_weights=linear.weight
         )
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -701,12 +647,7 @@ def test_linear_parallel(
             device=device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
@@ -736,12 +677,7 @@ def test_linear_parallel(
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -847,10 +783,7 @@ def test_column_parallel_packed(
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, sublora_dict = populate_loras(
-            id_to_index,
-            layer=lora_linear,
-            layer_weights=linear.weight,
-            repeats=repeats,
+            id_to_index, layer=lora_linear, layer_weights=linear.weight, repeats=repeats
         )
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -863,12 +796,7 @@ def test_column_parallel_packed(
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
@@ -899,12 +827,7 @@ def test_column_parallel_packed(
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -1461,8 +1384,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         packed_modules_list=packed_modules_two,
     )
     assert isinstance(
-        selected_fully_sharded_tp_layer,
-        MergedColumnParallelLinearWithShardedLoRA,
+        selected_fully_sharded_tp_layer, MergedColumnParallelLinearWithShardedLoRA
     ), (
         "from_layer should select MergedColumnParallelLinearWithShardedLoRA "
         "for fully sharded TP merged layers, got "
@@ -1498,8 +1420,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         packed_modules_list=packed_modules_two,
     )
     assert isinstance(
-        selected_fully_sharded_deepseek_layer,
-        MergedColumnParallelLinearWithLoRA,
+        selected_fully_sharded_deepseek_layer, MergedColumnParallelLinearWithLoRA
     ), (
         "from_layer should keep using MergedColumnParallelLinearWithLoRA "
         "for fused_qkv_a_proj when the base layer is effectively unsharded, got "
@@ -1569,15 +1490,11 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
     # -> ColumnParallelLinearWithLoRA should NOT match (packed_modules_list != 1)
     # -> MergedColumnParallelLinearVariableSliceWithLoRA should NOT match (< 3 slices)
     assert not ColumnParallelLinearWithLoRA.can_replace_layer(
-        source_layer=layer_2_slices,
-        lora_config=lora_config,
-        packed_modules_list=[],
+        source_layer=layer_2_slices, lora_config=lora_config, packed_modules_list=[]
     ), "ColumnParallelLinearWithLoRA should NOT handle empty packed_modules_list"
 
     assert not MergedColumnParallelLinearVariableSliceWithLoRA.can_replace_layer(
-        source_layer=layer_2_slices,
-        lora_config=lora_config,
-        packed_modules_list=[],
+        source_layer=layer_2_slices, lora_config=lora_config, packed_modules_list=[]
     ), (
         "MergedColumnParallelLinearVariableSliceWithLoRA "
         "should NOT handle 2 slices even with empty packed_modules_list"
@@ -1585,8 +1502,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
 
 
 @pytest.mark.parametrize(
-    "wrapper_cls",
-    [ColumnParallelLinearWithLoRA, ColumnParallelLinearWithShardedLoRA],
+    "wrapper_cls", [ColumnParallelLinearWithLoRA, ColumnParallelLinearWithShardedLoRA]
 )
 def test_get_and_maybe_dequant_weights_accepts_lora_wrappers(dist_init, wrapper_cls):
     from vllm.model_executor.layers.quantization.utils.quant_utils import (

@@ -69,7 +69,7 @@ class TestAutotuneDisabledKernel:
                     "small": (
                         torch.randn(4, 4, device="cuda"),
                         torch.randn(4, 4, device="cuda"),
-                    ),
+                    )
                 },
             )(_add_kernel)
 

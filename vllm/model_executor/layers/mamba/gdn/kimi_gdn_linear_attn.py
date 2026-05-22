@@ -6,9 +6,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    divide,
-)
+from vllm.distributed import divide
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -25,11 +23,7 @@ from ...fla.ops.kda import (
     fused_kda_gate,
     fused_recurrent_kda,
 )
-from ...linear import (
-    ColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from ...linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
 from ..mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -100,10 +94,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
     def __init__(
-        self,
-        config: KimiLinearConfig,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, config: KimiLinearConfig, vllm_config: VllmConfig, prefix: str = ""
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -231,10 +222,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        output: torch.Tensor,
+        self, hidden_states: torch.Tensor, positions: torch.Tensor, output: torch.Tensor
     ) -> None:
         num_tokens = hidden_states.size(0)
         q = self.q_proj(hidden_states)[0]
@@ -255,15 +243,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
-            g1,
-            beta,
-            core_attn_out,
-            self.prefix,
-        )
+        torch.ops.vllm.kda_attention(q, k, v, g1, beta, core_attn_out, self.prefix)
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
@@ -398,10 +378,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             zero_idx = non_spec_state_indices_tensor[~has_initial_state]
             recurrent_state[zero_idx] = 0
             initial_state = recurrent_state[non_spec_state_indices_tensor].contiguous()
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_kda(
+            (core_attn_out_non_spec, last_recurrent_state) = chunk_kda(
                 q=q,
                 k=k,
                 v=v,
@@ -416,10 +393,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
         else:
             assert non_spec_query_start_loc is not None
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = fused_recurrent_kda(
+            (core_attn_out_non_spec, last_recurrent_state) = fused_recurrent_kda(
                 q=q,
                 k=k,
                 v=v,

@@ -22,8 +22,7 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 def has_native_kv_cache_layout(
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    key_cache: torch.Tensor, value_cache: torch.Tensor
 ) -> bool:
     """Return whether KV cache blocks can use the native ROCm pairing.
 
@@ -126,11 +125,9 @@ def kernel_paged_attention_2d(
         M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
         L = tl.zeros([num_queries_per_kv_padded], dtype=tl.float32)
     else:
-        M = tl.load(
-            sink_ptr + query_head_idx,
-            mask=head_mask,
-            other=float("-inf"),
-        ).to(dtype=tl.float32)
+        M = tl.load(sink_ptr + query_head_idx, mask=head_mask, other=float("-inf")).to(
+            dtype=tl.float32
+        )
         L = tl.where(float("-inf") < M, 1.0, 0.0)
 
     acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
@@ -439,12 +436,7 @@ def chunked_prefill_paged_decode(
         else:
             processed_block_table = block_table.to(torch.int32)
 
-        kernel_paged_attention_2d[
-            (
-                num_seqs,
-                num_kv_heads,
-            )
-        ](
+        kernel_paged_attention_2d[(num_seqs, num_kv_heads)](
             output_ptr=output,
             query_ptr=query,
             key_cache_ptr=key_cache,

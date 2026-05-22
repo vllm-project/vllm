@@ -198,10 +198,7 @@ class MiMoVisionAttention(nn.Module):
         # The checkpoint stores these only for non-full-attention blocks
         self.use_sink = use_sink
         if use_sink:
-            self.sinks = nn.Parameter(
-                torch.empty(num_heads),
-                requires_grad=False,
-            )
+            self.sinks = nn.Parameter(torch.empty(num_heads), requires_grad=False)
         else:
             self.sinks = None
 
@@ -675,9 +672,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return MultiModalDataParser(target_sr=24000.0)
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
@@ -838,10 +833,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        max_frames_per_video: int = 14,
+        self, seq_len: int, mm_counts: Mapping[str, int], max_frames_per_video: int = 14
     ) -> int:
         max_videos = mm_counts.get("video", 0)
         max_total_frames = self._get_max_video_frames(seq_len)
@@ -850,11 +842,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         )
         return max(max_frames_per_video, 1)
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
         image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
         return self.get_num_video_tokens(
@@ -883,9 +871,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
     _INPUT_FPS: float = 1.0
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         merge_size = self.info.get_hf_config().vision_config.spatial_merge_size
         fields: dict[str, MultiModalFieldConfig] = dict(
@@ -954,10 +940,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     T = frames.shape[0]
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     va_converted.append(
-                        VideoAudioInput(
-                            video=(frames, timestamps),
-                            audio=va_item.audio,
-                        )
+                        VideoAudioInput(video=(frames, timestamps), audio=va_item.audio)
                     )
             mm_data = {**mm_data, "video_audio": va_converted}
 
@@ -1091,10 +1074,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             is_embed_mask.append(False)
 
             embed_t = torch.tensor(is_embed_mask)
-            return PromptUpdateDetails(
-                full=full,
-                is_embed=lambda _tok, _seq: embed_t,
-            )
+            return PromptUpdateDetails(full=full, is_embed=lambda _tok, _seq: embed_t)
 
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["audio"][item_idx]
@@ -1224,8 +1204,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             self.audio_encoder = None
         with self._mark_language_model(vllm_config):
             self.language_model = MiMoV2FlashForCausalLM(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
         self.make_empty_intermediate_tensors = (
@@ -1474,10 +1453,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

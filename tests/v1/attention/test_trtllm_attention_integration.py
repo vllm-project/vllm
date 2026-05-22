@@ -59,18 +59,9 @@ NUM_GPU_BLOCKS = 8192
 DEVICE_TYPE = current_platform.device_type
 
 BATCH_SPECS = {
-    "decode_only": BatchSpec(
-        seq_lens=[128, 256, 512],
-        query_lens=[1, 1, 1],
-    ),
-    "prefill_only": BatchSpec(
-        seq_lens=[64, 128, 256],
-        query_lens=[16, 32, 16],
-    ),
-    "mixed": BatchSpec(
-        seq_lens=[128, 256, 512, 128],
-        query_lens=[1, 1, 8, 16],
-    ),
+    "decode_only": BatchSpec(seq_lens=[128, 256, 512], query_lens=[1, 1, 1]),
+    "prefill_only": BatchSpec(seq_lens=[64, 128, 256], query_lens=[16, 32, 16]),
+    "mixed": BatchSpec(seq_lens=[128, 256, 512, 128], query_lens=[1, 1, 8, 16]),
 }
 
 
@@ -78,9 +69,7 @@ def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
     head_size = vllm_config.model_config.get_head_size()
     return {
         name: PerLayerParameters(
-            window_left=-1,
-            logits_soft_cap=0.0,
-            sm_scale=1.0 / (head_size**0.5),
+            window_left=-1, logits_soft_cap=0.0, sm_scale=1.0 / (head_size**0.5)
         )
         for name in layer_names
     }
@@ -116,13 +105,7 @@ def _create_hnd_kv_cache(
     # Build cache in (2, num_blocks, block_size, num_kv_heads, head_size)
     # then convert to HND format (same approach as test_attention_backends.py).
     kv_cache_raw = torch.zeros(
-        2,
-        num_blocks,
-        block_size,
-        num_kv_heads,
-        head_size,
-        dtype=dtype,
-        device=device,
+        2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
     kv_cache_flat = kv_cache_raw.view(2, -1, num_kv_heads, head_size)
 
@@ -336,12 +319,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             mask_fn, B=None, H=None, Q_LEN=q_len, KV_LEN=s_len, device=device
         )
         sdpa_out = flex_attention(
-            q_sdpa,
-            k_sdpa,
-            v_sdpa,
-            block_mask=block_mask,
-            scale=scale,
-            enable_gqa=True,
+            q_sdpa, k_sdpa, v_sdpa, block_mask=block_mask, scale=scale, enable_gqa=True
         )
         all_sdpa_out.append(sdpa_out.transpose(1, 2).squeeze(0))
 
@@ -410,8 +388,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         with (
             set_current_vllm_config(vllm_config),
             unittest.mock.patch(
-                "vllm.utils.flashinfer.supports_trtllm_attention",
-                return_value=True,
+                "vllm.utils.flashinfer.supports_trtllm_attention", return_value=True
             ),
             unittest.mock.patch(
                 "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
@@ -422,8 +399,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
                 kv_cache_spec, layer_names, vllm_config, device
             )
             attn_metadata = builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
             )
 
             # Verify the correct TRTLLM metadata types were produced.
@@ -463,11 +439,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             output = torch.empty_like(query_vllm)
 
             impl.do_kv_cache_update(
-                mock_layer,
-                key_vllm,
-                value_vllm,
-                kv_cache,
-                attn_metadata.slot_mapping,
+                mock_layer, key_vllm, value_vllm, kv_cache, attn_metadata.slot_mapping
             )
 
             # nvfp4 trtllm kernel requires FP8 queries. In the real
@@ -509,10 +481,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         get_kv_cache_layout.cache_clear()
 
 
-@pytest.mark.parametrize(
-    "batch_spec_name",
-    list(BATCH_SPECS.keys()),
-)
+@pytest.mark.parametrize("batch_spec_name", list(BATCH_SPECS.keys()))
 @torch.inference_mode()
 def test_trtllm_gen_full_attention_integration(batch_spec_name: str):
     """Test TRTLLM gen-full attention through the full FlashInfer
@@ -521,16 +490,11 @@ def test_trtllm_gen_full_attention_integration(batch_spec_name: str):
     _run_trtllm_integration(BATCH_SPECS[batch_spec_name])
 
 
-@pytest.mark.parametrize(
-    "batch_spec_name",
-    list(BATCH_SPECS.keys()),
-)
+@pytest.mark.parametrize("batch_spec_name", list(BATCH_SPECS.keys()))
 @torch.inference_mode()
 def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
     """Test TRTLLM attention with nvfp4 KV cache through the full
     FlashInfer MetadataBuilder.build() -> FlashInferImpl.forward() pipeline."""
     _run_trtllm_integration(
-        BATCH_SPECS[batch_spec_name],
-        kv_cache_dtype="nvfp4",
-        model_name=MODEL_NVFP4,
+        BATCH_SPECS[batch_spec_name], kv_cache_dtype="nvfp4", model_name=MODEL_NVFP4
     )

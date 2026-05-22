@@ -96,9 +96,7 @@ class MetaTensorMode(TorchDispatchMode):
         return func(*args, **kwargs)
 
 
-def meta_tensor_mode(
-    loading_code=None,
-):
+def meta_tensor_mode(loading_code=None):
     if loading_code is None:
         return _NoInitOrTensorImpl.context_manager()
     elif callable(loading_code):
@@ -305,10 +303,7 @@ class TensorizerConfig(MutableMapping):
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         return TensorizerArgs(self)  # type: ignore
 
-    def verify_with_parallel_config(
-        self,
-        parallel_config: "ParallelConfig",
-    ) -> None:
+    def verify_with_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         if parallel_config.tensor_parallel_size > 1 and not self._is_sharded:
             raise ValueError(
                 "For a sharded model, tensorizer_uri should include a"
@@ -393,8 +388,7 @@ class TensorizerArgs:
 
         if self.encryption_keyfile:
             with open_stream(
-                tensorizer_config.encryption_keyfile,
-                **self.stream_kwargs,
+                tensorizer_config.encryption_keyfile, **self.stream_kwargs
             ) as stream:
                 key = stream.read()
                 decryption_params = DecryptionParams.from_key(key)
@@ -657,9 +651,7 @@ def serialize_extra_artifacts(
 
 
 def serialize_vllm_model(
-    model: nn.Module,
-    tensorizer_config: TensorizerConfig,
-    model_config: "ModelConfig",
+    model: nn.Module, tensorizer_config: TensorizerConfig, model_config: "ModelConfig"
 ) -> nn.Module:
     model.register_parameter(
         "vllm_tensorized_marker",

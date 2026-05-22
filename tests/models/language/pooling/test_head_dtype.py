@@ -5,17 +5,10 @@ import torch
 from transformers import AutoModelForSequenceClassification
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["nie3e/sentiment-polish-gpt2-small"],
-)
+@pytest.mark.parametrize("model", ["nie3e/sentiment-polish-gpt2-small"])
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with hf_runner(
         model, dtype=dtype, auto_cls=AutoModelForSequenceClassification

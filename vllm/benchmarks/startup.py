@@ -21,10 +21,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from tqdm import tqdm
 
-from vllm.benchmarks.lib.utils import (
-    convert_to_pytorch_benchmark_format,
-    write_to_json,
-)
+from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
 
 PERCENTAGES = [10, 25, 50, 75, 90, 99]
@@ -53,16 +50,12 @@ _BASE_METRICS = [
     MetricDesc("compilation_time", "compilation", "Compilation time"),
 ]
 _ENCODER_METRIC = MetricDesc(
-    "encoder_compilation_time",
-    "encoder_compilation",
-    "Encoder compilation time",
+    "encoder_compilation_time", "encoder_compilation", "Encoder compilation time"
 )
 
 
 def _compute_metric(
-    phase: str,
-    desc: MetricDesc,
-    iterations: list[dict[str, float]],
+    phase: str, desc: MetricDesc, iterations: list[dict[str, float]]
 ) -> MetricStats:
     values = [m[desc.iter_key] for m in iterations]
     arr = np.array(values)
@@ -76,9 +69,7 @@ def _compute_metric(
 
 
 def _collect_phase_metrics(
-    phase: str,
-    iterations: list[dict[str, float]],
-    has_encoder: bool,
+    phase: str, iterations: list[dict[str, float]], has_encoder: bool
 ) -> list[MetricStats]:
     metrics = [_compute_metric(phase, desc, iterations) for desc in _BASE_METRICS]
     if has_encoder:
@@ -236,11 +227,7 @@ def main(args: argparse.Namespace):
         # Create a queue for inter-process communication
         result_queue = multiprocessing.Queue()
         process = multiprocessing.Process(
-            target=run_startup_in_subprocess,
-            args=(
-                engine_args,
-                result_queue,
-            ),
+            target=run_startup_in_subprocess, args=(engine_args, result_queue)
         )
         process.start()
         process.join()

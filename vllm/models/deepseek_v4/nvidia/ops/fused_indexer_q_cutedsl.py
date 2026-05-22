@@ -23,10 +23,7 @@ from vllm.vllm_flash_attn.cute import utils as cute_utils
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
 
-_TORCH_TO_CUTE = {
-    torch.bfloat16: BFloat16,
-    torch.float32: Float32,
-}
+_TORCH_TO_CUTE = {torch.bfloat16: BFloat16, torch.float32: Float32}
 
 
 def fused_indexer_q_rope_quant_mxfp4_cutedsl(
@@ -136,10 +133,7 @@ class IndexerQRopeQuantKernel:
 
     @cute.jit
     def _load_q_and_rope(
-        self,
-        positions: cute.Tensor,
-        q: cute.Tensor,
-        cos_sin_cache: cute.Tensor,
+        self, positions: cute.Tensor, q: cute.Tensor, cos_sin_cache: cute.Tensor
     ):
         """Compute thread indices, load Q (BF16), and apply interleaved RoPE.
 
@@ -272,14 +266,7 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
         total_threads = q.shape[0] * self.threads_per_token
         grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
         self.kernel(
-            positions,
-            q,
-            cos_sin_cache,
-            weights,
-            q_quant,
-            q_scale,
-            weights_out,
-            scale,
+            positions, q, cos_sin_cache, weights, q_quant, q_scale, weights_out, scale
         ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
 
     @cute.kernel
@@ -323,9 +310,7 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
             for j in cutlass.range_constexpr(1, 8):
                 amax_bf16x2 = _bf16x2_max(amax_bf16x2, _bf16x2_abs(q_bf16x2[i, j]))
             amax_bf16x2 = cute_utils.warp_reduce(
-                amax_bf16x2,
-                _bf16x2_max,
-                width=MXFP4_BLOCK_SIZE // 16,
+                amax_bf16x2, _bf16x2_max, width=MXFP4_BLOCK_SIZE // 16
             )
             amax_pair = _bf16x2_to_fp32(amax_bf16x2)
             amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
@@ -392,20 +377,14 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
         )
         positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
         cos_sin_cache = make_fake_tensor(
-            cos_sin_dtype,
-            (max_pos, rope_dim),
-            divisibility=8,
+            cos_sin_dtype, (max_pos, rope_dim), divisibility=8
         )
         weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
         q_fp4 = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim // 2),
-            divisibility=16,
+            Uint8, (num_tokens, num_heads, head_dim // 2), divisibility=16
         )
         q_scale = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim // MXFP4_BLOCK_SIZE),
-            divisibility=4,
+            Uint8, (num_tokens, num_heads, head_dim // MXFP4_BLOCK_SIZE), divisibility=4
         )
         weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 
@@ -466,13 +445,7 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
         total_threads = q.shape[0] * self.threads_per_token
         grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
         self.kernel(
-            positions,
-            q,
-            cos_sin_cache,
-            weights,
-            q_fp8,
-            weights_out,
-            scale,
+            positions, q, cos_sin_cache, weights, q_fp8, weights_out, scale
         ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
 
     @cute.kernel
@@ -515,9 +488,7 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
             for j in cutlass.range_constexpr(1, 8):
                 amax_bf16x2 = _bf16x2_max(amax_bf16x2, _bf16x2_abs(q_bf16x2[i, j]))
             amax_bf16x2 = cute_utils.warp_reduce(
-                amax_bf16x2,
-                _bf16x2_max,
-                width=self.subwarp_size,
+                amax_bf16x2, _bf16x2_max, width=self.subwarp_size
             )
             amax_pair = _bf16x2_to_fp32(amax_bf16x2)
             amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
@@ -583,15 +554,11 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
         )
         positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
         cos_sin_cache = make_fake_tensor(
-            cos_sin_dtype,
-            (max_pos, rope_dim),
-            divisibility=8,
+            cos_sin_dtype, (max_pos, rope_dim), divisibility=8
         )
         weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
         q_fp8 = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim),
-            divisibility=16,
+            Uint8, (num_tokens, num_heads, head_dim), divisibility=16
         )
         weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 

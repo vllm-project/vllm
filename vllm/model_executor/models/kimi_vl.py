@@ -92,11 +92,7 @@ class MaxImageTokenMeta:
 
 
 class KimiVLMultiModalProjector(nn.Module):
-    def __init__(
-        self,
-        config: KimiVLConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, config: KimiVLConfig, prefix: str = ""):
         super().__init__()
         self.use_data_parallel = is_vit_use_data_parallel()
 
@@ -141,8 +137,7 @@ class KimiVLImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
 
     pixel_values: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("np", 3, "ps", "ps"),
+        torch.Tensor | list[torch.Tensor], TensorShape("np", 3, "ps", "ps")
     ]
 
     image_grid_hws: Annotated[torch.Tensor, TensorShape("ni", 2)]
@@ -160,12 +155,7 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_processor = self.get_hf_processor()
         patch_size = hf_processor.image_processor.patch_size
         kernel_size = hf_processor.image_processor.merge_kernel_size
@@ -233,9 +223,7 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
 
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_grid_hws = hf_inputs.get("image_grid_hws", torch.empty((0, 2)))
         image_grid_sizes = image_grid_hws.prod(-1)
@@ -267,18 +255,15 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
             else:
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+                    image_width=image_size.width, image_height=image_size.height
                 )
 
             return [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=get_replacement,
-            ),
+                modality="image", target=[image_token_id], replacement=get_replacement
+            )
         ]
 
 
@@ -297,11 +282,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise ValueError("Only image modality is supported")
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config
         config: KimiVLConfig = model_config.hf_config
@@ -318,12 +299,10 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = MoonVitPretrainedModel(
-                config.vision_config,
-                prefix=maybe_prefix(prefix, "vision_tower"),
+                config.vision_config, prefix=maybe_prefix(prefix, "vision_tower")
             )
             self.multi_modal_projector = KimiVLMultiModalProjector(
-                config=config,
-                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+                config=config, prefix=maybe_prefix(prefix, "multi_modal_projector")
             )
 
         with self._mark_language_model(vllm_config):

@@ -55,11 +55,7 @@ class TestHf3fsMockClient:
 
     @pytest.mark.parametrize(
         "dtype, bytes_per_page",
-        [
-            (torch.float32, 512),
-            (torch.float16, 256),
-            (torch.bfloat16, 256),
-        ],
+        [(torch.float32, 512), (torch.float16, 256), (torch.bfloat16, 256)],
         ids=["float32", "float16", "bfloat16"],
     )
     def test_batch_write_and_read_dtype(self, tmp_path, dtype, bytes_per_page):
@@ -166,10 +162,7 @@ class TestHF3FSKVConnectorStats:
 
     @pytest.mark.parametrize(
         "task_type, duration_key",
-        [
-            ("Saved", "save_duration"),
-            ("Loaded", "load_duration"),
-        ],
+        [("Saved", "save_duration"), ("Loaded", "load_duration")],
         ids=["save", "load"],
     )
     def test_record_success_duration(self, hf3fs_stats, task_type, duration_key):
@@ -182,10 +175,7 @@ class TestHF3FSKVConnectorStats:
 
     @pytest.mark.parametrize(
         "task_type, failed_key",
-        [
-            ("Saved", "num_failed_save"),
-            ("Loaded", "num_failed_load"),
-        ],
+        [("Saved", "num_failed_save"), ("Loaded", "num_failed_load")],
         ids=["save", "load"],
     )
     def test_record_failed_task(self, hf3fs_stats, task_type, failed_key):

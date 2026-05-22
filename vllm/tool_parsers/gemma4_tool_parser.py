@@ -22,9 +22,7 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -33,9 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
@@ -370,8 +366,7 @@ class Gemma4ToolParser(ToolParser):
         # Supports function names with letters, digits, underscores,
         # hyphens, and dots (e.g. "get-weather", "module.func").
         self.tool_call_regex = re.compile(
-            r"<\|tool_call>call:([\w\-\.]+)\{(.*?)\}<tool_call\|>",
-            re.DOTALL,
+            r"<\|tool_call>call:([\w\-\.]+)\{(.*?)\}<tool_call\|>", re.DOTALL
         )
 
         # Streaming state — reset per-request via _reset_streaming_state()
@@ -438,9 +433,7 @@ class Gemma4ToolParser(ToolParser):
     # ------------------------------------------------------------------
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         if self.tool_call_start_token not in model_output:
             return ExtractedToolCallInformation(
@@ -521,10 +514,7 @@ class Gemma4ToolParser(ToolParser):
             return None
 
     def _extract_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
+        self, previous_text: str, current_text: str, delta_text: str
     ) -> DeltaMessage | None:
         """Tag-counting streaming parser.
 
@@ -639,8 +629,7 @@ class Gemma4ToolParser(ToolParser):
                         type="function",
                         id=make_tool_call_id(),
                         function=DeltaFunctionCall(
-                            name=func_name,
-                            arguments="",
+                            name=func_name, arguments=""
                         ).model_dump(exclude_none=True),
                     )
                 ]
@@ -729,8 +718,7 @@ class Gemma4ToolParser(ToolParser):
             current_args = _parse_gemma4_args(raw_args_str, partial=True)
         except Exception:
             logger.debug(
-                "Could not parse partial Gemma4 args yet: %s",
-                raw_args_str[:100],
+                "Could not parse partial Gemma4 args yet: %s", raw_args_str[:100]
             )
             return None
 

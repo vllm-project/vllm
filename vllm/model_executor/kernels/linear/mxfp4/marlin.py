@@ -31,10 +31,7 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
         prepare_fp4_layer_for_marlin(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
             apply_fp4_marlin_linear,

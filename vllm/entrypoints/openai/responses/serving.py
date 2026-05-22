@@ -39,10 +39,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-)
+from vllm.entrypoints.openai.engine.serving import GenerationError, OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
@@ -259,16 +256,14 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> dict[str, Any]:
         return (
             request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
+                self.chat_template, self.chat_template_content_format
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
         )
 
     def _validate_generator_input(
-        self,
-        engine_input: EngineInput,
+        self, engine_input: EngineInput
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_input)
@@ -323,9 +318,7 @@ class OpenAIServingResponses(OpenAIServing):
         return None
 
     async def create_responses(
-        self,
-        request: ResponsesRequest,
-        raw_request: Request | None = None,
+        self, request: ResponsesRequest, raw_request: Request | None = None
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
@@ -483,12 +476,9 @@ class OpenAIServingResponses(OpenAIServing):
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
                 chat_template_kwargs = self._effective_chat_template_kwargs(request)
-                reasoning_parser_kwargs = {
-                    "chat_template_kwargs": chat_template_kwargs,
-                }
+                reasoning_parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
                 reasoning_parser = self.parser.reasoning_parser_cls(
-                    tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,
+                    tokenizer, chat_template_kwargs=chat_template_kwargs
                 )
                 if (
                     isinstance(
@@ -601,9 +591,7 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
     async def _make_request(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
+        self, request: ResponsesRequest, prev_response: ResponsesResponse | None
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -635,9 +623,7 @@ class OpenAIServingResponses(OpenAIServing):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
-        new_messages = construct_input_messages(
-            request_input=messages,
-        )
+        new_messages = construct_input_messages(request_input=messages)
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.openai_serving_render.preprocess_chat(
             request,
@@ -736,9 +722,7 @@ class OpenAIServingResponses(OpenAIServing):
             sub_request += 1
 
     def _make_request_with_harmony(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
+        self, request: ResponsesRequest, prev_response: ResponsesResponse | None
     ):
         if request.tool_choice not in ("auto", "none"):
             raise NotImplementedError(
@@ -1071,8 +1055,7 @@ class OpenAIServingResponses(OpenAIServing):
         ]
 
     def _make_response_output_items_with_harmony(
-        self,
-        context: HarmonyContext,
+        self, context: HarmonyContext
     ) -> list[ResponseOutputItem]:
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
@@ -1161,9 +1144,7 @@ class OpenAIServingResponses(OpenAIServing):
         return sys_msg
 
     def _construct_input_messages_with_harmony(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
+        self, request: ResponsesRequest, prev_response: ResponsesResponse | None
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
@@ -1240,10 +1221,7 @@ class OpenAIServingResponses(OpenAIServing):
         return messages
 
     async def _run_background_request_stream(
-        self,
-        request: ResponsesRequest,
-        *args,
-        **kwargs,
+        self, request: ResponsesRequest, *args, **kwargs
     ):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
@@ -1256,12 +1234,7 @@ class OpenAIServingResponses(OpenAIServing):
         finally:
             new_event_signal.set()
 
-    async def _run_background_request(
-        self,
-        request: ResponsesRequest,
-        *args,
-        **kwargs,
-    ):
+    async def _run_background_request(self, request: ResponsesRequest, *args, **kwargs):
         response = await self.responses_full_generator(request, *args, **kwargs)
 
         if isinstance(response, ErrorResponse):
@@ -1274,9 +1247,7 @@ class OpenAIServingResponses(OpenAIServing):
                     stored_response.status = "failed"
 
     async def responses_background_stream_generator(
-        self,
-        response_id: str,
-        starting_after: int | None = None,
+        self, response_id: str, starting_after: int | None = None
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         if response_id not in self.event_store:
             raise VLLMValidationError(
@@ -1303,10 +1274,7 @@ class OpenAIServingResponses(OpenAIServing):
             await new_event_signal.wait()
 
     async def retrieve_responses(
-        self,
-        response_id: str,
-        starting_after: int | None,
-        stream: bool | None,
+        self, response_id: str, starting_after: int | None, stream: bool | None
     ) -> (
         ErrorResponse
         | ResponsesResponse
@@ -1320,14 +1288,12 @@ class OpenAIServingResponses(OpenAIServing):
 
         if stream:
             return self.responses_background_stream_generator(
-                response_id,
-                starting_after,
+                response_id, starting_after
             )
         return response
 
     async def cancel_responses(
-        self,
-        response_id: str,
+        self, response_id: str
     ) -> ErrorResponse | ResponsesResponse:
         async with self.response_store_lock:
             response = self.response_store.get(response_id)

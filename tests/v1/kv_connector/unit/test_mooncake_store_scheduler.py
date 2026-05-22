@@ -33,9 +33,7 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_block_ids=[([2],)],
-            num_computed_tokens=[44],
+            req_ids=["req-0"], new_block_ids=[([2],)], num_computed_tokens=[44]
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens=(
@@ -52,9 +50,7 @@ def _add_unfinished_request(
     prefill_end_tokens: int,
 ) -> None:
     request = SimpleNamespace(
-        all_token_ids=token_ids,
-        block_hashes=block_hashes,
-        num_output_placeholders=0,
+        all_token_ids=token_ids, block_hashes=block_hashes, num_output_placeholders=0
     )
     scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
     scheduler._request_trackers["req-0"] = RequestTracker(
@@ -121,9 +117,7 @@ def _make_pending_load_unfinished_request(
     block_ids: tuple[list[int], ...] = ([0, 1, 2],),
 ) -> None:
     request = SimpleNamespace(
-        num_tokens=num_tokens,
-        block_hashes=block_hashes,
-        num_output_placeholders=0,
+        num_tokens=num_tokens, block_hashes=block_hashes, num_output_placeholders=0
     )
     scheduler._unfinished_requests["req-0"] = (request, block_ids)
 
@@ -136,9 +130,7 @@ def _make_pending_load_scheduler_output() -> SimpleNamespace:
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[],
-            new_block_ids=[],
-            num_computed_tokens=[],
+            req_ids=[], new_block_ids=[], num_computed_tokens=[]
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -153,14 +145,10 @@ def test_pending_load_does_not_co_queue_save():
     # when both completions land for the delay-freed request.
     scheduler = _make_bare_scheduler()
     _make_pending_load_unfinished_request(
-        scheduler,
-        num_tokens=48,
-        block_hashes=[b"h0", b"h1", b"h2"],
+        scheduler, num_tokens=48, block_hashes=[b"h0", b"h1", b"h2"]
     )
     scheduler.load_specs["req-0"] = LoadSpec(
-        vllm_cached_tokens=0,
-        kvpool_cached_tokens=48,
-        can_load=True,
+        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=True
     )
 
     meta = scheduler.build_connector_meta(_make_pending_load_scheduler_output())
@@ -202,9 +190,7 @@ def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamesp
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_block_ids=[([2],)],
-            num_computed_tokens=[0],
+            req_ids=["req-0"], new_block_ids=[([2],)], num_computed_tokens=[0]
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -225,9 +211,7 @@ def test_resumed_from_preemption_with_load_skips_save():
         num_computed_tokens=0,
     )
     scheduler.load_specs["req-0"] = LoadSpec(
-        vllm_cached_tokens=0,
-        kvpool_cached_tokens=48,
-        can_load=True,
+        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=True
     )
 
     meta = scheduler.build_connector_meta(

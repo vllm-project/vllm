@@ -63,10 +63,7 @@ def run_test(
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
-                vllm_prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                audios=audios,
+                vllm_prompts, max_tokens, num_logprobs=num_logprobs, audios=audios
             )
             for vllm_prompts, _, audios in inputs
         ]
@@ -74,10 +71,7 @@ def run_test(
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(
-                hf_prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                audios=audios,
+                hf_prompts, max_tokens, num_logprobs=num_logprobs, audios=audios
             )
             for _, hf_prompts, audios in inputs
         ]
@@ -101,9 +95,7 @@ def resampled_assets() -> list[tuple[Any, int]]:
         # Resample to Whisper's expected sample rate (16kHz)
         if orig_sr != WHISPER_SAMPLE_RATE:
             audio = resampler.resample(audio, orig_sr=orig_sr)
-        sampled_assets.append(
-            (audio, WHISPER_SAMPLE_RATE),
-        )
+        sampled_assets.append((audio, WHISPER_SAMPLE_RATE))
     return sampled_assets
 
 
@@ -144,10 +136,7 @@ def test_beam_search_encoder_decoder(
     model = "openai/whisper-large-v3-turbo"
     check_model_available(model)
 
-    hf_prompts = [
-        "<|startoftranscript|>",
-        "<|startoftranscript|>",
-    ]
+    hf_prompts = ["<|startoftranscript|>", "<|startoftranscript|>"]
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
         hf_outputs = hf_model.generate_beam_search(
@@ -184,9 +173,7 @@ def test_beam_search_encoder_decoder(
         enforce_eager=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_beam_search(
-            vllm_prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
+            vllm_prompts, beam_width=beam_width, max_tokens=max_tokens
         )
 
     for i in range(len(vllm_prompts)):
@@ -224,9 +211,7 @@ def test_parse_language_detection_output():
     """
     from unittest.mock import MagicMock
 
-    from vllm.model_executor.models.whisper import (
-        WhisperForConditionalGeneration,
-    )
+    from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
 
     cls = WhisperForConditionalGeneration
 
@@ -328,10 +313,7 @@ def test_models_distributed(
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 def test_encoder_cache_cleanup(
-    vllm_runner,
-    model: str,
-    input_audios,
-    monkeypatch,
+    vllm_runner, model: str, input_audios, monkeypatch
 ) -> None:
     """Test that encoder cache is properly cleaned up after requests complete.
 

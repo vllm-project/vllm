@@ -119,13 +119,7 @@ def _fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 @dsl_user_op
 def _fp32x4_to_fp8x4(
-    a0: Float32,
-    a1: Float32,
-    a2: Float32,
-    a3: Float32,
-    *,
-    loc=None,
-    ip=None,
+    a0: Float32, a1: Float32, a2: Float32, a3: Float32, *, loc=None, ip=None
 ) -> Uint32:
     # Pack four FP32 values into one b32 of four e4m3 bytes, byte order
     # {a0, a1, a2, a3} from low to high address.
@@ -152,11 +146,7 @@ def _fp32x4_to_fp8x4(
 
 @dsl_user_op
 def _fp32x8_to_fp4x8(
-    vals: cute.Tensor,
-    offset: cutlass.Constexpr[int],
-    *,
-    loc=None,
-    ip=None,
+    vals: cute.Tensor, offset: cutlass.Constexpr[int], *, loc=None, ip=None
 ) -> Uint32:
     # Pack eight scaled FP32 values into four E2M1x2 bytes, returned as one b32.
     assert vals.element_type is Float32

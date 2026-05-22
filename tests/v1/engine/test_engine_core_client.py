@@ -176,10 +176,7 @@ def _make_pooling_request(
 ) -> EngineCoreRequest:
     late_interaction_params = None
     if mode is not None and query_key is not None:
-        late_interaction_params = LateInteractionParams(
-            mode=mode,
-            query_key=query_key,
-        )
+        late_interaction_params = LateInteractionParams(mode=mode, query_key=query_key)
 
     return EngineCoreRequest(
         request_id=request_id,
@@ -187,8 +184,7 @@ def _make_pooling_request(
         mm_features=None,
         sampling_params=None,
         pooling_params=PoolingParams(
-            task="token_embed",
-            late_interaction_params=late_interaction_params,
+            task="token_embed", late_interaction_params=late_interaction_params
         ),
         arrival_time=time.time(),
         lora_request=None,
@@ -307,9 +303,7 @@ class TestMessage:
 
 # Dummy utility function to monkey-patch into engine core.
 def echo_dc(
-    self,
-    msg: str,
-    return_list: bool = False,
+    self, msg: str, return_list: bool = False
 ) -> TestMessage | list[TestMessage]:
     print(f"echo dc util function called: {msg}")
     val = None if msg is None else TestMessage(msg)
@@ -320,9 +314,7 @@ def echo_dc(
 
 # Dummy utility function to test dict serialization with custom types.
 def echo_dc_dict(
-    self,
-    msg: str,
-    return_dict: bool = False,
+    self, msg: str, return_dict: bool = False
 ) -> TestMessage | dict[str, TestMessage]:
     print(f"echo dc dict util function called: {msg}")
     val = None if msg is None else TestMessage(msg)
@@ -335,11 +327,7 @@ def echo_dc_dict(
 
 
 # Dummy utility function to test nested structures with custom types.
-def echo_dc_nested(
-    self,
-    msg: str,
-    structure_type: str = "list_of_dicts",
-) -> Any:
+def echo_dc_nested(self, msg: str, structure_type: str = "list_of_dicts") -> Any:
     print(f"echo dc nested util function called: {msg}, structure: {structure_type}")
     val = None if msg is None else TestMessage(msg)
 
@@ -494,9 +482,7 @@ def subprocess_future_echo_patch(monkeypatch, tmp_path):
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(
-    monkeypatch: pytest.MonkeyPatch,
-    multiprocessing_mode: bool,
-    subprocess_echo_patch,
+    monkeypatch: pytest.MonkeyPatch, multiprocessing_mode: bool, subprocess_echo_patch
 ):
     with monkeypatch.context() as m:
         # Monkey-patch core engine utility function to test.
@@ -584,8 +570,7 @@ def test_engine_core_client(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(
-    monkeypatch: pytest.MonkeyPatch,
-    subprocess_echo_patch,
+    monkeypatch: pytest.MonkeyPatch, subprocess_echo_patch
 ):
     with monkeypatch.context() as m:
         # Monkey-patch core engine utility function to test.
@@ -681,8 +666,7 @@ async def test_engine_core_client_asyncio(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_return(
-    monkeypatch: pytest.MonkeyPatch,
-    subprocess_echo_dc_patch,
+    monkeypatch: pytest.MonkeyPatch, subprocess_echo_dc_patch
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -729,8 +713,7 @@ async def test_engine_core_client_util_method_custom_return(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_dict_return(
-    monkeypatch: pytest.MonkeyPatch,
-    subprocess_echo_dc_dict_patch,
+    monkeypatch: pytest.MonkeyPatch, subprocess_echo_dc_dict_patch
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -786,8 +769,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_nested_structures(
-    monkeypatch: pytest.MonkeyPatch,
-    subprocess_echo_dc_nested_patch,
+    monkeypatch: pytest.MonkeyPatch, subprocess_echo_dc_nested_patch
 ):
     with monkeypatch.context() as m:
         # Must set insecure serialization to allow returning custom types.
@@ -896,8 +878,7 @@ async def test_engine_core_client_util_method_nested_structures(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_future_utility_async(
-    monkeypatch: pytest.MonkeyPatch,
-    subprocess_future_echo_patch,
+    monkeypatch: pytest.MonkeyPatch, subprocess_future_echo_patch
 ):
     """Test that a utility returning a Future completes when the future is done
     (engine uses add_done_callback).
@@ -938,10 +919,7 @@ async def test_engine_core_client_future_utility_async(
 
 @pytest.mark.parametrize(
     "model_name,num_groups",
-    [
-        ("meta-llama/Llama-3.2-1B-Instruct", 1),
-        ("google/gemma-3-1b-it", 7),
-    ],
+    [("meta-llama/Llama-3.2-1B-Instruct", 1), ("google/gemma-3-1b-it", 7)],
 )
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
@@ -949,10 +927,7 @@ async def test_engine_core_client_future_utility_async(
     indirect=["publisher_config"],
 )
 def test_kv_cache_events(
-    multiprocessing_mode: bool,
-    publisher_config,
-    model_name: str,
-    num_groups: int,
+    multiprocessing_mode: bool, publisher_config, model_name: str, num_groups: int
 ):
     block_size = 16
     num_blocks = 2
@@ -1029,10 +1004,7 @@ def test_kv_cache_events(
     indirect=["publisher_config"],
 )
 @multi_gpu_test(num_gpus=4)
-async def test_kv_cache_events_dp(
-    multiprocessing_mode: bool,
-    publisher_config,
-):
+async def test_kv_cache_events_dp(multiprocessing_mode: bool, publisher_config):
     block_size = 16
     num_blocks = 2
     dp_size = 2

@@ -331,8 +331,7 @@ class BaseConfigParser(Parser):
         else:
             # FIXME: handle this better
             logger.warning(
-                "Unknown model_dtype %s, defaulting to bfloat16",
-                model_dtype,
+                "Unknown model_dtype %s, defaulting to bfloat16", model_dtype
             )
             torch_dtype = torch.bfloat16
 
@@ -931,9 +930,7 @@ class UnembedMetrics(ComponentMetrics):
 
     @classmethod
     def get_parser(cls) -> ParserChain:
-        return ParserChain(
-            BaseConfigParser(),
-        )
+        return ParserChain(BaseConfigParser())
 
     def get_num_flops_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
@@ -945,9 +942,7 @@ class UnembedMetrics(ComponentMetrics):
         if per_gpu:
             V //= self.tp_size
 
-        return {
-            "unembed": 2 * T * D * V,
-        }
+        return {"unembed": 2 * T * D * V}
 
     def get_read_bytes_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
@@ -974,9 +969,7 @@ class UnembedMetrics(ComponentMetrics):
         if per_gpu:
             V //= self.tp_size
 
-        return {
-            "output": T * V * self.activation_byte_size,
-        }
+        return {"output": T * V * self.activation_byte_size}
 
 
 #### ModelMetrics ####

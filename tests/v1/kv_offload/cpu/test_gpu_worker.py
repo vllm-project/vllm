@@ -61,31 +61,24 @@ def test_transfer(
     kv_cache_tensors: list[CanonicalKVCacheTensor] = []
     for i in range(num_tensors):
         gpu_tensor = torch.zeros(
-            (num_gpu_blocks, gpu_page_size_bytes),
-            dtype=torch.int8,
-            device=device,
+            (num_gpu_blocks, gpu_page_size_bytes), dtype=torch.int8, device=device
         )
         kv_cache_tensors.append(
             CanonicalKVCacheTensor(
-                tensor=gpu_tensor,
-                page_size_bytes=gpu_page_size_bytes,
+                tensor=gpu_tensor, page_size_bytes=gpu_page_size_bytes
             )
         )
 
     # one group containing all tensors, one data ref per tensor
     kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]] = [
         [
-            CanonicalKVCacheRef(
-                tensor_idx=i,
-                page_size_bytes=gpu_page_size_bytes,
-            )
+            CanonicalKVCacheRef(tensor_idx=i, page_size_bytes=gpu_page_size_bytes)
             for i in range(num_tensors)
         ]
     ]
 
     kv_caches = CanonicalKVCaches(
-        tensors=kv_cache_tensors,
-        group_data_refs=kv_cache_groups_data_refs,
+        tensors=kv_cache_tensors, group_data_refs=kv_cache_groups_data_refs
     )
 
     mmap_region: SharedOffloadRegion | None = None
@@ -185,9 +178,7 @@ def test_transfer(
 
     # verify dst tensors at gpu-page granularity.
     for src_tensor, dst_tensor, orig_dst_tensor in zip(
-        handler.src_tensors,
-        handler.dst_tensors,
-        orig_dst_tensors,
+        handler.src_tensors, handler.dst_tensors, orig_dst_tensors
     ):
         # view both GPU and CPU tensors as (n, gpu_page_size_bytes) for comparison.
         src_view = src_tensor.reshape(-1, gpu_page_size_bytes)
@@ -247,14 +238,11 @@ def test_transfer_multi_group(
     kv_cache_tensors: list[CanonicalKVCacheTensor] = []
     for _ in range(num_tensors):
         gpu_tensor = torch.zeros(
-            (num_gpu_blocks, gpu_page_size_bytes),
-            dtype=torch.int8,
-            device=device,
+            (num_gpu_blocks, gpu_page_size_bytes), dtype=torch.int8, device=device
         )
         kv_cache_tensors.append(
             CanonicalKVCacheTensor(
-                tensor=gpu_tensor,
-                page_size_bytes=gpu_page_size_bytes,
+                tensor=gpu_tensor, page_size_bytes=gpu_page_size_bytes
             )
         )
 

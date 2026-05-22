@@ -30,10 +30,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -136,9 +133,7 @@ class VisualAttention(nn.Module):
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = x.size()
@@ -267,17 +262,13 @@ class VisualAttentionBlock(nn.Module):
         )
 
     def attention(
-        self,
-        x: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
         return self.attn(x, attn_mask=attn_mask)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
@@ -511,9 +502,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         # Drops anything between <img>/</img> tags; encoding with the tokenizer
         # will automatically add the image pads for the context.
         prompt, num_matched_images = re.subn(
-            r"(Picture \d*: <img>).*?(<\/img>\n)",
-            r"\1\2",
-            prompt,
+            r"(Picture \d*: <img>).*?(<\/img>\n)", r"\1\2", prompt
         )
 
         image_data = mm_data.get("images")
@@ -524,10 +513,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             assert num_matched_images == num_images
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
     def _hf_processor_applies_updates(
@@ -540,9 +526,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -586,13 +570,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
-    packed_modules_mapping = {
-        "c_attn": ["c_attn"],
-        "gate_up_proj": [
-            "w2",
-            "w1",
-        ],
-    }
+    packed_modules_mapping = {"c_attn": ["c_attn"], "gate_up_proj": ["w2", "w1"]}
 
     embed_input_ids = SupportsMultiModal.embed_input_ids
 
@@ -650,10 +628,7 @@ class QwenVLForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            return QwenImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return QwenImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         return None
 

@@ -89,8 +89,7 @@ class PoolingMetadata:
         )
 
     def _get_prompt_token_ids(
-        self,
-        prompt_token_ids: torch.Tensor | None,
+        self, prompt_token_ids: torch.Tensor | None
     ) -> list[torch.Tensor]:
         if prompt_token_ids is None:
             raise ValueError(

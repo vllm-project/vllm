@@ -126,9 +126,7 @@ def make_kv_cache_config_hybrid_model(
         )
     elif second_spec_type == "mamba":
         second_spec = MambaSpec(
-            block_size=block_size,
-            shapes=(1, 1),
-            dtypes=(torch.float32,),
+            block_size=block_size, shapes=(1, 1), dtypes=(torch.float32,)
         )
 
     return KVCacheConfig(
@@ -144,14 +142,8 @@ def make_kv_cache_config_hybrid_model(
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
-                ["layer2"],
-                second_spec,
-            ),
-            KVCacheGroupSpec(
-                ["layer3"],
-                second_spec,
-            ),
+            KVCacheGroupSpec(["layer2"], second_spec),
+            KVCacheGroupSpec(["layer3"], second_spec),
         ],
     )
 
@@ -161,9 +153,7 @@ def make_kv_cache_config_three_types(
 ) -> KVCacheConfig:
     if third_spec_type == "mamba":
         third_spec = MambaSpec(
-            block_size=block_size,
-            shapes=(1, 1),
-            dtypes=(torch.float32,),
+            block_size=block_size, shapes=(1, 1), dtypes=(torch.float32,)
         )
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
@@ -197,10 +187,7 @@ def make_kv_cache_config_three_types(
                     sliding_window=2 * block_size,
                 ),
             ),
-            KVCacheGroupSpec(
-                ["layer3"],
-                third_spec,
-            ),
+            KVCacheGroupSpec(["layer3"], third_spec),
         ],
     )
 
@@ -721,10 +708,7 @@ def _make_hybrid_kv_cache_config(
     """
     spec_map = {
         "full": lambda: FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
         ),
         "sliding_window": lambda: SlidingWindowSpec(
             block_size=block_size,
@@ -741,9 +725,7 @@ def _make_hybrid_kv_cache_config(
             sliding_window=4 * block_size,
         ),
         "mamba": lambda: MambaSpec(
-            block_size=block_size,
-            shapes=(1, 1),
-            dtypes=(torch.float32,),
+            block_size=block_size, shapes=(1, 1), dtypes=(torch.float32,)
         ),
         "mamba_align": lambda: MambaSpec(
             block_size=block_size,
@@ -759,9 +741,7 @@ def _make_hybrid_kv_cache_config(
     ]
 
     return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=kv_cache_groups,
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
     )
 
 
@@ -784,8 +764,7 @@ _HYBRID_MODEL_TEST_CASES = [
     # 3 groups: 1 full + 2 others (different types)
     pytest.param(["full", "sliding_window", "mamba"], id="3g-full+sw+mamba"),
     pytest.param(
-        ["full", "sliding_window", "sliding_window_large"],
-        id="3g-full+sw+sw_large",
+        ["full", "sliding_window", "sliding_window_large"], id="3g-full+sw+sw_large"
     ),
     # 3 groups: 2 full + 1 other
     pytest.param(["full", "full", "sliding_window"], id="3g-2full+sw"),
@@ -795,10 +774,7 @@ _HYBRID_MODEL_TEST_CASES = [
         ["full", "sliding_window", "full", "sliding_window_large"],
         id="4g-interleaved-full+sw+sw_large",
     ),
-    pytest.param(
-        ["full", "mamba", "full", "mamba"],
-        id="4g-interleaved-full+mamba",
-    ),
+    pytest.param(["full", "mamba", "full", "mamba"], id="4g-interleaved-full+mamba"),
     # 4 groups: interleaved with different sliding windows
     pytest.param(
         ["full", "sliding_window", "full", "sliding_window_large"],
@@ -810,10 +786,7 @@ _HYBRID_MODEL_TEST_CASES = [
         id="4g-sw+mamba+sw_large+mamba",
     ),
     # 4 groups: 2 full + 2 others (grouped)
-    pytest.param(
-        ["full", "full", "sliding_window", "mamba"],
-        id="4g-2full+sw+mamba",
-    ),
+    pytest.param(["full", "full", "sliding_window", "mamba"], id="4g-2full+sw+mamba"),
 ]
 
 
@@ -894,7 +867,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 # - 2 groups: 1 full + 1 other
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
-    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
+    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw")
 ]
 
 
@@ -1399,9 +1372,7 @@ def test_cache_blocks(hash_fn):
 
     block_size = 4
     block_pool = BlockPool(
-        num_gpu_blocks=5,
-        enable_caching=True,
-        hash_block_size=block_size,
+        num_gpu_blocks=5, enable_caching=True, hash_block_size=block_size
     )
     # Req:
     #  Block 0: [0, 1, 2, 3]
@@ -1571,11 +1542,7 @@ def test_mm_prefix_caching():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (
-            kv_cache_utils.NONE_HASH,
-            tuple(all_token_ids[:block_size]),
-            (("aaa", 11),),
-        )
+        (kv_cache_utils.NONE_HASH, tuple(all_token_ids[:block_size]), (("aaa", 11),))
     )
     assert block_hashes[1] == sha256(
         (
@@ -1878,10 +1845,7 @@ def test_maybe_evict_cached_block():
 
     block0, block1, block2, block3 = pool.blocks
     assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {
-            block0.block_id: block0,
-            block3.block_id: block3,
-        },
+        block_hash0: {block0.block_id: block0, block3.block_id: block3},
         block_hash1: block1,
         block_hash2: block2,
     }
@@ -2140,12 +2104,7 @@ def test_block_stored_event_group_idx(group_id: int):
         ][group_id]
     )
     assert (
-        events[0].kv_cache_spec_sliding_window
-        == [
-            None,
-            2 * block_size,
-            None,
-        ][group_id]
+        events[0].kv_cache_spec_sliding_window == [None, 2 * block_size, None][group_id]
     )
 
 

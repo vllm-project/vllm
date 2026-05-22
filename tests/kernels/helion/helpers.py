@@ -19,14 +19,12 @@ from vllm.kernels.helion.utils import get_canonical_gpu_name
 GPU_PLATFORM = get_canonical_gpu_name()
 
 DEFAULT_CONFIGS: dict[CaseKey, helion.Config] = {
-    CaseKey.default(): helion.Config(block_sizes=[32]),
+    CaseKey.default(): helion.Config(block_sizes=[32])
 }
 
 
 @contextmanager
-def dummy_kernel_registry(
-    configs: dict[CaseKey, helion.Config] | None = None,
-):
+def dummy_kernel_registry(configs: dict[CaseKey, helion.Config] | None = None):
     """Context manager providing a register function with automatic config setup.
 
     Yields a ``register`` callable with the same signature as
@@ -49,15 +47,9 @@ def dummy_kernel_registry(
         ConfigManager.reset_instance()
         cm = ConfigManager(base_dir=config_dir)
 
-        with patch(
-            "vllm.kernels.helion.config_manager.ConfigManager",
-            return_value=cm,
-        ):
+        with patch("vllm.kernels.helion.config_manager.ConfigManager", return_value=cm):
 
-            def register(
-                op_name: str | None = None,
-                **kwargs,
-            ) -> Callable:
+            def register(op_name: str | None = None, **kwargs) -> Callable:
                 def decorator(fn: Callable) -> Callable:
                     name = op_name or fn.__name__
                     kernel_dir = config_dir / name

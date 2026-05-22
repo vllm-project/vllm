@@ -4,10 +4,7 @@
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from tests.tool_parsers.utils import run_tool_extraction
 
 
@@ -83,7 +80,7 @@ I'll get that information.""",
             xfail_nonstreaming={
                 "test_surrounding_text": (
                     "Parser doesn't handle surrounding text correctly in non-streaming"
-                ),
+                )
             },
         )
 

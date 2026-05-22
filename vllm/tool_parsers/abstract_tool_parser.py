@@ -22,14 +22,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.logger import init_logger
-from vllm.sampling_params import (
-    StructuredOutputsParams,
-)
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
@@ -58,11 +54,7 @@ class ToolParser:
     # required/named tool_choice, treating them the same as "auto".
     supports_required_and_named: bool = True
 
-    def __init__(
-        self,
-        tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
-    ):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -86,8 +78,7 @@ class ToolParser:
         return self.model_tokenizer.get_vocab()
 
     def adjust_request(
-        self,
-        request: ChatCompletionRequest | ResponsesRequest,
+        self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         # If there are no tools, return the request as is.
         if not request.tools:
@@ -109,7 +100,7 @@ class ToolParser:
                 if structure_tag is not None:
                     if request.structured_outputs is None:
                         request.structured_outputs = StructuredOutputsParams(
-                            structural_tag=json.dumps(structure_tag.model_dump()),
+                            structural_tag=json.dumps(structure_tag.model_dump())
                         )
                     else:
                         request.structured_outputs.structural_tag = json.dumps(

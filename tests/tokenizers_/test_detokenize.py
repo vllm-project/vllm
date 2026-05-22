@@ -17,7 +17,7 @@ from vllm.v1.engine.detokenizer import (
 )
 
 SPECIAL_TOKS_TRUTH = [
-    "Some text with adjacent special tokens                <|padding|><|padding|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>",  # noqa
+    "Some text with adjacent special tokens                <|padding|><|padding|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>"  # noqa
 ]
 
 TRUTH = [

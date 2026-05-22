@@ -21,9 +21,7 @@ logger = init_logger(__name__)
 
 
 def safe_apply_chat_template(
-    tokenizer: MistralTokenizer,
-    messages: list[ChatCompletionMessageParam],
-    **kwargs,
+    tokenizer: MistralTokenizer, messages: list[ChatCompletionMessageParam], **kwargs
 ) -> str | list[int]:
     from mistral_common.exceptions import MistralCommonException
 
@@ -48,11 +46,7 @@ def safe_apply_chat_template(
 
 
 class MistralRenderer(BaseRenderer[MistralTokenizer]):
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer: MistralTokenizer | None,
-    ) -> None:
+    def __init__(self, config: VllmConfig, tokenizer: MistralTokenizer | None) -> None:
         super().__init__(config, tokenizer)
 
         self._apply_chat_template_async = make_async(
@@ -60,9 +54,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
     def render_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -74,9 +66,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = safe_apply_chat_template(
-            tokenizer,
-            messages,
-            **params.get_apply_chat_template_kwargs(),
+            tokenizer, messages, **params.get_apply_chat_template_kwargs()
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)
@@ -88,9 +78,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         return conversation, prompt
 
     async def render_messages_async(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -102,9 +90,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = await self._apply_chat_template_async(
-            tokenizer,
-            messages,
-            **params.get_apply_chat_template_kwargs(),
+            tokenizer, messages, **params.get_apply_chat_template_kwargs()
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)

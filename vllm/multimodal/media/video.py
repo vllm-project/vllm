@@ -39,12 +39,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 merged.pop("num_frames", None)
         return merged
 
-    def __init__(
-        self,
-        image_io: ImageMediaIO,
-        num_frames: int = 32,
-        **kwargs,
-    ) -> None:
+    def __init__(self, image_io: ImageMediaIO, num_frames: int = 32, **kwargs) -> None:
         super().__init__()
 
         self.image_io = image_io
@@ -75,10 +70,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self, media_type: str, data: str
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
-            load_frame = partial(
-                self.image_io.load_base64,
-                "image/jpeg",
-            )
+            load_frame = partial(self.image_io.load_base64, "image/jpeg")
 
             if self.num_frames > 0:
                 frame_parts = data.split(",", self.num_frames)[: self.num_frames]
@@ -145,18 +137,12 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
 
         return self.load_bytes(data)
 
-    def encode_base64(
-        self,
-        media: npt.NDArray,
-        *,
-        video_format: str = "JPEG",
-    ) -> str:
+    def encode_base64(self, media: npt.NDArray, *, video_format: str = "JPEG") -> str:
         video = media
 
         if video_format == "JPEG":
             encode_frame = partial(
-                self.image_io.encode_base64,
-                image_format=video_format,
+                self.image_io.encode_base64, image_format=video_format
             )
 
             return ",".join(encode_frame(Image.fromarray(frame)) for frame in video)

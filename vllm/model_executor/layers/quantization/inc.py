@@ -43,14 +43,7 @@ class INCConfig(QuantizationConfig):
     SUPPORTED_BITS = {2, 3, 4, 8}
     SUPPORTED_DTYPES = {"int"}
     SUPPORTED_FORMATS = {"auto_round:auto_gptq", "auto_round:auto_awq"}
-    SUPPORTED_BACKENDS = {
-        "auto",
-        "gptq",
-        "gptq:marlin",
-        "awq",
-        "awq:marlin",
-        "marlin",
-    }
+    SUPPORTED_BACKENDS = {"auto", "gptq", "gptq:marlin", "awq", "awq:marlin", "marlin"}
 
     def __init__(
         self,
@@ -257,10 +250,7 @@ class INCConfig(QuantizationConfig):
             sym,
         )
         if backend == "auto" or "marlin" in backend:
-            AWQ_TYPE_MAP = {
-                4: scalar_types.uint4,
-                8: scalar_types.uint8,
-            }
+            AWQ_TYPE_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
             use_marlin = (weight_bits in AWQ_TYPE_MAP) and check_marlin_supported(
                 AWQ_TYPE_MAP[weight_bits], group_size, not sym
             )
@@ -294,9 +284,7 @@ class INCConfig(QuantizationConfig):
             )
 
             quant_args = AWQConfig(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                zero_point=not sym,
+                weight_bits=weight_bits, group_size=group_size, zero_point=not sym
             )
 
         if isinstance(layer, RoutedExperts):
@@ -426,9 +414,7 @@ class INCConfig(QuantizationConfig):
             is_ark_available, ark_error, _, _ = get_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
-                    weight_bits=weight_bits,
-                    group_size=group_size,
-                    sym=sym,
+                    weight_bits=weight_bits, group_size=group_size, sym=sym
                 )
 
             logger.debug(
@@ -439,9 +425,7 @@ class INCConfig(QuantizationConfig):
             )
 
             return INCXPULinearMethod(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                sym=sym,
+                weight_bits=weight_bits, group_size=group_size, sym=sym
             )
         return None
 
@@ -466,9 +450,7 @@ class INCConfig(QuantizationConfig):
             is_ark_available, ark_error, _, _ = get_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
-                    weight_bits=weight_bits,
-                    group_size=group_size,
-                    sym=sym,
+                    weight_bits=weight_bits, group_size=group_size, sym=sym
                 )
 
             logger.debug(
@@ -552,9 +534,7 @@ class INCXPULinearBase(LinearMethodBase):
 
         scales = GroupQuantScaleParameter(
             data=torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
+                scales_and_zp_size, output_size_per_partition, dtype=params_dtype
             ),
             input_dim=0,
             output_dim=1,
@@ -667,15 +647,11 @@ class INCXPULinearMethod(INCXPULinearBase):
         # Symmetric: GPTQ v1 stores qzeros=7, effective zp = 7+1 = 8
         # Kernel expects int8 scalar = 8
         layer.qzeros = Parameter(
-            torch.tensor([8], dtype=torch.int8, device=device),
-            requires_grad=False,
+            torch.tensor([8], dtype=torch.int8, device=device), requires_grad=False
         )
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         # qweight is already in NT layout [K_packed, N] (strides (1, K_packed))
         # from process_weights_after_loading — pass directly to kernel.
@@ -786,9 +762,6 @@ class INCARKLinearMethod(INCXPULinearBase):
         del layer.scales
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return layer.ark_linear.forward(x)

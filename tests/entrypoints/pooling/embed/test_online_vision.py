@@ -54,12 +54,7 @@ def server():
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
-    messages = [
-        {
-            "role": "user",
-            "content": input_text,
-        },
-    ]
+    messages = [{"role": "user", "content": input_text}]
 
     # note: vlm2vec_phi3v.jinja
     # Embedding models should only embed one message at a time.
@@ -148,9 +143,7 @@ def test_chat_image_with_media_io_kwargs(server: RemoteOpenAIServer, model_name:
         json={
             "model": model_name,
             "messages": messages,
-            "media_io_kwargs": {
-                "image": {"rgba_background_color": [0, 0, 0]},
-            },
+            "media_io_kwargs": {"image": {"rgba_background_color": [0, 0, 0]}},
         },
     )
     response.raise_for_status()

@@ -25,12 +25,7 @@ def _arr(arr):
 def test_find_array():
     from vllm.model_executor.models.gritlm import GritLMMeanPool
 
-    model_config = ModelConfig(
-        MODEL_NAME,
-        runner="pooling",
-        dtype="bfloat16",
-        seed=0,
-    )
+    model_config = ModelConfig(MODEL_NAME, runner="pooling", dtype="bfloat16", seed=0)
     pooling = GritLMMeanPool(model_config=model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
@@ -46,11 +41,7 @@ def test_find_array():
         pooling._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
 
 
-def run_llm_encode(
-    llm: LLM,
-    queries: list[str],
-    instruction: str,
-) -> list[list[float]]:
+def run_llm_encode(llm: LLM, queries: list[str], instruction: str) -> list[list[float]]:
     outputs = llm.embed([instruction + q for q in queries])
     return [output.outputs.embedding for output in outputs]
 
@@ -67,7 +58,7 @@ def get_test_data():
     README.md in https://github.com/ContextualAI/gritlm
     """
     q_instruction = gritlm_instruction(
-        "Given a scientific paper title, retrieve the paper's abstract",
+        "Given a scientific paper title, retrieve the paper's abstract"
     )
     queries = [
         "Bitcoin: A Peer-to-Peer Electronic Cash System",
@@ -102,22 +93,12 @@ def test_gritlm_offline_embedding(vllm_runner):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        max_model_len=MAX_MODEL_LEN,
+        MODEL_NAME, runner="pooling", max_model_len=MAX_MODEL_LEN
     ) as vllm_model:
         llm = vllm_model.llm
 
-        d_rep = run_llm_encode(
-            llm,
-            documents,
-            d_instruction,
-        )
-        q_rep = run_llm_encode(
-            llm,
-            queries,
-            q_instruction,
-        )
+        d_rep = run_llm_encode(llm, documents, d_instruction)
+        q_rep = run_llm_encode(llm, queries, q_instruction)
 
     validate_embed_output(q_rep, d_rep)
 
@@ -138,16 +119,10 @@ async def test_gritlm_api_server_embedding():
         client_embedding = server.get_async_client()
 
         d_rep = await run_client_embeddings(
-            client_embedding,
-            MODEL_NAME,
-            documents,
-            d_instruction,
+            client_embedding, MODEL_NAME, documents, d_instruction
         )
         q_rep = await run_client_embeddings(
-            client_embedding,
-            MODEL_NAME,
-            queries,
-            q_instruction,
+            client_embedding, MODEL_NAME, queries, q_instruction
         )
 
     validate_embed_output(q_rep, d_rep)
@@ -157,9 +132,7 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="generate",
-        max_model_len=MAX_MODEL_LEN,
+        MODEL_NAME, runner="generate", max_model_len=MAX_MODEL_LEN
     ) as vllm_model:
         llm = vllm_model.llm
 
@@ -179,10 +152,7 @@ async def test_gritlm_api_server_generate():
         client_generate = server.get_async_client()
 
         outputs = await client_generate.completions.create(
-            model=MODEL_NAME,
-            prompt=input,
-            max_tokens=256,
-            temperature=0.0,
+            model=MODEL_NAME, prompt=input, max_tokens=256, temperature=0.0
         )
 
     assert outputs.choices[0].text == "The capital of France is Paris."

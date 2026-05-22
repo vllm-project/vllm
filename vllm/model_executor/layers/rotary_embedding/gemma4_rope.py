@@ -69,10 +69,7 @@ class Gemma4RotaryEmbedding(RotaryEmbedding):
         # Zero-pad for non-rotated dims (identity rotation: cos=1, sin=0)
         if self.nope_angles > 0:
             inv_freq = torch.cat(
-                [
-                    inv_freq,
-                    torch.zeros(self.nope_angles, dtype=torch.float),
-                ]
+                [inv_freq, torch.zeros(self.nope_angles, dtype=torch.float)]
             )
         return inv_freq
 

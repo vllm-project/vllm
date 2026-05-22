@@ -9,10 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1 import (
-    KVConnectorRole,
-    supports_hma,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole, supports_hma
 from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
 

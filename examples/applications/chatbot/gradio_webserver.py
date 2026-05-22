@@ -28,11 +28,7 @@ import requests
 
 def http_bot(prompt):
     headers = {"User-Agent": "vLLM Client"}
-    pload = {
-        "prompt": prompt,
-        "stream": True,
-        "max_tokens": 128,
-    }
+    pload = {"prompt": prompt, "stream": True, "max_tokens": 128}
     response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
 
     for chunk in response.iter_lines(

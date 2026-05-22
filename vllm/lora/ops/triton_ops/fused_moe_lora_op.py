@@ -269,12 +269,7 @@ def _fused_moe_lora_kernel(
 
     # Get expert_id
     expert_id = _get_expert_id(
-        expert_ids_ptr,
-        lora_id,
-        pid_m,
-        stride_el,
-        max_loras,
-        naive_block_assignment,
+        expert_ids_ptr, lora_id, pid_m, stride_el, max_loras, naive_block_assignment
     )
     if expert_id == -1:
         return
@@ -748,12 +743,7 @@ def _fused_moe_lora(
     # of token id sorting across ranks.
     use_tma = supports_tma(device) and not fully_sharded
 
-    intermediate_cache_shape = (
-        num_slices,
-        M,
-        top_k_num,
-        max_lora_rank,
-    )
+    intermediate_cache_shape = (num_slices, M, top_k_num, max_lora_rank)
     if use_tma:
         if num_slices > 1:
             # if num_slices > 1, we construct TMA descriptors for LoRA
@@ -771,9 +761,7 @@ def _fused_moe_lora(
             )
 
     a_intermediate_cache1 = torch.zeros(
-        intermediate_cache_shape,
-        dtype=output.dtype,
-        device=device,
+        intermediate_cache_shape, dtype=output.dtype, device=device
     )
 
     use_gdc = supports_pdl(device) and not fully_sharded

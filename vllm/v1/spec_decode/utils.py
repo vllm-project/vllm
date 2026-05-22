@@ -4,9 +4,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 PADDING_SLOT_ID = -1
 
@@ -556,11 +554,7 @@ def copy_and_expand_dflash_inputs_kernel(
     # --- Token indices to sample (mask tokens, skip the bonus token) ---
     is_sample = is_query & (query_off > 0)
     sample_out_idx = req_idx * num_speculative_tokens + (query_off - 1)
-    tl.store(
-        out_token_indices_ptr + sample_out_idx,
-        query_out,
-        mask=is_sample,
-    )
+    tl.store(out_token_indices_ptr + sample_out_idx, query_out, mask=is_sample)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

@@ -62,11 +62,7 @@ class Sampler:
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
 
-    def __call__(
-        self,
-        logits: torch.Tensor,
-        input_batch: InputBatch,
-    ) -> SamplerOutput:
+    def __call__(self, logits: torch.Tensor, input_batch: InputBatch) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         cu_num_logits_np = input_batch.cu_num_logits_np
@@ -139,20 +135,12 @@ class Sampler:
 
         # Apply penalties in place.
         self.penalties_state.apply_penalties(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
+            logits, expanded_idx_mapping, idx_mapping_np, input_ids, expanded_local_pos
         )
 
         # Apply bad words masking in place.
         self.bad_words_state.apply_bad_words(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
+            logits, expanded_idx_mapping, idx_mapping_np, input_ids, expanded_local_pos
         )
 
         # Apply temperature in place.

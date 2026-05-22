@@ -364,8 +364,7 @@ def test_contexted_kv_attention_alibi(
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
         closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
         base = torch.tensor(
-            2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
-            dtype=torch.float32,
+            2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))), dtype=torch.float32
         )
         powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
         slopes = torch.pow(base, powers)
@@ -559,12 +558,7 @@ def test_contexted_kv_attention_alibi(
 
         # Compute attention
         out = F.scaled_dot_product_attention(
-            q_sdpa,
-            k_sdpa,
-            v_sdpa,
-            attn_mask=alibi_mask,
-            dropout_p=0.0,
-            scale=scale,
+            q_sdpa, k_sdpa, v_sdpa, attn_mask=alibi_mask, dropout_p=0.0, scale=scale
         )
 
         # Reshape output back to [query_len, num_heads, head_size]
@@ -649,10 +643,7 @@ def test_contexted_kv_attention_alibi_f32(
 @pytest.mark.parametrize("op", OPS)
 @torch.inference_mode()
 def test_qwen3_nonstandard_block_size(
-    head_size: int,
-    dtype: torch.dtype,
-    device: str,
-    op: Callable,
+    head_size: int, dtype: torch.dtype, device: str, op: Callable
 ) -> None:
     """
     A separate test function specifically added

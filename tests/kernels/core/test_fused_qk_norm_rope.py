@@ -138,9 +138,4 @@ def test_fused_qk_norm_rope_matches_reference(
     else:
         ATOL, RTOL = (1e-2, 1e-2)
 
-    torch.testing.assert_close(
-        qkv_fused,
-        ref_result,
-        atol=ATOL,
-        rtol=RTOL,
-    )
+    torch.testing.assert_close(qkv_fused, ref_result, atol=ATOL, rtol=RTOL)

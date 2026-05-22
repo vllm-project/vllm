@@ -46,9 +46,7 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
+        from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -84,10 +82,7 @@ class CudagraphDispatcher:
             "Cudagraph capture sizes must be set when cudagraphs are enabled."
         )
         self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
-        for end, start in zip(
-            capture_sizes + [max_size + 1],
-            [0] + capture_sizes,
-        ):
+        for end, start in zip(capture_sizes + [max_size + 1], [0] + capture_sizes):
             for bs in range(start, end):
                 if bs == start:
                     self._bs_to_padded_graph_size[bs] = start
@@ -346,8 +341,7 @@ class CudagraphDispatcher:
             if descs:
                 # Sort by (num_tokens, num_active_loras) descending
                 descs.sort(
-                    key=lambda d: (d.num_tokens, d.num_active_loras),
-                    reverse=True,
+                    key=lambda d: (d.num_tokens, d.num_active_loras), reverse=True
                 )
                 result.append((mode, descs))
 

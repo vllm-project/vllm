@@ -95,13 +95,7 @@ class ClsToken(nn.Module):
             return x
 
         token = self.token.unsqueeze(0).expand(x.shape[0], -1, -1)
-        x = torch.cat(
-            [
-                token,
-                x,
-            ],
-            dim=1,
-        )
+        x = torch.cat([token, x], dim=1)
 
         return x
 
@@ -539,9 +533,7 @@ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
         super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        mask_meta: MaskMetadata | None = None,
+        self, hidden_states: torch.Tensor, mask_meta: MaskMetadata | None = None
     ):
         hidden_states = (
             hidden_states
@@ -558,9 +550,7 @@ class RadioVisionEncoder(InternVisionEncoder):
         super().__init__(*args, layer_cls=RadioVisionEncoderLayer, **kwargs)
 
     def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        mask_meta: MaskMetadata | None = None,
+        self, inputs_embeds: torch.Tensor, mask_meta: MaskMetadata | None = None
     ):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -569,9 +559,7 @@ class RadioVisionEncoder(InternVisionEncoder):
 
 
 class RadioInternVisionModel(nn.Module):
-    packed_modules_mapping = {
-        "qkv": ["qkv"],
-    }
+    packed_modules_mapping = {"qkv": ["qkv"]}
 
     def __init__(
         self,
@@ -693,9 +681,7 @@ class RadioInternVisionModel(nn.Module):
 
 
 class RadioModel(nn.Module):
-    packed_modules_mapping = {
-        "qkv": ["qkv"],
-    }
+    packed_modules_mapping = {"qkv": ["qkv"]}
 
     def __init__(
         self,
@@ -734,11 +720,7 @@ class RadioModel(nn.Module):
         imgs_sizes: list[tuple[int, int]] | None = None,
         num_frames: int | None = None,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        y = self.model(
-            pixel_values,
-            imgs_sizes=imgs_sizes,
-            num_frames=num_frames,
-        )
+        y = self.model(pixel_values, imgs_sizes=imgs_sizes, num_frames=num_frames)
         return self._extract_final(y, imgs_sizes=imgs_sizes)
 
     def load_weights(self, weights) -> set[str]:

@@ -296,7 +296,7 @@ class NCCLWeightTransferEngine(
             ...         master_address=master_address,
             ...         master_port=master_port,
             ...         world_size=world_size,
-            ...     ),
+            ...     )
             ... )
         """
         if isinstance(init_info, dict):
@@ -312,11 +312,7 @@ class NCCLWeightTransferEngine(
         # Trainer is always rank 0
         device = torch.accelerator.current_device_index()
         return NCCLWeightTransferEngine._stateless_init_process_group(
-            master_address,
-            master_port,
-            0,
-            world_size,
-            device,
+            master_address, master_port, 0, world_size, device
         )
 
     @staticmethod

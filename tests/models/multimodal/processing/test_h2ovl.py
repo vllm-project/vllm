@@ -37,9 +37,7 @@ def _get_expected_num_patches(
             orig_width=width,
             orig_height=height,
             target_ratios=get_h2ovl_target_ratios(
-                min_num=1,
-                max_num=max_num,
-                prior_aspect_ratio=None,
+                min_num=1, max_num=max_num, prior_aspect_ratio=None
             ),
             image_size=config.vision_config.image_size,
             use_thumbnail=False,  # Thumbnail is handled separately
@@ -50,9 +48,7 @@ def _get_expected_num_patches(
             orig_width=width,
             orig_height=height,
             target_ratios=get_h2ovl_target_ratios(
-                min_num=3,
-                max_num=max_num,
-                prior_aspect_ratio=aspect_ratio,
+                min_num=3, max_num=max_num, prior_aspect_ratio=aspect_ratio
             ),
             image_size=config.vision_config.image_size,
             use_thumbnail=False,
@@ -73,9 +69,7 @@ def _get_expected_num_patches(
         orig_width=width,
         orig_height=height,
         target_ratios=get_h2ovl_target_ratios(
-            min_num,
-            max_num,
-            prior_aspect_ratio=None,
+            min_num, max_num, prior_aspect_ratio=None
         ),
         image_size=config.vision_config.image_size,
         use_thumbnail=False,
@@ -122,11 +116,7 @@ def _run_check(
 
 
 @pytest.mark.parametrize(
-    "model_id",
-    [
-        "h2oai/h2ovl-mississippi-800m",
-        "h2oai/h2ovl-mississippi-2b",
-    ],
+    "model_id", ["h2oai/h2ovl-mississippi-800m", "h2oai/h2ovl-mississippi-2b"]
 )
 @pytest.mark.parametrize(
     "size_factors",

@@ -60,23 +60,11 @@ def make_config_arg_parser(description: str):
         ),
     )
     parser.add_argument(
-        "-m",
-        nargs="+",
-        type=int,
-        default=[64],
-        help="num tokens per rank",
+        "-m", nargs="+", type=int, default=[64], help="num tokens per rank"
     )
+    parser.add_argument("-k", type=int, default=7168, help="hidden-size")
     parser.add_argument(
-        "-k",
-        type=int,
-        default=7168,
-        help="hidden-size",
-    )
-    parser.add_argument(
-        "-n",
-        type=int,
-        default=1024,
-        help="N dimension of the first fused-moe matmul",
+        "-n", type=int, default=1024, help="N dimension of the first fused-moe matmul"
     )
     parser.add_argument(
         "--num-experts", type=int, default=32, help="Global num experts"

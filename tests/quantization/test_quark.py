@@ -191,10 +191,7 @@ class AccuracyTestConfig:
     excepted_value: float
 
     def get_model_args(
-        self,
-        tp_size: int,
-        model_max_len: int | None = None,
-        kwargs: dict | None = None,
+        self, tp_size: int, model_max_len: int | None = None, kwargs: dict | None = None
     ) -> dict:
         if kwargs is None:
             kwargs = {}
@@ -218,7 +215,7 @@ GSM8K_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
         model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
         excepted_value=0.96,
-    ),
+    )
 ]
 
 WIKITEXT_ACCURACY_CONFIGS = [
@@ -291,25 +288,16 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
 
     rtol = 0.25
 
-    config = AccuracyTestConfig(
-        model_name=model_name,
-        excepted_value=expected_value,
-    )
+    config = AccuracyTestConfig(model_name=model_name, excepted_value=expected_value)
 
     model_args = config.get_model_args(
-        tp_size=tp_size,
-        kwargs={
-            "cudagraph_capture_sizes": [16],
-        },
+        tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
     )
     model_args.pop("add_bos_token")
 
     # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=task,
-        batch_size=64,
+        model="vllm", model_args=model_args, tasks=task, batch_size=64
     )
 
     EXPECTED_VALUE = config.excepted_value

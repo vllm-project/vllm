@@ -32,9 +32,7 @@ from vllm.utils.network_utils import get_open_port
 
 
 def create_mock_parallel_config(
-    rank: int = 0,
-    world_size: int = 1,
-    dp_rank: int = 0,
+    rank: int = 0, world_size: int = 1, dp_rank: int = 0
 ) -> ParallelConfig:
     """Create a mock ParallelConfig for testing."""
     config = MagicMock(spec=ParallelConfig)
@@ -82,11 +80,7 @@ class TestNCCLWeightTransferUpdateInfoValidation:
 
     def test_empty_lists_valid(self):
         """Test that empty lists are valid."""
-        info = NCCLWeightTransferUpdateInfo(
-            names=[],
-            dtype_names=[],
-            shapes=[],
-        )
+        info = NCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[])
         assert len(info.names) == 0
 
 
@@ -126,7 +120,7 @@ class TestNCCLEngineParsing:
         with pytest.raises(ValueError, match="Invalid init_info"):
             engine.parse_init_info(
                 {
-                    "master_address": "127.0.0.1",
+                    "master_address": "127.0.0.1"
                     # Missing master_port, rank_offset, world_size
                 }
             )
@@ -199,9 +193,7 @@ def test_nccl_receive_weights_without_init_raises():
     engine = NCCLWeightTransferEngine(config, parallel_config)
 
     update_info = NCCLWeightTransferUpdateInfo(
-        names=["w"],
-        dtype_names=["float32"],
-        shapes=[[10]],
+        names=["w"], dtype_names=["float32"], shapes=[[10]]
     )
 
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -227,10 +219,7 @@ def trainer_broadcast_tensor(
 
     # Create process group as rank 0 (trainer)
     pg = StatelessProcessGroup.create(
-        host=master_address,
-        port=master_port,
-        rank=0,
-        world_size=world_size,
+        host=master_address, port=master_port, rank=0, world_size=world_size
     )
     # Ray sets CUDA_VISIBLE_DEVICES, so device 0 is the assigned GPU
     comm = PyNcclCommunicator(pg, device=0)
@@ -293,9 +282,7 @@ def inference_receive_tensor(
             received_tensors.append((name, tensor.clone()))
 
     update_info = NCCLWeightTransferUpdateInfo(
-        names=["test.weight"],
-        dtype_names=[tensor_dtype],
-        shapes=[tensor_shape],
+        names=["test.weight"], dtype_names=[tensor_dtype], shapes=[tensor_shape]
     )
     engine.receive_weights(update_info, noop_load_weights)
     torch.accelerator.synchronize()
@@ -449,18 +436,13 @@ class TestIPCWeightTransferUpdateInfoValidation:
         """Test that omitting ipc_handles raises TypeError."""
         with pytest.raises(TypeError):
             IPCWeightTransferUpdateInfo(
-                names=["layer.weight"],
-                dtype_names=["float32"],
-                shapes=[[10, 10]],
+                names=["layer.weight"], dtype_names=["float32"], shapes=[[10, 10]]
             )
 
     def test_empty_lists_valid(self):
         """Test that empty lists are valid."""
         info = IPCWeightTransferUpdateInfo(
-            names=[],
-            dtype_names=[],
-            shapes=[],
-            ipc_handles=[],
+            names=[], dtype_names=[], shapes=[], ipc_handles=[]
         )
         assert len(info.names) == 0
 
@@ -606,10 +588,7 @@ class TrainerActor:
 
 
 @ray.remote(num_gpus=0.5)
-def inference_receive_ipc_tensor(
-    ipc_handle_dict: dict,
-    mode: str = "ray",
-) -> dict:
+def inference_receive_ipc_tensor(ipc_handle_dict: dict, mode: str = "ray") -> dict:
     """Inference task that receives tensor via IPCWeightTransferEngine."""
     import os
 
@@ -623,9 +602,7 @@ def inference_receive_ipc_tensor(
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
-    from vllm.distributed.weight_transfer.ipc_engine import (
-        IPCWeightTransferEngine,
-    )
+    from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
 
     # Create engine with mock parallel config
     config = WeightTransferConfig(backend="ipc")
@@ -725,8 +702,7 @@ def test_ipc_weight_transfer_between_processes(mode: str):
     ray.get(pg.ready())
 
     scheduling_strategy = PlacementGroupSchedulingStrategy(
-        placement_group=pg,
-        placement_group_capture_child_tasks=True,
+        placement_group=pg, placement_group_capture_child_tasks=True
     )
 
     # Tensor to transfer: 100x100 filled with 42s
@@ -772,10 +748,7 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
     ipc_handles = [{wrong_uuid: ipc_handle}]
 
     update_info = IPCWeightTransferUpdateInfo(
-        names=["w"],
-        dtype_names=["float32"],
-        shapes=[[10, 10]],
-        ipc_handles=ipc_handles,
+        names=["w"], dtype_names=["float32"], shapes=[[10, 10]], ipc_handles=ipc_handles
     )
 
     with pytest.raises(ValueError, match="IPC handle not found"):

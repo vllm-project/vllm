@@ -28,10 +28,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -72,15 +69,9 @@ class Cohere2VisionImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", 3, "h", "w"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", 3, "h", "w")]
 
-    num_patches: Annotated[
-        torch.Tensor,
-        TensorShape("bn"),
-    ]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 class Cohere2VisionMultiModalProjector(nn.Module):
@@ -181,9 +172,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
 
         return image_processor.get_number_of_image_patches(
-            image_height,
-            image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            image_height, image_width, self.ctx.get_merged_mm_kwargs(mm_kwargs)
         )
 
 
@@ -230,10 +219,7 @@ class Cohere2VisionMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
         # Ensure num_patches is available for proper tensor splitting
@@ -261,9 +247,7 @@ class Cohere2VisionMultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
@@ -302,9 +286,7 @@ class Cohere2VisionMultiModalProcessor(
 
         return [
             PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_replacement,
+                modality="image", target=image_token, replacement=get_replacement
             )
         ]
 
@@ -454,8 +436,5 @@ class Cohere2VisionForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)

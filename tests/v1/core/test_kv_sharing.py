@@ -31,12 +31,11 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
     # However, if they have different attention backends, they will be
     # placed in different attention groups for KV cache group 0
     kv_cache_groups = [
-        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec())
     ]
 
     add_kv_sharing_layers_to_kv_cache_groups(
-        shared_kv_cache_layers=shared_kv_cache_layers,
-        kv_cache_groups=kv_cache_groups,
+        shared_kv_cache_layers=shared_kv_cache_layers, kv_cache_groups=kv_cache_groups
     )
 
     # Check that the layers were added to the correct KV cache group
@@ -60,12 +59,11 @@ def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
     }
 
     kv_cache_groups = [
-        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec())
     ]
 
     add_kv_sharing_layers_to_kv_cache_groups(
-        shared_kv_cache_layers=shared_kv_cache_layers,
-        kv_cache_groups=kv_cache_groups,
+        shared_kv_cache_layers=shared_kv_cache_layers, kv_cache_groups=kv_cache_groups
     )
 
     # Check that the layers were added to the correct KV cache group
@@ -95,8 +93,7 @@ def test_initialize_kv_cache_for_kv_sharing_no_attn_groups():
     ]
 
     add_kv_sharing_layers_to_kv_cache_groups(
-        shared_kv_cache_layers=shared_kv_cache_layers,
-        kv_cache_groups=kv_cache_groups,
+        shared_kv_cache_layers=shared_kv_cache_layers, kv_cache_groups=kv_cache_groups
     )
 
     # Check that the layers were added to the correct KV cache group

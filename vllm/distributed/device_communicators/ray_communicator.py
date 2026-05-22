@@ -215,11 +215,7 @@ class RayPPCommunicator(Communicator):
             raise RayChannelError("RayPPCommunicator has been destroyed.")
         return buf
 
-    def allgather(
-        self,
-        send_buf: "torch.Tensor",
-        recv_buf: "torch.Tensor",
-    ):
+    def allgather(self, send_buf: "torch.Tensor", recv_buf: "torch.Tensor"):
         raise NotImplementedError("allgather is not supported")
 
     def allreduce(

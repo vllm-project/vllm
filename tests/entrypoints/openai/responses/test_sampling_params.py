@@ -60,11 +60,7 @@ class TestResponsesRequestSamplingParams:
 
     def test_stop_string_conversion(self):
         """Test that single stop string is converted to list."""
-        request = ResponsesRequest(
-            model="test-model",
-            input="test input",
-            stop="STOP",
-        )
+        request = ResponsesRequest(model="test-model", input="test input", stop="STOP")
 
         sampling_params = request.to_sampling_params(default_max_tokens=1000)
 
@@ -72,10 +68,7 @@ class TestResponsesRequestSamplingParams:
 
     def test_default_values(self):
         """Test default values for optional parameters."""
-        request = ResponsesRequest(
-            model="test-model",
-            input="test input",
-        )
+        request = ResponsesRequest(model="test-model", input="test input")
 
         sampling_params = request.to_sampling_params(default_max_tokens=1000)
 
@@ -105,16 +98,12 @@ class TestResponsesRequestSamplingParams:
 
         # Test valid seed at boundaries
         request_min = ResponsesRequest(
-            model="test-model",
-            input="test input",
-            seed=torch.iinfo(torch.long).min,
+            model="test-model", input="test input", seed=torch.iinfo(torch.long).min
         )
         assert request_min.seed == torch.iinfo(torch.long).min
 
         request_max = ResponsesRequest(
-            model="test-model",
-            input="test input",
-            seed=torch.iinfo(torch.long).max,
+            model="test-model", input="test input", seed=torch.iinfo(torch.long).max
         )
         assert request_max.seed == torch.iinfo(torch.long).max
 
@@ -137,9 +126,7 @@ class TestResponsesRequestSamplingParams:
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
         text_config = ResponseTextConfig()
         text_config.format = ResponseFormatTextJSONSchemaConfig(
-            type="json_schema",
-            name="test",
-            schema={"type": "object"},
+            type="json_schema", name="test", schema={"type": "object"}
         )
         request = ResponsesRequest(
             model="test-model",

@@ -62,10 +62,7 @@ def default_server_args(
     return args
 
 
-EXAMPLE_PROMPTS = [
-    "Hello, my name is",
-    "What is an LLM?",
-]
+EXAMPLE_PROMPTS = ["Hello, my name is", "What is an LLM?"]
 
 
 def _encode_embeds(embeds: torch.Tensor):
@@ -187,10 +184,7 @@ async def test_completions_with_prompt_embeds(
     )
     assert len(completion.choices) == 2
     completion_text_only = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="This is a prompt",
-        max_tokens=5,
-        temperature=0.0,
+        model=model_name, prompt="This is a prompt", max_tokens=5, temperature=0.0
     )
     completion_embeds_only = await client_with_prompt_embeds.completions.create(
         model=model_name,
@@ -276,8 +270,7 @@ async def test_completions_with_logprobs_and_prompt_embeds(
 
 @pytest.mark.asyncio
 async def test_prompt_logprobs_raises_error(
-    example_prompt_embeds,
-    client_with_prompt_embeds: openai.AsyncOpenAI,
+    example_prompt_embeds, client_with_prompt_embeds: openai.AsyncOpenAI
 ):
     encoded_embeds, _ = example_prompt_embeds
 

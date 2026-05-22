@@ -32,11 +32,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -195,10 +191,7 @@ class NixlConnectorScheduler:
             return
         if remote_engine_id not in self._heartbeat_by_engine:
             self._heartbeat_by_engine[remote_engine_id] = HeartbeatInfo(
-                req_ids=set(),
-                host=host,
-                port=port,
-                tp_size=tp_size,
+                req_ids=set(), host=host, port=port, tp_size=tp_size
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
         self._heartbeat_req_engine[request.request_id] = (
@@ -312,10 +305,7 @@ class NixlConnectorScheduler:
                     continue
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
-                    "Received message for tp rank %s",
-                    target_tp_rank,
-                )
+                logger.debug("Received message for tp rank %s", target_tp_rank)
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
@@ -501,9 +491,7 @@ class NixlConnectorScheduler:
             params["_remote_blocks_processed"] = True
 
     def _build_save_meta(
-        self,
-        meta: NixlConnectorMetadata,
-        scheduler_output: SchedulerOutput,
+        self, meta: NixlConnectorMetadata, scheduler_output: SchedulerOutput
     ) -> None:
         # only called when use_host_buffer is True to build the save metadata
 
@@ -536,8 +524,7 @@ class NixlConnectorScheduler:
                 self._reqs_need_save.pop(req_id)
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         meta = NixlConnectorMetadata()
 
@@ -578,9 +565,7 @@ class NixlConnectorScheduler:
             self._stop_heartbeat(req_id)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: BlockIds,
+        self, request: "Request", block_ids: BlockIds
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks

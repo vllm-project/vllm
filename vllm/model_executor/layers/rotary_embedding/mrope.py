@@ -302,22 +302,14 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = self.apply_rotary_emb.forward_native(
-            query_rot,
-            cos,
-            sin,
-        )
+        query_rot = self.apply_rotary_emb.forward_native(query_rot, cos, sin)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = self.apply_rotary_emb.forward_native(
-            key_rot,
-            cos,
-            sin,
-        )
+        key_rot = self.apply_rotary_emb.forward_native(key_rot, cos, sin)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -356,21 +348,13 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = self.apply_rotary_emb(
-            query_rot,
-            cos,
-            sin,
-        )
+        query_rot = self.apply_rotary_emb(query_rot, cos, sin)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = self.apply_rotary_emb(
-            key_rot,
-            cos,
-            sin,
-        )
+        key_rot = self.apply_rotary_emb(key_rot, cos, sin)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -385,9 +369,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
     @staticmethod
     def get_next_input_positions(
-        mrope_position_delta: int,
-        context_len: int,
-        seq_len: int,
+        mrope_position_delta: int, context_len: int, seq_len: int
     ) -> list[list[int]]:
         return [
             list(

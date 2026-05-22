@@ -30,10 +30,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
-def _ref_convert_id_to_token(
-    tokenizer: TokenizerLike,
-    token_id: int,
-) -> str:
+def _ref_convert_id_to_token(tokenizer: TokenizerLike, token_id: int) -> str:
     """Reference impl of logprobs detokenization.
 
     Args:
@@ -51,9 +48,7 @@ def _ref_convert_id_to_token(
 )
 @pytest.mark.parametrize("stream_interval", [1, 5, 10])
 def test_incremental_detokenization(
-    request_output_kind: RequestOutputKind,
-    stream_interval: int,
-    dummy_test_vectors,
+    request_output_kind: RequestOutputKind, stream_interval: int, dummy_test_vectors
 ):
     output_processor = OutputProcessor(
         dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval

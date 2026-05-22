@@ -29,17 +29,9 @@ logger = init_logger(__name__)
 
 
 class Gemma4Proposer(SpecDecodeBaseProposer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        runner=None,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         super().__init__(
-            vllm_config,
-            device,
-            pass_hidden_states_to_model=True,
-            runner=runner,
+            vllm_config, device, pass_hidden_states_to_model=True, runner=runner
         )
         # All draft steps predict from the same position (the last
         # target-model position), so positions and seq_lens must not
@@ -68,9 +60,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         return True
 
     def build_per_group_and_layer_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int = 0,
+        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int = 0
     ) -> tuple[list[object], dict[str, object]]:
         """Build attention metadata using the correct block table per group.
 
@@ -114,10 +104,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
 
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
-                size,
-                masked_emb.hidden_size,
-                dtype=self.dtype,
-                device=self.device,
+                size, masked_emb.hidden_size, dtype=self.dtype, device=self.device
             )
             for _ in range(3):
                 masked_emb.get_top_tokens(static_input, lm_head_weight)
@@ -125,10 +112,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
 
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                static_output = masked_emb.get_top_tokens(
-                    static_input,
-                    lm_head_weight,
-                )
+                static_output = masked_emb.get_top_tokens(static_input, lm_head_weight)
             self._centroids_graphs[size] = g
             self._centroids_inputs[size] = static_input
             self._centroids_outputs[size] = static_output
@@ -153,10 +137,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         if target_backend is not None:
             base = replace(
                 base,
-                attention_config=replace(
-                    base.attention_config,
-                    backend=target_backend,
-                ),
+                attention_config=replace(base.attention_config, backend=target_backend),
             )
         return base
 
@@ -249,9 +230,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                     kv_cache_group_id=gid,
                 )
                 attn_group.create_metadata_builders(
-                    self.vllm_config,
-                    self.device,
-                    kernel_block_size=kernel_block_size,
+                    self.vllm_config, self.device, kernel_block_size=kernel_block_size
                 )
                 attention_groups[group_key] = attn_group
             else:
@@ -272,10 +251,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
             ].kv_cache_spec.block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
-    def _setup_gemma4_kv_sharing(
-        self,
-        target_attn_layer_names: set[str],
-    ) -> None:
+    def _setup_gemma4_kv_sharing(self, target_attn_layer_names: set[str]) -> None:
         """Wire draft layers to share KV with the target model.
 
         Each draft decoder layer is mapped to the last non-KV-shared

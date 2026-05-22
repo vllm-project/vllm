@@ -3,13 +3,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Literal,
-    Protocol,
-    get_args,
-)
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
 import numpy as np
 import torch
@@ -460,8 +454,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
 
 def split_decodes_prefills_and_extends(
-    common_attn_metadata: CommonAttentionMetadata,
-    decode_threshold: int = 1,
+    common_attn_metadata: CommonAttentionMetadata, decode_threshold: int = 1
 ) -> tuple[int, int, int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -681,8 +674,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_prefills = int(is_pure_prefill.sum())
 
     target_regions = np.repeat(
-        [0, 1, 2, 3],
-        [num_decodes, num_short_extends, num_long_extends, num_prefills],
+        [0, 1, 2, 3], [num_decodes, num_short_extends, num_long_extends, num_prefills]
     ).astype(np.int32)
 
     needs_swap = req_regions != target_regions
@@ -739,9 +731,7 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
 
 
 def subclass_attention_metadata(
-    name_prefix: str,
-    metadata_cls: Any,
-    fields: list[tuple[str, Any, Any]],
+    name_prefix: str, metadata_cls: Any, fields: list[tuple[str, Any, Any]]
 ) -> Any:
     """
     Return a new subclass of `metadata_cls` with additional fields
@@ -758,8 +748,7 @@ class KVSharingFastPrefillMetadata(Protocol):
 
 
 def create_fast_prefill_custom_backend(
-    prefix: str,
-    underlying_attn_backend: type[AttentionBackend],
+    prefix: str, underlying_attn_backend: type[AttentionBackend]
 ) -> type[AttentionBackend]:
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
@@ -803,9 +792,7 @@ def create_fast_prefill_custom_backend(
 
 
 def compute_causal_conv1d_metadata(
-    query_start_loc_p_cpu: torch.Tensor,
-    *,
-    device: torch.device,
+    query_start_loc_p_cpu: torch.Tensor, *, device: torch.device
 ):
     # Needed for causal_conv1d. Use the CPU query_start_loc to avoid DtoH sync.
     assert query_start_loc_p_cpu.device.type == "cpu"
@@ -922,10 +909,7 @@ def mamba_get_block_table_tensor(
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
+        start_indices = torch.clamp((seq_lens - 1) // kv_cache_spec.block_size, min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(

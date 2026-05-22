@@ -22,13 +22,7 @@ def monkeypatch_module():
 
 @pytest.fixture(scope="module", params=[True])
 def server(request, monkeypatch_module):
-    args = [
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "8192",
-        "--enforce-eager",
-    ]
+    args = ["--dtype", "bfloat16", "--max-model-len", "8192", "--enforce-eager"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -117,10 +111,7 @@ async def test_single_completion(client: openai.AsyncOpenAI):
 
     # test using token IDs
     completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=[0, 0, 0, 0, 0],
-        max_tokens=5,
-        temperature=0.0,
+        model=MODEL_NAME, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None

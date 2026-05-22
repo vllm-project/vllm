@@ -78,7 +78,7 @@ def llm_pair(request):
     env_vars = {
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
-        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "VLLM_USE_FLASHINFER_SAMPLER": "0"
     }
     with temporary_environ(env_vars):
         full = LLM(
@@ -107,10 +107,7 @@ def llm_pair(request):
     del full
     del piecewise
 
-    wait_for_gpu_memory_to_clear(
-        devices=[0],
-        threshold_ratio=0.1,
-    )
+    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
 
 
 @pytest.mark.parametrize(

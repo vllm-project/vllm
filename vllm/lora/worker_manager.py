@@ -79,9 +79,7 @@ class WorkerLoRAManager:
         return True
 
     def create_lora_manager(
-        self,
-        model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        self, model: torch.nn.Module, vllm_config: VllmConfig | None = None
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -238,9 +236,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
     def create_lora_manager(
-        self,
-        model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        self, model: torch.nn.Module, vllm_config: VllmConfig | None = None
     ) -> Any:
         lora_manager = create_lora_manager(
             model,

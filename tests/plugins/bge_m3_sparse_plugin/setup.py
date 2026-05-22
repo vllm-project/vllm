@@ -9,7 +9,7 @@ setup(
     packages=["bge_m3_sparse_processor"],
     entry_points={
         "vllm.io_processor_plugins": [
-            "bge_m3_sparse_plugin = bge_m3_sparse_processor:register_bge_m3_sparse_embeddings_processor",  # noqa: E501
+            "bge_m3_sparse_plugin = bge_m3_sparse_processor:register_bge_m3_sparse_embeddings_processor"  # noqa: E501
         ]
     },
 )

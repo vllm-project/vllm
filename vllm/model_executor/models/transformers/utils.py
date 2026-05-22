@@ -166,10 +166,7 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     if conv.padding_mode != "zeros":
         return conv
 
-    vllm_conv_cls = {
-        nn.Conv2d: Conv2dLayer,
-        nn.Conv3d: Conv3dLayer,
-    }.get(type(conv))
+    vllm_conv_cls = {nn.Conv2d: Conv2dLayer, nn.Conv3d: Conv3dLayer}.get(type(conv))
 
     if vllm_conv_cls is None:
         return conv
@@ -231,10 +228,7 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
     logger.debug("%s: %s -> %s", name, old_module, new_module)
 
 
-def get_feature_request_tip(
-    model: str,
-    trust_remote_code: bool,
-) -> str:
+def get_feature_request_tip(model: str, trust_remote_code: bool) -> str:
     hf_url = f"a discussion at https://huggingface.co/{model}/discussions/new"
     gh_url = "an issue at https://github.com/huggingface/transformers/issues/new/choose"
     url = hf_url if trust_remote_code else gh_url

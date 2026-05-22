@@ -201,8 +201,7 @@ class MultiModalConfig:
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
-        cls,
-        value: dict[str, int | dict[str, int]],
+        cls, value: dict[str, int | dict[str, int]]
     ) -> MMDummyOptions:
         out: MMDummyOptions = {}
 
@@ -324,8 +323,7 @@ class MultiModalConfig:
         return limit_data.count
 
     def merge_mm_processor_kwargs(
-        self,
-        inference_kwargs: Mapping[str, object],
+        self, inference_kwargs: Mapping[str, object]
     ) -> dict[str, object]:
         """
         Get the keyword arguments to pass to the multi-modal processor

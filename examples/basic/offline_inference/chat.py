@@ -67,12 +67,7 @@ def main(args: dict):
         },
     ]
     outputs = llm.chat(conversation, sampling_params, use_tqdm=False)
-    print_outputs(
-        outputs,
-        [
-            conversation,
-        ],
-    )
+    print_outputs(outputs, [conversation])
 
     # You can run batch inference with llm.chat API
     conversations = [conversation for _ in range(10)]
@@ -88,10 +83,7 @@ def main(args: dict):
             chat_template = f.read()
 
         outputs = llm.chat(
-            conversations,
-            sampling_params,
-            use_tqdm=False,
-            chat_template=chat_template,
+            conversations, sampling_params, use_tqdm=False, chat_template=chat_template
         )
         print_outputs(outputs, conversations)
 

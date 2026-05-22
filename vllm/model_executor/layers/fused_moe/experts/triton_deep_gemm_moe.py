@@ -16,9 +16,7 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_e8m0_used,
-)
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 
 class TritonOrDeepGemmExperts(FallbackExperts):
@@ -32,8 +30,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEExpertsModular],
-        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular], type[mk.FusedMoEExpertsModular]
     ]:
         return (DeepGemmExperts, TritonExperts)
 
@@ -75,10 +72,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
             )
 
     def _select_experts_impl(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
+        self, hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
     ) -> mk.FusedMoEExpertsModular:
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
             return self.experts

@@ -112,14 +112,10 @@ def reshape_and_cache_kernel_flash(
         value_tile = value_load
 
     tl.store(
-        key_cache_ptr + tgt_idx_k,
-        key_tile,
-        mask=tile_pos < (num_heads * head_size),
+        key_cache_ptr + tgt_idx_k, key_tile, mask=tile_pos < (num_heads * head_size)
     )
     tl.store(
-        value_cache_ptr + tgt_idx_v,
-        value_tile,
-        mask=tile_pos < (num_heads * head_size),
+        value_cache_ptr + tgt_idx_v, value_tile, mask=tile_pos < (num_heads * head_size)
     )
     return
 
@@ -396,10 +392,7 @@ def triton_reshape_and_cache_flash(
 
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
-    grid = lambda meta: (
-        slot_mapping.shape[0],
-        triton.cdiv(n, meta["TILE_SIZE"]),
-    )
+    grid = lambda meta: (slot_mapping.shape[0], triton.cdiv(n, meta["TILE_SIZE"]))
 
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
@@ -496,11 +489,7 @@ def reshape_and_cache_kernel_flash_diffkv(
     else:
         value_tile = value_load
 
-    tl.store(
-        kv_cache_ptr + tgt_idx + tile_offs,
-        key_tile,
-        mask=tile_offs < head_size_k,
-    )
+    tl.store(kv_cache_ptr + tgt_idx + tile_offs, key_tile, mask=tile_offs < head_size_k)
     tl.store(
         kv_cache_ptr + tgt_idx + head_size_k + tile_offs,
         value_tile,
@@ -571,10 +560,7 @@ def triton_reshape_and_cache_flash_diffkv(
 
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
-    grid = lambda meta: (
-        slot_mapping.shape[0],
-        num_heads,
-    )
+    grid = lambda meta: (slot_mapping.shape[0], num_heads)
 
     reshape_and_cache_kernel_flash_diffkv[grid](
         key_ptr=key,

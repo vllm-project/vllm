@@ -14,9 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
-from vllm.tool_parsers.glm4_moe_tool_parser import (
-    Glm4MoeModelToolParser,
-)
+from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 
 # Use a common model that is likely to be available
 MODEL = "zai-org/GLM-4.5"
@@ -32,10 +30,9 @@ def sample_tools():
     return [
         ChatCompletionToolsParam(
             function=FunctionDefinition(
-                name="get_weather",
-                parameters={"city": {"type": "string"}},
-            ),
-        ),
+                name="get_weather", parameters={"city": {"type": "string"}}
+            )
+        )
     ]
 
 
@@ -104,11 +101,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -137,11 +130,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -149,11 +138,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Orlando",
-                                "state": "FL",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -174,11 +159,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Seattle",
-                                "state": "WA",
-                                "unit": "celsius",
-                            }
+                            {"city": "Seattle", "state": "WA", "unit": "celsius"}
                         ),
                     )
                 )
@@ -199,11 +180,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "New York",
-                                "state": "NY",
-                                "unit": "celsius",
-                            }
+                            {"city": "New York", "state": "NY", "unit": "celsius"}
                         ),
                     )
                 )
@@ -221,12 +198,7 @@ def test_extract_tool_calls_no_tools(glm4_moe_tool_parser, mock_request):
                 ToolCall(
                     function=FunctionCall(
                         name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Beijing",
-                                "date": "2025-08-01",
-                            }
-                        ),
+                        arguments=json.dumps({"city": "Beijing", "date": "2025-08-01"}),
                     )
                 )
             ],
@@ -700,15 +672,11 @@ if __name__ == "__main__":
                         "content": {"type": "string"},
                     },
                 },
-            ),
-        ),
+            )
+        )
     ]
     glm4_moe_tool_parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=tools,
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
     # Simulate token-based streaming (special tags as single tokens)
     chunks = [
@@ -810,13 +778,11 @@ def test_whitespace_preserved_in_arg_values(glm4_moe_tokenizer):
                 name="apply_diff",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "s": {"type": "string"},
-                    },
+                    "properties": {"s": {"type": "string"}},
                     "required": ["s"],
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -904,10 +870,7 @@ def test_delimiter_preserved_transformers_5x(glm4_moe_tool_parser):
     assert adjusted_none.skip_special_tokens is True
 
     # No tools at all
-    request_no_tools = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-    )  # type: ignore
+    request_no_tools = ChatCompletionRequest(model=MODEL, messages=[])  # type: ignore
     adjusted_empty = glm4_moe_tool_parser.adjust_request(request_no_tools)
     assert adjusted_empty.skip_special_tokens is True
 
@@ -1073,15 +1036,11 @@ def test_streaming_multi_token_with_multiple_args(glm4_moe_tokenizer):
                         "b": {"type": "number"},
                     },
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=tools,
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
     # All arguments arrive in two big chunks (simulates stream_interval=5)
     chunks = [
@@ -1174,8 +1133,8 @@ def test_stream_interval_single_tool_call(glm4_moe_tokenizer, stream_interval):
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -1210,8 +1169,8 @@ def test_stream_interval_multiple_tool_calls(glm4_moe_tokenizer, stream_interval
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -1250,8 +1209,8 @@ def test_stream_interval_content_then_tool_call(glm4_moe_tokenizer, stream_inter
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -1290,8 +1249,8 @@ def test_stream_interval_extreme_single_chunk(glm4_moe_tokenizer):
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -1329,8 +1288,8 @@ def test_stream_interval_content_between_tool_calls(
                     "type": "object",
                     "properties": {"city": {"type": "string"}},
                 },
-            ),
-        ),
+            )
+        )
     ]
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
@@ -1377,10 +1336,7 @@ def function_tools():
             name="get_weather",
             parameters={
                 "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                    "unit": {"type": "string"},
-                },
+                "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
             },
         ),
         FunctionTool(

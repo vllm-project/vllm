@@ -46,17 +46,12 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
-from vllm.distributed.utils import (
-    StatelessProcessGroup,
-    get_cached_tcp_store_client,
-)
+from vllm.distributed.utils import StatelessProcessGroup, get_cached_tcp_store_client
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -260,21 +255,15 @@ def patched_fused_scaled_matmul_reduce_scatter(
 
 
 direct_register_custom_op(
-    op_name="all_reduce",
-    op_func=all_reduce,
-    fake_impl=all_reduce_fake,
+    op_name="all_reduce", op_func=all_reduce, fake_impl=all_reduce_fake
 )
 
 direct_register_custom_op(
-    op_name="reduce_scatter",
-    op_func=reduce_scatter,
-    fake_impl=reduce_scatter_fake,
+    op_name="reduce_scatter", op_func=reduce_scatter, fake_impl=reduce_scatter_fake
 )
 
 direct_register_custom_op(
-    op_name="all_gather",
-    op_func=all_gather,
-    fake_impl=all_gather_fake,
+    op_name="all_gather", op_func=all_gather, fake_impl=all_gather_fake
 )
 
 # TODO: Remove this once the pytorch fix
@@ -488,8 +477,7 @@ class GroupCoordinator:
 
         if self.device_communicator is not None:
             assert isinstance(
-                self.device_communicator,
-                (CudaCommunicator, XpuCommunicator),
+                self.device_communicator, (CudaCommunicator, XpuCommunicator)
             )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
@@ -969,9 +957,7 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> tuple[
-        dict[str, torch.Tensor | Any] | None,
-        list[Handle],
-        list[Callable[[], None]],
+        dict[str, torch.Tensor | Any] | None, list[Handle], list[Callable[[], None]]
     ]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
@@ -1102,10 +1088,7 @@ class GroupCoordinator:
     ):
         if self.device_communicator is not None:
             return self.device_communicator.dispatch_router_logits(
-                hidden_states,
-                router_logits,
-                is_sequence_parallel,
-                extra_tensors,
+                hidden_states, router_logits, is_sequence_parallel, extra_tensors
             )
         else:
             return hidden_states, router_logits
@@ -1545,8 +1528,7 @@ def initialize_model_parallel(
     coord_store: Store | None = None
     if enable_elastic_ep:
         coord_store = get_cached_tcp_store_client(
-            parallel_config.data_parallel_master_ip,
-            parallel_config._coord_store_port,
+            parallel_config.data_parallel_master_ip, parallel_config._coord_store_port
         )
         # Use stateless world group for global information
         world_size = get_world_group().world_size

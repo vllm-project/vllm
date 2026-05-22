@@ -24,9 +24,7 @@ def main():
     model = models.data[0].id
 
     responses = client.embeddings.create(
-        input=["Follow the white rabbit."],
-        model=model,
-        dimensions=32,
+        input=["Follow the white rabbit."], model=model, dimensions=32
     )
 
     for data in responses.data:

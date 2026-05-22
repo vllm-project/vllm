@@ -270,9 +270,7 @@ class Qwen2MoeAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -345,10 +343,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -536,13 +531,7 @@ class Qwen2MoeModel(nn.Module):
 
 class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     fall_back_to_pt_during_load = False
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ]
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -588,10 +577,7 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

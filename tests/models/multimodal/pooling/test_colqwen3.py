@@ -65,35 +65,28 @@ def _make_base64_image(
 
 
 def _make_image_mm_param(
-    image_uri: str,
-    text: str | None = None,
+    image_uri: str, text: str | None = None
 ) -> ScoreMultiModalParam:
     """Build a ScoreMultiModalParam containing an image (and optional text)."""
     content: list = [
         ChatCompletionContentPartImageParam(
-            type="image_url",
-            image_url={"url": image_uri},
-        ),
+            type="image_url", image_url={"url": image_uri}
+        )
     ]
     if text is not None:
-        content.append(
-            ChatCompletionContentPartTextParam(type="text", text=text),
-        )
+        content.append(ChatCompletionContentPartTextParam(type="text", text=text))
     return ScoreMultiModalParam(content=content)
 
 
 def _make_text_mm_param(text: str) -> ScoreMultiModalParam:
     """Build a ScoreMultiModalParam containing only text."""
     return ScoreMultiModalParam(
-        content=[ChatCompletionContentPartTextParam(type="text", text=text)],
+        content=[ChatCompletionContentPartTextParam(type="text", text=text)]
     )
 
 
 def _run_token_embed_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify per-token embedding shape and L2 normalization."""
     with vllm_runner(
@@ -115,19 +108,11 @@ def _run_token_embed_test(
 
         # Verify L2 normalization
         norms = torch.norm(emb, p=2, dim=-1)
-        torch.testing.assert_close(
-            norms,
-            torch.ones_like(norms),
-            rtol=1e-2,
-            atol=1e-2,
-        )
+        torch.testing.assert_close(norms, torch.ones_like(norms), rtol=1e-2, atol=1e-2)
 
 
 def _run_late_interaction_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
     from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
@@ -155,10 +140,7 @@ def _run_late_interaction_test(
 
 
 def _run_relevance_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify that relevant documents score higher than irrelevant ones."""
     query = "What is machine learning?"
@@ -185,31 +167,19 @@ def _run_relevance_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_token_embed(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_token_embed(vllm_runner, model: str, dtype: str) -> None:
     _run_token_embed_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_late_interaction_scoring(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_late_interaction_scoring(vllm_runner, model: str, dtype: str) -> None:
     _run_late_interaction_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_relevance_ordering(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_relevance_ordering(vllm_runner, model: str, dtype: str) -> None:
     _run_relevance_test(vllm_runner, model, dtype=dtype)
 
 
@@ -217,10 +187,7 @@ def test_colqwen3_relevance_ordering(
 
 
 def _run_multimodal_text_query_image_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Score a text query against image documents via the multimodal path.
 
@@ -231,10 +198,7 @@ def _run_multimodal_text_query_image_docs_test(
     blue_image = _make_base64_image(64, 64, color=(0, 0, 255))
 
     query = "Describe the red object"
-    image_docs = [
-        _make_image_mm_param(red_image),
-        _make_image_mm_param(blue_image),
-    ]
+    image_docs = [_make_image_mm_param(red_image), _make_image_mm_param(blue_image)]
 
     with vllm_runner(
         model,
@@ -252,10 +216,7 @@ def _run_multimodal_text_query_image_docs_test(
 
 
 def _run_multimodal_mixed_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Score a text query against a mix of text and image documents.
 
@@ -289,10 +250,7 @@ def _run_multimodal_mixed_docs_test(
 
 
 def _run_multimodal_image_query_text_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Score an image query against text documents.
 
@@ -325,28 +283,20 @@ def _run_multimodal_image_query_text_docs_test(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
 def test_colqwen3_multimodal_text_query_image_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
+    vllm_runner, model: str, dtype: str
 ) -> None:
     _run_multimodal_text_query_image_docs_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_multimodal_mixed_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_multimodal_mixed_docs(vllm_runner, model: str, dtype: str) -> None:
     _run_multimodal_mixed_docs_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
 def test_colqwen3_multimodal_image_query_text_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
+    vllm_runner, model: str, dtype: str
 ) -> None:
     _run_multimodal_image_query_text_docs_test(vllm_runner, model, dtype=dtype)

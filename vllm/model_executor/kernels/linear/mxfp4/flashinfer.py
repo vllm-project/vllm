@@ -42,10 +42,7 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         from vllm.utils.flashinfer import (
             flashinfer_mxfp4_quantize,

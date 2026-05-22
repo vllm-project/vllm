@@ -114,17 +114,11 @@ async def accumulate_streaming_response(
 
     # Build the final response
     choice = ChatCompletionResponseChoice(
-        index=index,
-        message=message,
-        finish_reason=finish_reason or "stop",
+        index=index, message=message, finish_reason=finish_reason or "stop"
     )
 
     # Create usage info (with dummy values for tests)
-    usage = UsageInfo(
-        prompt_tokens=0,
-        completion_tokens=0,
-        total_tokens=0,
-    )
+    usage = UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
     response = ChatCompletionResponse(
         id=response_id or "chatcmpl-test",

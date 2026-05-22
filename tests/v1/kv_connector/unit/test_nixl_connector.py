@@ -375,10 +375,7 @@ def test_kv_transfer_handshake(dist_init):
             KVCacheGroupSpec(
                 ["layer0", "layer1", "layer2"],
                 FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=4,
-                    head_size=16,
-                    dtype=torch.float16,
+                    block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
                 ),
             )
         ]
@@ -616,11 +613,7 @@ class TestNixlHandshake:
                     local_block_ids=([num_xfers + 1, num_xfers + 2, num_xfers + 3],),
                     kv_transfer_params={
                         "remote_block_ids": (
-                            [
-                                num_xfers + 4,
-                                num_xfers + 5,
-                                num_xfers + 6,
-                            ],
+                            [num_xfers + 4, num_xfers + 5, num_xfers + 6],
                         ),
                         "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                         "remote_request_id": f"prefill-{request_id}",
@@ -633,9 +626,7 @@ class TestNixlHandshake:
 
             # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             dummy_ctx = ForwardContext(
-                no_compile_layers={},
-                attn_metadata={},
-                slot_mapping={},
+                no_compile_layers={}, attn_metadata={}, slot_mapping={}
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -657,13 +648,7 @@ class TestNixlHandshake:
         FakeNixlWrapper,
     )
     @pytest.mark.parametrize(
-        "decode_tp_size, prefill_tp_size",
-        [
-            (1, 1),
-            (2, 1),
-            (4, 2),
-            (4, 4),
-        ],
+        "decode_tp_size, prefill_tp_size", [(1, 1), (2, 1), (4, 2), (4, 4)]
     )
     def test_async_load_kv(
         self,
@@ -705,9 +690,7 @@ class TestNixlHandshake:
         start = time.perf_counter()
         while time.perf_counter() - start < timeout:
             dummy_ctx = ForwardContext(
-                no_compile_layers={},
-                attn_metadata={},
-                slot_mapping={},
+                no_compile_layers={}, attn_metadata={}, slot_mapping={}
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -870,8 +853,7 @@ class TestNixlHandshake:
             prompt_logprobs_dict={},
             pooler_output=[None],
             kv_connector_output=KVConnectorOutput(
-                finished_sending=done_sending0,
-                finished_recving=None,
+                finished_sending=done_sending0, finished_recving=None
             ),
         )
         out1 = ModelRunnerOutput(
@@ -882,8 +864,7 @@ class TestNixlHandshake:
             prompt_logprobs_dict={},
             pooler_output=[None],
             kv_connector_output=KVConnectorOutput(
-                finished_sending=done_sending1,
-                finished_recving=None,
+                finished_sending=done_sending1, finished_recving=None
             ),
         )
         aggregated = aggregator.aggregate([out0, out1], output_rank=0)
@@ -942,9 +923,7 @@ class TestNixlHandshake:
         start = time.perf_counter()
         while time.perf_counter() - start < timeout:
             dummy_ctx = ForwardContext(
-                no_compile_layers={},
-                attn_metadata={},
-                slot_mapping={},
+                no_compile_layers={}, attn_metadata={}, slot_mapping={}
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -1115,11 +1094,7 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     connector.bind_connector_metadata(metadata)
 
     # Start the transfer
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(dummy_ctx)
 
     # Verify stats are recorded after transfer is complete
@@ -1402,9 +1377,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
         with _make_fake_nixl_pkg() as working_dir:
             runtime_env = {
                 "working_dir": working_dir,  # ship fake nixl package
-                "env_vars": {
-                    "NIXL_TELEMETRY_ENABLE": "1",
-                },
+                "env_vars": {"NIXL_TELEMETRY_ENABLE": "1"},
             }
             # On XPU/ROCm, vLLM expects Ray's device key to be "GPU".
             # Explicitly reserving GPU resources here prevents false negatives
@@ -1660,9 +1633,7 @@ def test_register_kv_caches(
             expected_tensor_size = (
                 cross_layers_kv_cache.element_size() * cross_layers_kv_cache.numel()
             )
-            expected_base_addrs = [
-                cross_layers_kv_cache.data_ptr(),
-            ]
+            expected_base_addrs = [cross_layers_kv_cache.data_ptr()]
             expected_num_entries = 1
 
             expected_blocks_count = num_blocks * (2 if is_blocks_first else 1)
@@ -1773,12 +1744,7 @@ class FakePlatform(Platform):
         return "VRAM"
 
 
-@pytest.mark.parametrize(
-    "kv_buffer_device, nixl_memory_type",
-    [
-        ("oot", "VRAM"),
-    ],
-)
+@pytest.mark.parametrize("kv_buffer_device, nixl_memory_type", [("oot", "VRAM")])
 def test_kv_buffer_to_nixl_memory_types(
     default_vllm_config, dist_init, kv_buffer_device, nixl_memory_type
 ):
@@ -1924,11 +1890,7 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
     # Bind scheduler-produced metadata and start worker processing.
     connector.bind_connector_metadata(kv_meta)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(dummy_ctx)
 
     # Ensure it was tracked by the worker
@@ -2092,11 +2054,7 @@ def test_transfer_failure_logging(
     )
     connector.bind_connector_metadata(metadata)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
 
     # Capture logs from the nixl.worker logger specifically
     # vLLM loggers have propagate=False, so we need to capture directly
@@ -2194,11 +2152,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     )
     connector.bind_connector_metadata(metadata)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(dummy_ctx)
 
     # Wait for handshake to fail
@@ -2246,11 +2200,7 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     )
     connector.bind_connector_metadata(metadata)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(dummy_ctx)
 
     # Wait for handshake to complete and process ready_requests
@@ -2273,12 +2223,7 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
 )
 @pytest.mark.parametrize(
     "failure_mode",
-    [
-        "handshake",
-        "transfer_setup",
-        "transfer_failed",
-        "transfer_exception",
-    ],
+    ["handshake", "transfer_setup", "transfer_failed", "transfer_exception"],
 )
 def test_failed_request_skips_kv_postprocessing(
     default_vllm_config, dist_init, failure_mode
@@ -2344,11 +2289,7 @@ def test_failed_request_skips_kv_postprocessing(
     )
     connector.bind_connector_metadata(metadata)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        slot_mapping={},
-    )
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
     connector.start_load_kv(dummy_ctx)
 
     if failure_mode == "handshake":
@@ -2565,10 +2506,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     - NixlHandshakePayload decoder
     - NixlAgentMetadata decoder
     """
-    local_vllm_config = create_vllm_config(
-        model="facebook/opt-125m",
-        block_size=16,
-    )
+    local_vllm_config = create_vllm_config(model="facebook/opt-125m", block_size=16)
     decode_connector = NixlConnector(
         local_vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
     )

@@ -4,9 +4,7 @@
 from vllm.config.pooler import PoolerConfig
 
 
-def test_idefics_multimodal(
-    vllm_runner,
-) -> None:
+def test_idefics_multimodal(vllm_runner) -> None:
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -50,9 +48,7 @@ def update_config(config):
     return config
 
 
-def test_gemma_multimodal(
-    vllm_runner,
-) -> None:
+def test_gemma_multimodal(vllm_runner) -> None:
     messages = [
         {
             "role": "system",

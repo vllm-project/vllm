@@ -32,10 +32,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -91,10 +88,7 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         return {"image": 1}
 
     def get_image_feature_grid_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
+        self, *, image_width: int, image_height: int
     ) -> tuple[int, int]:
         image_processor = self.get_image_processor()
         target_width = image_processor.size["width"]
@@ -114,15 +108,9 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         nrows = math.ceil(image_height / patch_height)
         return ncols, nrows
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         ncols, nrows = self.get_image_feature_grid_size(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
         return ncols * nrows
@@ -174,10 +162,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         image_patches = processed_outputs["image_patches"]
@@ -188,10 +173,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
         return processed_outputs
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _apply_hf_processor_tokens_only(self, prompt_tokens: list[int]) -> list[int]:
         # HF processor adds boa_token_id
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
@@ -203,9 +185,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         return prompt_tokens
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         patches_per_image = hf_inputs.get("patches_per_image", torch.empty(0))
 
@@ -235,14 +215,12 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             image_size = images.get_image_size(item_idx)
 
             ncols, nrows = self.info.get_image_feature_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
+                image_width=image_size.width, image_height=image_size.height
             )
             image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
             return PromptUpdateDetails.select_token_id(
-                image_tokens + [bos_token_id],
-                embed_token_id=_IMAGE_TOKEN_ID,
+                image_tokens + [bos_token_id], embed_token_id=_IMAGE_TOKEN_ID
             )
 
         return [
@@ -357,10 +335,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

@@ -143,12 +143,7 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
 def thinking_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(
-        model="Qwen/Qwen3-0.6B",
-        max_model_len=4096,
-        enforce_eager=True,
-        seed=0,
-    )
+    llm = LLM(model="Qwen/Qwen3-0.6B", max_model_len=4096, enforce_eager=True, seed=0)
 
     yield weakref.proxy(llm)
 
@@ -165,8 +160,7 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     ]
 
     outputs = thinking_llm.chat(
-        messages,
-        chat_template_kwargs={"enable_thinking": enable_thinking},
+        messages, chat_template_kwargs={"enable_thinking": enable_thinking}
     )
     assert len(outputs) == 1
 

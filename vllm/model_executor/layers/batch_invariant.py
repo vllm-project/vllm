@@ -308,17 +308,9 @@ def bmm_kernel(
         b_mask = k_valid[:, None] & mask_n[None, :]
 
         # a: [BLOCK_SIZE_M, BLOCK_SIZE_K] from A[offs_m, offs_k]
-        a = tl.load(
-            a_ptrs,
-            mask=a_mask,
-            other=0.0,
-        )
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         # b: [BLOCK_SIZE_K, BLOCK_SIZE_N] from B[offs_k, offs_n]
-        b = tl.load(
-            b_ptrs,
-            mask=b_mask,
-            other=0.0,
-        )
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         accumulator = tl.dot(a, b, accumulator)
 
     # c_m / c_n: [BLOCK_SIZE_M] / [BLOCK_SIZE_N], row/col indices for C

@@ -29,10 +29,7 @@ def _build_renderer(
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
     )
 
-    return HfRenderer(
-        vllm_config,
-        cached_tokenizer_from_config(model_config),
-    )
+    return HfRenderer(vllm_config, cached_tokenizer_from_config(model_config))
 
 
 def test_multi_modal_uuids_length_mismatch_raises():
@@ -64,10 +61,7 @@ def test_multi_modal_uuids_length_mismatch_raises():
 def test_multi_modal_uuids_missing_modality_raises():
     renderer = _build_renderer()
 
-    mm_data = {
-        "image": [cherry_pil_image],
-        "video": None,
-    }
+    mm_data = {"image": [cherry_pil_image], "video": None}
 
     # Only image uuids provided; video missing should raise
     mm_uuids = {"image": ["hash_cherry"]}
@@ -92,8 +86,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
     mm_cache_gb: float, enable_prefix_caching: bool
 ):
     renderer = _build_renderer(
-        mm_cache_gb=mm_cache_gb,
-        enable_prefix_caching=enable_prefix_caching,
+        mm_cache_gb=mm_cache_gb, enable_prefix_caching=enable_prefix_caching
     )
 
     mm_data = {
@@ -127,8 +120,7 @@ def test_multi_modal_uuids_accepts_empty(
     mm_cache_gb: float, enable_prefix_caching: bool
 ):
     renderer = _build_renderer(
-        mm_cache_gb=mm_cache_gb,
-        enable_prefix_caching=enable_prefix_caching,
+        mm_cache_gb=mm_cache_gb, enable_prefix_caching=enable_prefix_caching
     )
 
     # While None means cached multi-modal input requiring UUIDs

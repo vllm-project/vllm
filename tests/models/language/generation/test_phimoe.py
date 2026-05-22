@@ -8,9 +8,7 @@ from vllm.platforms import current_platform
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
-MODELS = [
-    "microsoft/Phi-3.5-MoE-instruct",
-]
+MODELS = ["microsoft/Phi-3.5-MoE-instruct"]
 
 
 def test_phimoe_routing_function():
@@ -71,7 +69,7 @@ def test_phimoe_routing_function():
     reason="Skipping due to known issue: "
     "'DynamicCache' object has no attribute 'seen_tokens'. See: "
     "https://huggingface.co/microsoft/Phi-3.5-MoE-instruct/discussions/58 "
-    "for details.",
+    "for details."
 )
 @pytest.mark.skipif(
     condition=current_platform.is_cpu(),
@@ -102,8 +100,5 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )

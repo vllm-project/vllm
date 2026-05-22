@@ -6,10 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from transformers import AutoTokenizer
 
-from tests.tool_parsers.utils import (
-    run_tool_extraction,
-    run_tool_extraction_streaming,
-)
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -19,8 +16,7 @@ TOOL_CALL_END = "<|tool_call_end|>"
 
 SIMPLE_FUNCTION_OUTPUT = "get_candidate_status(candidate_id='12345')"
 SIMPLE_FUNCTION_CALL = FunctionCall(
-    name="get_candidate_status",
-    arguments='{"candidate_id": "12345"}',
+    name="get_candidate_status", arguments='{"candidate_id": "12345"}'
 )
 MORE_TYPES_FUNCTION_OUTPUT = (
     "register_user(name='John Doe', "
@@ -40,19 +36,14 @@ MORE_TYPES_FUNCTION_CALL = FunctionCall(
     '"aliases": ["John", "Johnny"]}',
 )
 PARAMETERLESS_FUNCTION_OUTPUT = "get_weather()"
-PARAMETERLESS_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments="{}",
-)
+PARAMETERLESS_FUNCTION_CALL = FunctionCall(name="get_weather", arguments="{}")
 EMPTY_DICT_FUNCTION_OUTPUT = "do_something_cool(additional_data={})"
 EMPTY_DICT_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"additional_data": {}}',
+    name="do_something_cool", arguments='{"additional_data": {}}'
 )
 EMPTY_LIST_FUNCTION_OUTPUT = "do_something_cool(steps=[])"
 EMPTY_LIST_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"steps": []}',
+    name="do_something_cool", arguments='{"steps": []}'
 )
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"
@@ -231,8 +222,7 @@ TEST_CASES = [
 
 
 @pytest.mark.parametrize(
-    "streaming, model_output, expected_tool_calls, expected_content",
-    TEST_CASES,
+    "streaming, model_output, expected_tool_calls, expected_content", TEST_CASES
 )
 def test_tool_call(
     streaming: bool,
@@ -260,7 +250,7 @@ def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):
     model_output_deltas = [
         f"{TOOL_CALL_START}[get_candidate_status(candidate_id='12345'), "
         f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}",
+        f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -325,9 +315,7 @@ def test_streaming_leading_block_and_trailing_in_single_delta(
     assert "Done." in reconstructor.other_content
 
 
-def test_echoed_tool_call_body_not_leaked_to_content(
-    lfm2_tokenizer: TokenizerLike,
-):
+def test_echoed_tool_call_body_not_leaked_to_content(lfm2_tokenizer: TokenizerLike):
     """LFM2 sometimes emits the tool call body again after the first
     <|tool_call_end|>, capped with a second <|tool_call_end|>. The
     echoed body must not surface as assistant content — neither in
@@ -407,16 +395,12 @@ def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[0].function == DOTTED_NAME_FUNCTION_CALL
 
 
-def test_adjust_request_disables_skip_special_tokens(
-    lfm2_tokenizer: TokenizerLike,
-):
+def test_adjust_request_disables_skip_special_tokens(lfm2_tokenizer: TokenizerLike):
     """When tools are present, the parser must force
     ``skip_special_tokens=False`` so the engine does not strip the
     <|tool_call_start|>/<|tool_call_end|> sentinels before they reach the
     parser."""
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
 

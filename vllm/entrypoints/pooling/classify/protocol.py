@@ -29,10 +29,7 @@ class ClassificationCompletionRequest(
     FixedMaxLenTokenizeParamsMixin,
 ):
     def to_pooling_params(self):
-        return PoolingParams(
-            task="classify",
-            use_activation=self.use_activation,
-        )
+        return PoolingParams(task="classify", use_activation=self.use_activation)
 
 
 class ClassificationChatRequest(
@@ -42,10 +39,7 @@ class ClassificationChatRequest(
     FixedMaxLenTokenizeParamsMixin,
 ):
     def to_pooling_params(self):
-        return PoolingParams(
-            task="classify",
-            use_activation=self.use_activation,
-        )
+        return PoolingParams(task="classify", use_activation=self.use_activation)
 
 
 ClassificationRequest: TypeAlias = (

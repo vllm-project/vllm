@@ -4,9 +4,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -19,10 +17,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_output_into_messages,
 )
 from vllm.logger import init_logger
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike

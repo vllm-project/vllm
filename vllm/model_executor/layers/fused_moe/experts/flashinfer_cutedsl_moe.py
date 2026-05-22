@@ -34,15 +34,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     Supports expert parallelism natively.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
         assert quant_config.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization is currently supported."
         )
@@ -80,12 +73,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-        ]
+        SUPPORTED_W_A = [(kNvfp4Static, kNvfp4Dynamic)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -93,9 +83,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         return activation == MoEActivation.SILU
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     def supports_expert_map(self) -> bool:

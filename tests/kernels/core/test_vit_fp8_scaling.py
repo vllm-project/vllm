@@ -14,9 +14,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     _FP8_AMAX_HISTORY_LEN,
     _FP8_MAX,
 )
-from vllm.utils.flashinfer import (
-    is_flashinfer_cudnn_fp8_prefill_attn_supported,
-)
+from vllm.utils.flashinfer import is_flashinfer_cudnn_fp8_prefill_attn_supported
 
 LAYER_0 = "visual.blocks.0.attn.attn"
 LAYER_1 = "visual.blocks.1.attn.attn"
@@ -55,9 +53,7 @@ def _build_attention(mm_config):
         ),
     ):
         attn = MMEncoderAttention(
-            num_heads=NUM_HEADS,
-            head_size=HEAD_DIM,
-            prefix=LAYER_0,
+            num_heads=NUM_HEADS, head_size=HEAD_DIM, prefix=LAYER_0
         )
         attn.process_weights_after_loading(torch.bfloat16)
         yield attn
@@ -88,8 +84,7 @@ def _make_static_attention(tmp_path):
     )
     with _build_attention(
         MultiModalConfig(
-            mm_encoder_attn_dtype="fp8",
-            mm_encoder_fp8_scale_path=str(scale_file),
+            mm_encoder_attn_dtype="fp8", mm_encoder_fp8_scale_path=str(scale_file)
         )
     ) as attn:
         yield attn
@@ -178,8 +173,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
         json.dumps({"visual.blocks.99.attn": {"q": 1.0, "k": 1.0, "v": 1.0}})
     )
     mm_config = MultiModalConfig(
-        mm_encoder_attn_dtype="fp8",
-        mm_encoder_fp8_scale_path=str(scale_file),
+        mm_encoder_attn_dtype="fp8", mm_encoder_fp8_scale_path=str(scale_file)
     )
     vllm_config = VllmConfig()
     vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
@@ -197,9 +191,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
         ),
     ):
         attn = MMEncoderAttention(
-            num_heads=NUM_HEADS,
-            head_size=HEAD_DIM,
-            prefix=LAYER_0,
+            num_heads=NUM_HEADS, head_size=HEAD_DIM, prefix=LAYER_0
         )
         with pytest.raises(ValueError, match="scales not found for layer"):
             attn.process_weights_after_loading(torch.bfloat16)
@@ -221,8 +213,7 @@ def test_dynamic_scales_auto_save(tmp_path) -> None:
     save_file = tmp_path / "auto_scales.json"
     with _build_attention(
         MultiModalConfig(
-            mm_encoder_attn_dtype="fp8",
-            mm_encoder_fp8_scale_save_path=str(save_file),
+            mm_encoder_attn_dtype="fp8", mm_encoder_fp8_scale_save_path=str(save_file)
         )
     ) as attn:
         if attn is None or not attn.fp8_enabled:

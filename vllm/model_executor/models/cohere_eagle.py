@@ -42,21 +42,14 @@ class CohereEagleDecoderLayer(CohereDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(
-            config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
+            config, cache_config=cache_config, quant_config=quant_config, prefix=prefix
         )
 
 
 @support_torch_compile
 class CohereEagleModel(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        start_layer_id: int = 0,
+        self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -109,8 +102,7 @@ class CohereEagleModel(nn.Module):
         # Cohere EAGLE applies an explicit final LayerNorm to the draft
         # hidden states before they are consumed by the logits processor.
         self.norm = LayerNorm(
-            param_shape=(self.config.hidden_size),
-            eps=self.config.layer_norm_eps,
+            param_shape=(self.config.hidden_size), eps=self.config.layer_norm_eps
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -126,11 +118,7 @@ class CohereEagleModel(nn.Module):
         hidden_states = self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 

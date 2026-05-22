@@ -10,16 +10,10 @@ from typing import Any
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed.device_communicators.shm_broadcast import (
-    Handle,
-    MessageQueue,
-)
+from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import (
-    get_distributed_init_method,
-    get_open_port,
-)
+from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
     MultiprocExecutor,
@@ -150,10 +144,7 @@ class RayWorkerProc(WorkerProc):
             os.environ[key] = value
 
         self.local_rank = local_rank
-        super().__init__(
-            local_rank=local_rank,
-            **self._init_kwargs,
-        )
+        super().__init__(local_rank=local_rank, **self._init_kwargs)
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -317,7 +308,7 @@ class RayExecutorV2(MultiprocExecutor):
 
         # Collect driver env vars and apply but don't overwrite node-local values.
         self.driver_env_vars = get_driver_env_vars(
-            worker_specific_vars=WORKER_SPECIFIC_ENV_VARS,
+            worker_specific_vars=WORKER_SPECIFIC_ENV_VARS
         )
 
         runtime_env = self._build_runtime_env()
@@ -387,7 +378,7 @@ class RayExecutorV2(MultiprocExecutor):
             worker_env_vars = {
                 current_platform.device_control_env_var: ",".join(
                     map(str, node_gpus[node_id])
-                ),
+                )
             }
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(

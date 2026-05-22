@@ -83,9 +83,7 @@ async def test_generate_normal_flow(mock_async_llm):
     # Collect outputs from generate
     outputs = []
     async for output in mock_async_llm.generate(
-        prompt=prompt,
-        sampling_params=sampling_params,
-        request_id=request_id,
+        prompt=prompt, sampling_params=sampling_params, request_id=request_id
     ):
         outputs.append(output)
 

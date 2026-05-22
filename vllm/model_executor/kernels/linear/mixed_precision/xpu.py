@@ -110,10 +110,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             setattr(layer, self.w_gidx_name, None)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
@@ -147,10 +144,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         if c.act_type not in (torch.bfloat16, torch.float16):
             return False, "XPUW4A8Int requires BF16/FP16 activations"
         if c.weight_type != scalar_types.int4:
-            return (
-                False,
-                f"XPUW4A8Int requires int4 weights, got {c.weight_type}",
-            )
+            return (False, f"XPUW4A8Int requires int4 weights, got {c.weight_type}")
         if c.zero_points:
             return False, "XPUW4A8Int only supports symmetric weight quantization"
         if c.group_size != -1 and c.group_size % 32 != 0:
@@ -199,9 +193,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         packed = self._pack_int4_weight(w)  # [out, in/8] packed uint4
 
         replace_parameter(
-            layer,
-            self.w_q_name,
-            torch.nn.Parameter(packed, requires_grad=False),
+            layer, self.w_q_name, torch.nn.Parameter(packed, requires_grad=False)
         )
 
         # Free the original unpacked int8 weight (still registered as "weight")
@@ -209,10 +201,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         layer.register_parameter("weight", None)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])  # [M, K]
         from vllm._xpu_ops import xpu_ops as ops

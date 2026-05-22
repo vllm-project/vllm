@@ -117,10 +117,7 @@ class ConchLinearKernel(MPLinearKernel):
             layer.register_parameter(self.w_zp_name, None)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         from conch.ops.quantization.gemm import mixed_precision_gemm
 

@@ -40,10 +40,7 @@ def test_invalid_stat_logger_plugin_raises(monkeypatch: pytest.MonkeyPatch):
         return {"bad": object()}
 
     with monkeypatch.context() as m:
-        m.setattr(
-            "vllm.v1.metrics.loggers.load_plugins_by_group",
-            fake_plugin_loader,
-        )
+        m.setattr("vllm.v1.metrics.loggers.load_plugins_by_group", fake_plugin_loader)
         with pytest.raises(
             TypeError,
             match="Stat logger plugin 'bad' must be a subclass of StatLoggerBase",

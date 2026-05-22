@@ -78,20 +78,12 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
+        model=model_name, max_num_seqs=2, limit_mm_per_prompt={"image": len(image_urls)}
     )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -120,13 +112,7 @@ def load_bee(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -156,13 +142,7 @@ def load_command_a_vision(question: str, image_urls: list[str]) -> ModelRequestD
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -254,13 +234,7 @@ def load_exaone4_5(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -288,13 +262,7 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -321,13 +289,7 @@ def load_granite4_vision(question: str, image_urls: list[str]) -> ModelRequestDa
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -421,19 +383,10 @@ def load_hyperclovax_seed_vision(
                 "lens_local_keywords": "",
             }
         )
-    message["content"].append(
-        {
-            "type": "text",
-            "text": question,
-        }
-    )
+    message["content"].append({"type": "text", "text": question})
 
     prompt = tokenizer.apply_chat_template(
-        [
-            message,
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
+        [message], tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
@@ -456,9 +409,7 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
         # if you are running out of memory, you can reduce the "longest_edge".
         # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
-        mm_processor_kwargs={
-            "size": {"longest_edge": 2 * 364},
-        },
+        mm_processor_kwargs={"size": {"longest_edge": 2 * 364}},
     )
 
     placeholders = "\n".join(
@@ -548,13 +499,7 @@ def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -566,9 +511,7 @@ def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -585,13 +528,7 @@ def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -603,9 +540,7 @@ def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -622,13 +557,7 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -656,13 +585,7 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -690,13 +613,7 @@ def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -723,13 +640,7 @@ def load_llava_next(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -756,13 +667,7 @@ def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestDa
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -1111,10 +1016,7 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
+            "content": [*placeholders, {"type": "text", "text": question}],
         },
     ]
 
@@ -1138,9 +1040,7 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         image_data = [post_process_image(fetch_image(url)) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1169,10 +1069,7 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
+            "content": [*placeholders, {"type": "text", "text": question}],
         },
     ]
 
@@ -1196,9 +1093,7 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         image_data = [post_process_image(fetch_image(url)) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1214,13 +1109,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -1246,9 +1135,7 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
         max_num_seqs=16,
         enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={
-            "max_image_size": {"longest_edge": 384},
-        },
+        mm_processor_kwargs={"max_image_size": {"longest_edge": 384}},
     )
 
     placeholders = "\n".join(
@@ -1286,9 +1173,7 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1312,9 +1197,7 @@ def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1332,9 +1215,7 @@ def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1361,9 +1242,7 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1381,13 +1260,7 @@ def load_glm4_1v(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -1397,9 +1270,7 @@ def load_glm4_1v(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1417,13 +1288,7 @@ def load_glm4_5v(question: str, image_urls: list[str]) -> ModelRequestData:
     )
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
     processor = AutoProcessor.from_pretrained(model_name)
     prompt = processor.apply_chat_template(
@@ -1432,9 +1297,7 @@ def load_glm4_5v(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1452,13 +1315,7 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
     )
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
     processor = AutoProcessor.from_pretrained(model_name)
     prompt = processor.apply_chat_template(
@@ -1467,9 +1324,7 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1486,13 +1341,7 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -1504,9 +1353,7 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
+        engine_args=engine_args, prompt=prompt, image_data=image_data
     )
 
 
@@ -1579,10 +1426,7 @@ def run_generate(
     )
 
     outputs = llm.generate(
-        {
-            "prompt": req_data.prompt,
-            "multi_modal_data": {"image": req_data.image_data},
-        },
+        {"prompt": req_data.prompt, "multi_modal_data": {"image": req_data.image_data}},
         sampling_params=sampling_params,
         lora_request=req_data.lora_requests,
     )
@@ -1627,15 +1471,9 @@ def run_chat(
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": question,
-                    },
+                    {"type": "text", "text": question},
                     *(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image_url},
-                        }
+                        {"type": "image_url", "image_url": {"url": image_url}}
                         for image_url in image_urls
                     ),
                 ],
@@ -1675,10 +1513,7 @@ def parse_args():
         help="The method to run in `vllm.LLM`.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     parser.add_argument(
         "--num-images",

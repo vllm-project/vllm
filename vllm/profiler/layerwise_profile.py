@@ -295,12 +295,9 @@ class LayerwiseProfileResults(profile):
                 self._summary_stats_tree.append(summary_node)
 
         def build_model_stats_tree_df(
-            node: _ModuleTreeNode,
-            parent: _StatsTreeNode[ModelStatsEntry] | None = None,
+            node: _ModuleTreeNode, parent: _StatsTreeNode[ModelStatsEntry] | None = None
         ) -> _StatsTreeNode[ModelStatsEntry] | None:
-            if event_has_module(
-                node.event,
-            ):
+            if event_has_module(node.event):
                 name = event_module_repr(node.event)
                 cuda_time_us = self._cumulative_cuda_time(node)
                 cpu_time_us = node.event.duration_time_ns / 1000

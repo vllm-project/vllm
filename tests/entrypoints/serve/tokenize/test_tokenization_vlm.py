@@ -36,8 +36,7 @@ def server():
 
 
 def test_tokenize_chat_expands_image_placeholders(
-    server: RemoteOpenAIServer,
-    local_asset_server,
+    server: RemoteOpenAIServer, local_asset_server
 ):
     image_url = local_asset_server.url_for("stop_sign.jpg")
     messages = [
@@ -51,8 +50,7 @@ def test_tokenize_chat_expands_image_placeholders(
     ]
 
     response = requests.post(
-        server.url_for("tokenize"),
-        json={"model": MODEL_NAME, "messages": messages},
+        server.url_for("tokenize"), json={"model": MODEL_NAME, "messages": messages}
     )
     response.raise_for_status()
 

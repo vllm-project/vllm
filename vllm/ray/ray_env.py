@@ -42,9 +42,7 @@ DEFAULT_ENV_VAR_PREFIXES: set[str] = {
     "HUGGING_FACE_",
 }
 
-DEFAULT_EXTRA_ENV_VARS: set[str] = {
-    "PYTHONHASHSEED",
-}
+DEFAULT_EXTRA_ENV_VARS: set[str] = {"PYTHONHASHSEED"}
 
 
 def _parse_csv(value: str) -> set[str]:
@@ -105,8 +103,7 @@ def get_env_vars_to_copy(
     )
     if RAY_NON_CARRY_OVER_ENV_VARS:
         logger.info(
-            "RAY_NON_CARRY_OVER_ENV_VARS from config: %s",
-            RAY_NON_CARRY_OVER_ENV_VARS,
+            "RAY_NON_CARRY_OVER_ENV_VARS from config: %s", RAY_NON_CARRY_OVER_ENV_VARS
         )
     logger.info(
         "To exclude env vars from copying, add them to %s",

@@ -147,7 +147,7 @@ class TestExtractToolCalls:
                         "count": {"type": "integer"},
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -174,11 +174,9 @@ class TestExtractToolCalls:
                 name="score",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"},
-                    },
+                    "properties": {"value": {"type": "integer"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -201,11 +199,9 @@ class TestExtractToolCalls:
                 name="score",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"},
-                    },
+                    "properties": {"value": {"type": "integer"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -246,17 +242,17 @@ class TestExtractToolCalls:
                                         "minutes": {"type": "number"},
                                     },
                                 },
-                            ],
+                            ]
                         },
                         "patches": {
                             "oneOf": [
                                 {"type": "array", "items": {"type": "object"}},
                                 {"type": "null"},
-                            ],
+                            ]
                         },
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -289,15 +285,10 @@ class TestExtractToolCalls:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "wait": {
-                            "anyOf": [
-                                {"type": "object"},
-                                {"type": "null"},
-                            ],
-                        },
+                        "wait": {"anyOf": [{"type": "object"}, {"type": "null"}]}
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -322,11 +313,9 @@ class TestExtractToolCalls:
                 name="get_weather",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "location": {"type": "string"},
-                    },
+                    "properties": {"location": {"type": "string"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -350,11 +339,9 @@ class TestExtractToolCalls:
                 name="get_weather",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "location": {"type": "string"},
-                    },
+                    "properties": {"location": {"type": "string"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -383,7 +370,7 @@ class TestExtractToolCalls:
                         "meta": {"type": "object"},
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -414,7 +401,7 @@ class TestExtractToolCalls:
                         "whole": {"type": "number"},
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -443,7 +430,7 @@ class TestExtractToolCalls:
                         "label": {"type": ["string", "null"]},
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -467,11 +454,9 @@ class TestExtractToolCalls:
                 name="clear",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "value": {"type": ["integer", "null"]},
-                    },
+                    "properties": {"value": {"type": ["integer", "null"]}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -492,11 +477,9 @@ class TestExtractToolCalls:
                 name="echo",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                    },
+                    "properties": {"text": {"type": "string"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         model_output = (
@@ -627,12 +610,9 @@ class TestExtractToolCallsStreaming:
                 name="add",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "x": {"type": "integer"},
-                        "y": {"type": "integer"},
-                    },
+                    "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -654,11 +634,9 @@ class TestExtractToolCallsStreaming:
                 name="score",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"},
-                    },
+                    "properties": {"value": {"type": "integer"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -682,21 +660,16 @@ class TestExtractToolCallsStreaming:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "wait": {
-                            "anyOf": [
-                                {"type": "object"},
-                                {"type": "null"},
-                            ],
-                        },
+                        "wait": {"anyOf": [{"type": "object"}, {"type": "null"}]},
                         "patches": {
                             "oneOf": [
                                 {"type": "array", "items": {"type": "object"}},
                                 {"type": "null"},
-                            ],
+                            ]
                         },
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -966,7 +939,7 @@ class TestExtractToolCallsStreaming:
                         "meta": {"type": "object"},
                     },
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -989,11 +962,9 @@ class TestExtractToolCallsStreaming:
                 name="set_val",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "count": {"type": ["integer", "null"]},
-                    },
+                    "properties": {"count": {"type": ["integer", "null"]}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -1015,11 +986,9 @@ class TestExtractToolCallsStreaming:
                 name="clear",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "value": {"type": ["integer", "null"]},
-                    },
+                    "properties": {"value": {"type": ["integer", "null"]}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -1040,11 +1009,9 @@ class TestExtractToolCallsStreaming:
                 name="measure",
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "ratio": {"type": "number"},
-                    },
+                    "properties": {"ratio": {"type": "number"}},
                 },
-            ),
+            )
         )
         parser = make_parser(tools=[tool])
         full_text = (
@@ -1098,13 +1065,7 @@ class TestDelimiterPreservation:
         """Regression: skip_special_tokens must be False when tools are enabled."""
         # adjust_request must set skip_special_tokens=False
         tool = make_tool_param(
-            "search",
-            {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                },
-            },
+            "search", {"type": "object", "properties": {"query": {"type": "string"}}}
         )
         request = make_request(tools=[tool])
         request.tool_choice = "auto"

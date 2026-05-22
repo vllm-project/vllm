@@ -23,9 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
 )
-from vllm.utils.flashinfer import (
-    scaled_fp4_grouped_quantize,
-)
+from vllm.utils.flashinfer import scaled_fp4_grouped_quantize
 
 kE2M1ToFloat = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
@@ -288,9 +286,7 @@ def grouped_gemm_ref(
 
     # Repack into [num_experts, max_m, n_out]
     out_ref = torch.zeros(
-        (num_experts, max_m_val, n_out),
-        dtype=out.dtype,
-        device=out.device,
+        (num_experts, max_m_val, n_out), dtype=out.dtype, device=out.device
     )
     expert_slot = [0] * num_experts
 
@@ -318,9 +314,7 @@ def flashinfer_cutedsl_grouped_gemm_nt_masked(
     # hidden_states: [l, m, k]
     # weights: [l, n, k]
     aq, aq_sf = scaled_fp4_grouped_quantize(
-        hidden_states,
-        masked_m.to(hidden_states.device),
-        input_global_scale,
+        hidden_states, masked_m.to(hidden_states.device), input_global_scale
     )
     num_experts, n, k = weights.shape
     bq, bq_sf = scaled_fp4_grouped_quantize(

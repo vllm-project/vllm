@@ -7,10 +7,7 @@ from unittest.mock import patch
 
 from vllm.v1.executor.ray_env_utils import get_driver_env_vars
 
-WORKER_VARS: set[str] = {
-    "CUDA_VISIBLE_DEVICES",
-    "LOCAL_RANK",
-}
+WORKER_VARS: set[str] = {"CUDA_VISIBLE_DEVICES", "LOCAL_RANK"}
 
 
 class TestDefaultPropagation:

@@ -44,11 +44,7 @@ from vllm.assets.audio import AudioAsset
 # ──────────────────────────────────────────────────────────────────────
 
 
-def identify_language(
-    audio_path: str,
-    client: OpenAI,
-    model: str,
-) -> str:
+def identify_language(audio_path: str, client: OpenAI, model: str) -> str:
     """
     Send a single audio file to the vLLM transcription endpoint and return
     the detected language tag.
@@ -59,19 +55,12 @@ def identify_language(
     """
     with open(audio_path, "rb") as f:
         result = client.audio.transcriptions.create(
-            file=f,
-            model=model,
-            response_format="json",
-            temperature=0.0,
+            file=f, model=model, response_format="json", temperature=0.0
         )
     return result.text.strip()
 
 
-def identify_language_raw(
-    audio_path: str,
-    model: str,
-    api_base: str,
-) -> str:
+def identify_language_raw(audio_path: str, model: str, api_base: str) -> str:
     """
     Same as :func:`identify_language` but uses raw HTTP so that the demo
     works without the ``openai`` SDK (useful for quick debugging).
@@ -81,20 +70,13 @@ def identify_language_raw(
     url = f"{api_base}/audio/transcriptions"
     with open(audio_path, "rb") as f:
         files = {"file": (os.path.basename(audio_path), f)}
-        data = {
-            "model": model,
-            "response_format": "json",
-        }
+        data = {"model": model, "response_format": "json"}
         resp = requests.post(url, files=files, data=data)
         resp.raise_for_status()
     return resp.json()["text"].strip()
 
 
-def identify_language_streaming(
-    audio_path: str,
-    model: str,
-    api_base: str,
-) -> str:
+def identify_language_streaming(audio_path: str, model: str, api_base: str) -> str:
     """
     Streaming variant – demonstrates the streaming transcription endpoint.
     For a 1-2 token output the stream finishes almost instantly, but this
@@ -105,11 +87,7 @@ def identify_language_streaming(
     url = f"{api_base}/audio/transcriptions"
     with open(audio_path, "rb") as f:
         files = {"file": (os.path.basename(audio_path), f)}
-        data = {
-            "stream": "true",
-            "model": model,
-            "response_format": "json",
-        }
+        data = {"stream": "true", "model": model, "response_format": "json"}
         response = requests.post(url, files=files, data=data, stream=True)
         response.raise_for_status()
 
@@ -172,7 +150,7 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="FireRedLID – Language Identification demo via vLLM",
+        description="FireRedLID – Language Identification demo via vLLM"
     )
     parser.add_argument(
         "--audio_paths",

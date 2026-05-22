@@ -138,21 +138,13 @@ def benchmark_config(
         w1 = torch.randint(
             -127,
             127,
-            (
-                num_experts,
-                shard_intermediate_size,
-                hidden_size,
-            ),
+            (num_experts, shard_intermediate_size, hidden_size),
             dtype=torch.int8,
         )
         w2 = torch.randint(
             -127,
             127,
-            (
-                num_experts,
-                hidden_size,
-                shard_intermediate_size // 2,
-            ),
+            (num_experts, hidden_size, shard_intermediate_size // 2),
             dtype=torch.int8,
         )
     else:
@@ -178,8 +170,7 @@ def benchmark_config(
             dtype=dtype,
         )
         w2_scale = torch.rand(
-            (num_experts, hidden_size, intermediate_size // group_size),
-            dtype=dtype,
+            (num_experts, hidden_size, intermediate_size // group_size), dtype=dtype
         )
     elif use_int8_w8a16:
         w1_scale = torch.randn(
@@ -268,8 +259,7 @@ def benchmark_config(
                     use_monolithic=False,
                 ),
                 fused_experts=TritonOrDeepGemmExperts(
-                    moe_config=moe_config,
-                    quant_config=quant_config,
+                    moe_config=moe_config, quant_config=quant_config
                 ),
                 inplace=not disable_inplace(),
             )

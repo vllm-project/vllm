@@ -37,10 +37,7 @@ class TestConfig:
                 }
             else:
                 self.mm_processor_kwargs = {
-                    "size": {
-                        "shortest_edge": 28 * 28,
-                        "longest_edge": 1280 * 28 * 28,
-                    }
+                    "size": {"shortest_edge": 28 * 28, "longest_edge": 1280 * 28 * 28}
                 }
 
 
@@ -84,8 +81,7 @@ class Qwen2VLTester:
         max_tokens: int = 5,
     ):
         sampling_params = vllm.SamplingParams(
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=temperature, max_tokens=max_tokens
         )
         inputs = [
             {
@@ -142,10 +138,7 @@ class Qwen2VLTester:
                 )
 
 
-TEST_IMAGES = [
-    ImageAsset("stop_sign"),
-    ImageAsset("cherry_blossom"),
-]
+TEST_IMAGES = [ImageAsset("stop_sign"), ImageAsset("cherry_blossom")]
 
 EXPECTED_OUTPUTS = [
     "A red stop sign stands prominently in the foreground, with a traditional Chinese gate and a black SUV in the background, illustrating a blend of modern and cultural elements.",  # noqa: E501
@@ -169,10 +162,7 @@ EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
 ]
 
 EXPECTED_BEAM_SEARCH_OUTPUTS = [
-    [
-        "A majestic skyscraper stands",
-        "A majestic tower stands tall",
-    ],
+    ["A majestic skyscraper stands", "A majestic tower stands tall"]
 ]
 
 QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
@@ -236,11 +226,7 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
     )
     tester = Qwen2VLTester(config)
     for lora_id in [1, 2]:
-        tester.run_test(
-            TEST_IMAGES,
-            expected_outputs=EXPECTED_OUTPUTS,
-            lora_id=lora_id,
-        )
+        tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
 
 def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
@@ -255,11 +241,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
     )
     tester = Qwen2VLTester(config)
     for lora_id in [1, 2]:
-        tester.run_test(
-            TEST_IMAGES,
-            expected_outputs=EXPECTED_OUTPUTS,
-            lora_id=lora_id,
-        )
+        tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
 
 def test_qwen2vl_multiple_lora_types(

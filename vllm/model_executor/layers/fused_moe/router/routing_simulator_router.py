@@ -192,11 +192,7 @@ class DistributionBasedRouting(RoutingStrategy):
         """Generate weights based on the distribution."""
         if self.distribution == "uniform":
             # All-ones weights for uniform distribution
-            return torch.ones(
-                (num_tokens, top_k),
-                dtype=torch.float32,
-                device=device,
-            )
+            return torch.ones((num_tokens, top_k), dtype=torch.float32, device=device)
 
         elif self.distribution == "normal":
             # For normal distribution, generate weights from the same

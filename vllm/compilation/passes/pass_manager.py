@@ -19,9 +19,7 @@ from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
-    from .fusion.allreduce_rms_fusion import (
-        RocmAiterAllReduceFusionPass,
-    )
+    from .fusion.allreduce_rms_fusion import RocmAiterAllReduceFusionPass
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
@@ -46,11 +44,7 @@ if current_platform.is_cuda():
     from .fusion.collective_fusion import AsyncTPPass
     from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
-from .inductor_pass import (
-    CustomGraphPass,
-    InductorPass,
-    get_pass_context,
-)
+from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .utility.fix_functionalization import FixFunctionalizationPass
 from .utility.noop_elimination import NoOpEliminationPass
 
@@ -159,9 +153,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_norm_quant:
                 if rocm_aiter_ops.is_enabled():
-                    self.passes += [
-                        RocmAiterRMSNormQuantFusionPass(config),
-                    ]
+                    self.passes += [RocmAiterRMSNormQuantFusionPass(config)]
                 self.passes += [RMSNormQuantFusionPass(config)]
 
             if self.pass_config.fuse_act_quant:

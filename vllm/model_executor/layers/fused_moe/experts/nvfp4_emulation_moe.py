@@ -42,11 +42,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     native support for this dtype.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
             "Using Nvfp4QuantizationEmulationTritonExperts MOE backend. This will"
@@ -75,8 +71,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
 

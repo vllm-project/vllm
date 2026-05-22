@@ -4,10 +4,7 @@
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 
 
 class TestQwen3xmlToolParser(ToolParserTests):

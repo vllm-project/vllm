@@ -39,18 +39,8 @@ def human_readable_int(value: str) -> int:
 
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
     if match:
-        decimal_multiplier = {
-            "k": 10**3,
-            "m": 10**6,
-            "g": 10**9,
-            "t": 10**12,
-        }
-        binary_multiplier = {
-            "K": 2**10,
-            "M": 2**20,
-            "G": 2**30,
-            "T": 2**40,
-        }
+        decimal_multiplier = {"k": 10**3, "m": 10**6, "g": 10**9, "t": 10**12}
+        binary_multiplier = {"K": 2**10, "M": 2**20, "G": 2**30, "T": 2**40}
 
         number, suffix = match.groups()
         if suffix in decimal_multiplier:
@@ -241,9 +231,7 @@ class FlexibleArgumentParser(ArgumentParser):
         return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
-        self,
-        args: list[str] | None = None,
-        namespace: Namespace | None = None,
+        self, args: list[str] | None = None, namespace: Namespace | None = None
     ):
         if args is None:
             args = sys.argv[1:]
@@ -273,12 +261,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 # vllm serve -tp 2 --model <model> --enforce-eager --port 8001
                 # [After]
                 # vllm serve <model> -tp 2 --enforce-eager --port 8001
-                args = [
-                    "serve",
-                    model_tag,
-                    *args[1:model_idx],
-                    *args[rest_start_idx:],
-                ]
+                args = ["serve", model_tag, *args[1:model_idx], *args[rest_start_idx:]]
             except StopIteration:
                 pass
             # Check for --served-model-name without a positional model argument
@@ -346,8 +329,7 @@ class FlexibleArgumentParser(ArgumentParser):
             return nested_dict
 
         def recursive_dict_update(
-            original: dict[str, Any],
-            update: dict[str, Any],
+            original: dict[str, Any], update: dict[str, Any]
         ) -> set[str]:
             """Recursively updates a dictionary with another dictionary.
             Returns a set of duplicate keys that were overwritten.

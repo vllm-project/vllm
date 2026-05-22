@@ -3,9 +3,7 @@
 
 from collections.abc import Iterable, Sequence
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -128,8 +126,7 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
-                    reasoning=reasoning,
-                    content=content if content else None,
+                    reasoning=reasoning, content=content if content else None
                 )
             elif self.end_token_id in previous_token_ids:
                 # end token in previous, thinking content ends

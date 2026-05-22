@@ -30,7 +30,4 @@ class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
 )
 class SmolVLMForConditionalGeneration(Idefics3ForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-        )
+        super().__init__(vllm_config=vllm_config, prefix=prefix)

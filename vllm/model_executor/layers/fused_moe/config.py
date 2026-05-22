@@ -444,11 +444,7 @@ class FusedMoEQuantConfig:
             dtype=dtype,
         )
 
-    def scale_shape(
-        self,
-        max_tokens: int,
-        hidden_dim: int,
-    ) -> tuple[int, int] | None:
+    def scale_shape(self, max_tokens: int, hidden_dim: int) -> tuple[int, int] | None:
         """
         Construct the proper activation scale shape for this
         config.
@@ -467,10 +463,7 @@ class FusedMoEQuantConfig:
             return None
 
     def batched_scale_shape(
-        self,
-        num_experts: int,
-        max_tokens: int,
-        hidden_dim: int,
+        self, num_experts: int, max_tokens: int, hidden_dim: int
     ) -> tuple[int, int, int] | None:
         """
         Construct the proper activation batched scale shape for this
@@ -829,8 +822,7 @@ def nvfp4_moe_quant_config(
 
 
 def mxfp4_moe_quant_config(
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
+    w1_scale: torch.Tensor, w2_scale: torch.Tensor
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for MXFP4 x MXFP4 MoE.
@@ -886,9 +878,7 @@ def int4_w4a16_moe_quant_config(
 
 
 def fp8_w8a16_moe_quant_config(
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    block_shape: list[int] | None = None,
+    w1_scale: torch.Tensor, w2_scale: torch.Tensor, block_shape: list[int] | None = None
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
@@ -992,8 +982,7 @@ def awq_marlin_moe_quant_config(
 
 
 def biased_moe_quant_config(
-    w1_bias: torch.Tensor | None,
-    w2_bias: torch.Tensor | None,
+    w1_bias: torch.Tensor | None, w2_bias: torch.Tensor | None
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations with biases.

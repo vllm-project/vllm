@@ -16,11 +16,7 @@ class VLLMValidationError(ValueError):
     """
 
     def __init__(
-        self,
-        message: str,
-        *,
-        parameter: str | None = None,
-        value: Any = None,
+        self, message: str, *, parameter: str | None = None, value: Any = None
     ) -> None:
         super().__init__(message)
         self.parameter = parameter
@@ -54,11 +50,7 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     message: str
 
-    def __init__(
-        self,
-        lora_name: str,
-        lora_path: str,
-    ) -> None:
+    def __init__(self, lora_name: str, lora_path: str) -> None:
         message = f"Loading lora {lora_name} failed: No adapter found for {lora_path}"
         self.message = message
 

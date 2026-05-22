@@ -142,9 +142,7 @@ class MoEMixin(MixtureOfExperts):
             )
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ):
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts

@@ -19,10 +19,7 @@ MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
 
 
 def _build_video_mm_data(
-    num_frames: int,
-    width: int = 128,
-    height: int = 128,
-    original_fps: float = 30.0,
+    num_frames: int, width: int = 128, height: int = 128, original_fps: float = 30.0
 ) -> dict[str, Any]:
     """Create synthetic video data with metadata indicating that
     HF processor should re-sample frames (do_sample_frames=True).
@@ -43,14 +40,8 @@ def _build_video_mm_data(
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
-@pytest.mark.parametrize(
-    "num_frames",
-    [8, 16],
-)
-def test_processor_num_frames_timestamp(
-    model_id: str,
-    num_frames: int,
-) -> None:
+@pytest.mark.parametrize("num_frames", [8, 16])
+def test_processor_num_frames_timestamp(model_id: str, num_frames: int) -> None:
     """Regression test: using ``num_frames`` (without ``fps``) must not
     cause a timestamp / token-count mismatch.
 
@@ -64,10 +55,7 @@ def test_processor_num_frames_timestamp(
     to ``min_frames=4`` for a short video at 30 fps), so this test
     would fail without the fix.
     """
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 0, "video": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     prompt = "<|vision_start|><|video_pad|><|vision_end|>"

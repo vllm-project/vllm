@@ -31,14 +31,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 from .qwen2_vl import Qwen2VLMultiModalDataParser
-from .qwen3_5 import (
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5ProcessingInfo,
-)
-from .qwen3_vl import (
-    Qwen3VLDummyInputsBuilder,
-    Qwen3VLMultiModalProcessor,
-)
+from .qwen3_5 import Qwen3_5ForConditionalGeneration, Qwen3_5ProcessingInfo
+from .qwen3_vl import Qwen3VLDummyInputsBuilder, Qwen3VLMultiModalProcessor
 from .utils import AutoWeightsLoader, WeightsMapper
 
 
@@ -57,9 +51,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
         return self.ctx.get_hf_processor(
-            Qwen3VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            Qwen3VLProcessor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
     @property
@@ -82,9 +74,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
         return limits
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
         result: dict[str, int] = {"image": max_image_tokens}
@@ -109,10 +99,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
     info=ColQwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class ColQwen3_5Model(
-    Qwen3_5ForConditionalGeneration,
-    SupportsLateInteraction,
-):
+class ColQwen3_5Model(Qwen3_5ForConditionalGeneration, SupportsLateInteraction):
     """ColQwen3.5 late interaction model for multi-modal retrieval/reranking.
 
     This model extends Qwen3_5ForConditionalGeneration with a ColBERT-style
@@ -136,9 +123,7 @@ class ColQwen3_5Model(
     # Qwen3_5ForCausalLM has them under "language_model.model.*".
     # Visual weights ("visual.*") already match the vLLM module path.
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "language_model.": "language_model.model.",
-        }
+        orig_to_new_prefix={"language_model.": "language_model.model."}
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -167,18 +152,12 @@ class ColQwen3_5Model(
         )
 
         self.custom_text_proj = nn.Linear(
-            hidden_size,
-            self.embed_dim,
-            bias=False,
-            dtype=head_dtype,
+            hidden_size, self.embed_dim, bias=False, dtype=head_dtype
         )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
-        self.pooler = pooler_for_token_embed(
-            pooler_config,
-            projector=None,
-        )
+        self.pooler = pooler_for_token_embed(pooler_config, projector=None)
 
     def forward(
         self,
@@ -229,10 +208,7 @@ class ColQwen3_5Model(
             else:
                 model_weights.append((name, weight))
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
         loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
 
         for name, weight in proj_weights:

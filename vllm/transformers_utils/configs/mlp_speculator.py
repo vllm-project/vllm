@@ -8,9 +8,7 @@ from transformers import PretrainedConfig
 class MLPSpeculatorConfig(PretrainedConfig):
     model_type = "mlp_speculator"
 
-    attribute_map = {
-        "hidden_size": "emb_dim",
-    }
+    attribute_map = {"hidden_size": "emb_dim"}
 
     def __init__(
         self,

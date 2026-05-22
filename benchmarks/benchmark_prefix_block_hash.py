@@ -34,8 +34,7 @@ def _generate_blocks(
 
 
 def _hash_all_blocks(
-    hash_fn: Callable[[object], bytes],
-    blocks: Iterable[Sequence[int]],
+    hash_fn: Callable[[object], bytes], blocks: Iterable[Sequence[int]]
 ) -> float:
     parent_hash: BlockHash | None = None
     start = time.perf_counter()
@@ -46,9 +45,7 @@ def _hash_all_blocks(
 
 
 def _benchmark(
-    hash_algo: str,
-    blocks: list[list[int]],
-    trials: int,
+    hash_algo: str, blocks: list[list[int]], trials: int
 ) -> tuple[float, float, float] | None:
     try:
         hash_fn = get_hash_fn_by_name(hash_algo)

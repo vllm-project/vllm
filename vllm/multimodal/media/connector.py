@@ -64,8 +64,7 @@ def merge_media_io_kwargs(
     for key in all_keys:
         io_cls = MODALITY_IO_MAP.get(key, MediaIO)
         merged[key] = io_cls.merge_kwargs(
-            (defaults or {}).get(key),
-            (overrides or {}).get(key),
+            (defaults or {}).get(key), (overrides or {}).get(key)
         )
     return merged or None
 
@@ -233,11 +232,7 @@ class MediaConnector:
         ext = Path(url.split("?", 1)[0]).suffix or ""
         return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
 
-    def _load_data_url(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-    ) -> _M:  # type: ignore[type-var]
+    def _load_data_url(self, url: str, media_io: MediaIO[_M]) -> _M:  # type: ignore[type-var]
         # Format per RFC 2397:
         # data:[<mediatype>][;base64],<data>
         data_spec, data = url[5:].split(",", 1)
@@ -249,11 +244,7 @@ class MediaConnector:
 
         return media_io.load_base64(media_type, data)
 
-    def _load_file_url(
-        self,
-        url_spec: Url,
-        media_io: MediaIO[_M],
-    ) -> _M:  # type: ignore[type-var]
+    def _load_file_url(self, url_spec: Url, media_io: MediaIO[_M]) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
             raise RuntimeError(
@@ -283,11 +274,7 @@ class MediaConnector:
             )
 
     def load_from_url(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-        *,
-        fetch_timeout: int | None = None,
+        self, url: str, media_io: MediaIO[_M], *, fetch_timeout: int | None = None
     ) -> _M:  # type: ignore[type-var]
         if url[:5].lower() == "data:":
             return self._load_data_url(url, media_io)
@@ -318,11 +305,7 @@ class MediaConnector:
         raise ValueError(msg)
 
     async def load_from_url_async(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-        *,
-        fetch_timeout: int | None = None,
+        self, url: str, media_io: MediaIO[_M], *, fetch_timeout: int | None = None
     ) -> _M:
         loop = asyncio.get_running_loop()
 
@@ -367,42 +350,27 @@ class MediaConnector:
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
 
-    def fetch_audio(
-        self,
-        audio_url: str,
-    ) -> tuple[np.ndarray, int | float]:
+    def fetch_audio(self, audio_url: str) -> tuple[np.ndarray, int | float]:
         """
         Load audio from a URL.
         """
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
-            audio_url,
-            audio_io,
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            audio_url, audio_io, fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT
         )
 
-    async def fetch_audio_async(
-        self,
-        audio_url: str,
-    ) -> tuple[np.ndarray, int | float]:
+    async def fetch_audio_async(self, audio_url: str) -> tuple[np.ndarray, int | float]:
         """
         Asynchronously fetch audio from a URL.
         """
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
-            audio_url,
-            audio_io,
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            audio_url, audio_io, fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT
         )
 
-    def fetch_image(
-        self,
-        image_url: str,
-        *,
-        image_mode: str = "RGB",
-    ) -> Image.Image:
+    def fetch_image(self, image_url: str, *, image_mode: str = "RGB") -> Image.Image:
         """
         Load a PIL image from an HTTP or base64 data URL.
 
@@ -414,19 +382,14 @@ class MediaConnector:
 
         try:
             return self.load_from_url(
-                image_url,
-                image_io,
-                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                image_url, image_io, fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
             raise ValueError(str(e)) from e
 
     async def fetch_image_async(
-        self,
-        image_url: str,
-        *,
-        image_mode: str = "RGB",
+        self, image_url: str, *, image_mode: str = "RGB"
     ) -> Image.Image:
         """
         Asynchronously load a PIL image from an HTTP or base64 data URL.
@@ -439,19 +402,14 @@ class MediaConnector:
 
         try:
             return await self.load_from_url_async(
-                image_url,
-                image_io,
-                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                image_url, image_io, fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
             raise ValueError(str(e)) from e
 
     def fetch_video(
-        self,
-        video_url: str,
-        *,
-        image_mode: str = "RGB",
+        self, video_url: str, *, image_mode: str = "RGB"
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -462,16 +420,11 @@ class MediaConnector:
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
         return self.load_from_url(
-            video_url,
-            video_io,
-            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            video_url, video_io, fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT
         )
 
     async def fetch_video_async(
-        self,
-        video_url: str,
-        *,
-        image_mode: str = "RGB",
+        self, video_url: str, *, image_mode: str = "RGB"
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -484,15 +437,10 @@ class MediaConnector:
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
 
         return await self.load_from_url_async(
-            video_url,
-            video_io,
-            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            video_url, video_io, fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT
         )
 
-    def fetch_image_embedding(
-        self,
-        data: str,
-    ) -> torch.Tensor:
+    def fetch_image_embedding(self, data: str) -> torch.Tensor:
         """
         Load image embedding from a URL.
         """
@@ -500,10 +448,7 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
-    def fetch_audio_embedding(
-        self,
-        data: str,
-    ) -> torch.Tensor:
+    def fetch_audio_embedding(self, data: str) -> torch.Tensor:
         """
         Load audio embedding from a URL.
         """

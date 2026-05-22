@@ -70,11 +70,7 @@ def main():
             "output": str(result),
         }
     )
-    response_2 = client.responses.create(
-        model=model,
-        input=input_messages,
-        tools=tools,
-    )
+    response_2 = client.responses.create(model=model, input=input_messages, tools=tools)
     print(response_2.output_text)
 
 

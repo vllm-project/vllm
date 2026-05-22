@@ -315,12 +315,7 @@ def test_cutlass_w4a8_moe_mm_cuda_graph():
     K = 512
     N = 2048
 
-    setup = make_moe_test_setup(
-        num_experts=num_experts,
-        K=K,
-        N=N,
-        max_blocks=32,
-    )
+    setup = make_moe_test_setup(num_experts=num_experts, K=K, N=N, max_blocks=32)
 
     # Construct model that calls the grouped GEMM kernel.
     model = W4A8MoELayer(setup)

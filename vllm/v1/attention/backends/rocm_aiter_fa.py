@@ -27,9 +27,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import (
-    split_decodes_prefills_and_extends,
-)
+from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -295,10 +293,7 @@ if current_platform.is_rocm():
         QUANT = False
         if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
-        grid = (
-            num_tokens,
-            num_kv_heads,
-        )
+        grid = (num_tokens, num_kv_heads)
         reshape_and_cache_shuffle_kernel[grid](
             key,
             value,
@@ -471,8 +466,7 @@ class AiterFlashAttentionMetadataBuilder(
     ) -> "AiterFlashAttentionMetadata":
         assert self.reorder_batch_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
-            common_attn_metadata,
-            decode_threshold=self.reorder_batch_threshold,
+            common_attn_metadata, decode_threshold=self.reorder_batch_threshold
         )
         # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled
         if (
@@ -515,7 +509,7 @@ class AiterFlashAttentionMetadataBuilder(
         decode_metadata = None
         if num_decodes > 0:
             decode_metadata = AiterFlashAttentionDecodeMetadata(
-                max_query_len=query_lens_cpu[:num_decodes].max().item(),
+                max_query_len=query_lens_cpu[:num_decodes].max().item()
             )
 
         prefill_metadata = None
@@ -556,10 +550,7 @@ class AiterFlashAttentionMetadataBuilder(
                     out=cu_seq_lens[1:],
                 )
                 token_to_seq = torch.arange(
-                    0,
-                    num_extends,
-                    dtype=torch.int32,
-                    device=seq_lens_for_extend.device,
+                    0, num_extends, dtype=torch.int32, device=seq_lens_for_extend.device
                 )
                 token_to_seq = torch.repeat_interleave(
                     token_to_seq, swa_seqlen_for_extend
@@ -670,9 +661,7 @@ class AiterFlashAttentionMetadataBuilder(
         return attn_metadata
 
     def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
+        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
     ) -> AiterFlashAttentionMetadata:
         """
         Build attention metadata for draft model without CPU-GPU sync.
@@ -685,7 +674,7 @@ class AiterFlashAttentionMetadataBuilder(
         num_tokens = common_attn_metadata.num_actual_tokens
 
         decode_metadata = AiterFlashAttentionDecodeMetadata(
-            max_query_len=common_attn_metadata.max_query_len,
+            max_query_len=common_attn_metadata.max_query_len
         )
 
         return AiterFlashAttentionMetadata(
@@ -1176,23 +1165,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         )
                         output[:num_decode_tokens].copy_(
                             decode_out.reshape(
-                                num_decode_tokens,
-                                query.shape[1],
-                                query.shape[2],
+                                num_decode_tokens, query.shape[1], query.shape[2]
                             )
                         )
                     else:
                         # Non-uniform query lengths can appear in real serving
                         # traffic (e.g. mixed datasets). Fall back to varlen
                         # unified_attention instead of asserting.
-                        from aiter.ops.triton.unified_attention import (
-                            unified_attention,
-                        )
+                        from aiter.ops.triton.unified_attention import unified_attention
 
-                        descale_shape = (
-                            num_decodes,
-                            key_cache.shape[2],
-                        )
+                        descale_shape = (num_decodes, key_cache.shape[2])
                         unified_attention(
                             q=query[:num_decode_tokens],
                             k=key_cache,
@@ -1229,17 +1211,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         "unified_attention fallback with shuffle layout "
                         "is not supported yet."
                     )
-                    from aiter.ops.triton.unified_attention import (
-                        unified_attention,
-                    )
+                    from aiter.ops.triton.unified_attention import unified_attention
 
                     decode_cu_seqlens_q = attn_metadata.query_start_loc[
                         : num_decodes + 1
                     ]
-                    descale_shape = (
-                        num_decodes,
-                        key_cache.shape[2],
-                    )
+                    descale_shape = (num_decodes, key_cache.shape[2])
                     unified_attention(
                         q=query[:num_decode_tokens],
                         k=key_cache,

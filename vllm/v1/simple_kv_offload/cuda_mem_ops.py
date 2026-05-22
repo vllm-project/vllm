@@ -155,9 +155,7 @@ def build_params(
 
 
 def copy_blocks(
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    params: BatchMemcpyParams,
+    src_block_ids: list[int], dst_block_ids: list[int], params: BatchMemcpyParams
 ) -> None:
     """Copy blocks via cuMemcpyBatchAsync / hipMemcpyBatchAsync."""
     n = len(src_block_ids)

@@ -16,9 +16,7 @@ from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm.compilation.passes.inductor_pass import InductorPass, get_pass_context
-from vllm.compilation.passes.ir.clone_elimination import (
-    UnsafeCloneEliminationPass,
-)
+from vllm.compilation.passes.ir.clone_elimination import UnsafeCloneEliminationPass
 from vllm.compilation.passes.ir.inplace_functionalization import (
     VllmIRInplaceFunctionalizationPass,
 )
@@ -118,12 +116,7 @@ class ModelWithTritonAfterMaybeInplace(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size, dtype=torch.bfloat16))
 
         @triton.jit
-        def _triton_add_kernel(
-            x_ptr,
-            y_ptr,
-            n_elements,
-            BLOCK_SIZE: tl.constexpr,
-        ):
+        def _triton_add_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(axis=0)
             block_start = pid * BLOCK_SIZE
             offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -160,8 +153,7 @@ skipif_no_triton = pytest.mark.skipif(not HAS_TRITON, reason="Requires Triton")
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 @pytest.mark.parametrize(
     "model_class,expected_functionalized,expected_donated,expected_clones",
@@ -247,8 +239,7 @@ def test_inplace_functionalization(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 def test_donated_buffer_context_propagation(default_vllm_config):
     """Test that donated_input_ids propagates correctly through pass_context."""
@@ -283,8 +274,7 @@ def test_donated_buffer_context_propagation(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 def test_maybe_inplace_reuse_error(default_vllm_config):
     """Test that reusing a donated activation input raises ValueError."""
@@ -318,8 +308,7 @@ def test_maybe_inplace_reuse_error(default_vllm_config):
 
     # Compilation should raise BackendCompilerFailed wrapping ValueError
     with pytest.raises(
-        torch._dynamo.exc.BackendCompilerFailed,
-        match="is used again after the node",
+        torch._dynamo.exc.BackendCompilerFailed, match="is used again after the node"
     ):
         compiled_model = torch.compile(model, backend=backend, fullgraph=True)
         compiled_model(x.clone(), residual.clone())
@@ -406,8 +395,7 @@ def with_dyn_arg(fn: Callable, arg_index: int, dim_index: int):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 def test_piecewise_compilation_with_donated_buffers(monkeypatch, fresh_vllm_cache):
     """

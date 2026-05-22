@@ -107,9 +107,7 @@ def benchmark_decode(
     workspace_buffer = torch.zeros(1024 * 1024 * 1024, dtype=torch.int8)
 
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-        workspace_buffer,
-        kv_layout,
-        use_tensor_cores=True,
+        workspace_buffer, kv_layout, use_tensor_cores=True
     )
     wrapper.plan(
         kv_indptr,

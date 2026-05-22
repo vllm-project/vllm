@@ -10,11 +10,7 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 
 class BagelProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
-    _defaults = {
-        "images_kwargs": {
-            "return_tensors": "pt",
-        },
-    }
+    _defaults = {"images_kwargs": {"return_tensors": "pt"}}
 
 
 class BagelProcessor(ProcessorMixin):

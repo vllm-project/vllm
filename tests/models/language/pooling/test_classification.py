@@ -23,11 +23,7 @@ from vllm.platforms import current_platform
 )
 @pytest.mark.parametrize("dtype", ["half"] if current_platform.is_rocm() else ["float"])
 def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)

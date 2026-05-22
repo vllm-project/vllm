@@ -5,10 +5,7 @@ import time
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from fastapi import UploadFile
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.entrypoints.openai.engine.protocol import (
@@ -18,11 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import (
-    BeamSearchParams,
-    RequestOutputKind,
-    SamplingParams,
-)
+from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.utils import random_uuid
 
 from ..base.protocol import _LONG_INFO, AudioResponseFormat
@@ -142,9 +135,7 @@ class TranslationRequest(OpenAIBaseModel):
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
-    _DEFAULT_SAMPLING_PARAMS: dict = {
-        "temperature": 0,
-    }
+    _DEFAULT_SAMPLING_PARAMS: dict = {"temperature": 0}
 
     def build_stt_params(
         self,
@@ -165,9 +156,7 @@ class TranslationRequest(OpenAIBaseModel):
         )
 
     def to_beam_search_params(
-        self,
-        default_max_tokens: int,
-        default_sampling_params: dict | None = None,
+        self, default_max_tokens: int, default_sampling_params: dict | None = None
     ) -> BeamSearchParams:
         if default_sampling_params is None:
             default_sampling_params = {}

@@ -22,10 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from vllm.benchmarks.datasets import (
-    MultiModalConversationDataset,
-    VisionArenaDataset,
-)
+from vllm.benchmarks.datasets import MultiModalConversationDataset, VisionArenaDataset
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -210,9 +207,7 @@ def validate_args(args):
             )
 
 
-def benchmark_multimodal_processor(
-    args: argparse.Namespace,
-) -> dict[str, Any]:
+def benchmark_multimodal_processor(args: argparse.Namespace) -> dict[str, Any]:
     """
     Run the multimodal processor benchmark.
     """
@@ -242,12 +237,7 @@ def benchmark_multimodal_processor(
     expected_output_lens = [request.expected_output_len for request in requests]
 
     sampling_params = [
-        SamplingParams(
-            n=1,
-            temperature=0.0,
-            max_tokens=output_len,
-            detokenize=True,
-        )
+        SamplingParams(n=1, temperature=0.0, max_tokens=output_len, detokenize=True)
         for output_len in expected_output_lens
     ]
 
@@ -385,10 +375,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Name of the dataset to benchmark on. Defaults to 'random-mm'.",
     )
     parser.add_argument(
-        "--num-prompts",
-        type=int,
-        default=10,
-        help="Number of prompts to process.",
+        "--num-prompts", type=int, default=10, help="Number of prompts to process."
     )
     parser.add_argument(
         "--num-warmups",
@@ -446,9 +433,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Comma-separated list of percentiles to calculate (e.g., '50,90,99').",
     )
     parser.add_argument(
-        "--disable-tqdm",
-        action="store_true",
-        help="Disable tqdm progress bar.",
+        "--disable-tqdm", action="store_true", help="Disable tqdm progress bar."
     )
 
 
@@ -504,14 +489,10 @@ def main(args: argparse.Namespace) -> None:
 
         for p in selected_percentiles:
             percentile_value = next(
-                (val for pct, val in result["percentiles_e2el_ms"] if pct == p),
-                0.0,
+                (val for pct, val in result["percentiles_e2el_ms"] if pct == p), 0.0
             )
             e2el_data.append(
-                {
-                    "Metric": f"P{p}",
-                    "Value (ms)": f"{percentile_value:.2f}",
-                }
+                {"Metric": f"P{p}", "Value (ms)": f"{percentile_value:.2f}"}
             )
 
         e2el_df = pd.DataFrame(e2el_data)

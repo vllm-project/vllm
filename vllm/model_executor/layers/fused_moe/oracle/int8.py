@@ -30,18 +30,14 @@ class Int8MoeBackend(Enum):
     TRITON = "TRITON"
 
 
-def _get_priority_backends(
-    moe_config: FusedMoEConfig,
-) -> list[Int8MoeBackend]:
+def _get_priority_backends(moe_config: FusedMoEConfig) -> list[Int8MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
     return [Int8MoeBackend.TRITON]
 
 
-def backend_to_kernel_cls(
-    backend: Int8MoeBackend,
-) -> list[type[mk.FusedMoEExperts]]:
+def backend_to_kernel_cls(backend: Int8MoeBackend) -> list[type[mk.FusedMoEExperts]]:
     if backend == Int8MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
@@ -55,9 +51,7 @@ def backend_to_kernel_cls(
 
 def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     """Map user's MoEBackend to Int8MoeBackend."""
-    mapping = {
-        "triton": Int8MoeBackend.TRITON,
-    }
+    mapping = {"triton": Int8MoeBackend.TRITON}
     if backend := mapping.get(runner_backend):
         return backend
     raise ValueError(
@@ -125,11 +119,7 @@ def select_int8_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
+                k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -155,10 +145,7 @@ def make_int8_moe_quant_config(
 
     if a1_scale is None or a2_scale is None:
         return int8_w8a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=None,
-            w2_zp=None,
+            w1_scale=w1_scale, w2_scale=w2_scale, w1_zp=None, w2_zp=None
         )
 
     return int8_w8a8_moe_quant_config(
@@ -199,15 +186,10 @@ def make_int8_moe_kernel(
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
+        experts = experts_cls(moe_config=moe_config, quant_config=moe_quant_config)
 
     kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-        inplace=not moe_config.disable_inplace,
+        prepare_finalize, experts, inplace=not moe_config.disable_inplace
     )
 
     return kernel

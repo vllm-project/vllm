@@ -601,13 +601,7 @@ def run_model_bench(args):
     with open(f"model_bench-{type_string}-{timestr}.pkl", "wb") as f:
         args_dict = vars(args)
         args_dict.pop("func")
-        pkl.dump(
-            {
-                "args": args_dict,
-                "results": all_results,
-            },
-            f,
-        )
+        pkl.dump({"args": args_dict, "results": all_results}, f)
 
 
 if __name__ == "__main__":
@@ -651,29 +645,15 @@ Benchmark Machete GEMM.
         choices=["bfloat16", "float16", "int8", "float8_e4m3fn"],
     )
     parser.add_argument(
-        "--group-scale-type",
-        action=ToTorchDtype,
-        choices=["bfloat16", "float16"],
+        "--group-scale-type", action=ToTorchDtype, choices=["bfloat16", "float16"]
     )
     parser.add_argument(
-        "--group-zero-type",
-        type=to_torch_dtype,
-        choices=["bfloat16", "float16"],
+        "--group-zero-type", type=to_torch_dtype, choices=["bfloat16", "float16"]
     )
+    parser.add_argument("--channel-scale-type", action=ToTorchDtype, choices=["float"])
+    parser.add_argument("--token-scale-type", action=ToTorchDtype, choices=["float"])
     parser.add_argument(
-        "--channel-scale-type",
-        action=ToTorchDtype,
-        choices=["float"],
-    )
-    parser.add_argument(
-        "--token-scale-type",
-        action=ToTorchDtype,
-        choices=["float"],
-    )
-    parser.add_argument(
-        "--out-type",
-        action=ToTorchDtype,
-        choices=["bfloat16", "float16"],
+        "--out-type", action=ToTorchDtype, choices=["bfloat16", "float16"]
     )
     parser.add_argument(
         "--group-size",

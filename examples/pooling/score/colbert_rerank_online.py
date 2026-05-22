@@ -72,10 +72,7 @@ def score_example():
     data = {
         "model": MODEL,
         "text_1": "What is machine learning?",
-        "text_2": [
-            "Machine learning is a subset of AI.",
-            "The weather is sunny.",
-        ],
+        "text_2": ["Machine learning is a subset of AI.", "The weather is sunny."],
     }
 
     response = requests.post(f"{BASE_URL}/score", headers=headers, json=data)

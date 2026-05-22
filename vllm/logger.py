@@ -58,14 +58,14 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
             "formatter": "vllm_color" if _use_color() else "vllm",
             "level": envs.VLLM_LOGGING_LEVEL,
             "stream": envs.VLLM_LOGGING_STREAM,
-        },
+        }
     },
     "loggers": {
         "vllm": {
             "handlers": ["vllm"],
             "level": envs.VLLM_LOGGING_LEVEL,
             "propagate": False,
-        },
+        }
     },
     "version": 1,
     "disable_existing_loggers": False,

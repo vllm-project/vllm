@@ -14,11 +14,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
-    JobResult,
-    SecondaryTierManager,
-)
+from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
 
 logger = logging.getLogger(__name__)
 

@@ -11,9 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,10 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
 )
 from vllm.logger import init_logger
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     find_common_prefix,
     is_complete_json,
@@ -52,9 +47,7 @@ class Llama3JsonToolParser(ToolParser):
     json_decoder: json.JSONDecoder = json.JSONDecoder()
 
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        tools: list[Tool] | None = None,
+        self, tokenizer: PreTrainedTokenizerBase, tools: list[Tool] | None = None
     ):
         super().__init__(tokenizer, tools)
 

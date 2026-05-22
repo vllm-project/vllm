@@ -80,8 +80,7 @@ class CompiledModTuple(torch.nn.Module):
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            backend="inductor",
+            mode=CompilationMode.VLLM_COMPILE, backend="inductor"
         )
     )
 
@@ -445,11 +444,7 @@ def test_standalone_compile_correctness():
 
     from ..utils import compare_two_settings
 
-    compilation_config = json.dumps(
-        {
-            "mode": CompilationMode.VLLM_COMPILE,
-        }
-    )
+    compilation_config = json.dumps({"mode": CompilationMode.VLLM_COMPILE})
 
     common_args = [
         "--dtype",
@@ -500,9 +495,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
         # First compilation - initialize model and generate
         llm_model = LLM(
             model="gpt2",
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-            ),
+            compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
             max_model_len=256,
         )
 
@@ -517,9 +510,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_FORCE_AOT_LOAD", "1")
         llm_model = LLM(
             model="gpt2",
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-            ),
+            compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
             max_model_len=256,
         )
         llm_model.generate("Hello, my name is")
@@ -813,9 +804,7 @@ def test_disable_compile_cache_skips_aot_save(
     with (
         use_vllm_config(vllm_config),
         compilation_counter.expect(
-            num_aot_compiles=1,
-            num_aot_artifacts_saved=0,
-            num_aot_artifacts_loaded=0,
+            num_aot_compiles=1, num_aot_artifacts_saved=0, num_aot_artifacts_loaded=0
         ),
     ):
         mod = CompiledMod(vllm_config=vllm_config)
@@ -860,9 +849,7 @@ def test_disable_compile_cache_skips_aot_load(
     with (
         use_vllm_config(vllm_config),
         compilation_counter.expect(
-            num_aot_compiles=1,
-            num_aot_artifacts_saved=0,
-            num_aot_artifacts_loaded=0,
+            num_aot_compiles=1, num_aot_artifacts_saved=0, num_aot_artifacts_loaded=0
         ),
     ):
         mod = CompiledMod(vllm_config=vllm_config)
@@ -886,9 +873,7 @@ def test_aot_counters_on_save_and_load(
     with (
         use_vllm_config(vllm_config),
         compilation_counter.expect(
-            num_aot_compiles=1,
-            num_aot_artifacts_saved=1,
-            num_aot_artifacts_loaded=0,
+            num_aot_compiles=1, num_aot_artifacts_saved=1, num_aot_artifacts_loaded=0
         ),
     ):
         CompiledMod(vllm_config=vllm_config)(*args)
@@ -901,9 +886,7 @@ def test_aot_counters_on_save_and_load(
     with (
         use_vllm_config(vllm_config),
         compilation_counter.expect(
-            num_aot_compiles=0,
-            num_aot_artifacts_saved=0,
-            num_aot_artifacts_loaded=1,
+            num_aot_compiles=0, num_aot_artifacts_saved=0, num_aot_artifacts_loaded=1
         ),
     ):
         CompiledMod(vllm_config=vllm_config)(*args)

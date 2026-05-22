@@ -62,16 +62,10 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             vllm_config=vllm_config,
         )
         (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            (
-                (envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,),
-                torch.uint8,
-            ),
+            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8)
         )
 
-    def prepare_metadata(
-        self,
-        prefill_metadata: "MLACommonPrefillMetadata",
-    ) -> None:
+    def prepare_metadata(self, prefill_metadata: "MLACommonPrefillMetadata") -> None:
         super().prepare_metadata(prefill_metadata)
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
@@ -121,11 +115,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         return ret
 
     def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        self, chunk_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 

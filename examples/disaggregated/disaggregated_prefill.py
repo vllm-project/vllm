@@ -67,11 +67,7 @@ def run_decode(prefill_done):
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-    prompts = [
-        "Hello, my name is",
-        "Hi, your name is",
-        "Tell me a very long story",
-    ]
+    prompts = ["Hello, my name is", "Hi, your name is", "Tell me a very long story"]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
     # Using P2pNcclConnector to transmit KV caches between vLLM instances.

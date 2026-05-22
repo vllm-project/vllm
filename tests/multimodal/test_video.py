@@ -8,10 +8,7 @@ import numpy.typing as npt
 import pytest
 
 from vllm.assets.base import get_vllm_public_assets
-from vllm.multimodal.video import (
-    VIDEO_LOADER_REGISTRY,
-    VideoLoader,
-)
+from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
 
 from .utils import create_long_gop_video, create_video_from_image
 
@@ -273,11 +270,7 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
 
         # Test without recovery
         frames_no_recovery, meta_no = loader.load_bytes(
-            video_data,
-            fps=2,
-            max_duration=10,
-            frame_recovery=False,
-            backend="opencv",
+            video_data, fps=2, max_duration=10, frame_recovery=False, backend="opencv"
         )
 
         # Test with frame_recovery enabled
@@ -447,17 +440,11 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             id="molmo2-uniform_last_frame",
         ),
         pytest.param(
-            "molmo2",
-            {"fps": 2, "frame_sample_mode": "fps"},
-            119,
-            id="molmo2-fps",
+            "molmo2", {"fps": 2, "frame_sample_mode": "fps"}, 119, id="molmo2-fps"
         ),
         # uniform sampling + pyav codec (same frame counts as opencv)
         pytest.param(
-            "opencv",
-            {"num_frames": 32, "backend": "pyav"},
-            32,
-            id="pyav-num_frames",
+            "opencv", {"num_frames": 32, "backend": "pyav"}, 32, id="pyav-num_frames"
         ),
         pytest.param("opencv", {"fps": 2, "backend": "pyav"}, 120, id="pyav-fps"),
         pytest.param(

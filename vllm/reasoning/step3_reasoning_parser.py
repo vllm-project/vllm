@@ -83,8 +83,7 @@ class Step3ReasoningParser(ReasoningParser):
             reasoning = delta_text[:end_index]
             content = delta_text[end_index + len(self.think_end_token) :]
             return DeltaMessage(
-                reasoning=reasoning,
-                content=content if content else None,
+                reasoning=reasoning, content=content if content else None
             )
         elif self.think_end_token_id in previous_token_ids:
             # </think> already seen in previous text, everything is content

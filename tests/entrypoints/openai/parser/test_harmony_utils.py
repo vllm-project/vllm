@@ -24,56 +24,29 @@ from vllm.entrypoints.openai.responses.harmony import (
 class TestIsFunctionRecipient:
     @pytest.mark.parametrize(
         "recipient",
-        [
-            "functions.get_weather",
-            "functions.search_web",
-            "functions.math.sum",
-        ],
+        ["functions.get_weather", "functions.search_web", "functions.math.sum"],
     )
     def test_functions_prefix_accepted(self, recipient):
         assert is_function_recipient(recipient) is True
 
     @pytest.mark.parametrize(
-        "recipient",
-        [
-            "get_weather",
-            "search_web",
-            "calculator",
-            "my-tool",
-        ],
+        "recipient", ["get_weather", "search_web", "calculator", "my-tool"]
     )
     def test_bare_function_name_accepted(self, recipient):
         assert is_function_recipient(recipient) is True
 
-    @pytest.mark.parametrize(
-        "recipient",
-        [
-            "assistant",
-        ],
-    )
+    @pytest.mark.parametrize("recipient", ["assistant"])
     def test_assistant_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
     @pytest.mark.parametrize(
         "recipient",
-        [
-            "math.sum",
-            "code.run",
-            "namespace.tool_name",
-            "my.deeply.nested.tool",
-        ],
+        ["math.sum", "code.run", "namespace.tool_name", "my.deeply.nested.tool"],
     )
     def test_dotted_function_names_accepted(self, recipient):
         assert is_function_recipient(recipient) is True
 
-    @pytest.mark.parametrize(
-        "recipient",
-        [
-            "python",
-            "browser",
-            "container",
-        ],
-    )
+    @pytest.mark.parametrize("recipient", ["python", "browser", "container"])
     def test_builtin_tool_names_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
@@ -90,24 +63,11 @@ class TestIsFunctionRecipient:
     def test_builtin_dotted_variants_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
-    @pytest.mark.parametrize(
-        "recipient",
-        [
-            "",
-            "functions.",
-        ],
-    )
+    @pytest.mark.parametrize("recipient", ["", "functions."])
     def test_empty_recipients_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
-    @pytest.mark.parametrize(
-        "recipient",
-        [
-            "<|start|>",
-            "<|end|>",
-            "<|channel|>",
-        ],
-    )
+    @pytest.mark.parametrize("recipient", ["<|start|>", "<|end|>", "<|channel|>"])
     def test_harmony_tokens_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
@@ -174,14 +134,7 @@ class TestExtractFunctionFromRecipient:
     def test_strips_functions_prefix(self, recipient, expected):
         assert extract_function_from_recipient(recipient) == expected
 
-    @pytest.mark.parametrize(
-        "recipient",
-        [
-            "get_weather",
-            "calculator",
-            "my-tool",
-        ],
-    )
+    @pytest.mark.parametrize("recipient", ["get_weather", "calculator", "my-tool"])
     def test_bare_name_returned_as_is(self, recipient):
         assert extract_function_from_recipient(recipient) == recipient
 
@@ -253,12 +206,7 @@ class TestCommonParseInputToHarmonyMessage:
         chat_msg = {
             "role": "assistant",
             "tool_calls": [
-                {
-                    "function": {
-                        "name": "get_current_time",
-                        "arguments": None,
-                    }
-                }
+                {"function": {"name": "get_current_time", "arguments": None}}
             ],
         }
 
@@ -270,10 +218,7 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_system_message(self, parse_function):
         """Test parsing system message."""
-        chat_msg = {
-            "role": "system",
-            "content": "You are a helpful assistant",
-        }
+        chat_msg = {"role": "system", "content": "You are a helpful assistant"}
 
         messages = parse_function(chat_msg)
 
@@ -284,10 +229,7 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_developer_message(self, parse_function):
         """Test parsing developer message."""
-        chat_msg = {
-            "role": "developer",
-            "content": "Use concise language",
-        }
+        chat_msg = {"role": "developer", "content": "Use concise language"}
 
         messages = parse_function(chat_msg)
 
@@ -296,10 +238,7 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_user_message_with_string_content(self, parse_function):
         """Test parsing user message with string content."""
-        chat_msg = {
-            "role": "user",
-            "content": "What's the weather in San Francisco?",
-        }
+        chat_msg = {"role": "user", "content": "What's the weather in San Francisco?"}
 
         messages = parse_function(chat_msg)
 
@@ -327,10 +266,7 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_assistant_message_with_string_content(self, parse_function):
         """Test parsing assistant message with string content (no tool calls)."""
-        chat_msg = {
-            "role": "assistant",
-            "content": "Hello! How can I help you today?",
-        }
+        chat_msg = {"role": "assistant", "content": "Hello! How can I help you today?"}
 
         messages = parse_function(chat_msg)
 
@@ -343,10 +279,7 @@ class TestCommonParseInputToHarmonyMessage:
 
         class MockPydanticModel:
             def model_dump(self, exclude_none=True):
-                return {
-                    "role": "user",
-                    "content": "Test message",
-                }
+                return {"role": "user", "content": "Test message"}
 
         chat_msg = MockPydanticModel()
         messages = parse_function(chat_msg)
@@ -397,79 +330,41 @@ class TestParseChatInputToHarmonyMessage:
     """
 
     def test_user_message_with_empty_content(self):
-        chat_msg = {
-            "role": "user",
-            "content": "",
-        }
+        chat_msg = {"role": "user", "content": ""}
 
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
-        verify_harmony_messages(
-            messages,
-            [
-                {
-                    "role": "user",
-                    "content": "",
-                },
-            ],
-        )
+        verify_harmony_messages(messages, [{"role": "user", "content": ""}])
 
     def test_user_message_with_none_content(self):
-        chat_msg = {
-            "role": "user",
-            "content": None,
-        }
+        chat_msg = {"role": "user", "content": None}
 
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
-        verify_harmony_messages(
-            messages,
-            [
-                {
-                    "role": "user",
-                    "content": "",
-                },
-            ],
-        )
+        verify_harmony_messages(messages, [{"role": "user", "content": ""}])
 
     def test_assistant_message_with_empty_content(self):
-        chat_msg = {
-            "role": "assistant",
-            "content": "",
-        }
+        chat_msg = {"role": "assistant", "content": ""}
 
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
         assert len(messages) == 0
 
     def test_assistant_message_with_none_content(self):
-        chat_msg = {
-            "role": "assistant",
-            "content": None,
-        }
+        chat_msg = {"role": "assistant", "content": None}
 
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
         assert len(messages) == 0
 
     def test_assistant_message_with_content_but_empty_reasoning(self):
-        chat_msg = {
-            "role": "assistant",
-            "content": "The answer is 4.",
-            "reasoning": "",
-        }
+        chat_msg = {"role": "assistant", "content": "The answer is 4.", "reasoning": ""}
 
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
         verify_harmony_messages(
             messages,
-            [
-                {
-                    "role": "assistant",
-                    "channel": "final",
-                    "content": "The answer is 4.",
-                },
-            ],
+            [{"role": "assistant", "channel": "final", "content": "The answer is 4."}],
         )
 
     def test_assistant_message_with_reasoning_but_empty_content(self):
@@ -488,7 +383,7 @@ class TestParseChatInputToHarmonyMessage:
                     "role": "assistant",
                     "channel": "analysis",
                     "content": "I'm thinking about the user's question.",
-                },
+                }
             ],
         )
 
@@ -508,7 +403,7 @@ class TestParseChatInputToHarmonyMessage:
                     "role": "assistant",
                     "channel": "analysis",
                     "content": "I'm thinking about the user's question.",
-                },
+                }
             ],
         )
 
@@ -536,7 +431,7 @@ class TestParseChatInputToHarmonyMessage:
                     "recipient": "functions.get_weather",
                     "content": '{"location": "San Francisco"}',
                     "content_type": "json",
-                },
+                }
             ],
         )
 
@@ -649,9 +544,7 @@ class TestParseChatInputToHarmonyMessage:
         )
 
     def test_tool_message_with_string_content(self):
-        tool_id_names = {
-            "call_123": "get_weather",
-        }
+        tool_id_names = {"call_123": "get_weather"}
         chat_msg = {
             "role": "tool",
             "tool_call_id": "call_123",
@@ -670,14 +563,12 @@ class TestParseChatInputToHarmonyMessage:
                     "name": "functions.get_weather",
                     "content": "The weather in San Francisco is sunny, 72°F",
                     "channel": "commentary",
-                },
+                }
             ],
         )
 
     def test_tool_message_with_array_content(self):
-        tool_id_names = {
-            "call_123": "search_results",
-        }
+        tool_id_names = {"call_123": "search_results"}
         chat_msg = {
             "role": "tool",
             "tool_call_id": "call_123",
@@ -704,19 +595,13 @@ class TestParseChatInputToHarmonyMessage:
                     "name": "functions.search_results",
                     "content": "Result 1: Result 2: Result 3",
                     "channel": "commentary",
-                },
+                }
             ],
         )
 
     def test_tool_message_with_empty_content(self):
-        tool_id_names = {
-            "call_123": "empty_tool",
-        }
-        chat_msg = {
-            "role": "tool",
-            "tool_call_id": "call_123",
-            "content": "",
-        }
+        tool_id_names = {"call_123": "empty_tool"}
+        chat_msg = {"role": "tool", "tool_call_id": "call_123", "content": ""}
 
         messages = parse_chat_input_to_harmony_message(
             chat_msg, tool_id_names=tool_id_names
@@ -730,19 +615,13 @@ class TestParseChatInputToHarmonyMessage:
                     "name": "functions.empty_tool",
                     "content": "",
                     "channel": "commentary",
-                },
+                }
             ],
         )
 
     def test_tool_message_with_none_content(self):
-        tool_id_names = {
-            "call_123": "empty_tool",
-        }
-        chat_msg = {
-            "role": "tool",
-            "tool_call_id": "call_123",
-            "content": None,
-        }
+        tool_id_names = {"call_123": "empty_tool"}
+        chat_msg = {"role": "tool", "tool_call_id": "call_123", "content": None}
 
         messages = parse_chat_input_to_harmony_message(
             chat_msg, tool_id_names=tool_id_names
@@ -756,7 +635,7 @@ class TestParseChatInputToHarmonyMessage:
                     "name": "functions.empty_tool",
                     "content": "",
                     "channel": "commentary",
-                },
+                }
             ],
         )
 
@@ -766,7 +645,7 @@ class TestAutoDropAnalysisMessages:
         messages = [
             Message.from_role_and_content(
                 Role.ASSISTANT, "The answer is 4."
-            ).with_channel("final"),
+            ).with_channel("final")
         ]
         cleaned_messages = auto_drop_analysis_messages(messages)
         assert cleaned_messages == messages
@@ -775,7 +654,7 @@ class TestAutoDropAnalysisMessages:
         messages = [
             Message.from_role_and_content(
                 Role.ASSISTANT, "I'm thinking about the user's question."
-            ).with_channel("analysis"),
+            ).with_channel("analysis")
         ]
         cleaned_messages = auto_drop_analysis_messages(messages)
         assert cleaned_messages == messages
@@ -799,7 +678,7 @@ class TestAutoDropAnalysisMessages:
         messages = [
             Message.from_role_and_content(
                 Role.ASSISTANT, "The answer is 4."
-            ).with_channel("final"),
+            ).with_channel("final")
         ]
         cleaned_messages = auto_drop_analysis_messages(messages)
         assert cleaned_messages == messages
@@ -1023,8 +902,7 @@ class TestGetSystemMessage:
 
     def test_unsupported_reasoning_effort_raises_clear_error(self) -> None:
         with pytest.raises(
-            ValueError,
-            match="reasoning_effort='max' is not supported by Harmony",
+            ValueError, match="reasoning_effort='max' is not supported by Harmony"
         ):
             get_system_message(reasoning_effort="max")
 
@@ -1104,11 +982,7 @@ class TestResponseInputToHarmonyReasoningItem:
 
     def test_reasoning_with_empty_content_returns_none(self):
         """Test reasoning item with empty content list returns None."""
-        item = {
-            "type": "reasoning",
-            "id": "rs_123",
-            "content": [],
-        }
+        item = {"type": "reasoning", "id": "rs_123", "content": []}
 
         msg = response_input_to_harmony(item, prev_responses=[])
 

@@ -93,66 +93,20 @@ ONLY_OPEN_TAG_STREAM = {
 }
 
 TEST_CASES = [
+    pytest.param(False, WITH_THINK, id="with_think"),
+    pytest.param(True, WITH_THINK_STREAM, id="with_think_stream"),
+    pytest.param(False, WITHOUT_THINK, id="without_think"),
+    pytest.param(True, WITHOUT_THINK_STREAM, id="without_think_stream"),
+    pytest.param(False, WITH_REASONING_EFFORT_NONE, id="with_reasoning_effort_none"),
     pytest.param(
-        False,
-        WITH_THINK,
-        id="with_think",
+        True, WITH_REASONING_EFFORT_NONE_STREAM, id="with_reasoning_effort_none_stream"
     ),
-    pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_THINK,
-        id="without_think",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_THINK_STREAM,
-        id="without_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITH_REASONING_EFFORT_NONE,
-        id="with_reasoning_effort_none",
-    ),
-    pytest.param(
-        True,
-        WITH_REASONING_EFFORT_NONE_STREAM,
-        id="with_reasoning_effort_none_stream",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        MULTILINE_REASONING,
-        id="multiline_reasoning",
-    ),
-    pytest.param(
-        True,
-        MULTILINE_REASONING,
-        id="multiline_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        ONLY_OPEN_TAG,
-        id="only_open_tag",
-    ),
-    pytest.param(
-        True,
-        ONLY_OPEN_TAG_STREAM,
-        id="only_open_tag_stream",
-    ),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_stream"),
+    pytest.param(False, MULTILINE_REASONING, id="multiline_reasoning"),
+    pytest.param(True, MULTILINE_REASONING, id="multiline_reasoning_stream"),
+    pytest.param(False, ONLY_OPEN_TAG, id="only_open_tag"),
+    pytest.param(True, ONLY_OPEN_TAG_STREAM, id="only_open_tag_stream"),
 ]
 
 STILL_REASONING_PROMPT = """<｜hy_begin▁of▁sentence｜>
@@ -198,11 +152,7 @@ REASONING_END_TEST_CASES = [
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    hy_v3_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, hy_v3_tokenizer):
     output = hy_v3_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = [
         hy_v3_tokenizer.convert_tokens_to_string([token]) for token in output
@@ -214,8 +164,7 @@ def test_reasoning(
             "reasoning_effort": param_dict["reasoning_effort"]
         }
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        hy_v3_tokenizer,
-        **parser_kwargs,
+        hy_v3_tokenizer, **parser_kwargs
     )
 
     reasoning, content = run_reasoning_extraction(
@@ -235,8 +184,7 @@ def test_is_reasoning_end_full_prompt(
     prompt: str, is_reasoning_end: bool, hy_v3_tokenizer
 ):
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        hy_v3_tokenizer,
-        chat_template_kwargs={"reasoning_effort": "high"},
+        hy_v3_tokenizer, chat_template_kwargs={"reasoning_effort": "high"}
     )
     tokens = hy_v3_tokenizer.tokenize(prompt)
     token_ids = hy_v3_tokenizer.convert_tokens_to_ids(tokens)
@@ -249,12 +197,10 @@ def test_constructor_does_not_mutate_shared_chat_template_kwargs(hy_v3_tokenizer
     chat_template_kwargs = {"reasoning_effort": "low"}
 
     first_parser: ReasoningParser = parser_cls(
-        hy_v3_tokenizer,
-        chat_template_kwargs=chat_template_kwargs,
+        hy_v3_tokenizer, chat_template_kwargs=chat_template_kwargs
     )
     second_parser: ReasoningParser = parser_cls(
-        hy_v3_tokenizer,
-        chat_template_kwargs=chat_template_kwargs,
+        hy_v3_tokenizer, chat_template_kwargs=chat_template_kwargs
     )
 
     assert chat_template_kwargs == {"reasoning_effort": "low"}
@@ -266,8 +212,7 @@ def test_constructor_does_not_mutate_shared_chat_template_kwargs(hy_v3_tokenizer
 
 def test_constructor_falls_back_to_outer_reasoning_effort(hy_v3_tokenizer):
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        hy_v3_tokenizer,
-        reasoning_effort="low",
+        hy_v3_tokenizer, reasoning_effort="low"
     )
 
     assert isinstance(parser, HYV3ReasoningParser)

@@ -56,20 +56,15 @@ class KVCacheBlocks:
 
     @overload
     def get_block_ids(
-        self,
-        allow_none: Literal[False] = False,
+        self, allow_none: Literal[False] = False
     ) -> tuple[list[int], ...]: ...
 
     @overload
     def get_block_ids(
-        self,
-        allow_none: Literal[True] = True,
+        self, allow_none: Literal[True] = True
     ) -> tuple[list[int], ...] | None: ...
 
-    def get_block_ids(
-        self,
-        allow_none: bool = False,
-    ) -> tuple[list[int], ...] | None:
+    def get_block_ids(self, allow_none: bool = False) -> tuple[list[int], ...] | None:
         """
         Converts the KVCacheBlocks instance to block_ids.
 
@@ -339,8 +334,7 @@ class KVCacheManager:
             request.num_computed_tokens + num_new_computed_tokens
         )
         total_computed_tokens = min(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.max_model_len,
+            num_local_computed_tokens + num_external_computed_tokens, self.max_model_len
         )
 
         if full_sequence_must_fit:
@@ -419,8 +413,7 @@ class KVCacheManager:
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
         num_tokens_to_cache = min(
-            total_computed_tokens + num_new_tokens,
-            request.num_tokens,
+            total_computed_tokens + num_new_tokens, request.num_tokens
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 

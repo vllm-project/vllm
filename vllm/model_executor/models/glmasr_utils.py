@@ -34,8 +34,7 @@ def _as_list_chunk_counts(
 
 
 def _normalize_chunk_counts(
-    chunk_counts: torch.Tensor | list[int] | list[torch.Tensor] | None,
-    num_chunks: int,
+    chunk_counts: torch.Tensor | list[int] | list[torch.Tensor] | None, num_chunks: int
 ) -> list[int]:
     if chunk_counts is None:
         return [1] * num_chunks
@@ -55,9 +54,7 @@ def _get_audio_output_lengths_from_lengths(
 
 
 def _get_audio_output_lengths_from_mask(
-    mask: torch.Tensor,
-    merge_factor: int,
-    conv_params: list[tuple[int, int, int]],
+    mask: torch.Tensor, merge_factor: int, conv_params: list[tuple[int, int, int]]
 ) -> torch.Tensor:
     audio_lengths = mask.sum(-1)
     return _get_audio_output_lengths_from_lengths(
@@ -105,8 +102,7 @@ def _get_audio_output_lengths_for_tower(
 
 
 def _flatten_audio_features_by_length(
-    audio_features: torch.Tensor,
-    audio_output_lengths: torch.Tensor,
+    audio_features: torch.Tensor, audio_output_lengths: torch.Tensor
 ) -> torch.Tensor:
     num_chunks, max_audio_tokens, embed_dim = audio_features.shape
     audio_output_lengths = audio_output_lengths.unsqueeze(1)
@@ -120,8 +116,7 @@ def _flatten_audio_features_by_length(
 
 
 def _group_audio_embeddings(
-    chunk_embeddings: Sequence[torch.Tensor],
-    chunk_counts: Sequence[int],
+    chunk_embeddings: Sequence[torch.Tensor], chunk_counts: Sequence[int]
 ) -> tuple[torch.Tensor, ...]:
     grouped_embeddings = []
     current_idx = 0

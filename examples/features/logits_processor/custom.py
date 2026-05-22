@@ -39,10 +39,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig
-from vllm.v1.sample.logits_processor import (
-    BatchUpdate,
-    LogitsProcessor,
-)
+from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 
 
@@ -120,10 +117,7 @@ sampling_params_list = [
 
 def main():
     # Create an LLM.
-    llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=[DummyLogitsProcessor],
-    )
+    llm = LLM(model="facebook/opt-125m", logits_processors=[DummyLogitsProcessor])
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.

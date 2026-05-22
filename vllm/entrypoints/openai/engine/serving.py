@@ -188,10 +188,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
     ) -> str:
         json_str = json.dumps(
             self.create_error_response(
-                message=message,
-                err_type=err_type,
-                status_code=status_code,
-                param=param,
+                message=message, err_type=err_type, status_code=status_code, param=param
             ).model_dump()
         )
         return json_str
@@ -200,8 +197,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         """Raise GenerationError if finish_reason indicates an error."""
         if finish_reason == "error":
             logger.error(
-                "Request %s failed with an internal error during generation",
-                request_id,
+                "Request %s failed with an internal error during generation", request_id
             )
             raise GenerationError("Internal server error")
 
@@ -210,15 +206,10 @@ class OpenAIServing(BeamSearchOnlineMixin):
     ) -> str:
         """Convert GenerationError to streaming error response."""
         return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
+            str(e), err_type="InternalServerError", status_code=e.status_code
         )
 
-    async def _check_model(
-        self,
-        request: AnyRequest,
-    ) -> ErrorResponse | None:
+    async def _check_model(self, request: AnyRequest) -> ErrorResponse | None:
         error_response = None
 
         if self._is_model_supported(request.model):
@@ -269,9 +260,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         return None
 
     def _maybe_get_adapters(
-        self,
-        request: AnyRequest,
-        supports_default_mm_loras: bool = False,
+        self, request: AnyRequest, supports_default_mm_loras: bool = False
     ) -> LoRARequest | None:
         if request.model in self.models.lora_requests:
             return self.models.lora_requests[request.model]
@@ -376,10 +365,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
             lora_request=lora_request,
         )
 
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
+    async def _get_trace_headers(self, headers: Headers) -> Mapping[str, str] | None:
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
@@ -526,8 +512,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
                         and (
                             request.tool_choice == "required"
                             or isinstance(
-                                request.tool_choice,
-                                ChatCompletionNamedToolChoiceParam,
+                                request.tool_choice, ChatCompletionNamedToolChoiceParam
                             )
                         )
                     )

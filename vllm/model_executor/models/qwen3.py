@@ -143,9 +143,7 @@ class Qwen3Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -225,10 +223,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -236,9 +231,7 @@ class Qwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-ALL_DECODER_LAYER_TYPES = {
-    "attention": Qwen3DecoderLayer,
-}
+ALL_DECODER_LAYER_TYPES = {"attention": Qwen3DecoderLayer}
 
 
 @support_torch_compile(
@@ -262,15 +255,8 @@ class Qwen3ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     embedding_modules = {
@@ -325,10 +311,7 @@ class Qwen3ForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -6,9 +6,7 @@ from dataclasses import replace
 import torch
 
 from vllm.config import get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -20,21 +18,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     OffloadingSpec,
 )
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingWorker,
-    TransferSpec,
-)
+from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
 
 logger = init_logger(__name__)
 
@@ -101,10 +92,7 @@ class OffloadingConnectorWorker:
 
                     # get the logical dimension for num_blocks
                     test_shape = attn_backends[layer_name].get_kv_cache_shape(
-                        num_blocks=1234,
-                        block_size=16,
-                        num_kv_heads=1,
-                        head_size=256,
+                        num_blocks=1234, block_size=16, num_kv_heads=1, head_size=256
                     )
                     num_blocks_logical_dim = test_shape.index(1234)
 
@@ -126,9 +114,7 @@ class OffloadingConnectorWorker:
                         page = layer_kv_cache_spec.page_size_bytes
                         tensors_per_block[layer_name] = (
                             torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
+                                [], dtype=torch.int8, device=layer_kv_cache.device
                             )
                             .set_(storage)
                             .view(num_blocks, page),
@@ -147,9 +133,7 @@ class OffloadingConnectorWorker:
                         storage = layer_kv_cache.untyped_storage()
                         raw = (
                             torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
+                                [], dtype=torch.int8, device=layer_kv_cache.device
                             )
                             .set_(storage)
                             .view(2, num_blocks, half_page_size)
@@ -171,9 +155,7 @@ class OffloadingConnectorWorker:
                     assert first_state_tensor.storage_offset() == 0
                     tensor = (
                         torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=first_state_tensor.device,
+                            [], dtype=torch.int8, device=first_state_tensor.device
                         )
                         .set_(first_state_tensor.untyped_storage())
                         .view((num_blocks, layer_kv_cache_spec.page_size_bytes))
@@ -208,8 +190,7 @@ class OffloadingConnectorWorker:
             for tensor in tensors_per_block[first_layer_name]:
                 block_tensors.append(
                     CanonicalKVCacheTensor(
-                        tensor=tensor,
-                        page_size_bytes=page_size_bytes[first_layer_name],
+                        tensor=tensor, page_size_bytes=page_size_bytes[first_layer_name]
                     )
                 )
 
@@ -230,8 +211,7 @@ class OffloadingConnectorWorker:
             group_data_refs.append(group_refs)
 
         canonical_kv_caches = CanonicalKVCaches(
-            tensors=block_tensors,
-            group_data_refs=group_data_refs,
+            tensors=block_tensors, group_data_refs=group_data_refs
         )
 
         self._register_handlers(canonical_kv_caches)
@@ -262,11 +242,7 @@ class OffloadingConnectorWorker:
         assert len(storage) % page_size_bytes == 0
         num_blocks = len(storage) // page_size_bytes
         tensor = (
-            torch.tensor(
-                [],
-                dtype=torch.int8,
-                device=kv_cache.device,
-            )
+            torch.tensor([], dtype=torch.int8, device=kv_cache.device)
             .set_(storage)
             .view(num_blocks, page_size_bytes)
         )

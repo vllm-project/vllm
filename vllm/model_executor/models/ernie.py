@@ -27,10 +27,7 @@ from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 _LEGACY_SUFFIX_MAPPER = WeightsMapper(
-    orig_to_new_suffix={
-        ".gamma": ".weight",
-        ".beta": ".bias",
-    }
+    orig_to_new_suffix={".gamma": ".weight", ".beta": ".bias"}
 )
 
 
@@ -73,18 +70,14 @@ class ErnieEmbedding(BertEmbedding):
 class ErnieModel(BertModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            embedding_class=ErnieEmbedding,
+            vllm_config=vllm_config, prefix=prefix, embedding_class=ErnieEmbedding
         )
 
 
 class ErniePoolingModel(BertPoolingModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            embedding_class=ErnieEmbedding,
+            vllm_config=vllm_config, prefix=prefix, embedding_class=ErnieEmbedding
         )
 
 
@@ -123,8 +116,7 @@ class ErnieForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQ
 
         self.num_labels = config.num_labels
         self.ernie = ErniePoolingModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "ernie"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "ernie")
         )
         self.classifier = nn.Linear(
             config.hidden_size,
@@ -136,9 +128,7 @@ class ErnieForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQ
         assert pooler_config is not None
 
         self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            pooling=self.ernie.pooler,
-            classifier=self.classifier,
+            pooler_config, pooling=self.ernie.pooler, classifier=self.classifier
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -192,8 +182,7 @@ class ErnieForTokenClassification(nn.Module):
         self.head_dtype = vllm_config.model_config.head_dtype
         self.num_labels = config.num_labels
         self.ernie = ErnieModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "ernie"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "ernie")
         )
         self.classifier = nn.Linear(
             config.hidden_size, config.num_labels, dtype=self.head_dtype

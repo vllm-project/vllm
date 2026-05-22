@@ -72,10 +72,7 @@ class ParserManager:
             return parser_cls
         except Exception as e:
             logger.exception(
-                "Failed to import lazy parser '%s' from %s: %s",
-                name,
-                module_path,
-                e,
+                "Failed to import lazy parser '%s' from %s: %s", name, module_path, e
             )
             raise
 
@@ -221,8 +218,7 @@ class ParserManager:
 
     @classmethod
     def get_reasoning_parser(
-        cls,
-        reasoning_parser_name: str | None,
+        cls, reasoning_parser_name: str | None
     ) -> type[ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
         from vllm.reasoning import ReasoningParserManager

@@ -37,12 +37,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_nvlink_one_sided,
 )
-from vllm.utils.import_utils import (
-    has_aiter,
-    has_deep_ep,
-    has_deep_gemm,
-    has_mori,
-)
+from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm, has_mori
 
 
 @dataclass
@@ -298,9 +293,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
-    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
 
     register_experts(
         AiterExperts,
@@ -430,7 +423,7 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
             per_out_ch_quant=False,
             per_act_token_quant=False,
             block_shape=None,
-        ),
+        )
     ]
 
 
@@ -441,9 +434,7 @@ def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
 
 
 def make_cutlass_strides(
-    e: int,
-    n: int,
-    k: int,
+    e: int, n: int, k: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     ab_strides1 = torch.full((e,), k, device="cuda", dtype=torch.int64)
     ab_strides2 = torch.full((e,), n, device="cuda", dtype=torch.int64)
@@ -470,10 +461,7 @@ def make_fused_experts(
             "num_dispatchers": num_dispatchers,
         }
     else:
-        kwargs = {
-            "moe_config": moe,
-            "quant_config": quant_config,
-        }
+        kwargs = {"moe_config": moe, "quant_config": quant_config}
 
     torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
 

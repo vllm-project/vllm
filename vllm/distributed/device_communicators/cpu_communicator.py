@@ -49,10 +49,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
 
         if self.use_all2all:
-            if self.all2all_backend not in (
-                "naive",
-                "allgather_reducescatter",
-            ):  # type: ignore[has-type]
+            if self.all2all_backend not in ("naive", "allgather_reducescatter"):  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on CPU. "
                     "Falling back to `allgather_reducescatter` manager.",
@@ -70,11 +67,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         """
         local_name = _CPUSHMDistributed.make_group_name(self)
         names: list[str] = [""] * self.world_size
-        torch.distributed.all_gather_object(
-            names,
-            local_name,
-            group=self.device_group,
-        )
+        torch.distributed.all_gather_object(names, local_name, group=self.device_group)
         return len(set(names)) == 1
 
     def all_reduce(self, input_):
@@ -143,9 +136,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         return output_tensor
 
     def send_tensor_dict(
-        self,
-        tensor_dict: dict[str, torch.Tensor | Any],
-        dst: int,
+        self, tensor_dict: dict[str, torch.Tensor | Any], dst: int
     ) -> None:
         if not self.supports_tensor_dict:
             raise NotImplementedError(
@@ -154,10 +145,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             )
         return self.dist_module.send_tensor_dict(tensor_dict, dst)
 
-    def recv_tensor_dict(
-        self,
-        src: int,
-    ) -> dict[str, torch.Tensor | Any]:
+    def recv_tensor_dict(self, src: int) -> dict[str, torch.Tensor | Any]:
         if not self.supports_tensor_dict:
             raise NotImplementedError(
                 "CpuCommunicator does not support tensor dict fastpath with "
@@ -182,10 +170,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
-            hidden_states,
-            router_logits,
-            is_sequence_parallel,
-            extra_tensors,
+            hidden_states, router_logits, is_sequence_parallel, extra_tensors
         )
 
     def dispatch(
@@ -220,10 +205,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
-        )
+        return self.all2all_manager.combine(hidden_states, is_sequence_parallel)
 
 
 class _CPUSHMDistributed:
@@ -244,10 +226,7 @@ class _CPUSHMDistributed:
         return f"{instance_identifier}-{shm_group_identifier}-cpushm"
 
     def _init_cpu_shm(self) -> int:
-        thread_num_tensor = torch.tensor(
-            [torch.get_num_threads()],
-            dtype=torch.int64,
-        )
+        thread_num_tensor = torch.tensor([torch.get_num_threads()], dtype=torch.int64)
         torch.distributed.all_reduce(
             thread_num_tensor,
             op=torch.distributed.ReduceOp.MIN,
@@ -262,10 +241,7 @@ class _CPUSHMDistributed:
             thread_num,
         )
         torch.distributed.barrier(self.communicator.device_group)
-        torch.ops._C.join_shm_manager(
-            handle,
-            self.group_name,
-        )
+        torch.ops._C.join_shm_manager(handle, self.group_name)
         torch.distributed.barrier(self.communicator.device_group)
 
         return handle
@@ -299,9 +275,7 @@ class _CPUSHMDistributed:
         torch.ops._C.shm_all_gather(self.handle, input, output)
 
     def send_tensor_dict(
-        self,
-        tensor_dict: dict[str, torch.Tensor | Any],
-        dst: int,
+        self, tensor_dict: dict[str, torch.Tensor | Any], dst: int
     ) -> None:
         key_list = list(tensor_dict.keys())
         value_list = list(tensor_dict.values())
@@ -319,10 +293,7 @@ class _CPUSHMDistributed:
 
         return None
 
-    def recv_tensor_dict(
-        self,
-        src: int,
-    ) -> dict[str, torch.Tensor | Any]:
+    def recv_tensor_dict(self, src: int) -> dict[str, torch.Tensor | Any]:
         tensor_list = torch.ops._C.shm_recv_tensor_list(self.handle, src)
 
         value_list: list[torch.Tensor] = tensor_list[:-1]

@@ -240,11 +240,7 @@ class AWQLinearMethod(LinearMethodBase):
         )
 
         scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
+            data=torch.empty(num_groups, output_size_per_partition, dtype=params_dtype),
             input_dim=0,
             output_dim=1,
             weight_loader=weight_loader,
@@ -260,10 +256,7 @@ class AWQLinearMethod(LinearMethodBase):
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         qweight = layer.qweight
         scales = layer.scales

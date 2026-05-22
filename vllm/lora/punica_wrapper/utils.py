@@ -117,10 +117,7 @@ def convert_mapping(
         prompt_mapping, dtype=torch.long, device=device
     )
     embeddings_indices = torch.stack(
-        [
-            indices[2] * extra_vocab_size,
-            indices[2] * (vocab_size + extra_vocab_size),
-        ]
+        [indices[2] * extra_vocab_size, indices[2] * (vocab_size + extra_vocab_size)]
     )
     embeddings_indices = torch.where(
         embeddings_indices == -1, max_loras - 1, embeddings_indices

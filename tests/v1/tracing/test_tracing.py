@@ -17,18 +17,11 @@ from tests.tracing.conftest import (  # noqa: F401
 )
 
 
-def test_traces(
-    monkeypatch: pytest.MonkeyPatch,
-    trace_service: FakeTraceService,
-):
+def test_traces(monkeypatch: pytest.MonkeyPatch, trace_service: FakeTraceService):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
 
-        sampling_params = SamplingParams(
-            temperature=0.01,
-            top_p=0.1,
-            max_tokens=256,
-        )
+        sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=256)
         model = "facebook/opt-125m"
         llm = LLM(
             model=model,

@@ -107,16 +107,12 @@ else:
 
 
 def get_mla_metadata_dense_fp8(
-    cache_seqlens: torch.Tensor,
-    num_q_tokens_per_head_k: int,
-    num_heads_k: int,
+    cache_seqlens: torch.Tensor, num_q_tokens_per_head_k: int, num_heads_k: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not _is_flashmla_available()[0]:
         _raise_flashmla_unavailable()
     return torch.ops._flashmla_extension_C.get_mla_decoding_metadata_dense_fp8(
-        cache_seqlens,
-        num_q_tokens_per_head_k,
-        num_heads_k,
+        cache_seqlens, num_q_tokens_per_head_k, num_heads_k
     )
 
 

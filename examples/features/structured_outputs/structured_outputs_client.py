@@ -11,13 +11,7 @@ import openai
 import pydantic
 from openai.types.chat import ChatCompletionChunk
 
-ConstraintsFormat = Literal[
-    "choice",
-    "regex",
-    "json",
-    "grammar",
-    "structural_tag",
-]
+ConstraintsFormat = Literal["choice", "regex", "json", "grammar", "structural_tag"]
 
 
 async def print_stream_response(
@@ -75,10 +69,7 @@ class CarDescription(pydantic.BaseModel):
 PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
     "choice": {
         "messages": [
-            {
-                "role": "user",
-                "content": "Classify this sentiment: vLLM is wonderful!",
-            }
+            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
         ],
         "extra_body": {"structured_outputs": {"choice": ["positive", "negative"]}},
     },
@@ -90,7 +81,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             }
         ],
         "extra_body": {
-            "structured_outputs": {"regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n"},
+            "structured_outputs": {"regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n"}
         },
     },
     "json": {
@@ -129,7 +120,7 @@ table ::= "table_1 " | "table_2 "
 condition ::= column "= " number
 
 number ::= "1 " | "2 "
-""",
+"""
             }
         },
     },
@@ -174,7 +165,7 @@ You are a helpful assistant.
 
 Given the previous instructions, what is the weather in New York City, Boston,
 and San Francisco?""",
-            },
+            }
         ],
         "response_format": {
             "type": "structural_tag",
@@ -197,7 +188,7 @@ and San Francisco?""",
 
 async def cli():
     parser = argparse.ArgumentParser(
-        description="Run OpenAI Chat Completion with various structured outputs capabilities",
+        description="Run OpenAI Chat Completion with various structured outputs capabilities"
     )
     _ = parser.add_argument(
         "--constraint",
@@ -230,10 +221,7 @@ async def cli():
         results = await asyncio.gather(
             *[
                 client.chat.completions.create(
-                    model=model,
-                    max_tokens=1024,
-                    stream=True,
-                    **PARAMS[name],
+                    model=model, max_tokens=1024, stream=True, **PARAMS[name]
                 )
                 for name in constraints
             ]
@@ -244,10 +232,7 @@ async def cli():
         results = await asyncio.gather(
             *[
                 client.chat.completions.create(
-                    model=model,
-                    max_tokens=1024,
-                    stream=False,
-                    **PARAMS[name],
+                    model=model, max_tokens=1024, stream=False, **PARAMS[name]
                 )
                 for name in constraints
             ]

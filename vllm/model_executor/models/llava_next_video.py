@@ -15,10 +15,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
@@ -89,12 +86,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
 
-    def _get_num_frame_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def _get_num_frame_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         spatial_pool_stride = hf_config.spatial_pool_stride
 
@@ -105,15 +97,10 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         return pooled_grid_length * pooled_grid_length
 
     def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
+        self, *, image_width: int, image_height: int, num_frames: int
     ) -> int:
         num_frame_tokens = self._get_num_frame_tokens(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
         return num_frame_tokens * num_frames
@@ -139,9 +126,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_videos = mm_counts.get("video", 0)
 
@@ -191,9 +176,7 @@ class LlavaNextVideoMultiModalProcessor(
     BaseMultiModalProcessor[LlavaNextVideoProcessingInfo]
 ):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values_videos=MultiModalFieldConfig.batched("video"))
 
@@ -225,10 +208,8 @@ class LlavaNextVideoMultiModalProcessor(
 
         return [
             PromptReplacement(
-                modality="video",
-                target=[video_token_id],
-                replacement=get_replacement,
-            ),
+                modality="video", target=[video_token_id], replacement=get_replacement
+            )
         ]
 
 
@@ -373,10 +354,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         return LlavaNextVideoPixelInputs(
             type="pixel_values_videos",
             pixel_values_videos=pixel_values_videos,
-            resolve_bindings={
-                "h": expected_h,
-                "w": expected_w,
-            },
+            resolve_bindings={"h": expected_h, "w": expected_w},
         )
 
     def _video_pixels_to_features(
@@ -447,10 +425,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

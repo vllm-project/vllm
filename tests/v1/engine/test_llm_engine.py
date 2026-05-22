@@ -19,10 +19,7 @@ DTYPE = "half"
 
 
 def _vllm_model(
-    apc: bool,
-    vllm_runner: type[VllmRunner],
-    *,
-    skip_tokenizer_init: bool = False,
+    apc: bool, vllm_runner: type[VllmRunner], *, skip_tokenizer_init: bool = False
 ):
     """Set up VllmRunner instance."""
     return vllm_runner(
@@ -66,17 +63,13 @@ def vllm_model_apc(vllm_runner):
 def vllm_model_skip_tokenizer_init(vllm_runner, request):
     """VllmRunner test fixture with APC."""
     with _vllm_model(
-        request.param,
-        vllm_runner,
-        skip_tokenizer_init=True,
+        request.param, vllm_runner, skip_tokenizer_init=True
     ) as vllm_model:
         yield vllm_model
 
 
 def _get_test_sampling_params(
-    prompt_list: list[str],
-    seed: int | None = 42,
-    structured_outputs: bool = False,
+    prompt_list: list[str], seed: int | None = 42, structured_outputs: bool = False
 ) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""
     rng = random.Random(seed)
@@ -106,13 +99,11 @@ def _get_test_sampling_params(
 
 
 def test_compatibility_with_skip_tokenizer_init(
-    vllm_model_skip_tokenizer_init: VllmRunner,
-    example_prompts: list[str],
+    vllm_model_skip_tokenizer_init: VllmRunner, example_prompts: list[str]
 ):
     # Case 1: Structured output request should raise an error.
     sampling_params_list, _ = _get_test_sampling_params(
-        example_prompts,
-        structured_outputs=True,
+        example_prompts, structured_outputs=True
     )
     llm: LLM = vllm_model_skip_tokenizer_init.llm
     with pytest.raises(ValueError):
@@ -161,9 +152,7 @@ def test_engine_metrics(vllm_runner, example_prompts):
     }
 
     with vllm_runner(
-        MODEL,
-        speculative_config=speculative_config,
-        disable_log_stats=False,
+        MODEL, speculative_config=speculative_config, disable_log_stats=False
     ) as vllm_model:
         llm: LLM = vllm_model.llm
         sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
@@ -218,11 +207,7 @@ def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain
     # token ids.
-    llm = LLM(
-        model=model,
-        skip_tokenizer_init=True,
-        enforce_eager=True,
-    )
+    llm = LLM(model=model, skip_tokenizer_init=True, enforce_eager=True)
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
     with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):

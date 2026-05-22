@@ -9,9 +9,7 @@ import numpy as np
 import pybase64 as base64
 import pytest
 
-from vllm.entrypoints.pooling.embed.protocol import (
-    build_typed_embeddings,
-)
+from vllm.entrypoints.pooling.embed.protocol import build_typed_embeddings
 
 
 @pytest.fixture
@@ -109,8 +107,7 @@ class TestBuildTypedEmbeddingsBase64:
 class TestBuildTypedEmbeddingsMultiple:
     def test_all_types_at_once(self, sample_embeddings: list[list[float]]):
         result = build_typed_embeddings(
-            sample_embeddings,
-            ["float", "binary", "ubinary", "base64"],
+            sample_embeddings, ["float", "binary", "ubinary", "base64"]
         )
         assert result.float is not None
         assert result.binary is not None

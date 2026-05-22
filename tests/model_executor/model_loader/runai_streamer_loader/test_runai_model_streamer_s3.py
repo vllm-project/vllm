@@ -15,9 +15,7 @@ test_model = "openai-community/gpt2"
 
 
 def test_runai_model_loader_download_files_s3_mocked_with_patch(
-    vllm_runner,
-    tmp_path: Path,
-    monkeypatch,
+    vllm_runner, tmp_path: Path, monkeypatch
 ):
     patcher = StreamerPatcher(str(tmp_path))
 
@@ -32,8 +30,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         patcher.shim_list_safetensors,
     )
     monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_pull_files",
-        patcher.shim_pull_files,
+        "vllm.transformers_utils.runai_utils.runai_pull_files", patcher.shim_pull_files
     )
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.weight_utils.SafetensorsStreamer",
@@ -41,9 +38,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
     )
 
     engine_args = EngineArgs(
-        model=test_mock_s3_model,
-        load_format=load_format,
-        tensor_parallel_size=1,
+        model=test_mock_s3_model, load_format=load_format, tensor_parallel_size=1
     )
 
     vllm_config = engine_args.create_engine_config()

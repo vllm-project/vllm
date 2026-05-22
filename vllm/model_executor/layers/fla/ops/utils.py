@@ -128,11 +128,7 @@ def get_available_device() -> str:
 @functools.cache
 def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
     device = get_available_device()
-    mapping = {
-        "cuda": "nvidia",
-        "hip": "amd",
-        "xpu": "intel",
-    }
+    mapping = {"cuda": "nvidia", "hip": "amd", "xpu": "intel"}
     # return the mapped value, or the original if not found
     return mapping.get(device, device)
 

@@ -27,9 +27,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTensorSym,
@@ -304,8 +302,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         SUPPORTED_W_A = [
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
@@ -467,11 +464,7 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         experts_per_worker = self.moe_config.num_local_experts
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (experts_per_worker, M * num_dp, max(N, K))
-        workspace2 = (
-            experts_per_worker,
-            M * num_dp,
-            max(activation_out_dim, K),
-        )
+        workspace2 = (experts_per_worker, M * num_dp, max(activation_out_dim, K))
         output = (experts_per_worker, M, K)
         return (workspace1, workspace2, output)
 
@@ -602,11 +595,7 @@ def run_cutlass_moe_fp4(
 
     a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
-        a,
-        a1_gscale,
-        expert_offsets,
-        blockscale_offsets,
-        num_topk,
+        a, a1_gscale, expert_offsets, blockscale_offsets, num_topk
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
@@ -694,8 +683,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
 
@@ -875,11 +863,7 @@ def run_cutlass_moe_mxfp4(
 
     a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
-        a,
-        expert_offsets,
-        blockscale_offsets,
-        e,
-        num_topk,
+        a, expert_offsets, blockscale_offsets, e, num_topk
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
@@ -934,11 +918,7 @@ def run_cutlass_moe_mxfp4(
     return
 
 
-def swizzle_mxfp4_scales(
-    scales: torch.Tensor,
-    N: int,
-    K: int,
-) -> torch.Tensor:
+def swizzle_mxfp4_scales(scales: torch.Tensor, N: int, K: int) -> torch.Tensor:
     """Swizzle flat [N, K//32] E8M0 scales to CUTLASS tiled layout.
 
     CUTLASS expects MX scale factors in a tiled layout:
@@ -996,8 +976,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         return (weight_key, activation_key) == (kMxfp4Static, kMxfp4Dynamic)
 
@@ -1014,9 +993,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         ]
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return moe_parallel_config.ep_size == 1
 
     @staticmethod
@@ -1282,8 +1259,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         raise NotImplementedError(
             "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "

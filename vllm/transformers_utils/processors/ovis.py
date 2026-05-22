@@ -39,13 +39,8 @@ IGNORE_ID = -100
 
 class OvisProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
     _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "images_kwargs": {
-            "do_convert_rgb": True,
-            "return_tensors": "pt",
-        },
+        "text_kwargs": {"padding": False},
+        "images_kwargs": {"do_convert_rgb": True, "return_tensors": "pt"},
     }
 
 
@@ -220,11 +215,7 @@ class OvisProcessor(ProcessorMixin):
                 replaced_and_tokenized_ids = torch.tensor([], dtype=torch.long)
 
             # Create the output with text features
-            output = BatchFeature(
-                data={
-                    "input_ids": replaced_and_tokenized_ids,
-                }
-            )
+            output = BatchFeature(data={"input_ids": replaced_and_tokenized_ids})
 
             # Add image features if present
             if image_features:

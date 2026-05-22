@@ -49,8 +49,7 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
     """
 
     def _move_to_back(
-        backends: list[UnquantizedMoeBackend],
-        backend: UnquantizedMoeBackend,
+        backends: list[UnquantizedMoeBackend], backend: UnquantizedMoeBackend
     ) -> None:
         backends.append(backends.pop(backends.index(backend)))
 
@@ -81,9 +80,7 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
     return _AVAILABLE_BACKENDS
 
 
-def backend_to_kernel_cls(
-    backend: UnquantizedMoeBackend,
-) -> type[mk.FusedMoEExperts]:
+def backend_to_kernel_cls(backend: UnquantizedMoeBackend) -> type[mk.FusedMoEExperts]:
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
             TrtLlmBf16Experts,
@@ -312,9 +309,7 @@ def convert_to_unquantized_kernel_format(
         w13_weight = swap_w13_to_w31(w13_weight)
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
-            _cache_permute_indices,
-            w13_weight,
-            w2_weight,
+            _cache_permute_indices, w13_weight, w2_weight
         )
 
     return w13_weight.contiguous(), w2_weight.contiguous()
@@ -351,10 +346,7 @@ def make_unquantized_moe_kernel(
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
+        experts = experts_cls(moe_config=moe_config, quant_config=quant_config)
 
     kernel = mk.FusedMoEKernel(
         prepare_finalize,

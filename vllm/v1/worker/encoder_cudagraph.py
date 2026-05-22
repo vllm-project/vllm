@@ -14,9 +14,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    SupportsEncoderCudaGraph,
-)
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -125,15 +123,13 @@ class EncoderCudaGraphManager:
                 # max_batch_size to min(user_budgets).
                 self.token_budgets = sorted(user_budgets)
                 self.max_batch_size = min(
-                    max_budget // min_budget,
-                    min(self.token_budgets),
+                    max_budget // min_budget, min(self.token_budgets)
                 )
             else:
                 # Fully auto-inferred.
                 self.token_budgets = self._generate_budgets(min_budget, max_budget)
                 self.max_batch_size = min(
-                    max_budget // min_budget,
-                    min(self.token_budgets),
+                    max_budget // min_budget, min(self.token_budgets)
                 )
 
         assert multimodal_config is not None
@@ -311,10 +307,7 @@ class EncoderCudaGraphManager:
         self.graph_hits += num_items
         return graph_meta.output_buffer
 
-    def _execute_local(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[torch.Tensor]:
+    def _execute_local(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
         """Execute encoder on local inputs using greedy-packed CUDA graphs.
 
         Sort images by output token count (smallest first), then greedily pack
@@ -405,10 +398,7 @@ class EncoderCudaGraphManager:
                 with torch.inference_mode():
                     raw = self.model.encoder_eager_forward(batch_mm_kwargs)
                 scatter_output_slices(
-                    raw,
-                    batch_orig_indices,
-                    per_item_out_tokens,
-                    outputs_by_orig_idx,
+                    raw, batch_orig_indices, per_item_out_tokens, outputs_by_orig_idx
                 )
             else:
                 logger.debug(
@@ -420,9 +410,7 @@ class EncoderCudaGraphManager:
                     (token_budget - batch_out_tokens) / token_budget * 100,
                 )
                 replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                    batch_mm_kwargs,
-                    self.max_batch_size,
-                    self.max_frames_per_batch,
+                    batch_mm_kwargs, self.max_batch_size, self.max_frames_per_batch
                 )
 
                 # graph_hits counted inside _run_budget_graph after replay.
@@ -443,9 +431,7 @@ class EncoderCudaGraphManager:
         return [outputs_by_orig_idx[i] for i in range(num_items)]
 
     def _dp_shard(
-        self,
-        mm_kwargs: dict[str, Any],
-        per_item_out_tokens: list[int],
+        self, mm_kwargs: dict[str, Any], per_item_out_tokens: list[int]
     ) -> tuple[dict[str, Any], list[int], list[int], int]:
         """Distribute items across TP ranks for data-parallel execution.
 
@@ -564,19 +550,13 @@ class EncoderCudaGraphManager:
             if count > 0:
                 rank_items = image_rank_assignment[current_idx : current_idx + count]
                 scatter_output_slices(
-                    rank_outputs[rank],
-                    rank_items,
-                    per_item_out_tokens,
-                    result,
+                    rank_outputs[rank], rank_items, per_item_out_tokens, result
                 )
                 current_idx += count
 
         return [t for t in result if t is not None]
 
-    def execute(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[torch.Tensor]:
+    def execute(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
         """Execute encoder using CUDA graph with optional DP.
 
         Args:

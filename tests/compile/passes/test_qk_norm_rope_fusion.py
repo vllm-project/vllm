@@ -6,10 +6,7 @@ import torch
 from torch._ops import OpOverload, OpOverloadPacket
 
 from tests.compile.backend import TestBackend
-from vllm.compilation.passes.fusion.matcher_utils import (
-    FLASHINFER_ROTARY_OP,
-    ROTARY_OP,
-)
+from vllm.compilation.passes.fusion.matcher_utils import FLASHINFER_ROTARY_OP, ROTARY_OP
 from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
     FUSED_QK_ROPE_OP,
     QKNormRoPEFusionPass,
@@ -122,8 +119,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 def test_qk_norm_rope_fusion(
     eps,
@@ -152,8 +148,7 @@ def test_qk_norm_rope_fusion(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
             pass_config=PassConfig(
-                enable_qk_norm_rope_fusion=True,
-                eliminate_noops=True,
+                enable_qk_norm_rope_fusion=True, eliminate_noops=True
             ),
         ),
     )

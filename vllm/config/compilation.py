@@ -12,12 +12,7 @@ from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import (
-    Range,
-    config,
-    get_hash_factors,
-    hash_factors,
-)
+from vllm.config.utils import Range, config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -802,9 +797,7 @@ class CompilationConfig:
             "compilation_time": True,
             "encoder_compilation_time": True,
             "traced_files": True,
-            "inductor_compile_config": {
-                "post_grad_custom_post_pass": True,
-            },
+            "inductor_compile_config": {"post_grad_custom_post_pass": True},
         }
 
         # exclude default attr in pass_config
@@ -915,11 +908,7 @@ class CompilationConfig:
         # See: https://github.com/pytorch/pytorch/issues/177719
         if not is_torch_equal_or_newer("2.12.0.dev"):
             enable_asserts = envs.VLLM_LOGGING_LEVEL == "DEBUG"
-            for key in (
-                "size_asserts",
-                "alignment_asserts",
-                "scalar_asserts",
-            ):
+            for key in ("size_asserts", "alignment_asserts", "scalar_asserts"):
                 self.inductor_compile_config.setdefault(key, enable_asserts)
 
         for k, v in self.inductor_passes.items():
@@ -1026,10 +1015,7 @@ class CompilationConfig:
             self.backend = current_platform.get_compile_backend()
 
     def init_backend(
-        self,
-        vllm_config: "VllmConfig",
-        prefix: str = "",
-        is_encoder: bool = False,
+        self, vllm_config: "VllmConfig", prefix: str = "", is_encoder: bool = False
     ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
@@ -1430,8 +1416,7 @@ class CompilationConfig:
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(
-                uniform_decode_query_len,
-                tensor_parallel_size,
+                uniform_decode_query_len, tensor_parallel_size
             )
 
         # For Mamba models with FULL decode cudagraphs, each decode

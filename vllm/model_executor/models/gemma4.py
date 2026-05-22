@@ -103,11 +103,9 @@ def _gemma4_routing_kernel(
     offs_e = tl.arange(0, BLOCK_E)
     valid = offs_e < E
 
-    logits = tl.load(
-        gating_ptr + pid * E + offs_e,
-        mask=valid,
-        other=-float("inf"),
-    ).to(tl.float32)
+    logits = tl.load(gating_ptr + pid * E + offs_e, mask=valid, other=-float("inf")).to(
+        tl.float32
+    )
 
     max_l = tl.max(logits, axis=0)
 
@@ -141,9 +139,7 @@ def _gemma4_routing_kernel(
 
     # Load scales for top-K only (masked gather; scale array is tiny → L1 cached)
     all_scales = tl.load(
-        per_expert_scale_ptr + all_ids.to(tl.int64),
-        mask=top_mask,
-        other=1.0,
+        per_expert_scale_ptr + all_ids.to(tl.int64), mask=top_mask, other=1.0
     ).to(tl.float32)
 
     # Final weights: vectorized multiply (only top-K will be stored)
@@ -181,9 +177,7 @@ def gemma4_fused_routing_kernel_triton(
 
 
 def gemma4_routing_function_torch(
-    gating_output: torch.Tensor,
-    topk: int,
-    per_expert_scale: torch.Tensor,
+    gating_output: torch.Tensor, topk: int, per_expert_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     _, topk_ids = torch.topk(gating_output, k=topk, dim=-1)
     router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)
@@ -260,10 +254,7 @@ class Gemma4Router(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -274,9 +265,7 @@ class Gemma4Router(nn.Module):
         self.scale = nn.Parameter(torch.ones(self.hidden_size))
         # Constant 1/sqrt(hidden_size) scaling factor
         self.register_buffer(
-            "root_size",
-            torch.tensor(self.hidden_size**-0.5),
-            persistent=False,
+            "root_size", torch.tensor(self.hidden_size**-0.5), persistent=False
         )
         # Project to expert logits; replicated across TP for consistent routing
         # GateLinear supports bf16 W/A → fp32 output, which is important
@@ -310,10 +299,7 @@ class Gemma4MoE(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -503,10 +489,7 @@ class Gemma4Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         # Unified QKV path (works for both k_eq_v and standard layers).
         # For k_eq_v, K weights are loaded into both K and V slots of
@@ -633,14 +616,10 @@ class Gemma4DecoderLayer(nn.Module):
         )
         if self.enable_moe_block:
             self.router = Gemma4Router(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.router",
+                config, quant_config=quant_config, prefix=f"{prefix}.router"
             )
             self.moe = Gemma4MoE(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.moe",
+                config, quant_config=quant_config, prefix=f"{prefix}.moe"
             )
             self.post_feedforward_layernorm_1 = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
@@ -709,9 +688,7 @@ class Gemma4DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(residual)
 
         hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            **kwargs,
+            positions=positions, hidden_states=hidden_states, **kwargs
         )
 
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -844,8 +821,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         if self.embed_tokens_per_layer is None:
             return None
         per_layer_inputs_mask = torch.logical_and(
-            input_ids >= 0,
-            input_ids < self.vocab_size_per_layer_input,
+            input_ids >= 0, input_ids < self.vocab_size_per_layer_input
         )
         per_layer_inputs_tokens = torch.where(
             per_layer_inputs_mask, input_ids, torch.zeros_like(input_ids)
@@ -859,9 +835,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         )
 
     def project_per_layer_inputs(
-        self,
-        inputs_embeds: torch.Tensor,
-        per_layer_inputs: torch.Tensor | None,
+        self, inputs_embeds: torch.Tensor, per_layer_inputs: torch.Tensor | None
     ) -> torch.Tensor | None:
         """Project inputs_embeds and combine with per_layer_inputs.
 
@@ -1012,8 +986,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             )
             # PLE projection norm: output = norm(x) * weight
             self.per_layer_projection_norm = RMSNorm(
-                self.hidden_size_per_layer_input,
-                eps=config.rms_norm_eps,
+                self.hidden_size_per_layer_input, eps=config.rms_norm_eps
             )
             # Scale factor for combining projection + per_layer_inputs
             # Register as buffer so it moves to GPU with the model
@@ -1054,9 +1027,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Embedding scale = sqrt(hidden_size)
         # Downcast to model dtype (bfloat16 etc.) for numerical parity
         self.register_buffer(
-            "normalizer",
-            torch.tensor(config.hidden_size**0.5),
-            persistent=False,
+            "normalizer", torch.tensor(config.hidden_size**0.5), persistent=False
         )
 
         # --- You Only Cache Once (YOCO) split for fast prefill ---
@@ -1136,22 +1107,16 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         hidden_size = config.hidden_size
 
         def _make_empty_intermediate_tensors(
-            batch_size: int,
-            dtype: torch.dtype,
-            device: torch.device,
+            batch_size: int, dtype: torch.dtype, device: torch.device
         ) -> IntermediateTensors:
             tensors: dict[str, torch.Tensor] = {
                 "hidden_states": torch.zeros(
-                    (batch_size, hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
+                    (batch_size, hidden_size), dtype=dtype, device=device
+                )
             }
             if ple_dim and ple_dim > 0:
                 tensors["per_layer_inputs"] = torch.zeros(
-                    (batch_size, num_layers, ple_dim),
-                    dtype=dtype,
-                    device=device,
+                    (batch_size, num_layers, ple_dim), dtype=dtype, device=device
                 )
             return IntermediateTensors(tensors)
 
@@ -1170,9 +1135,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         return self.self_decoder.get_per_layer_inputs(input_ids)
 
     def project_per_layer_inputs(
-        self,
-        inputs_embeds: torch.Tensor,
-        per_layer_inputs: torch.Tensor | None,
+        self, inputs_embeds: torch.Tensor, per_layer_inputs: torch.Tensor | None
     ) -> torch.Tensor | None:
         """Project inputs_embeds and combine with per_layer_inputs.
 
@@ -1219,9 +1182,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
         if logits_indices_padded is None:
             logits_indices_padded = torch.arange(
-                batch_size,
-                dtype=positions.dtype,
-                device=positions.device,
+                batch_size, dtype=positions.dtype, device=positions.device
             )
 
         # NOTE: Keep .clone() until fix in
@@ -1283,11 +1244,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
-                input_ids,
-                positions,
-                inputs_embeds,
-                per_layer_inputs,
-                **kwargs,
+                input_ids, positions, inputs_embeds, per_layer_inputs, **kwargs
             )
             hidden_states = self.norm(hidden_states)
             return hidden_states
@@ -1338,9 +1295,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
         if not get_pp_group().is_last_rank:
-            tensors: dict[str, torch.Tensor] = {
-                "hidden_states": hidden_states,
-            }
+            tensors: dict[str, torch.Tensor] = {"hidden_states": hidden_states}
             if per_layer_inputs is not None:
                 tensors["per_layer_inputs"] = per_layer_inputs
             return IntermediateTensors(tensors)
@@ -1385,12 +1340,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Strategy B: underscore-separated suffix
         # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
         underscore_suffix_expert_params_mapping = [
-            (
-                f"{param_name}weight_",
-                f"{weight_name.rstrip('.')}_",
-                expert_id,
-                shard_id,
-            )
+            (f"{param_name}weight_", f"{weight_name.rstrip('.')}_", expert_id, shard_id)
             for (
                 param_name,
                 weight_name,
@@ -1512,7 +1462,7 @@ class Gemma4ForCausalLM(
             # from `model.language_model.*`. We reuse that same checkpoint
             # and adapter naming for the text-only Gemma4ForCausalLM path,
             # so LoRA keys from the conditional wrapper map onto `model.*`.
-            "model.language_model.": "model.",
+            "model.language_model.": "model."
         },
         orig_to_new_substr={
             # Gemma4ForConditionalGeneration names MoE adapter targets under
@@ -1526,15 +1476,8 @@ class Gemma4ForCausalLM(
     # attention and full attention without k_eq_v). k_eq_v layers use
     # separate q_proj + k_proj without packing.
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1545,8 +1488,7 @@ class Gemma4ForCausalLM(
         self.config = config
         self.quant_config = quant_config
         self.model = Gemma4Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         self.lm_head = ParallelLMHead(
@@ -1559,8 +1501,7 @@ class Gemma4ForCausalLM(
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
-            config.vocab_size,
-            soft_cap=getattr(config, "final_logit_softcapping", None),
+            config.vocab_size, soft_cap=getattr(config, "final_logit_softcapping", None)
         )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -1609,10 +1550,7 @@ class Gemma4ForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1639,20 +1577,11 @@ class Gemma4ForCausalLM(
                 # Remap new HF checkpoint naming to internal vLLM
                 # naming: HF moved per_expert_scale to router and
                 # renamed moe → experts in the MoE block.
-                name = name.replace(
-                    ".router.per_expert_scale",
-                    ".moe.per_expert_scale",
-                )
+                name = name.replace(".router.per_expert_scale", ".moe.per_expert_scale")
                 if ".experts.gate_up_proj" in name:
-                    name = name.replace(
-                        ".experts.gate_up_proj",
-                        ".moe.gate_up_proj",
-                    )
+                    name = name.replace(".experts.gate_up_proj", ".moe.gate_up_proj")
                 elif ".experts.down_proj" in name:
-                    name = name.replace(
-                        ".experts.down_proj",
-                        ".moe.down_proj",
-                    )
+                    name = name.replace(".experts.down_proj", ".moe.down_proj")
 
                 # Remap individual 2D expert weights:
                 # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
@@ -1708,12 +1637,7 @@ class Gemma4ForCausalLM(
 
         # Skip multimodal weights — handled by the multimodal wrapper.
         # Also skip lm_head when weights are tied.
-        skip = [
-            "audio_tower.",
-            "vision_tower.",
-            "embed_audio.",
-            "embed_vision.",
-        ]
+        skip = ["audio_tower.", "vision_tower.", "embed_audio.", "embed_vision."]
         if self.config.tie_word_embeddings:
             skip.append("lm_head.")
 

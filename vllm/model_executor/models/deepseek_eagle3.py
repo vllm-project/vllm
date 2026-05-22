@@ -150,9 +150,7 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            llama_4_scaling=None,
+            positions=positions, hidden_states=hidden_states, llama_4_scaling=None
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -166,11 +164,7 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV2Eagle3Model(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        start_layer_id: int = 0,
-        prefix: str = "",
+        self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = ""
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -234,10 +228,7 @@ class DeepseekV2Eagle3Model(nn.Module):
             self.fc_norm = None
 
         self.norm_output = getattr(self.config, "norm_output", False)
-        self.norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -378,10 +369,7 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (
@@ -393,19 +381,12 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
-            (
-                logits.shape[0],
-                self.config.vocab_size,
-            ),
-            float("-inf"),
+            (logits.shape[0], self.config.vocab_size), float("-inf")
         )
         logits_new[:, targets] = logits
         return logits_new
 
-    def combine_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Combine multiple auxiliary hidden states returned by Eagle3
         return self.model.fc(hidden_states)
 
@@ -433,11 +414,7 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=None, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
 
 

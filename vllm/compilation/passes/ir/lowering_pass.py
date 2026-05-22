@@ -35,10 +35,9 @@ class VllmIRLoweringPass(VllmInductorPass):
 
         # Look for any call_function node where the target is a vLLM IR op.
         # Then, lower_matched_op will select, trace, and insert the implementation.
-        register_graph_pattern(
-            CallFunctionVarArgs(self.ops),
-            pass_dict=self.patterns,
-        )(self.lower_matched_op)
+        register_graph_pattern(CallFunctionVarArgs(self.ops), pass_dict=self.patterns)(
+            self.lower_matched_op
+        )
 
     def lower_matched_op(self, match: Match, *args, **kwargs):
         # TODO(luka) I think args and kwargs are for the match, but just use the node?

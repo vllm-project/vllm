@@ -7,9 +7,7 @@ logger = init_logger(__name__)
 
 
 try:
-    from tpu_inference.platforms import (
-        TpuPlatform as TpuInferencePlatform,
-    )
+    from tpu_inference.platforms import TpuPlatform as TpuInferencePlatform
 
     TpuPlatform = TpuInferencePlatform  # type: ignore
     USE_TPU_INFERENCE = True

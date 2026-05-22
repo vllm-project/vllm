@@ -182,10 +182,7 @@ class KimiK2ReasoningParser(ReasoningParser):
             )
 
         # still reasoning (no content)
-        return (
-            model_output[start_token_index:],
-            None,
-        )
+        return (model_output[start_token_index:], None)
 
     def extract_reasoning_streaming(
         self,

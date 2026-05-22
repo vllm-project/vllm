@@ -55,9 +55,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, parallel_stat
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -71,9 +69,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -238,9 +234,7 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
 
     gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
     dist.all_gather(
-        gathered_tensors,
-        local_tensor,
-        group=parallel_state.get_tp_group().device_group,
+        gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group
     )
 
     gathered_tensors_split = [
@@ -345,18 +339,12 @@ class Glm4vVisionAttention(nn.Module):
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
+                qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
             )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -677,8 +665,7 @@ class Glm4vVisionTransformer(nn.Module):
         )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
+            head_size=head_dim, dtype=torch.get_default_dtype()
         )
 
     @property
@@ -728,10 +715,7 @@ class Glm4vVisionTransformer(nn.Module):
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
         max_seqlen = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -742,9 +726,7 @@ class Glm4vVisionTransformer(nn.Module):
         return max_seqlen
 
     def forward(
-        self,
-        x: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
+        self, x: torch.Tensor, grid_thw: torch.Tensor | list[list[int]]
     ) -> torch.Tensor:
         if isinstance(grid_thw, list):
             grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
@@ -904,12 +886,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         )
         return max_image_size
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
@@ -922,16 +899,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_width, image_height=target_height
         )
 
     def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
+        self, *, image_width: int, image_height: int, num_frames: int
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
@@ -961,9 +933,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -1105,10 +1075,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return selected_timestamps
 
     def _construct_video_placeholder(
-        self,
-        video_array: np.ndarray,
-        metadata: dict[str, Any],
-        grid_thw: torch.Tensor,
+        self, video_array: np.ndarray, metadata: dict[str, Any], grid_thw: torch.Tensor
     ) -> str:
         hf_processor = self.get_hf_processor()
         tokenizer = self.get_tokenizer()
@@ -1298,9 +1265,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt = prompt.replace(
-                    "<|begin_of_video|><|video|><|end_of_video|>",
-                    video_placeholder,
-                    1,
+                    "<|begin_of_video|><|video|><|end_of_video|>", video_placeholder, 1
                 )
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
@@ -1313,21 +1278,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             video_outputs = dict()
 
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
-        combined_outputs = dict(
-            processed_outputs,
-            **video_outputs,
-        )
+        combined_outputs = dict(processed_outputs, **video_outputs)
         return BatchFeature(combined_outputs)
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
@@ -1362,8 +1319,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video, metadata, grid_thw
             )
             return PromptUpdateDetails.select_token_id(
-                placeholder,
-                embed_token_id=hf_processor.video_token_id,
+                placeholder, embed_token_id=hf_processor.video_token_id
             )
 
         return [
@@ -1389,11 +1345,7 @@ class Glm4vForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_up_proj"],
     }
 
@@ -1607,28 +1559,18 @@ class Glm4vForConditionalGeneration(
                 yield offset, t, h // spatial_merge_size, w // spatial_merge_size
             elif mm_feature.modality == "video":
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
-                yield (
-                    offset,
-                    t,
-                    h // spatial_merge_size,
-                    w // spatial_merge_size,
-                )
+                yield (offset, t, h // spatial_merge_size, w // spatial_merge_size)
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-        ) in self.iter_mm_grid_thw(mm_features):
+        for offset, llm_grid_t, llm_grid_h, llm_grid_w in self.iter_mm_grid_thw(
+            mm_features
+        ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
@@ -1685,10 +1627,7 @@ class Glm4vForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1705,17 +1644,11 @@ class Glm4vForConditionalGeneration(
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         merge_size = self.config.vision_config.spatial_merge_size
         return num_image_tokens * (merge_size**2)
 
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         merge_size = self.config.vision_config.spatial_merge_size
         return num_vision_tokens // (merge_size**2)
 
@@ -1727,13 +1660,6 @@ class Glm4vForConditionalGeneration(
 )
 class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }

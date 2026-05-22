@@ -3,9 +3,7 @@
 
 
 import torch
-from compressed_tensors.quantization import (
-    QuantizationArgs,
-)
+from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
@@ -60,9 +58,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.layer_name = layer_name
 
         from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            GroupShape,
-        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 

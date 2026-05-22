@@ -36,8 +36,7 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
-    model="meta-llama/Llama-3.2-1B-Instruct",
-    enforce_eager=True,
+    model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True
 )
 
 VISION_ENGINE_ARGS = AsyncEngineArgs(
@@ -107,9 +106,7 @@ async def generate(
 )
 @pytest.mark.asyncio
 async def test_load(
-    output_kind: RequestOutputKind,
-    engine_args: AsyncEngineArgs,
-    prompt: PromptType,
+    output_kind: RequestOutputKind, engine_args: AsyncEngineArgs, prompt: PromptType
 ):
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
@@ -155,9 +152,7 @@ async def test_load(
 )
 @pytest.mark.asyncio
 async def test_abort(
-    output_kind: RequestOutputKind,
-    engine_args: AsyncEngineArgs,
-    prompt: PromptType,
+    output_kind: RequestOutputKind, engine_args: AsyncEngineArgs, prompt: PromptType
 ):
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
@@ -303,11 +298,7 @@ async def test_multi_abort(output_kind: RequestOutputKind):
     [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
 )
 @pytest.mark.asyncio
-async def test_finished_flag(
-    n: int,
-    engine_args: AsyncEngineArgs,
-    prompt: PromptType,
-):
+async def test_finished_flag(n: int, engine_args: AsyncEngineArgs, prompt: PromptType):
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
@@ -416,8 +407,7 @@ async def test_customize_loggers(monkeypatch):
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
-                TEXT_ENGINE_ARGS,
-                stat_loggers=[MockLoggingStatLogger],
+                TEXT_ENGINE_ARGS, stat_loggers=[MockLoggingStatLogger]
             )
         after.callback(engine.shutdown)
 
@@ -507,8 +497,7 @@ async def test_header_dp_rank_argument():
 
         # Create models first
         models = OpenAIServingModels(
-            engine_client=engine,
-            base_model_paths=BASE_MODEL_PATHS,
+            engine_client=engine, base_model_paths=BASE_MODEL_PATHS
         )
 
         # Create render serving instance (required by OpenAIServingChat)

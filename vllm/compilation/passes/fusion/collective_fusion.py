@@ -14,9 +14,7 @@ from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -65,12 +63,7 @@ def _flashinfer_scaled_mm_out(
     )
 
     flashinfer_scaled_fp8_mm_out(
-        A,
-        B,
-        scale_a,
-        scale_b,
-        out=out,
-        out_dtype=out_dtype or out.dtype,
+        A, B, scale_a, scale_b, out=out, out_dtype=out_dtype or out.dtype
     )
 
 
@@ -119,11 +112,7 @@ def fused_flashinfer_scaled_matmul_reduce_scatter_fake(
     world_size = c10d._resolve_process_group(group_name).size()
     result_shape = list(output_shape)
     result_shape[orig_scatter_dim] //= world_size
-    return torch.empty(
-        result_shape,
-        dtype=out_dtype or torch.bfloat16,
-        device=A.device,
-    )
+    return torch.empty(result_shape, dtype=out_dtype or torch.bfloat16, device=A.device)
 
 
 def fused_flashinfer_scaled_matmul_reduce_scatter(
@@ -187,9 +176,7 @@ def fused_all_gather_flashinfer_scaled_matmul_fake(
     output_shape[gather_dim] *= world_size
     output_shape[-1] = B.shape[1]
     return torch.empty(
-        output_shape,
-        dtype=out_dtype or torch.bfloat16,
-        device=A_shard.device,
+        output_shape, dtype=out_dtype or torch.bfloat16, device=A_shard.device
     )
 
 
@@ -245,9 +232,7 @@ def fused_all_gather_flashinfer_fp4_matmul_fake(
     output_shape[gather_dim] *= world_size
     output_shape[-1] = B.shape[1]
     return torch.empty(
-        output_shape,
-        dtype=out_dtype or torch.bfloat16,
-        device=A_shard.device,
+        output_shape, dtype=out_dtype or torch.bfloat16, device=A_shard.device
     )
 
 
@@ -276,16 +261,13 @@ def fused_all_gather_flashinfer_fp4_matmul(
     group = c10d._resolve_process_group(group_name)
     world_size = group.size()
     output = A_shard.new_empty(
-        A_shard.shape[0] * world_size,
-        B.shape[1],
-        dtype=out_dtype or torch.bfloat16,
+        A_shard.shape[0] * world_size, B.shape[1], dtype=out_dtype or torch.bfloat16
     )
     output_shards = output.chunk(world_size)
 
     A = A_shard.new_empty(A_shard.shape[0] * world_size, A_shard.shape[1])
     A_scale = A_scale_shard.new_empty(
-        A_scale_shard.shape[0] * world_size,
-        A_scale_shard.shape[1],
+        A_scale_shard.shape[0] * world_size, A_scale_shard.shape[1]
     )
 
     def fp4_shard_consumer(shards: list[torch.Tensor], rank: int) -> None:
@@ -302,11 +284,7 @@ def fused_all_gather_flashinfer_fp4_matmul(
         )
 
     torch.distributed._symmetric_memory._pipelined_multi_all_gather_and_consume(
-        [A_shard, A_scale_shard],
-        fp4_shard_consumer,
-        [A, A_scale],
-        group_name,
-        False,
+        [A_shard, A_scale_shard], fp4_shard_consumer, [A, A_scale], group_name, False
     )
     return output
 
@@ -348,10 +326,7 @@ class GEMMReduceScatterPattern(BasePattern):
         def pattern(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
             mm = torch.ops.aten.mm.default(mul, mm_weight)
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
-                mm,
-                dim=0,
-                world_size=self.tp_size,
-                group_name=self.tp.unique_name,
+                mm, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
             )
             return reduce_scatter
 
@@ -379,25 +354,16 @@ class AllGatherGEMMPattern(BasePattern):
         return [x, weight]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            x: torch.Tensor,
-            weight: torch.Tensor,
-        ) -> torch.Tensor:
+        def pattern(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             all_gather = torch.ops.vllm.all_gather.default(
-                x,
-                dim=0,
-                world_size=self.tp_size,
-                group_name=self.tp.unique_name,
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
             )
 
             return torch.ops.aten.mm.default(all_gather, weight)
 
         def replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
-                x,
-                [weight],
-                gather_dim=0,
-                group_name=self.tp.device_group.group_name,
+                x, [weight], gather_dim=0, group_name=self.tp.device_group.group_name
             )
             return mm_outputs
 
@@ -709,10 +675,7 @@ class FlashInferBMMFP8ReduceScatterPattern(
             )
             output = torch.ops.aten.reshape.default(bmm, list(bmm.shape[1:]))
             return torch.ops.vllm.reduce_scatter.default(
-                output,
-                dim=0,
-                world_size=self.tp_size,
-                group_name=self.tp.unique_name,
+                output, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
             )
 
         return _pattern
@@ -824,13 +787,7 @@ class FlashInferAllGatherFP4Pattern(
         a_scale_shard = torch.empty([128, 4], device=self.device, dtype=torch.int32)
         b_scale = torch.empty([4, 128], device=self.device, dtype=torch.uint8)
         alpha = torch.empty([], device=self.device, dtype=torch.float32)
-        return [
-            a_shard_2d,
-            b_2d,
-            a_scale_shard,
-            b_scale,
-            alpha,
-        ]
+        return [a_shard_2d, b_2d, a_scale_shard, b_scale, alpha]
 
     @property
     def pattern(self) -> Callable[..., torch.Tensor]:

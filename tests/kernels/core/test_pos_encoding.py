@@ -155,13 +155,7 @@ def test_rope_module_cache(default_vllm_config):
             rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
         rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
-        rope = get_rope(
-            head_size,
-            max_position,
-            is_neox_style,
-            rope_parameters,
-            dtype,
-        )
+        rope = get_rope(head_size, max_position, is_neox_style, rope_parameters, dtype)
         # different settings cannot share the same rope module
         assert id(rope) not in rope_setting_id_map.values()
         assert all(x.dtype == dtype for x in rope.buffers())
@@ -182,12 +176,6 @@ def test_rope_module_cache(default_vllm_config):
             rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
         rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
-        rope = get_rope(
-            head_size,
-            max_position,
-            is_neox_style,
-            rope_parameters,
-            dtype,
-        )
+        rope = get_rope(head_size, max_position, is_neox_style, rope_parameters, dtype)
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]

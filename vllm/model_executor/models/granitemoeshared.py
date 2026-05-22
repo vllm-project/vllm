@@ -119,17 +119,12 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
         self.residual_multiplier = config.residual_multiplier
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -161,9 +156,7 @@ class GraniteMoeSharedModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
+            self.vocab_size, config.hidden_size, quant_config=quant_config
         )
         self.embedding_multiplier = config.embedding_multiplier
 
@@ -199,11 +192,7 @@ class GraniteMoeSharedModel(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -249,13 +238,7 @@ class GraniteMoeSharedModel(nn.Module):
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # LoRA specific attributes
     embedding_modules = {
@@ -284,9 +267,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head.weight = self.model.embed_tokens.weight
 
         self.logits_processor = LogitsProcessor(
-            config.vocab_size,
-            config.vocab_size,
-            scale=1 / self.config.logits_scaling,
+            config.vocab_size, config.vocab_size, scale=1 / self.config.logits_scaling
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -315,7 +296,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             {
                 "hidden_states": torch.zeros(
                     (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
+                )
             }
         )
 

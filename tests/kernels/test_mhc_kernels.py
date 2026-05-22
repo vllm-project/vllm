@@ -44,7 +44,7 @@ def mhc_pre_ref(
             hc_scale[0].expand(hc_mult),
             hc_scale[1].expand(hc_mult),
             hc_scale[2].expand(hc_mult * hc_mult),
-        ],
+        ]
     )
     mixes = mixes * hc_scale + hc_base
 
@@ -91,10 +91,7 @@ def hc_head_ref(
     return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUDA required",
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
@@ -159,10 +156,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm required",
-)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
@@ -180,15 +174,7 @@ def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
     out.fill_(float("nan"))
 
     result = torch.ops.vllm.hc_head_triton(
-        residual,
-        fn,
-        hc_scale,
-        hc_base,
-        out,
-        hidden_size,
-        rms_eps,
-        hc_eps,
-        hc_mult,
+        residual, fn, hc_scale, hc_base, out, hidden_size, rms_eps, hc_eps, hc_mult
     )
 
     assert result is None

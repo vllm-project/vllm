@@ -87,10 +87,7 @@ def add_header(file_path, status):
             for i, line in enumerate(lines):
                 if line.strip() == LICENSE_LINE:
                     # Insert copyright line after license line
-                    lines.insert(
-                        i + 1,
-                        f"{COPYRIGHT_LINE}\n",
-                    )
+                    lines.insert(i + 1, f"{COPYRIGHT_LINE}\n")
                     break
 
             file.writelines(lines)

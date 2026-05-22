@@ -11,12 +11,7 @@ from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"]
-BAICHUAN_LORA_MODULES = [
-    "W_pack",
-    "o_proj",
-    "gate_up_proj",
-    "down_proj",
-]
+BAICHUAN_LORA_MODULES = ["W_pack", "o_proj", "gate_up_proj", "down_proj"]
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
@@ -108,12 +103,8 @@ def test_lora_weights_mapping(baichuan_lora_files):
             expected_lora_lst.append(module)
     expected_lora_modules = set(expected_lora_lst)
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "model.": "language_model.model.",
-        },
-        orig_to_new_substr={
-            ".layers.": ".baichuan_layers.",
-        },
+        orig_to_new_prefix={"model.": "language_model.model."},
+        orig_to_new_substr={".layers.": ".baichuan_layers."},
     )
     peft_helper = PEFTHelper.from_local_dir(
         baichuan_lora_files, max_position_embeddings=4096

@@ -168,7 +168,7 @@ class CudaPlatformBase(Platform):
     dist_backend: str = "nccl"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
     ray_noset_device_env_vars: list[str] = [
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"
     ]
 
     @property
@@ -431,7 +431,7 @@ class CudaPlatformBase(Platform):
                     )
                 if is_backend_supported:
                     logger.info_once(
-                        f"Using backend {vit_attn_backend} for vit attention",
+                        f"Using backend {vit_attn_backend} for vit attention"
                     )
                     return vit_attn_backend
             except ImportError:
@@ -475,11 +475,7 @@ class CudaPlatformBase(Platform):
         timeout: timedelta,
     ) -> ProcessGroup:
         assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
         from torch.distributed.distributed_c10d import ProcessGroupNCCL
 
         backend_options = ProcessGroupNCCL.Options()
@@ -613,9 +609,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def has_device_capability(
-        cls,
-        capability: tuple[int, int] | int,
-        device_id: int = 0,
+        cls, capability: tuple[int, int] | int, device_id: int = 0
     ) -> bool:
         try:
             return super().has_device_capability(capability, device_id)
@@ -654,9 +648,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 if i < j:
                     try:
                         p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                            handle,
-                            peer_handle,
-                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK,
+                            handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK
                         )
                         if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                             return False

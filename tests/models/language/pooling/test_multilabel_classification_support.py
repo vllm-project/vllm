@@ -6,16 +6,11 @@ from transformers import AutoModelForSequenceClassification
 
 
 @pytest.mark.parametrize(
-    "model",
-    ["Rami/multi-label-class-classification-on-github-issues"],
+    "model", ["Rami/multi-label-class-classification-on-github-issues"]
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)

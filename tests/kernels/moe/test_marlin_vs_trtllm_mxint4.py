@@ -5,12 +5,8 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-    fused_marlin_moe,
-)
-from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
-    grouped_topk,
-)
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import grouped_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
     prepare_static_weights_for_trtllm_mxint4_moe,
 )

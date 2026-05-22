@@ -25,26 +25,14 @@ from vllm.v1.worker.workspace import init_workspace_manager
 # Weight shapes for different models: [num_experts, topk, hidden_size,
 # intermediate_size]
 WEIGHT_SHAPES_MOE = {
-    "mixtral-8x7b": [
-        [8, 2, 4096, 14336],
-    ],
-    "deepseek-v2": [
-        [160, 6, 5120, 12288],
-    ],
-    "custom-small": [
-        [8, 2, 2048, 7168],
-    ],
-    "glm45-fp8": [
-        [128, 8, 4096, 1408],
-    ],
-    "Llama-4-Maverick-17B-128E-Instruct-FP8": [
-        [128, 1, 5120, 8192],
-    ],
+    "mixtral-8x7b": [[8, 2, 4096, 14336]],
+    "deepseek-v2": [[160, 6, 5120, 12288]],
+    "custom-small": [[8, 2, 2048, 7168]],
+    "glm45-fp8": [[128, 8, 4096, 1408]],
+    "Llama-4-Maverick-17B-128E-Instruct-FP8": [[128, 1, 5120, 8192]],
 }
 
-DEFAULT_MODELS = [
-    "mixtral-8x7b",
-]
+DEFAULT_MODELS = ["mixtral-8x7b"]
 
 DEFAULT_BATCH_SIZES = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 DEFAULT_TP_SIZES = [1]
@@ -150,10 +138,7 @@ def bench_run(
             allow_new_interface=True,
             use_monolithic=False,
         ),
-        CutlassExpertsFp8(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        ),
+        CutlassExpertsFp8(moe_config=moe_config, quant_config=quant_config),
     )
 
     # Create CUDA graphs for CUTLASS (match benchmark_moe.py pattern exactly)
@@ -180,12 +165,7 @@ def bench_run(
         # Capture 10 invocations like benchmark_moe.py
         for _ in range(10):
             fused_experts(
-                a,
-                w1_fp8q,
-                w2_fp8q,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
+                a, w1_fp8q, w2_fp8q, topk_weights, topk_ids, quant_config=quant_config
             )
     torch.accelerator.synchronize()
 

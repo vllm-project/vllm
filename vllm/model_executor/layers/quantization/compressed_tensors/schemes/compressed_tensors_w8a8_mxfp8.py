@@ -13,10 +13,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
-from vllm.model_executor.parameter import (
-    GroupQuantScaleParameter,
-    ModelWeightParameter,
-)
+from vllm.model_executor.parameter import GroupQuantScaleParameter, ModelWeightParameter
 
 __all__ = ["CompressedTensorsW8A8Mxfp8"]
 
@@ -84,9 +81,6 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)

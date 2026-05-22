@@ -76,9 +76,7 @@ class FunAudioChatAudioEncoderConfig(PretrainedConfig):
 
 class FunAudioChatConfig(PretrainedConfig):
     model_type = "funaudiochat"
-    attribute_map = {
-        "audio_token_id": "audio_token_index",
-    }
+    attribute_map = {"audio_token_id": "audio_token_index"}
 
     def __init__(
         self,

@@ -375,9 +375,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                         "{i} should be specified outside of the NeMo dictionary"
                     )
 
-            self.embed = NemoConvSubsampling(
-                **default_nemo_conv_settings,
-            )
+            self.embed = NemoConvSubsampling(**default_nemo_conv_settings)
         else:
             raise ValueError("unknown input_layer: " + input_layer)
 
@@ -423,11 +421,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             # Handle the special causal case
             subsampling_causal_cond = self.nemo_conv_settings.get(
                 "subsampling", "dw_striding"
-            ) in [
-                "dw_striding",
-                "striding",
-                "striding_conv1d",
-            ]
+            ) in ["dw_striding", "striding", "striding_conv1d"]
             is_causal = self.nemo_conv_settings.get("is_causal", False)
             if is_causal and subsampling_causal_cond:
                 lens_change = (
@@ -577,7 +571,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 f"""The sequence length after time reduction is invalid: 
                 {seq_len}. Your input feature is too short. Consider 
                 filtering out the very short sentence from data 
-                loader""",
+                loader"""
             )
 
         batch_size = xs_pad.shape[0]
@@ -1178,9 +1172,7 @@ class AudioEmbedding(nn.Module):
                         "{i} should be specified outside of the NeMo dictionary"
                     )
 
-            self.conv_ds = NemoConvSubsampling(
-                **default_nemo_conv_settings,
-            )
+            self.conv_ds = NemoConvSubsampling(**default_nemo_conv_settings)
         else:
             self.conv_ds = None
 

@@ -34,16 +34,8 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     video = VideoAsset(name="baby_reading", num_frames=16).np_ndarrays
 
     inputs = [
-        (
-            [INTERLEAVED_PROMPT],
-            [images],
-            [video],
-        ),
-        (
-            [NONINTERLEAVED_PROMPT],
-            [images],
-            [video],
-        ),
+        ([INTERLEAVED_PROMPT], [images], [video]),
+        ([NONINTERLEAVED_PROMPT], [images], [video]),
     ]
 
     with vllm_runner(

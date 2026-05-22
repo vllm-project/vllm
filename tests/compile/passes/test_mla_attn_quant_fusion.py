@@ -208,18 +208,10 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             "scale": self.fp8_linear.input_scale,
         }
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-    ):
+    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor):
         """Forward pass that creates the MLA attention + FP8 quant pattern."""
         attn_output = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(q.shape[0], self.output_dim),
+            q, kv_c_normed, k_pe, output_shape=(q.shape[0], self.output_dim)
         )
         return self.fp8_linear(attn_output)
 
@@ -254,18 +246,10 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
             },
         )
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-    ):
+    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor):
         """Forward pass that creates the MLA attention + NVFP4 quant pattern."""
         attn_output = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(q.shape[0], self.output_dim),
+            q, kv_c_normed, k_pe, output_shape=(q.shape[0], self.output_dim)
         )
         quant_output, output_block_scale = scaled_fp4_quant(
             attn_output, 1 / self.w["scale"]
@@ -285,8 +269,7 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
 
     quant_key = kFp8Dynamic128Sym
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
-        weight_block_size=[128, 128],
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
     )
 
     def __init__(self, *args, **kwargs):
@@ -325,18 +308,10 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
             "wscale": self.block_fp8_linear.weight_scale_inv,
         }
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-    ):
+    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor):
         """Forward pass: MLA attention -> block FP8 linear (group quant)."""
         attn_output = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(q.shape[0], self.output_dim),
+            q, kv_c_normed, k_pe, output_shape=(q.shape[0], self.output_dim)
         )
         return self.block_fp8_linear(attn_output)
 
@@ -357,30 +332,20 @@ if current_platform.is_cuda():
     # (num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank)
     MLA_DIMS = [(16, 128, 64, 128, 512)]
     PATTERN_TEST_MODELS_MLA_FP8 = [
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            TestMLAAttentionFp8StaticQuantPatternModel,
-        )
+        ("deepseek-ai/DeepSeek-V2-Lite", TestMLAAttentionFp8StaticQuantPatternModel)
     ]
     PATTERN_TEST_MODELS_MLA_GROUP_FP8 = [
-        (
-            "deepseek-ai/DeepSeek-V3",
-            TestMLAAttentionFp8GroupQuantPatternModel,
-        )
+        ("deepseek-ai/DeepSeek-V3", TestMLAAttentionFp8GroupQuantPatternModel)
     ]
     PATTERN_TEST_MODELS_MLA_FP4 = [
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            TestMLAAttentionNvfp4QuantPatternModel,
-        )
+        ("deepseek-ai/DeepSeek-V2-Lite", TestMLAAttentionNvfp4QuantPatternModel)
     ]
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
     BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
 
 
 @pytest.mark.parametrize(
-    "num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank",
-    MLA_DIMS,
+    "num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank", MLA_DIMS
 )
 @pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -388,16 +353,12 @@ if current_platform.is_cuda():
     "backend, model_name, model_class, custom_ops",
     list(
         flat_product(
-            BACKENDS_MLA_FP8,
-            PATTERN_TEST_MODELS_MLA_FP8,
-            ["+quant_fp8", "-quant_fp8"],
+            BACKENDS_MLA_FP8, PATTERN_TEST_MODELS_MLA_FP8, ["+quant_fp8", "-quant_fp8"]
         )
     )
     + list(
         flat_product(
-            BACKENDS_MLA_FP8,
-            PATTERN_TEST_MODELS_MLA_GROUP_FP8,
-            ["+quant_fp8"],
+            BACKENDS_MLA_FP8, PATTERN_TEST_MODELS_MLA_GROUP_FP8, ["+quant_fp8"]
         )
     )
     + list(flat_product(BACKENDS_MLA_FP4, PATTERN_TEST_MODELS_MLA_FP4, [""])),
@@ -437,11 +398,7 @@ def test_mla_attention_quant_pattern(
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
-    model_config = ModelConfig(
-        model=model_name,
-        max_model_len=2048,
-        dtype=dtype,
-    )
+    model_config = ModelConfig(model=model_name, max_model_len=2048, dtype=dtype)
     vllm_config = VllmConfig(
         model_config=model_config,
         scheduler_config=SchedulerConfig(
@@ -450,8 +407,7 @@ def test_mla_attention_quant_pattern(
             is_encoder_decoder=model_config.is_encoder_decoder,
         ),
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=custom_ops_list,
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=custom_ops_list
         ),
         cache_config=CacheConfig(cache_dtype="auto"),
         attention_config=AttentionConfig(backend=backend),

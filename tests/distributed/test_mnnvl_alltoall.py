@@ -161,9 +161,7 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
 
     vllm_config = VllmConfig()
     vllm_config.parallel_config = ParallelConfig(
-        data_parallel_size=world_size,
-        is_moe_model=True,
-        data_parallel_rank=rank,
+        data_parallel_size=world_size, is_moe_model=True, data_parallel_rank=rank
     )
     return set_forward_context(
         _AttnMeta(),
@@ -300,10 +298,7 @@ def _one_sided_lifecycle_worker(rank, world_size):
     assert manager.world_size == world_size
 
     init_kwargs = dict(
-        max_num_tokens=1024,
-        top_k=2,
-        num_experts=world_size * 8,
-        hidden_size=4096,
+        max_num_tokens=1024, top_k=2, num_experts=world_size * 8, hidden_size=4096
     )
 
     # Initialize
@@ -335,11 +330,7 @@ def _one_sided_lifecycle_worker(rank, world_size):
 @pytest.mark.parametrize("world_size", [2])
 def test_one_sided_manager_lifecycle(world_size):
     """Test init, cleanup, and reinit with different params."""
-    _spawn_workers(
-        _one_sided_lifecycle_worker,
-        world_size,
-        dp_size=world_size,
-    )
+    _spawn_workers(_one_sided_lifecycle_worker, world_size, dp_size=world_size)
 
 
 # ---------------------------------------------------------------------------
@@ -365,18 +356,14 @@ def _one_sided_workspace_grow_worker(rank, world_size):
     manager = FlashInferNVLinkOneSidedManager(cpu_group)
 
     base_kwargs = dict(
-        max_num_tokens=1024,
-        top_k=2,
-        num_experts=world_size * 8,
-        hidden_size=4096,
+        max_num_tokens=1024, top_k=2, num_experts=world_size * 8, hidden_size=4096
     )
     nvfp4_kwargs = dict(
         dispatch_dtype_bytes_per_elem=0,
         dispatch_scale_bytes_per_token=base_kwargs["hidden_size"] // 16,
     )
     bf16_kwargs = dict(
-        dispatch_dtype_bytes_per_elem=2,
-        dispatch_scale_bytes_per_token=0,
+        dispatch_dtype_bytes_per_elem=2, dispatch_scale_bytes_per_token=0
     )
 
     # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
@@ -419,11 +406,7 @@ def test_one_sided_manager_workspace_grow(world_size):
     """A later initialize() with a larger per-token payload must grow the
     workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
     payload must no-op."""
-    _spawn_workers(
-        _one_sided_workspace_grow_worker,
-        world_size,
-        dp_size=world_size,
-    )
+    _spawn_workers(_one_sided_workspace_grow_worker, world_size, dp_size=world_size)
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +453,7 @@ def _args_dispatch_combine_worker(rank, world_size):
         dtype=torch.float32,
     )
     ids = torch.full(
-        (tokens_per_rank, experts_per_token),
-        rank,
-        device=device,
-        dtype=torch.long,
+        (tokens_per_rank, experts_per_token), rank, device=device, dtype=torch.long
     )
 
     with _make_forward_context(rank, world_size, tokens_per_rank):
@@ -483,9 +463,7 @@ def _args_dispatch_combine_worker(rank, world_size):
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             # -- dispatch_router_logits --
             d_hidden, d_router = manager.dispatch_router_logits(
-                hidden.clone(),
-                router.clone(),
-                is_sequence_parallel=True,
+                hidden.clone(), router.clone(), is_sequence_parallel=True
             )
             assert d_hidden.shape == (total_tokens, hidden_size)
             assert d_router.shape == (total_tokens, num_experts)
@@ -494,20 +472,15 @@ def _args_dispatch_combine_worker(rank, world_size):
                 s = r * tokens_per_rank
                 e = (r + 1) * tokens_per_rank
                 torch.testing.assert_close(
-                    d_hidden[s:e],
-                    torch.full_like(d_hidden[s:e], float(r + 1)),
+                    d_hidden[s:e], torch.full_like(d_hidden[s:e], float(r + 1))
                 )
                 torch.testing.assert_close(
-                    d_router[s:e],
-                    torch.full_like(d_router[s:e], float(r + 1) * 10),
+                    d_router[s:e], torch.full_like(d_router[s:e], float(r + 1) * 10)
                 )
 
             # -- dispatch --
             d_hidden2, d_weights, d_ids = manager.dispatch(
-                hidden.clone(),
-                weights.clone(),
-                ids.clone(),
-                is_sequence_parallel=True,
+                hidden.clone(), weights.clone(), ids.clone(), is_sequence_parallel=True
             )
             assert d_hidden2.shape == (total_tokens, hidden_size)
             assert d_weights.shape == (total_tokens, experts_per_token)
@@ -517,8 +490,7 @@ def _args_dispatch_combine_worker(rank, world_size):
                 s = r * tokens_per_rank
                 e = (r + 1) * tokens_per_rank
                 torch.testing.assert_close(
-                    d_weights[s:e],
-                    torch.full_like(d_weights[s:e], float(r + 1) * 100),
+                    d_weights[s:e], torch.full_like(d_weights[s:e], float(r + 1) * 100)
                 )
                 assert (d_ids[s:e] == r).all()
 
@@ -538,8 +510,7 @@ def _args_dispatch_combine_worker(rank, world_size):
             for i in range(tokens_per_rank):
                 expected_val = float(rank * tokens_per_rank + i) * world_size
                 torch.testing.assert_close(
-                    combined[i],
-                    torch.full_like(combined[i], expected_val),
+                    combined[i], torch.full_like(combined[i], expected_val)
                 )
 
             torch.distributed.barrier()
@@ -601,10 +572,7 @@ def _two_sided_data_worker(rank, world_size):
     # Create deterministic per-rank test data
     torch.manual_seed(rank + 42)
     hidden = torch.randn(
-        tokens_per_rank,
-        hidden_size,
-        device=device,
-        dtype=torch.bfloat16,
+        tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
     )
     # Assign each token to experts spread across ranks so tokens move between GPUs
     topk_ids = torch.randint(
@@ -615,19 +583,13 @@ def _two_sided_data_worker(rank, world_size):
         dtype=torch.int32,
     )
     topk_weights = torch.rand(
-        tokens_per_rank,
-        experts_per_token,
-        device=device,
-        dtype=torch.float32,
+        tokens_per_rank, experts_per_token, device=device, dtype=torch.float32
     )
 
     # Unquantized config: quant_dtype=None means moe_kernel_quantize_input is a no-op
     no_quant = FusedMoEQuantDesc()
     quant_config = FusedMoEQuantConfig(
-        _a1=no_quant,
-        _a2=no_quant,
-        _w1=no_quant,
-        _w2=no_quant,
+        _a1=no_quant, _a2=no_quant, _w1=no_quant, _w2=no_quant
     )
     assert quant_config.quant_dtype is None  # sanity: no quantization
 
@@ -780,10 +742,7 @@ def _one_sided_data_worker(rank, world_size):
                 dtype=torch.int32,
             )
             topk_weights = torch.rand(
-                tokens_per_rank,
-                experts_per_token,
-                device=device,
-                dtype=torch.float32,
+                tokens_per_rank, experts_per_token, device=device, dtype=torch.float32
             )
 
             # --- One-sided dispatch ---
@@ -811,8 +770,7 @@ def _one_sided_data_worker(rank, world_size):
                 dtype=torch.bfloat16,
             )
             combined = manager.moe_alltoall.combine(
-                payload=expert_output,
-                runtime_max_tokens_per_rank=runtime_max_tokens,
+                payload=expert_output, runtime_max_tokens_per_rank=runtime_max_tokens
             )
             assert combined.shape == (tokens_per_rank, hidden_size)
 

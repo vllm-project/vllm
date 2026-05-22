@@ -3,10 +3,7 @@
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 
 
 class TestGranite20bFcToolParser(ToolParserTests):
@@ -70,7 +67,7 @@ class TestGranite20bFcToolParser(ToolParserTests):
             xfail_streaming={
                 "test_surrounding_text": (
                     "Granite 20B FC streaming requires <function_call> at start"
-                ),
+                )
             },
             xfail_nonstreaming={},
         )

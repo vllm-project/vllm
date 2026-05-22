@@ -30,10 +30,7 @@ TOOLS = [
                         "type": "string",
                         "description": "The city and state, e.g. San Francisco, CA",
                     },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                    },
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
                 },
                 "required": ["location"],
             },
@@ -120,10 +117,7 @@ PRODUCT_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "inserted": {
-                        "type": "boolean",
-                        "description": "inserted.",
-                    },
+                    "inserted": {"type": "boolean", "description": "inserted."},
                     "product_id": {
                         "type": "integer",
                         "description": "The product ID of the product.",

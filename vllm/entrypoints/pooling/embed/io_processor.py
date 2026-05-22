@@ -72,10 +72,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if self.enable_chunked_processing:
             self._pre_process_chunked(ctx)
 
-    def post_process_online(
-        self,
-        ctx: PoolingServeContext,
-    ):
+    def post_process_online(self, ctx: PoolingServeContext):
         if ctx.final_res_batch is None:
             raise ValueError("Final response batch not available")
 
@@ -265,8 +262,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     @staticmethod
     def _load_st_prompts(
-        model: str | Any,
-        revision: str | None,
+        model: str | Any, revision: str | None
     ) -> dict[str, str] | None:
         """Load ``task_instructions`` from ``config_sentence_transformers.json``."""
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
@@ -287,9 +283,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     @staticmethod
     def _mixed_input_to_messages(
-        inp: CohereEmbedInput,
-        *,
-        task_prefix: str | None = None,
+        inp: CohereEmbedInput, *, task_prefix: str | None = None
     ) -> list[ChatCompletionMessageParam]:
         """Build chat messages from a mixed text+image input.
 
@@ -317,8 +311,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             elif item.type == "image_url" and item.image_url is not None:
                 parts.append(
                     ChatCompletionContentPartImageParam(
-                        type="image_url",
-                        image_url=ImageURL(url=item.image_url["url"]),
+                        type="image_url", image_url=ImageURL(url=item.image_url["url"])
                     )
                 )
         messages.append(CustomChatCompletionMessageParam(role="user", content=parts))
@@ -326,8 +319,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     @staticmethod
     def _check_cohere_max_tokens(
-        outputs: list[PoolingRequestOutput],
-        max_tokens_check: int | None,
+        outputs: list[PoolingRequestOutput], max_tokens_check: int | None
     ) -> None:
         """Raise if any output exceeds *max_tokens_check* tokens.
 
@@ -361,10 +353,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def create_pooling_params(self, request):
         if isinstance(request, CohereEmbedRequest):
-            return PoolingParams(
-                task="embed",
-                dimensions=request.output_dimension,
-            )
+            return PoolingParams(task="embed", dimensions=request.output_dimension)
         return super().create_pooling_params(request)
 
     def _pre_process_cohere_online(self, ctx: PoolingServeContext) -> None:
@@ -405,10 +394,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
             if task_prefix is None:
                 ctx.engine_inputs = self._preprocess_cohere_text_completion(
-                    request,
-                    texts,
-                    truncate_prompt_tokens,
-                    truncation_side,
+                    request, texts, truncate_prompt_tokens, truncation_side
                 )
                 return
 
@@ -423,10 +409,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             ]
             if self._has_chat_template():
                 ctx.engine_inputs = self._batch_render_chat(
-                    request,
-                    all_messages,
-                    truncate_prompt_tokens,
-                    truncation_side,
+                    request, all_messages, truncate_prompt_tokens, truncation_side
                 )
             else:
                 ctx.engine_inputs = self._preprocess_cohere_text_completion(
@@ -500,15 +483,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
         tok_params = proxy.build_tok_params(self.model_config)
         chat_params = proxy.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
+            self.chat_template, self.chat_template_content_format
         ).with_defaults(
             merge_kwargs(
                 None,
-                dict(
-                    tools=None,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
-                ),
+                dict(tools=None, tokenize=is_mistral_tokenizer(renderer.tokenizer)),
             ),
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
@@ -532,9 +511,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             )
 
     def _apply_task_instruction(
-        self,
-        texts: list[str],
-        input_type: str | None,
+        self, texts: list[str], input_type: str | None
     ) -> list[str]:
         """Prepend the task-instruction prefix for *input_type*.
 
@@ -581,9 +558,7 @@ class JinaRankingTokenEmbedIOProcessor(
             )
 
             engine_inputs = self._preprocess_cmpl_online(
-                request,
-                prompt_input=prompt_input,
-                prompt_embeds=None,
+                request, prompt_input=prompt_input, prompt_embeds=None
             )
         elif isinstance(request, PoolingChatLikeRequest):
             raise ValueError("The JinaForRanking does not support chat Request.")

@@ -17,26 +17,19 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
 
 
-def get_attn_isa(
-    block_size: int | None = None,
-    dtype: torch.dtype | None = None,
-):
+def get_attn_isa(block_size: int | None = None, dtype: torch.dtype | None = None):
     # Delegate to _get_attn_isa so the fallback path applies the same arch
     # gating (e.g. RISC-V RVV is only chosen when the build's hardcoded
     # VLEN=128 kernel is actually present; on VLEN=256 / scalar hosts it
     # correctly falls through to vec/vec16).
     return _get_attn_isa(
-        dtype if dtype is not None else torch.bfloat16,
-        block_size if block_size else 32,
+        dtype if dtype is not None else torch.bfloat16, block_size if block_size else 32
     )
 
 
 # rand number generation takes too much time, cache rand tensors
 @functools.lru_cache(maxsize=128, typed=False)
-def tensor_cache(
-    elem_num: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
+def tensor_cache(elem_num: int, dtype: torch.dtype) -> torch.Tensor:
     tensor = torch.randn(elem_num, dtype=dtype)
     return tensor
 
@@ -75,27 +68,13 @@ def main(
         15 * torch.rand((num_query_heads,), dtype=torch.bfloat16) if use_sink else None
     )
 
-    query = tensor_cache(
-        elem_num=token_num * num_query_heads * head_size,
-        dtype=dtype,
-    )
-    query = query.view(
-        token_num,
-        num_query_heads,
-        head_size,
-    )
+    query = tensor_cache(elem_num=token_num * num_query_heads * head_size, dtype=dtype)
+    query = query.view(token_num, num_query_heads, head_size)
 
     key_value = tensor_cache(
-        elem_num=2 * num_blocks * num_kv_heads * block_size * head_size,
-        dtype=dtype,
+        elem_num=2 * num_blocks * num_kv_heads * block_size * head_size, dtype=dtype
     )
-    key_value = key_value.view(
-        2,
-        num_blocks,
-        block_size,
-        num_kv_heads,
-        head_size,
-    )
+    key_value = key_value.view(2, num_blocks, block_size, num_kv_heads, head_size)
     key_cache, value_cache = key_value.unbind(0)
 
     # KV cache for CPU attention

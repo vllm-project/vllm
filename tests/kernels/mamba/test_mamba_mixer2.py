@@ -96,10 +96,7 @@ def mixer2_gated_norm_tensor_parallel(
     gate_states = torch.randn(batch_size, seq_len, hidden_size)
 
     # create gated-norm with TP
-    mixer = Mixer2RMSNormGated(
-        full_hidden_size=hidden_size,
-        full_n_groups=n_groups,
-    )
+    mixer = Mixer2RMSNormGated(full_hidden_size=hidden_size, full_n_groups=n_groups)
     mixer.weight.weight_loader(mixer.weight, weight)  # load
 
     # create gated-norm without TP to compute reference
@@ -117,8 +114,7 @@ def mixer2_gated_norm_tensor_parallel(
         ),
     ):
         mixer_single_gpu = Mixer2RMSNormGated(
-            full_hidden_size=hidden_size,
-            full_n_groups=n_groups,
+            full_hidden_size=hidden_size, full_n_groups=n_groups
         )
     # assign weight to single-gpu mixer
     mixer_single_gpu.weight.data = weight

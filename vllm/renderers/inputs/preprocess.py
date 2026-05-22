@@ -254,8 +254,7 @@ def extract_target_prompt(model_config: "ModelConfig", prompt: object):
 
 
 def extract_prompt_components(
-    model_config: "ModelConfig",
-    prompt: PromptType | EngineInput,
+    model_config: "ModelConfig", prompt: PromptType | EngineInput
 ) -> PromptComponents:
     target_prompt = extract_target_prompt(model_config, prompt)
 
@@ -266,13 +265,9 @@ def extract_prompt_components(
     )
 
 
-def extract_prompt_len(
-    model_config: "ModelConfig",
-    prompt: PromptType | EngineInput,
-):
+def extract_prompt_len(model_config: "ModelConfig", prompt: PromptType | EngineInput):
     target_prompt = extract_target_prompt(model_config, prompt)
 
     return length_from_prompt_token_ids_or_embeds(
-        target_prompt.get("prompt_token_ids"),
-        target_prompt.get("prompt_embeds"),
+        target_prompt.get("prompt_token_ids"), target_prompt.get("prompt_embeds")
     )

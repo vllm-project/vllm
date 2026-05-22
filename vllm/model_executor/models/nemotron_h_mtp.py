@@ -11,9 +11,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -31,10 +29,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP
-from .nemotron_h import (
-    NemotronHAttentionDecoderLayer,
-    NemotronHMoEDecoderLayer,
-)
+from .nemotron_h import NemotronHAttentionDecoderLayer, NemotronHMoEDecoderLayer
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -81,8 +76,7 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
 
         if has_end_norm:
             self.final_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=getattr(config, "layer_norm_epsilon", 1e-5),
+                config.hidden_size, eps=getattr(config, "layer_norm_epsilon", 1e-5)
             )
 
     def forward(
@@ -108,9 +102,7 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
         # Call parent forward (Attention)
         # Parent forward expects: hidden_states, residual
         hidden_states, residual = super().forward(
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
 
         # End norm
@@ -168,8 +160,7 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 
         if has_end_norm:
             self.final_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=getattr(config, "layer_norm_epsilon", 1e-5),
+                config.hidden_size, eps=getattr(config, "layer_norm_epsilon", 1e-5)
             )
 
     def forward(
@@ -194,8 +185,7 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 
         # Call parent forward (MoE)
         hidden_states, residual = super().forward(
-            hidden_states=hidden_states,
-            residual=residual,
+            hidden_states=hidden_states, residual=residual
         )
 
         # End norm
@@ -232,10 +222,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
         self.pattern_len = len(self.pattern_str)
         assert self.pattern_len > 0
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         # Build flat list of layers
         self.layers = torch.nn.ModuleDict()
@@ -312,13 +299,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
 class NemotronHMTP(nn.Module, SupportsPP):
     """NemotronH MTP model."""
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -369,18 +350,11 @@ class NemotronHMTP(nn.Module, SupportsPP):
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
         hidden_states = self.model(
-            input_ids,
-            positions,
-            hidden_states,
-            intermediate_tensors,
-            inputs_embeds,
+            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         """Compute logits for DRAFT token generation."""
         assert self.lm_head is not None, (
             "lm_head not initialized - must be shared from target model"

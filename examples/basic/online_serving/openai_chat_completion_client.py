@@ -44,9 +44,7 @@ def main(args):
 
     # Chat Completion API
     chat_completion = client.chat.completions.create(
-        messages=messages,
-        model=model,
-        stream=args.stream,
+        messages=messages, model=model, stream=args.stream
     )
 
     print("-" * 50)

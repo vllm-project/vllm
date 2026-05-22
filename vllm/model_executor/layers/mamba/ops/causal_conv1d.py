@@ -688,10 +688,7 @@ def causal_conv1d_fn(
             return tot
 
     def grid(META):
-        return (
-            num_program(META, args),
-            triton.cdiv(dim, META["BLOCK_N"]),
-        )
+        return (num_program(META, args), triton.cdiv(dim, META["BLOCK_N"]))
 
     if batch_ptr.device != x.device:
         batch_ptr = batch_ptr.to(x.device)
@@ -1187,10 +1184,7 @@ def causal_conv1d_update(
     np2_statelen = triton.next_power_of_2(state_len)
 
     def grid(META):
-        return (
-            batch,
-            triton.cdiv(dim, META["BLOCK_N"]),
-        )
+        return (batch, triton.cdiv(dim, META["BLOCK_N"]))
 
     _causal_conv1d_update_kernel[grid](
         # Pointers to matrices

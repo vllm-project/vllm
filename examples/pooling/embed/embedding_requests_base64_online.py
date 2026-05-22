@@ -37,7 +37,7 @@ def main(args):
     model = response.json()["data"][0]["id"]
 
     input_texts = [
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ] * 2
 
     # The OpenAI client does not support the embed_dtype and endianness parameters.

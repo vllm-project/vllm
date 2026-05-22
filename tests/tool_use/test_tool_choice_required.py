@@ -7,9 +7,7 @@ import pytest
 import regex as re
 from pydantic import TypeAdapter
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionToolsParam,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 
@@ -28,7 +26,7 @@ EXAMPLE_TOOLS = [
                         "type": "string",
                         "description": "The city to find the weather for"
                         ", e.g. 'San Francisco'",
-                    },
+                    }
                 },
                 "required": ["city"],
                 "additionalProperties": False,

@@ -58,9 +58,7 @@ def correctness_test_embed_models(
         vllm_outputs = vllm_model.embed(example_prompts)
 
     with hf_runner(
-        model_info.name,
-        dtype=model_info.hf_dtype,
-        is_sentence_transformer=True,
+        model_info.name, dtype=model_info.hf_dtype, is_sentence_transformer=True
     ) as hf_model:
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
@@ -75,7 +73,6 @@ async def run_client_embeddings(
     instruction: str = "",
 ) -> list[list[float]]:
     outputs = await client.embeddings.create(
-        model=model_name,
-        input=[instruction + q for q in queries],
+        model=model_name, input=[instruction + q for q in queries]
     )
     return [data.embedding for data in outputs.data]

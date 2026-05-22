@@ -10,10 +10,7 @@ from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 def rocm_per_tensor_float_w8a8_scaled_mm_impl(
@@ -30,24 +27,11 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
         and B.shape[1] % 16 == 0  # K
         and ((bias is None) or (bias.dtype == out_dtype))
     ):
-        output = ops.wvSplitKQ(
-            B.t(),
-            A,
-            out_dtype,
-            As,
-            Bs,
-            num_compute_units(),
-            bias,
-        )
+        output = ops.wvSplitKQ(B.t(), A, out_dtype, As, Bs, num_compute_units(), bias)
     # Fallback
     else:
         output = torch._scaled_mm(
-            A,
-            B,
-            out_dtype=out_dtype,
-            scale_a=As,
-            scale_b=Bs,
-            bias=bias,
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
     return output
 

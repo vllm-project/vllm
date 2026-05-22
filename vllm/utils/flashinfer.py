@@ -457,9 +457,7 @@ if has_flashinfer():
     from vllm.utils.torch_utils import direct_register_custom_op
 
     def _flashinfer_concat_mla_k(
-        k: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
+        k: torch.Tensor, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> None:
         """Custom op wrapper for flashinfer's concat_mla_k.
 
@@ -488,9 +486,7 @@ if has_flashinfer():
         concat_mla_k(k, k_nope, k_pe)
 
     def _flashinfer_concat_mla_k_fake(
-        k: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
+        k: torch.Tensor, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> None:
         return
 
@@ -503,9 +499,7 @@ if has_flashinfer():
     )
 
     @torch.library.custom_op(
-        "vllm::flashinfer_mm_fp4",
-        mutates_args=[],
-        device_types="cuda",
+        "vllm::flashinfer_mm_fp4", mutates_args=[], device_types="cuda"
     )
     def flashinfer_mm_fp4(
         A: torch.Tensor,
@@ -534,9 +528,7 @@ if has_flashinfer():
             backend=backend,
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_fp4",
-    )
+    @torch.library.register_fake("vllm::flashinfer_mm_fp4")
     def flashinfer_mm_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -552,13 +544,9 @@ if has_flashinfer():
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
     @torch.library.custom_op(
-        "vllm::flashinfer_mxfp4_quantize",
-        mutates_args=[],
-        device_types="cuda",
+        "vllm::flashinfer_mxfp4_quantize", mutates_args=[], device_types="cuda"
     )
-    def flashinfer_mxfp4_quantize(
-        a: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def flashinfer_mxfp4_quantize(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
         return _mxfp4_quantize(a)
@@ -576,11 +564,7 @@ if has_flashinfer():
             torch.empty(padded_m, sf_cols, dtype=torch.uint8, device=a.device),
         )
 
-    @torch.library.custom_op(
-        "vllm::bmm_fp8",
-        mutates_args=[],
-        device_types="cuda",
-    )
+    @torch.library.custom_op("vllm::bmm_fp8", mutates_args=[], device_types="cuda")
     def bmm_fp8(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -593,9 +577,7 @@ if has_flashinfer():
 
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
 
-    @torch.library.register_fake(
-        "vllm::bmm_fp8",
-    )
+    @torch.library.register_fake("vllm::bmm_fp8")
     def bmm_fp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -609,9 +591,7 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
-        "vllm::flashinfer_nvfp4_quantize",
-        mutates_args=[],
-        device_types="cuda",
+        "vllm::flashinfer_nvfp4_quantize", mutates_args=[], device_types="cuda"
     )
     def flashinfer_nvfp4_quantize(
         a: torch.Tensor, a_global_sf: torch.Tensor
@@ -623,9 +603,7 @@ if has_flashinfer():
             a, a_global_sf, sfLayout=SfLayout.layout_8x4, do_shuffle=False
         )
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_nvfp4_quantize",
-    )
+    @torch.library.register_fake("vllm::flashinfer_nvfp4_quantize")
     def flashinfer_nvfp4_quantize_fake(
         a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -641,11 +619,7 @@ if has_flashinfer():
             rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
 
-    @torch.library.custom_op(
-        "vllm::mm_mxfp8",
-        mutates_args=[],
-        device_types="cuda",
-    )
+    @torch.library.custom_op("vllm::mm_mxfp8", mutates_args=[], device_types="cuda")
     def mm_mxfp8(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -657,18 +631,10 @@ if has_flashinfer():
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
         return mm_mxfp8_(
-            A,
-            B,
-            A_scale,
-            B_scale,
-            out=None,
-            out_dtype=out_dtype,
-            backend=backend,
+            A, B, A_scale, B_scale, out=None, out_dtype=out_dtype, backend=backend
         )
 
-    @torch.library.register_fake(
-        "vllm::mm_mxfp8",
-    )
+    @torch.library.register_fake("vllm::mm_mxfp8")
     def mm_mxfp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -816,12 +782,7 @@ def flashinfer_scaled_fp8_mm(
     assert scale_a.device.type == "cuda" and scale_b.device.type == "cuda"
 
     output = bmm_fp8(
-        a.unsqueeze(0),
-        b.unsqueeze(0),
-        scale_a,
-        scale_b,
-        out_dtype,
-        "auto",
+        a.unsqueeze(0), b.unsqueeze(0), scale_a, scale_b, out_dtype, "auto"
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:

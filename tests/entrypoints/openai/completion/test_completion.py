@@ -43,10 +43,7 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) -> None:
     completion = await client.completions.create(
         model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=0.0
@@ -64,20 +61,14 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
 
     # test using token IDs
     completion = await client.completions.create(
-        model=model_name,
-        prompt=[0, 0, 0, 0, 0],
-        max_tokens=5,
-        temperature=0.0,
+        model=model_name, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completion_truncation_side_controls_prompt_truncation(
     client: openai.AsyncOpenAI, model_name: str
 ) -> None:
@@ -111,10 +102,7 @@ async def test_completion_truncation_side_controls_prompt_truncation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
@@ -129,10 +117,7 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
@@ -150,10 +135,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
@@ -171,10 +153,7 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_too_many_completion_logprobs(
     client: openai.AsyncOpenAI, model_name: str
 ) -> None:
@@ -209,10 +188,7 @@ async def test_too_many_completion_logprobs(
 
     # the server should still work afterwards
     completion = await client.completions.create(
-        model=model_name,
-        prompt=[0, 0, 0, 0, 0],
-        max_tokens=5,
-        temperature=0.0,
+        model=model_name, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
     )
     assert len(completion.choices[0].text) >= 0
 
@@ -249,20 +225,14 @@ async def test_prompt_logprobs_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completion_streaming(
     client: openai.AsyncOpenAI, model_name: str
 ) -> None:
     prompt = "What is an LLM?"
 
     single_completion = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
+        model=model_name, prompt=prompt, max_tokens=5, temperature=0.0
     )
     single_output = single_completion.choices[0].text
     stream = await client.completions.create(
@@ -282,10 +252,7 @@ async def test_completion_streaming(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str):
     """Parallel sampling without streaming.
     A single request output contains a list of completions.
@@ -331,10 +298,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     """Streaming for parallel sampling.
     The tokens from multiple samples, are flattened into a single stream,
@@ -390,10 +354,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name: str):
     prompt = "What is the capital of France?"
 
@@ -405,10 +366,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": False,
-            "continuous_usage_stats": False,
-        },
+        stream_options={"include_usage": False, "continuous_usage_stats": False},
     )
 
     async for chunk in stream:
@@ -422,10 +380,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": False,
-            "continuous_usage_stats": True,
-        },
+        stream_options={"include_usage": False, "continuous_usage_stats": True},
     )
     async for chunk in stream:
         assert chunk.usage is None
@@ -438,10 +393,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": False,
-        },
+        stream_options={"include_usage": True, "continuous_usage_stats": False},
     )
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -465,10 +417,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True,
-        },
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
     )
     async for chunk in stream:
         assert chunk.usage is not None
@@ -549,19 +498,13 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     # test both text and token IDs
     for prompts in (["Hello, my name is"] * 2, [[0, 0, 0, 0, 0]] * 2):
         # test simple list
         batch = await client.completions.create(
-            model=model_name,
-            prompt=prompts,
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=prompts, max_tokens=5, temperature=0.0
         )
         assert len(batch.choices) == 2
         assert batch.choices[0].text == batch.choices[1].text
@@ -592,11 +535,7 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
 
         # test streaming
         batch = await client.completions.create(
-            model=model_name,
-            prompt=prompts,
-            max_tokens=5,
-            temperature=0.0,
-            stream=True,
+            model=model_name, prompt=prompts, max_tokens=5, temperature=0.0, stream=True
         )
         texts = [""] * 2
         async for chunk in batch:
@@ -607,10 +546,7 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
 async def test_echo_logprob_completion(
     client: openai.AsyncOpenAI, model_name: str, logprobs_arg: int
@@ -640,10 +576,7 @@ async def test_echo_logprob_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
@@ -676,10 +609,7 @@ async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
     prompt = (
         "Generate an email address for Alan Turing, who works in Enigma."
@@ -696,10 +626,7 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
     invalid_simplified_sql_grammar = """
         root ::= select_statementinvalidsyntax

@@ -284,10 +284,7 @@ class ParakeetExtractor:
         return clips
 
     def __call__(
-        self,
-        raw_speech: list[np.ndarray],
-        *,
-        device: str = "cpu",
+        self, raw_speech: list[np.ndarray], *, device: str = "cpu"
     ) -> dict[str, Any]:
         raw_speech = [
             torch.as_tensor(speech, device=device, dtype=torch.float32)

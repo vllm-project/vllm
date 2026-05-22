@@ -232,21 +232,13 @@ class TorchProfilerWrapper(WorkerProfiler):
         # (WAIT or WARMUP), so only wait + warmup - 1 non-active steps
         # remain to be advanced through via profiler.step() calls.
         self._warmup_steps_remaining = max(
-            profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
-            0,
+            profiler_config.wait_iterations + profiler_config.warmup_iterations - 1, 0
         )
 
-    def _build_profiler_table(
-        self,
-        sort_key: str,
-        row_limit: int | None = None,
-    ) -> str:
+    def _build_profiler_table(self, sort_key: str, row_limit: int | None = None) -> str:
         if row_limit is None:  # use profiler default row limit of 100
             return self.profiler.key_averages().table(sort_by=sort_key)
-        return self.profiler.key_averages().table(
-            sort_by=sort_key,
-            row_limit=row_limit,
-        )
+        return self.profiler.key_averages().table(sort_by=sort_key, row_limit=row_limit)
 
     def _write_profiler_table(self, rank: int, table: str) -> None:
         profiler_dir = self.profiler_config.torch_profiler_dir

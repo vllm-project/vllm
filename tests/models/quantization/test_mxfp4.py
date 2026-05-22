@@ -28,11 +28,7 @@ EXPECTED_STRS_MAP = {
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
     sampling_params = SamplingParams(max_tokens=20, temperature=0)
-    llm = LLM(
-        model=model_name,
-        kv_cache_dtype="fp8",
-        quantization="quark",
-    )
+    llm = LLM(model=model_name, kv_cache_dtype="fp8", quantization="quark")
     outputs = llm.generate(example_prompts, sampling_params)
     for i, output in enumerate(outputs):
         output_str = output.outputs[0].text

@@ -53,9 +53,7 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
             'gemm2_scales' containing shuffled/packed tensors ready for kernel
     """
     from flashinfer import block_scale_interleave
-    from flashinfer.fused_moe import (
-        convert_to_block_layout,
-    )
+    from flashinfer.fused_moe import convert_to_block_layout
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
         get_w2_permute_indices_with_cache,
@@ -113,37 +111,27 @@ def prepare_static_weights_for_trtllm_mxint4_moe(
         # 2. Shuffle weights and scaling factors for transposed mma output
         # for both w3_w1 and w2 weights and scale factors
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_weights_mxint4[i],
-            epilogue_tile_m,
+            _cache_permute_indices, gemm1_weights_mxint4[i], epilogue_tile_m
         )
         gemm1_weights_shuffled = gemm1_weights_mxint4[i][
             permute_indices.to(gemm1_weights.device)
         ].contiguous()
         permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_scales[i],
-            epilogue_tile_m,
-            num_elts_per_sf=32,
+            _cache_permute_indices, gemm1_scales[i], epilogue_tile_m, num_elts_per_sf=32
         ).to(device)
         gemm1_scales_shuffled.append(
             block_scale_interleave(gemm1_scales[i][permute_sf_indices].contiguous())
         )
 
         permute_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_weights_mxint4[i],
-            epilogue_tile_m,
+            _cache_permute_indices, gemm2_weights_mxint4[i], epilogue_tile_m
         )
         gemm2_weights_shuffled = gemm2_weights_mxint4[i][
             permute_indices.to(gemm2_weights.device)
         ].contiguous()
 
         permute_sf_indices = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            gemm2_scales[i],
-            epilogue_tile_m,
-            num_elts_per_sf=16,
+            _cache_permute_indices, gemm2_scales[i], epilogue_tile_m, num_elts_per_sf=16
         )
         gemm2_scales_shuffled.append(
             block_scale_interleave(

@@ -219,10 +219,7 @@ def test_hybrid_dp_server_info(server_manager):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_hybrid_lb_completion(
     clients: list[openai.AsyncOpenAI],
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -302,10 +299,7 @@ async def test_hybrid_lb_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_hybrid_lb_completion_streaming(
     clients: list[openai.AsyncOpenAI],
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -316,10 +310,7 @@ async def test_hybrid_lb_completion_streaming(
     async def make_streaming_request(client: openai.AsyncOpenAI):
         # Perform a non-streaming request to get the expected full output
         single_completion = await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0
         )
         single_output = single_completion.choices[0].text
 

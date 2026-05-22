@@ -171,9 +171,7 @@ class Idefics2VisionAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(
             hidden_states
@@ -258,22 +256,16 @@ class Idefics2EncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = Idefics2VisionAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
+            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         Args:
@@ -331,9 +323,7 @@ class Idefics2Encoder(nn.Module):
         )
 
     def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         r"""
         Args:
@@ -385,10 +375,7 @@ class Idefics2VisionTransformer(nn.Module):
 
         self.require_post_norm = require_post_norm
         self.post_layernorm = (
-            nn.LayerNorm(
-                embed_dim,
-                eps=config.layer_norm_eps,
-            )
+            nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
             if require_post_norm
             else nn.Identity()
         )

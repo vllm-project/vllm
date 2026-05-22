@@ -35,10 +35,7 @@ from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    Attention,
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
@@ -341,10 +338,7 @@ class Base(
             # Replace legacy suffixes used for norms
             # TODO(hmellor): Remove this when Transformers v4 support is dropped
             orig_to_new_regex.update(
-                {
-                    re.compile(r"\.gamma$"): ".weight",
-                    re.compile(r"\.beta$"): ".bias",
-                }
+                {re.compile(r"\.gamma$"): ".weight", re.compile(r"\.beta$"): ".bias"}
             )
 
         # Handle weights which have been renamed in Transformers
@@ -684,10 +678,7 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,

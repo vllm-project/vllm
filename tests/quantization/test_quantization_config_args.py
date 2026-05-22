@@ -98,10 +98,7 @@ def test_resolve_quantization_config_only():
 def test_resolve_merges_explicit_over_shorthand():
     # Explicit linear in quantization_config wins; moe falls back to the
     # shorthand's slot.
-    args = resolve_quantization_config(
-        "fp8_per_tensor",
-        {"linear": "fp8_per_block"},
-    )
+    args = resolve_quantization_config("fp8_per_tensor", {"linear": "fp8_per_block"})
     assert args.linear == QuantSpec(weight=kFp8Static128BlockSym)
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
 

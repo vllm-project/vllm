@@ -39,11 +39,7 @@ class TrtLlmFp8ExpertsBase:
     interfaces.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
@@ -102,8 +98,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         """Supports Fp8 block and MXFP8."""
         SUPPORTED_W_A = [
@@ -219,11 +214,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
 
         # Make additional scales for per-tensor interface.
@@ -247,8 +238,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         """Supports Fp8 per-tensor, Fp8 block, and MXFP8."""
         SUPPORTED_W_A = [
@@ -260,8 +250,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 

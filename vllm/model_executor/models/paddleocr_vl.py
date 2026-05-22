@@ -26,9 +26,7 @@ from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.image_utils import ChannelDimension
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPooling,
-)
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
 from vllm.config import VllmConfig
@@ -36,18 +34,11 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -58,11 +49,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -277,9 +264,7 @@ class PaddleOCRVLMultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -314,7 +299,7 @@ class PaddleOCRVLMultiModalProcessor(
                 modality="image",
                 target=[image_token_id],
                 replacement=partial(get_replacement, image_processor=image_processor),
-            ),
+            )
         ]
 
 
@@ -344,9 +329,7 @@ class Projector(nn.Module):
         )
 
     def forward(
-        self,
-        image_features: torch.Tensor,
-        image_grid_thw: torch.Tensor,
+        self, image_features: torch.Tensor, image_grid_thw: torch.Tensor
     ) -> torch.Tensor:
         m1, m2 = self.merge_kernel_size
         if isinstance(image_features, (list, tuple)):
@@ -388,10 +371,7 @@ class PaddleOCRImagePixelInputs(TensorSchema):
         torch.Tensor,
         TensorShape("bn", "p", 3, "patch_size", "patch_size", dynamic_dims={"p"}),
     ]
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("bn", 3),
-    ]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("bn", 3)]
 
 
 class SiglipVisionEmbeddings(nn.Module):
@@ -468,8 +448,7 @@ class SiglipVisionEmbeddings(nn.Module):
 
         if len(self.cache_position_embedding) >= max_cache:
             min_hit_grid = min(
-                self.cache_position_count,
-                key=self.cache_position_count.get,
+                self.cache_position_count, key=self.cache_position_count.get
             )
             self.cache_position_count.pop(min_hit_grid)
             self.cache_position_embedding.pop(min_hit_grid)
@@ -494,13 +473,7 @@ class SiglipVisionEmbeddings(nn.Module):
                 raise ValueError(
                     "position_ids cannot be None when pixel_values.dim() is 5."
                 )
-            (
-                batch_size,
-                sequence_len,
-                channel,
-                height,
-                width,
-            ) = pixel_values.shape
+            (batch_size, sequence_len, channel, height, width) = pixel_values.shape
             target_dtype = self.patch_embedding.weight.dtype
             pixel_values = rearrange(pixel_values, "b l c h w -> (b l) c h w")
             patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
@@ -594,8 +567,7 @@ class SiglipAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
         self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            enable_fp32_compute=True,
+            enforce_enable=True, enable_fp32_compute=True
         )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -640,18 +612,12 @@ class SiglipAttention(nn.Module):
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb.cos(),
-                rotary_pos_emb.sin(),
+                qk_concat, rotary_pos_emb.cos(), rotary_pos_emb.sin()
             )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(context_layer, "b s h d -> b s (h d)")
 
@@ -674,9 +640,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         seq = torch.arange(
-            seqlen,
-            device=self.inv_freq.device,
-            dtype=self.inv_freq.dtype,
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
@@ -700,11 +664,7 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = SiglipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -749,8 +709,7 @@ class SiglipEncoder(nn.Module):
         head_dim = embed_dim // num_heads
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
+            head_size=head_dim, dtype=torch.get_default_dtype()
         )
 
         self.layers = nn.ModuleList(
@@ -801,10 +760,7 @@ class SiglipEncoder(nn.Module):
             width_position_ids = torch.concat(split_wids, dim=0)
             height_position_ids = torch.concat(split_hids, dim=0)
 
-        pids = torch.stack(
-            [height_position_ids, width_position_ids],
-            dim=-1,
-        )
+        pids = torch.stack([height_position_ids, width_position_ids], dim=-1)
         max_grid_size = pids.max() + 1
         rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
         rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
@@ -848,9 +804,7 @@ class SiglipVisionTransformer(nn.Module):
 
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
+            config, quant_config=quant_config, prefix=f"{prefix}.encoder"
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -885,10 +839,7 @@ class SiglipVisionTransformer(nn.Module):
 
 class SiglipVisionModel(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
 
@@ -948,22 +899,14 @@ class SiglipVisionModel(nn.Module):
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
                 param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = (
                     loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
                 )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            for (
-                param_name,
-                weight_name,
-                shard_id,
-            ) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -984,11 +927,7 @@ class SiglipVisionModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -1038,8 +977,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         with self._mark_language_model(vllm_config):
             self.language_model = Ernie4_5ForCausalLM(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
             for layer in self.language_model.model.layers:
@@ -1050,10 +988,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def iter_mm_grid_thw(
@@ -1095,9 +1030,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0

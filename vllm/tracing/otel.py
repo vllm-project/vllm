@@ -103,9 +103,7 @@ def get_span_exporter(endpoint):
 
 
 def init_otel_worker_tracer(
-    instrumenting_module_name: str,
-    process_kind: str,
-    process_name: str,
+    instrumenting_module_name: str, process_kind: str, process_name: str
 ) -> Tracer:
     """
     Backend-specific initialization for OpenTelemetry in a worker process.
@@ -116,10 +114,7 @@ def init_otel_worker_tracer(
     if not otlp_endpoint:
         return None
 
-    extra_attrs = {
-        "vllm.process_kind": process_kind,
-        "vllm.process_name": process_name,
-    }
+    extra_attrs = {"vllm.process_kind": process_kind, "vllm.process_name": process_name}
 
     return init_otel_tracer(instrumenting_module_name, otlp_endpoint, extra_attrs)
 

@@ -18,20 +18,14 @@ def main():
     base_url = "http://localhost:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
     model = "Qwen/Qwen3-8B"  # get_first_model(client)
-    response = client.responses.create(
-        model=model,
-        input=input_messages,
-    )
+    response = client.responses.create(model=model, input=input_messages)
 
     for message in response.output:
         if message.type == "reasoning":
             # append reasoning message
             input_messages.append(message)
 
-    response_2 = client.responses.create(
-        model=model,
-        input=input_messages,
-    )
+    response_2 = client.responses.create(model=model, input=input_messages)
     print(response_2.output_text)
     # I am Qwen, a large language model developed by Alibaba Cloud.
     # I am designed to assist with a wide range of tasks, including

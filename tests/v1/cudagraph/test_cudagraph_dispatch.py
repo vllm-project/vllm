@@ -45,7 +45,7 @@ def _create_vllm_config(
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.compilation_config = compilation_config
     mock_config.scheduler_config = SchedulerConfig.default_factory(
-        max_num_seqs=max_num_seqs,
+        max_num_seqs=max_num_seqs
     )
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
@@ -53,10 +53,7 @@ def _create_vllm_config(
         mock_config.lora_config = None
     else:
         # Create a real LoRAConfig with specialize_active_lora enabled
-        mock_config.lora_config = LoRAConfig(
-            max_loras=4,
-            specialize_active_lora=True,
-        )
+        mock_config.lora_config = LoRAConfig(max_loras=4, specialize_active_lora=True)
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1(

@@ -154,9 +154,7 @@ class BenchmarkDataset(ABC):
         raise NotImplementedError("load_data must be implemented in subclasses.")
 
     def get_random_lora_request(
-        self,
-        max_loras: int | None = None,
-        lora_path: str | None = None,
+        self, max_loras: int | None = None, lora_path: str | None = None
     ) -> LoRARequest | None:
         """
         Optionally select a random LoRA request.
@@ -187,10 +185,7 @@ class BenchmarkDataset(ABC):
         return lora_request
 
     def get_round_robin_lora_request(
-        self,
-        index: int,
-        max_loras: int | None = None,
-        lora_path: str | None = None,
+        self, index: int, max_loras: int | None = None, lora_path: str | None = None
     ) -> LoRARequest | None:
         """
         Optionally select a LoRA request using deterministic round-robin.
@@ -505,15 +500,11 @@ def gen_prompt_decode_to_target_len(
         elif len(token_sequence) < target_token_len:
             if rng is not None:
                 extra_tokens = rng.integers(
-                    0,
-                    tokenizer.vocab_size,
-                    size=target_token_len - len(token_sequence),
+                    0, tokenizer.vocab_size, size=target_token_len - len(token_sequence)
                 ).tolist()
             else:
                 extra_tokens = np.random.randint(
-                    0,
-                    tokenizer.vocab_size,
-                    size=target_token_len - len(token_sequence),
+                    0, tokenizer.vocab_size, size=target_token_len - len(token_sequence)
                 ).tolist()
             token_sequence.extend(extra_tokens)
         elif len(token_sequence) > target_token_len:
@@ -593,12 +584,7 @@ class RandomDataset(BenchmarkDataset):
             )
 
         input_lens, output_lens, offsets = get_sampling_params(
-            self._rng,
-            num_requests,
-            range_ratio,
-            input_len,
-            output_len,
-            tokenizer,
+            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
         vocab_size = tokenizer.vocab_size
@@ -668,10 +654,7 @@ class RandomDataset(BenchmarkDataset):
         return requests
 
     def get_prefix(
-        self,
-        tokenizer: TokenizerLike,
-        allowed_tokens: np.ndarray,
-        prefix_len: int,
+        self, tokenizer: TokenizerLike, allowed_tokens: np.ndarray, prefix_len: int
     ) -> list[int]:
         """
         Get the prefix for the dataset.
@@ -780,12 +763,7 @@ class RandomDatasetForReranking(RandomDataset):
         query_len_param = (input_len // 2) - n_sep_tokens if is_reranker else input_len
 
         query_lens, _, query_offsets = get_sampling_params(
-            self._rng,
-            1,
-            range_ratio,
-            query_len_param,
-            0,
-            tokenizer,
+            self._rng, 1, range_ratio, query_len_param, 0, tokenizer
         )
 
         query_len = int(query_lens[0])
@@ -799,12 +777,7 @@ class RandomDatasetForReranking(RandomDataset):
             doc_len_param = input_len - query_len - n_sep_tokens
 
         doc_lens, _, doc_offsets = get_sampling_params(
-            self._rng,
-            num_requests,
-            range_ratio,
-            doc_len_param,
-            0,
-            tokenizer,
+            self._rng, num_requests, range_ratio, doc_len_param, 0, tokenizer
         )
 
         vocab_size = tokenizer.vocab_size
@@ -929,12 +902,7 @@ class RandomMultiModalDataset(RandomDataset):
         We could consider a “low-freq” mode (e.g., noise blur)
         to emulate network realism instead of max stress.
         """
-        random_pixels = self._rng.integers(
-            0,
-            256,
-            (height, width, 3),
-            dtype=np.uint8,
-        )
+        random_pixels = self._rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
         return Image.fromarray(random_pixels)
 
     def generate_synthetic_video(
@@ -948,10 +916,7 @@ class RandomMultiModalDataset(RandomDataset):
         import cv2
 
         random_pixels = self._rng.integers(
-            0,
-            256,
-            (num_frames, height, width, 3),
-            dtype=np.uint8,
+            0, 256, (num_frames, height, width, 3), dtype=np.uint8
         )
 
         # Create a temporary video file in memory
@@ -1012,8 +977,7 @@ class RandomMultiModalDataset(RandomDataset):
         return {k: v / total for k, v in bucket_config.items()}
 
     def generate_mm_item(
-        self,
-        mm_item_config: tuple[int, int, int],
+        self, mm_item_config: tuple[int, int, int]
     ) -> Mapping[str, Any]:
         """
         Create synthetic images and videos and
@@ -1063,10 +1027,7 @@ class RandomMultiModalDataset(RandomDataset):
         # Remove zero probability entries
         # and normalize bucket config to sum to 1
         bucket_config = self.normalize_bucket_config(bucket_config)
-        logger.info(
-            "Normalized bucket config: %s",
-            bucket_config,
-        )
+        logger.info("Normalized bucket config: %s", bucket_config)
         # Only consider limit per prompt for modalities in bucket config
         allowed_modalities = {self.map_config_to_modality(cfg) for cfg in bucket_config}
         limit_mm_per_prompt = {
@@ -1075,10 +1036,7 @@ class RandomMultiModalDataset(RandomDataset):
         if not limit_mm_per_prompt:
             raise ValueError("No valid limits for modalities present in bucket_config.")
 
-        logger.info(
-            "Updated mm-limit-per-prompt: %s",
-            limit_mm_per_prompt,
-        )
+        logger.info("Updated mm-limit-per-prompt: %s", limit_mm_per_prompt)
 
         # Get max and min num mm items and ensure
         # it is at most the sum of limit_mm_per_prompt for all modalities
@@ -1103,12 +1061,7 @@ class RandomMultiModalDataset(RandomDataset):
             max_num_mm_items,
         )
 
-        return (
-            min_num_mm_items,
-            max_num_mm_items,
-            limit_mm_per_prompt,
-            bucket_config,
-        )
+        return (min_num_mm_items, max_num_mm_items, limit_mm_per_prompt, bucket_config)
 
     def get_mm_item_iterator(
         self,
@@ -1197,24 +1150,16 @@ class RandomMultiModalDataset(RandomDataset):
             )
 
         input_lens, output_lens, offsets = get_sampling_params(
-            self._rng,
-            num_requests,
-            range_ratio,
-            input_len,
-            output_len,
-            tokenizer,
+            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
-        (
-            min_num_mm_items,
-            max_num_mm_items,
-            limit_mm_per_prompt,
-            bucket_config,
-        ) = self.get_mm_item_sampling_params(
-            base_items_per_request,
-            num_mm_items_range_ratio,
-            limit_mm_per_prompt,
-            bucket_config,
+        (min_num_mm_items, max_num_mm_items, limit_mm_per_prompt, bucket_config) = (
+            self.get_mm_item_sampling_params(
+                base_items_per_request,
+                num_mm_items_range_ratio,
+                limit_mm_per_prompt,
+                bucket_config,
+            )
         )
 
         vocab_size = tokenizer.vocab_size
@@ -1252,10 +1197,7 @@ class RandomMultiModalDataset(RandomDataset):
             token_mismatch_total += token_mismatch
             # Get multimodal item iterator for a given request
             mm_item_iterator = self.get_mm_item_iterator(
-                min_num_mm_items,
-                max_num_mm_items,
-                bucket_config,
-                limit_mm_per_prompt,
+                min_num_mm_items, max_num_mm_items, bucket_config, limit_mm_per_prompt
             )
 
             mm_content = cast(
@@ -2443,10 +2385,7 @@ class CustomAudioDataset(CustomDataset):
                     audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                     mm_content = {
                         "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": "wav",
-                        },
+                        "input_audio": {"data": audio_base64, "format": "wav"},
                     }
                     # prompt stays as plain string; serve.py handles wrapping
                 else:
@@ -2527,14 +2466,9 @@ class SpecBench(CustomDataset):
         if not getattr(self, "disable_shuffle", False):
             random.shuffle(self.data)
 
-    def sample(
-        self,
-        **kwargs,
-    ) -> list[SampleRequest]:
+    def sample(self, **kwargs) -> list[SampleRequest]:
         # leverage CustomDataset sample
-        return super().sample(
-            **kwargs,
-        )
+        return super().sample(**kwargs)
 
 
 # -----------------------------------------------------------------------------
@@ -2542,9 +2476,7 @@ class SpecBench(CustomDataset):
 # -----------------------------------------------------------------------------
 
 
-@deprecated(
-    "SonnetDataset is deprecated and will be removed in a future version.",
-)
+@deprecated("SonnetDataset is deprecated and will be removed in a future version.")
 class SonnetDataset(BenchmarkDataset):
     """
     Simplified implementation of the Sonnet dataset.  Loads poem lines from a
@@ -2556,10 +2488,7 @@ class SonnetDataset(BenchmarkDataset):
     DEFAULT_INPUT_LEN = 550
     DEFAULT_OUTPUT_LEN = 150
 
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.load_data()
 
@@ -2644,9 +2573,7 @@ class BurstGPTDataset(BenchmarkDataset):
         super().__init__(**kwargs)
         self.load_data()
 
-    def load_data(
-        self,
-    ):
+    def load_data(self):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
@@ -2663,9 +2590,7 @@ class BurstGPTDataset(BenchmarkDataset):
             data = self.data.sample(n=num_requests, random_state=self.random_seed)
         else:
             data = self.data.sample(
-                n=num_requests,
-                random_state=self.random_seed,
-                replace=True,
+                n=num_requests, random_state=self.random_seed, replace=True
             )
         # Convert the dataframe to a list of lists.
         return data.values.tolist()
@@ -2757,9 +2682,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 class ConversationDataset(HuggingFaceDataset):
     """Dataset for text-only conversation data."""
 
-    SUPPORTED_DATASET_PATHS = {
-        "Aeala/ShareGPT_Vicuna_unfiltered",
-    }
+    SUPPORTED_DATASET_PATHS = {"Aeala/ShareGPT_Vicuna_unfiltered"}
     IS_MULTIMODAL = False
 
     def sample(
@@ -2817,9 +2740,7 @@ class ConversationDataset(HuggingFaceDataset):
 class MultiModalConversationDataset(HuggingFaceDataset):
     """Dataset for multimodal conversation data."""
 
-    SUPPORTED_DATASET_PATHS = {
-        "lmms-lab/LLaVA-OneVision-Data",
-    }
+    SUPPORTED_DATASET_PATHS = {"lmms-lab/LLaVA-OneVision-Data"}
     IS_MULTIMODAL = True
 
     def sample(
@@ -2949,7 +2870,7 @@ class MMVUDataset(HuggingFaceDataset):
             x["question"]
             + " "
             + (" ".join(f"{k}.{v}" for k, v in x["choices"].items()))
-        ),
+        )
     }
 
     def __init__(self, **kwargs) -> None:
@@ -3024,9 +2945,7 @@ class InstructCoderDataset(HuggingFaceDataset):
     """
 
     DEFAULT_OUTPUT_LEN = 200  # this is the average default output length
-    SUPPORTED_DATASET_PATHS = {
-        "likaixin/InstructCoder",
-    }
+    SUPPORTED_DATASET_PATHS = {"likaixin/InstructCoder"}
 
     def sample(
         self,
@@ -3089,9 +3008,7 @@ class MTBenchDataset(HuggingFaceDataset):
     """  # noqa: E501
 
     DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
-    SUPPORTED_DATASET_PATHS = {
-        "philschmid/mt-bench",
-    }
+    SUPPORTED_DATASET_PATHS = {"philschmid/mt-bench"}
 
     def sample(
         self,
@@ -3149,9 +3066,7 @@ class HumanEvalDataset(HuggingFaceDataset):
     """
 
     DEFAULT_OUTPUT_LEN = 256
-    SUPPORTED_DATASET_PATHS = {
-        "openai/openai_humaneval",
-    }
+    SUPPORTED_DATASET_PATHS = {"openai/openai_humaneval"}
 
     def sample(
         self,
@@ -3209,9 +3124,7 @@ class GSM8KDataset(HuggingFaceDataset):
     """
 
     DEFAULT_OUTPUT_LEN = 256
-    SUPPORTED_DATASET_PATHS = {
-        "openai/gsm8k",
-    }
+    SUPPORTED_DATASET_PATHS = {"openai/gsm8k"}
 
     def sample(
         self,
@@ -3274,10 +3187,7 @@ class BlazeditDataset(HuggingFaceDataset):
     # Assuming 3 char per token, 10k chars will be 3333 tokens
     # We set default to 4000 to be safe
     DEFAULT_OUTPUT_LEN = 4000
-    SUPPORTED_DATASET_PATHS = {
-        "vdaita/edit_5k_char",
-        "vdaita/edit_10k_char",
-    }
+    SUPPORTED_DATASET_PATHS = {"vdaita/edit_5k_char", "vdaita/edit_10k_char"}
 
     def sample(
         self,
@@ -3463,12 +3373,8 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     Dataset class for processing a Next Edit Prediction dataset.
     """
 
-    SUPPORTED_DATASET_PATHS = {
-        "zed-industries/zeta",
-    }
-    MAPPING_PROMPT_FUNCS = {
-        "zed-industries/zeta": _format_zeta_prompt,
-    }
+    SUPPORTED_DATASET_PATHS = {"zed-industries/zeta"}
+    MAPPING_PROMPT_FUNCS = {"zed-industries/zeta": _format_zeta_prompt}
 
     def sample(
         self,
@@ -3707,10 +3613,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
     DEFAULT_NUM_PREFIXES = 10
     DEFAULT_OUTPUT_LEN = 128
 
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         random.seed(self.random_seed)
         np.random.seed(self.random_seed)

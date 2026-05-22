@@ -54,7 +54,7 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -63,15 +63,11 @@ class RVLMultiModalProjector(nn.Module):
         super().__init__()
         self.pre_norm = nn.LayerNorm(config.vision_config.hidden_size, eps=1e-06)
         self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size,
-            config.text_config.hidden_size,
-            bias=True,
+            config.vision_config.hidden_size, config.text_config.hidden_size, bias=True
         )
         self.act = GELUActivation()
         self.linear_2 = nn.Linear(
-            config.text_config.hidden_size,
-            config.text_config.hidden_size,
-            bias=True,
+            config.text_config.hidden_size, config.text_config.hidden_size, bias=True
         )
 
     def forward(self, image_feature: torch.Tensor) -> torch.Tensor:

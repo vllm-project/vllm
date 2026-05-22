@@ -26,13 +26,8 @@ def set_test_environment():
 
 
 # Override the backbone layers to 4 for faster startup
-HF_OVERRIDE_TEXT = {
-    "num_layers": 4,
-    "num_hidden_layers": 4,
-}
-HF_OVERRIDE_MM = {
-    "text_config": {"num_layers": 4, "num_hidden_layers": 4},
-}
+HF_OVERRIDE_TEXT = {"num_layers": 4, "num_hidden_layers": 4}
+HF_OVERRIDE_MM = {"text_config": {"num_layers": 4, "num_hidden_layers": 4}}
 
 
 def can_initialize(
@@ -65,10 +60,7 @@ def can_initialize(
         client = server.get_client()
         # Make a simple request to verify the server works
         completion = client.completions.create(
-            model=model,
-            prompt=["Hello, World!"],
-            temperature=0,
-            max_tokens=2,
+            model=model, prompt=["Hello, World!"], temperature=0, max_tokens=2
         )
         print(completion)
         assert completion.choices[0].text is not None
@@ -206,10 +198,7 @@ def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch
     can_initialize(
         "openai/gpt-oss-20b",
         hf_overrides=HF_OVERRIDE_TEXT,
-        extra_args=[
-            "--quantization-config.moe.activation",
-            "mxfp8",
-        ],
+        extra_args=["--quantization-config.moe.activation", "mxfp8"],
     )
 
 

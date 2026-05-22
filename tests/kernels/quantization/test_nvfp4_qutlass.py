@@ -172,11 +172,7 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     assert scales_dq.equal(scales_ref64)
     assert clip_mask_unpacked_dq.equal(clip_mask_unpacked_ref)
 
-    return (
-        xh_dq,
-        clip_mask_unpacked_ref,
-        (xh_e2m1_ref, xh_e4m3_ref, clip_mask_ref),
-    )
+    return (xh_dq, clip_mask_unpacked_ref, (xh_e2m1_ref, xh_e4m3_ref, clip_mask_ref))
 
 
 DTYPE = torch.bfloat16

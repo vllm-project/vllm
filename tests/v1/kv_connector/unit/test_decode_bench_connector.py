@@ -55,9 +55,7 @@ class DecodeBenchTestRunner:
 
         # Create worker-side connector
         self.worker_connector = DecodeBenchConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            self.scheduler.kv_cache_config,
+            vllm_config, KVConnectorRole.WORKER, self.scheduler.kv_cache_config
         )
 
         # Create dummy KV caches for testing
@@ -126,8 +124,7 @@ class DecodeBenchTestRunner:
 
         # Create model runner output
         model_runner_output = create_model_runner_output(
-            reqs=self.scheduler.running,
-            token_id=token_id,
+            reqs=self.scheduler.running, token_id=token_id
         )
 
         self.scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -307,9 +304,7 @@ def test_decode_bench_connector_multiple_requests():
     # Add EOS to finish
     scheduler_output = runner.scheduler.schedule()
     model_runner_output = create_model_runner_output(
-        reqs=runner.scheduler.running,
-        token_id=EOS_TOKEN_ID,
-        use_eos=True,
+        reqs=runner.scheduler.running, token_id=EOS_TOKEN_ID, use_eos=True
     )
     runner.scheduler.update_from_output(scheduler_output, model_runner_output)
 

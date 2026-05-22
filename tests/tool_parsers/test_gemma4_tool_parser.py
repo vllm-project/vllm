@@ -97,12 +97,7 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
         )
-        assert result == {
-            "name": "test",
-            "count": 42,
-            "active": True,
-            "score": 3.14,
-        }
+        assert result == {"name": "test", "count": 42, "active": True, "score": 3.14}
 
     def test_nested_object(self):
         result = _parse_gemma4_args('nested:{inner:<|"|>value<|"|>}')
@@ -573,12 +568,7 @@ class TestStreamingExtraction:
 
     def test_streaming_false_split_across_chunks(self, parser, mock_request):
         """Boolean false split across chunks."""
-        chunks = [
-            "<|tool_call>",
-            "call:set{flag:" + "false"[:4],
-            "e}",
-            "<tool_call|>",
-        ]
+        chunks = ["<|tool_call>", "call:set{flag:" + "false"[:4], "e}", "<tool_call|>"]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         args_text = self._collect_arguments(results)
@@ -588,12 +578,7 @@ class TestStreamingExtraction:
 
     def test_streaming_number_split_across_chunks(self, parser, mock_request):
         """Number split across chunks must not change type."""
-        chunks = [
-            "<|tool_call>",
-            "call:set{count:4",
-            "2}",
-            "<tool_call|>",
-        ]
+        chunks = ["<|tool_call>", "call:set{count:4", "2}", "<tool_call|>"]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         args_text = self._collect_arguments(results)
@@ -603,11 +588,7 @@ class TestStreamingExtraction:
 
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""
-        chunks = [
-            "<|tool_call>",
-            "call:get_status{}",
-            "<tool_call|>",
-        ]
+        chunks = ["<|tool_call>", "call:get_status{}", "<tool_call|>"]
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         name = self._collect_function_name(results)

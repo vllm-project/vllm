@@ -69,11 +69,7 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    def __init__(
-        self,
-        compile_prefix: str = "",
-        is_encoder: bool = False,
-    ) -> None:
+    def __init__(self, compile_prefix: str = "", is_encoder: bool = False) -> None:
         self.compiled = False
         self._compile_prefix = compile_prefix
         self._is_encoder = is_encoder
@@ -332,7 +328,5 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
 
     model.__class__.forward.__code__ = model.original_code_object()
     TorchCompileWithNoGuardsWrapper.__init__(
-        model,
-        compile_prefix=model._compile_prefix,
-        is_encoder=model._is_encoder,
+        model, compile_prefix=model._compile_prefix, is_encoder=model._is_encoder
     )

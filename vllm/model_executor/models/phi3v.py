@@ -35,10 +35,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -151,10 +148,7 @@ class Phi3VImageEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["image_embeds"] = "image_embeds"
-    data: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "f", "h"),
-    ]
+    data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("bn", "f", "h")]
 
 
 Phi3VImageInputs: TypeAlias = Phi3VImagePixelInputs | Phi3VImageEmbeddingInputs
@@ -176,9 +170,7 @@ class Phi3HDImageEmbedding(nn.Module):
         hidden_size = config.n_embd if hasattr(config, "n_embd") else config.hidden_size
 
         self.img_processor = _init_img_processor(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.img_processor",
+            config, quant_config=quant_config, prefix=f"{prefix}.img_processor"
         )
 
         image_dim_out = config.img_processor["image_dim_out"]
@@ -347,15 +339,10 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: ProcessorMixin,
+        self, *, image_width: int, image_height: int, processor: ProcessorMixin
     ) -> int:
         return processor.calc_num_image_tokens_from_image_size(  # type: ignore
-            width=image_width,
-            height=image_height,
+            width=image_width, height=image_height
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -403,10 +390,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         input_ids = processed_outputs["input_ids"]
@@ -420,9 +404,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -465,13 +447,10 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         ]
 
     def _recompute_cached_prompt_update(
-        self,
-        cached_update: ResolvedPromptUpdate,
-        new_item_idx: int,
+        self, cached_update: ResolvedPromptUpdate, new_item_idx: int
     ) -> ResolvedPromptUpdate:
         new_update = super()._recompute_cached_prompt_update(
-            cached_update,
-            new_item_idx,
+            cached_update, new_item_idx
         )
 
         if cached_update.modality == "image":
@@ -482,9 +461,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return new_update
 
     def _apply_prompt_updates(
-        self,
-        token_ids: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
+        self, token_ids: list[int], mm_prompt_updates: MultiModalPromptUpdates
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # align to hf behavior when there are images
         if len(mm_prompt_updates):
@@ -522,8 +499,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             ]
 
         token_ids, placeholders = super()._apply_prompt_updates(
-            token_ids=token_ids,
-            mm_prompt_updates=mm_prompt_updates,
+            token_ids=token_ids, mm_prompt_updates=mm_prompt_updates
         )
 
         # Keep the behavior in line with HF processor
@@ -630,17 +606,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
             )
 
         if image_embeds is not None:
-            return Phi3VImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return Phi3VImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
-        self,
-        image_input: Phi3VImageInputs,
-    ) -> torch.Tensor:
+    def _process_image_input(self, image_input: Phi3VImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -665,9 +635,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.embed_tokens,
-            is_multimodal=is_multimodal,
+            input_ids, self.embed_tokens, is_multimodal=is_multimodal
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -696,10 +664,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

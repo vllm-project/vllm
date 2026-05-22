@@ -25,13 +25,8 @@ from vllm.utils.torch_utils import (
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import (
-    MatcherRotaryEmbedding,
-)
-from .rms_quant_fusion import (
-    empty_bf16,
-    empty_i64,
-)
+from .matcher_utils import MatcherRotaryEmbedding
+from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
 
@@ -104,11 +99,7 @@ class RopeReshapeKVCachePattern:
 
     FUSED_OP = torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
 
-    def __init__(
-        self,
-        layer: Attention,
-        is_neox: bool,
-    ) -> None:
+    def __init__(self, layer: Attention, is_neox: bool) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
         self.num_kv_heads = layer.num_kv_heads
@@ -215,11 +206,7 @@ class RopeReshapeKVCachePattern:
             return gm
 
         pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            fwd_and_view_to_reshape,
-            pm_pass,
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
         )
 
 
@@ -253,10 +240,9 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         for _, layer in attn_layers.items():
             if layer.impl.fused_rope_kvcache_supported():
                 for is_neox in [True, False]:
-                    RopeReshapeKVCachePattern(
-                        layer=layer,
-                        is_neox=is_neox,
-                    ).register(self.patterns)
+                    RopeReshapeKVCachePattern(layer=layer, is_neox=is_neox).register(
+                        self.patterns
+                    )
                 if _USE_LAYERNAME:
                     break
 

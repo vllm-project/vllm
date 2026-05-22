@@ -57,17 +57,13 @@ def _setup_fp8_attention(num_heads: int, head_dim: int) -> tuple:
     vllm_config_fp8.model_config = SimpleNamespace(multimodal_config=mm_config_fp8)
     with set_current_vllm_config(vllm_config_fp8), backend_patch:
         attn_fp8 = MMEncoderAttention(
-            num_heads=num_heads,
-            head_size=head_dim,
-            prefix="visual.blocks.0.attn",
+            num_heads=num_heads, head_size=head_dim, prefix="visual.blocks.0.attn"
         ).to("cuda")
 
     # BF16 attention (no FP8)
     with set_current_vllm_config(VllmConfig()), backend_patch:
         attn_bf16 = MMEncoderAttention(
-            num_heads=num_heads,
-            head_size=head_dim,
-            prefix="visual.blocks.0.attn",
+            num_heads=num_heads, head_size=head_dim, prefix="visual.blocks.0.attn"
         ).to("cuda")
 
     torch.set_default_dtype(old_dtype)
@@ -76,12 +72,7 @@ def _setup_fp8_attention(num_heads: int, head_dim: int) -> tuple:
     return attn_fp8, attn_bf16, workspace
 
 
-def _build_meta(
-    seq_len: int,
-    num_heads: int,
-    head_dim: int,
-    fp8: bool,
-):
+def _build_meta(seq_len: int, num_heads: int, head_dim: int, fp8: bool):
     """Build cu_seqlens, max_seqlen, sequence_lengths."""
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
@@ -110,12 +101,7 @@ def _build_meta(
     return cu_seqlens, max_seqlen, seq_lengths
 
 
-def run_benchmark(
-    seq_lens: list[int],
-    num_heads: int,
-    head_dim: int,
-    method: str,
-):
+def run_benchmark(seq_lens: list[int], num_heads: int, head_dim: int, method: str):
     """Benchmark FP8 vs BF16 attention across seq_lens.
 
     Uses FlashInfer GPU-level timing to measure pure kernel time,
@@ -126,9 +112,7 @@ def run_benchmark(
 
         bench_fn = partial(bench_fn, use_cuda_graph=True, cold_l2_cache=False)
     elif method == "cudagraph":
-        from flashinfer.testing import (
-            bench_gpu_time_with_cudagraph as bench_fn,
-        )
+        from flashinfer.testing import bench_gpu_time_with_cudagraph as bench_fn
 
         bench_fn = partial(bench_fn, cold_l2_cache=False)
     else:
@@ -144,11 +128,7 @@ def run_benchmark(
         torch.manual_seed(42)
 
         q = torch.randn(
-            seq_len,
-            num_heads,
-            head_dim,
-            device="cuda",
-            dtype=torch.bfloat16,
+            seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
         )
         k = torch.randn_like(q)
         v = torch.randn_like(q)
@@ -188,23 +168,13 @@ def _make_trace_handler(output_dir: str, worker_name: str, label: str):
 
 
 def run_profile(
-    seq_len: int,
-    num_heads: int,
-    head_dim: int,
-    warmup: int,
-    output_dir: str,
+    seq_len: int, num_heads: int, head_dim: int, warmup: int, output_dir: str
 ):
     """Profile FP8 vs BF16 attention with PyTorch profiler."""
     attn_fp8, attn_bf16, workspace = _setup_fp8_attention(num_heads, head_dim)
 
     torch.manual_seed(42)
-    q = torch.randn(
-        seq_len,
-        num_heads,
-        head_dim,
-        device="cuda",
-        dtype=torch.bfloat16,
-    )
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
@@ -265,16 +235,8 @@ if __name__ == "__main__":
         default=DEFAULT_SEQ_LENS,
         help="Sequence lengths to benchmark",
     )
-    parser.add_argument(
-        "--num-heads",
-        type=int,
-        default=NUM_HEADS,
-    )
-    parser.add_argument(
-        "--head-dim",
-        type=int,
-        default=HEAD_DIM,
-    )
+    parser.add_argument("--num-heads", type=int, default=NUM_HEADS)
+    parser.add_argument("--head-dim", type=int, default=HEAD_DIM)
     parser.add_argument(
         "--method",
         choices=["cupti", "cudagraph"],
@@ -283,10 +245,7 @@ if __name__ == "__main__":
         "cudagraph (CUDA graph capture/replay). Default: cudagraph",
     )
     parser.add_argument(
-        "--warmup",
-        type=int,
-        default=10,
-        help="Warmup iterations (profile mode only)",
+        "--warmup", type=int, default=10, help="Warmup iterations (profile mode only)"
     )
     parser.add_argument(
         "--profile",
@@ -316,9 +275,4 @@ if __name__ == "__main__":
             args.profile_output_dir,
         )
     else:
-        run_benchmark(
-            args.seq_lens,
-            args.num_heads,
-            args.head_dim,
-            args.method,
-        )
+        run_benchmark(args.seq_lens, args.num_heads, args.head_dim, args.method)

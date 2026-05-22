@@ -11,9 +11,7 @@ HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 
 
 def run_helper(
-    *args: str,
-    env: dict[str, str] | None = None,
-    path: str | None = None,
+    *args: str, env: dict[str, str] | None = None, path: str | None = None
 ) -> list[str]:
     helper_env = {"PATH": path or os.environ["PATH"]}
     if env:
@@ -98,7 +96,7 @@ def test_local_metadata_args_use_local_overrides() -> None:
             "VLLM_BUILD_COMMIT": "localsha",
             "VLLM_BUILD_PIPELINE": "local-pipeline",
             "VLLM_BUILD_URL": "https://buildkite.example/local",
-        },
+        }
     )
 
     assert build_args(args) == {
@@ -110,9 +108,7 @@ def test_local_metadata_args_use_local_overrides() -> None:
     assert option_values(args, "--tag") == ["local/test:dev"]
 
 
-def test_release_version_lookup_failure_falls_back_to_commit(
-    tmp_path: Path,
-) -> None:
+def test_release_version_lookup_failure_falls_back_to_commit(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     buildkite_agent = fake_bin / "buildkite-agent"

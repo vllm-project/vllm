@@ -7,9 +7,7 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -44,10 +42,7 @@ class FunctionGemmaToolParser(ToolParser):
         r"|<start_function_call>call:(\w+)\{(.*)",
         re.DOTALL,
     )
-    arg_regex: re.Pattern = re.compile(
-        r"(\w+):<escape>(.*?)<escape>",
-        re.DOTALL,
-    )
+    arg_regex: re.Pattern = re.compile(r"(\w+):<escape>(.*?)<escape>", re.DOTALL)
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -84,9 +79,7 @@ class FunctionGemmaToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         if self.tool_call_start_token not in model_output:
             return ExtractedToolCallInformation(

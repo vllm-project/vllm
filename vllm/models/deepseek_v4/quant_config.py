@@ -12,16 +12,12 @@ from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4Config,
-    )
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 
 
 class DeepseekV4FP8Config(Fp8Config):

@@ -25,9 +25,7 @@ from vllm._custom_ops import (
     convert_weight_packed_scale_zp,
     int4_scaled_mm_cpu,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_cols,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import pack_cols
 from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
@@ -87,12 +85,7 @@ class TestConvertWeightPackedScaleZp:
     """Tests for convert_weight_packed_scale_zp weightpacking."""
 
     @pytest.mark.parametrize(
-        "K,N,group_size",
-        [
-            (128, 128, 128),
-            (256, 256, 128),
-            (512, 256, 64),
-        ],
+        "K,N,group_size", [(128, 128, 128), (256, 256, 128), (512, 256, 64)]
     )
     def test_packing_output_shapes(self, K, N, group_size):
         """Packed outputs should have expected shapes."""
@@ -101,10 +94,7 @@ class TestConvertWeightPackedScaleZp:
         )
 
         blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
-            packed_qweight,
-            packed_qzeros,
-            scales,
-            CPUQuantAlgo.AWQ,
+            packed_qweight, packed_qzeros, scales, CPUQuantAlgo.AWQ
         )
 
         block_n = 32
@@ -147,10 +137,7 @@ class TestInt4ScaledMmCpu:
         )
 
         blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
-            packed_qweight,
-            packed_qzeros,
-            scales,
-            CPUQuantAlgo.AWQ,
+            packed_qweight, packed_qzeros, scales, CPUQuantAlgo.AWQ
         )
 
         x = torch.randn(M, K, dtype=torch.bfloat16)
@@ -181,10 +168,7 @@ class TestInt4ScaledMmCpu:
         )
 
         blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
-            packed_qweight,
-            packed_qzeros,
-            scales,
-            CPUQuantAlgo.AWQ,
+            packed_qweight, packed_qzeros, scales, CPUQuantAlgo.AWQ
         )
 
         bias = torch.randn(N, dtype=torch.float32)
@@ -210,10 +194,7 @@ class TestInt4ScaledMmCpu:
         )
 
         blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
-            packed_qweight,
-            packed_qzeros,
-            scales,
-            CPUQuantAlgo.AWQ,
+            packed_qweight, packed_qzeros, scales, CPUQuantAlgo.AWQ
         )
 
         B, S = 2, 8
@@ -242,10 +223,7 @@ class TestInt4ScaledMmCpu:
         )
 
         blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
-            packed_qweight,
-            packed_qzeros,
-            scales,
-            CPUQuantAlgo.AWQ,
+            packed_qweight, packed_qzeros, scales, CPUQuantAlgo.AWQ
         )
 
         x = torch.randn(M, K, dtype=torch.float16)
@@ -266,12 +244,7 @@ class TestCreateWeightsUnchanged:
     """Create_weights should still produce correct int4 placeholder shapes."""
 
     @pytest.mark.parametrize(
-        "K,N,group_size",
-        [
-            (128, 128, 128),
-            (256, 256, 128),
-            (512, 256, 64),
-        ],
+        "K,N,group_size", [(128, 128, 128), (256, 256, 128), (512, 256, 64)]
     )
     def test_int4_placeholder_shapes(self, K, N, group_size):
         """Verify qweight, qzeros, scales shapes."""

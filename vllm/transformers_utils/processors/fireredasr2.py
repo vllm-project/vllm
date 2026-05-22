@@ -6,10 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import (
-    AutoFeatureExtractor,
-    BatchFeature,
-)
+from transformers import AutoFeatureExtractor, BatchFeature
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 from transformers.utils import TensorType
@@ -251,12 +248,7 @@ class FireRedASR2Processor(ProcessorMixin):
     feature_extractor_class = "FireRedASR2FeatureExtractor"
     tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
 
-    def __init__(
-        self,
-        feature_extractor,
-        tokenizer,
-        audio_token="<|AUDIO|>",
-    ):
+    def __init__(self, feature_extractor, tokenizer, audio_token="<|AUDIO|>"):
         super().__init__(feature_extractor, tokenizer)
         self.current_processor = self.feature_extractor
         self._in_target_context_manager = False

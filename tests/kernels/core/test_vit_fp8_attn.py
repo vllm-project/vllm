@@ -8,18 +8,14 @@ import pytest
 import torch
 
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.flashinfer import (
-    is_flashinfer_cudnn_fp8_prefill_attn_supported,
-)
+from vllm.utils.flashinfer import is_flashinfer_cudnn_fp8_prefill_attn_supported
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def _has_flashinfer_cudnn() -> bool:
     """Check if FlashInfer cuDNN backend is available."""
     try:
-        from flashinfer.prefill import (
-            cudnn_batch_prefill_with_kv_cache,  # noqa: F401
-        )
+        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache  # noqa: F401
 
         return True
     except ImportError:
@@ -81,9 +77,7 @@ def _build_cu_seqlens_and_meta(
     cu_seqlens_np = np.array([0, seq_len], dtype=np.int32)
 
     sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-        AttentionBackendEnum.FLASHINFER,
-        cu_seqlens_np,
-        torch.device("cuda"),
+        AttentionBackendEnum.FLASHINFER, cu_seqlens_np, torch.device("cuda")
     )
 
     max_seqlen = torch.tensor(
@@ -113,10 +107,7 @@ def _build_cu_seqlens_and_meta(
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 def test_fp8_attn_output_shape(
-    head_dim: int,
-    seq_len: int,
-    num_heads: int,
-    _fp8_attention,
+    head_dim: int, seq_len: int, num_heads: int, _fp8_attention
 ) -> None:
     """Verify FP8 attention produces correct output shape after un-padding."""
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -127,9 +118,7 @@ def test_fp8_attn_output_shape(
     attn = None
     with contextlib.suppress(ValueError, ImportError):
         attn = MMEncoderAttention(
-            num_heads=num_heads,
-            head_size=head_dim,
-            prefix="visual.blocks.0.attn",
+            num_heads=num_heads, head_size=head_dim, prefix="visual.blocks.0.attn"
         ).to("cuda")
 
     if attn is None or not attn.fp8_enabled:
@@ -143,13 +132,7 @@ def test_fp8_attn_output_shape(
         seq_len, num_heads, head_dim, fp8_padded_hidden_size=fp8_padded_hidden_size
     )
 
-    q = torch.randn(
-        seq_len,
-        num_heads,
-        head_dim,
-        device="cuda",
-        dtype=torch.bfloat16,
-    )
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
@@ -178,12 +161,7 @@ def test_fp8_vs_bf16_close(
 
     torch.manual_seed(42)
     q = torch.randn(
-        1,
-        seq_len,
-        num_heads,
-        head_dim,
-        device="cuda",
-        dtype=torch.bfloat16,
+        1, seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
     )
     k = torch.randn_like(q)
     v = torch.randn_like(q)
@@ -192,9 +170,7 @@ def test_fp8_vs_bf16_close(
     attn_fp8 = None
     with contextlib.suppress(ValueError, ImportError):
         attn_fp8 = MMEncoderAttention(
-            num_heads=num_heads,
-            head_size=head_dim,
-            prefix="visual.blocks.0.attn",
+            num_heads=num_heads, head_size=head_dim, prefix="visual.blocks.0.attn"
         ).to("cuda")
 
     if attn_fp8 is None or not attn_fp8.fp8_enabled:
@@ -203,19 +179,11 @@ def test_fp8_vs_bf16_close(
 
     fp8_padded_hidden_size = num_heads * round_up(head_dim, 16)
     cu_seqlens, max_seqlen, seq_lengths = _build_cu_seqlens_and_meta(
-        seq_len,
-        num_heads,
-        head_dim,
-        fp8_padded_hidden_size=fp8_padded_hidden_size,
+        seq_len, num_heads, head_dim, fp8_padded_hidden_size=fp8_padded_hidden_size
     )
 
     out_fp8 = attn_fp8._forward_flashinfer(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        cu_seqlens,
-        max_seqlen,
-        seq_lengths,
+        q.clone(), k.clone(), v.clone(), cu_seqlens, max_seqlen, seq_lengths
     )
 
     # BF16 baseline (create non-FP8 attention by using scale=attn_fp8.scale
@@ -223,9 +191,7 @@ def test_fp8_vs_bf16_close(
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         _get_flashinfer_workspace_buffer,
     )
-    from vllm.v1.attention.ops.vit_attn_wrappers import (
-        vit_flashinfer_wrapper,
-    )
+    from vllm.v1.attention.ops.vit_attn_wrappers import vit_flashinfer_wrapper
 
     out_bf16 = vit_flashinfer_wrapper(
         q=q.clone(),
@@ -249,8 +215,7 @@ def test_fp8_vs_bf16_close(
     rel_diff_flat = (abs_diff / denom).flatten()
 
     cosine_sim = torch.nn.functional.cosine_similarity(
-        out_fp8_f.flatten().unsqueeze(0),
-        out_bf16_f.flatten().unsqueeze(0),
+        out_fp8_f.flatten().unsqueeze(0), out_bf16_f.flatten().unsqueeze(0)
     ).item()
 
     pcts = [50, 90, 95, 99, 99.9]

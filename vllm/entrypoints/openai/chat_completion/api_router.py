@@ -17,10 +17,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
-    load_aware_call,
-    with_cancellation,
-)
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

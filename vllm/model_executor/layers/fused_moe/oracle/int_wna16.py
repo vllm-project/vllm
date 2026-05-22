@@ -23,9 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -39,9 +37,7 @@ class WNA16MoEBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
 
 
-def backend_to_kernel_cls(
-    backend: WNA16MoEBackend,
-) -> list[type[mk.FusedMoEExperts]]:
+def backend_to_kernel_cls(backend: WNA16MoEBackend) -> list[type[mk.FusedMoEExperts]]:
     """Return the experts class for the given backend, or None for NONE."""
     if backend == WNA16MoEBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
@@ -65,17 +61,12 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
-    _AVAILABLE_BACKENDS = [
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
-    ]
+    _AVAILABLE_BACKENDS = [WNA16MoEBackend.MARLIN, WNA16MoEBackend.BATCHED_MARLIN]
     return _AVAILABLE_BACKENDS
 
 
 def select_wna16_moe_backend(
-    config: FusedMoEConfig,
-    weight_key: QuantKey,
-    weight_bits: int,
+    config: FusedMoEConfig, weight_key: QuantKey, weight_bits: int
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -200,9 +191,7 @@ def make_wna16_moe_kernel(
         )
 
     return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-        inplace=not moe_config.disable_inplace,
+        prepare_finalize, experts, inplace=not moe_config.disable_inplace
     )
 
 
@@ -567,16 +556,9 @@ def convert_to_wna16_moe_kernel_format(
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
-    if backend in (
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
-    ):
-        from vllm.model_executor.layers.quantization.auto_gptq import (
-            AutoGPTQConfig,
-        )
-        from vllm.model_executor.layers.quantization.awq_marlin import (
-            AWQMarlinConfig,
-        )
+    if backend in (WNA16MoEBackend.MARLIN, WNA16MoEBackend.BATCHED_MARLIN):
+        from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+        from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 
         if isinstance(quant_config, AWQMarlinConfig):
             if w13_qzeros is None or w2_qzeros is None:

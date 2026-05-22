@@ -85,7 +85,7 @@ class Scheduler(SchedulerInterface):
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
-                self.observability_config.kv_cache_metrics_sample,
+                self.observability_config.kv_cache_metrics_sample
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
@@ -135,8 +135,7 @@ class Scheduler(SchedulerInterface):
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
         self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config,
-            self.parallel_config.data_parallel_index,
+            self.kv_events_config, self.parallel_config.data_parallel_index
         )
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
@@ -266,8 +265,7 @@ class Scheduler(SchedulerInterface):
             )
 
             self.routed_experts_mgr = RoutedExpertsManager(
-                vllm_config=vllm_config,
-                kv_cache_config=kv_cache_config,
+                vllm_config=vllm_config, kv_cache_config=kv_cache_config
             )
             # Block-ID snapshot taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later
@@ -455,8 +453,7 @@ class Scheduler(SchedulerInterface):
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
+                            self.running, key=lambda r: (r.priority, r.arrival_time)
                         )
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
@@ -561,8 +558,7 @@ class Scheduler(SchedulerInterface):
                 ) and not self._try_promote_blocked_waiting_request(request):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
+                            "%s is still in WAITING_FOR_REMOTE_KVS state.", request_id
                         )
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
@@ -1281,9 +1277,7 @@ class Scheduler(SchedulerInterface):
         return GrammarOutput(structured_output_request_ids, bitmask)
 
     def update_from_output(
-        self,
-        scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
+        self, scheduler_output: SchedulerOutput, model_runner_output: ModelRunnerOutput
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
@@ -1314,8 +1308,7 @@ class Scheduler(SchedulerInterface):
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
             failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids,
-                num_scheduled_tokens,
+                kv_connector_output.invalid_block_ids, num_scheduled_tokens
             )
 
         # Persist per-step routed experts into the scheduler-side slot
@@ -1329,8 +1322,7 @@ class Scheduler(SchedulerInterface):
             re = model_runner_output.routed_experts
             self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
             routing_data = re.routing_data.astype(
-                self.routed_experts_mgr.routed_experts_by_slot.dtype,
-                copy=False,
+                self.routed_experts_mgr.routed_experts_by_slot.dtype, copy=False
             )
             # Build offset map using model runner's request order
             # (input_batch ordering), NOT scheduler dict order.
@@ -1455,9 +1447,7 @@ class Scheduler(SchedulerInterface):
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
-                        block_ids,
-                        request.num_prompt_tokens,
-                        token_start=prompt_start,
+                        block_ids, request.num_prompt_tokens, token_start=prompt_start
                     )
                 else:
                     if scheduled_spec_token_ids:
@@ -1690,8 +1680,7 @@ class Scheduler(SchedulerInterface):
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
-            draft_token_ids.req_ids,
-            draft_token_ids.draft_token_ids,
+            draft_token_ids.req_ids, draft_token_ids.draft_token_ids
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1717,8 +1706,7 @@ class Scheduler(SchedulerInterface):
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
-            draft_token_ids.req_ids,
-            draft_token_ids.draft_token_ids,
+            draft_token_ids.req_ids, draft_token_ids.draft_token_ids
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():

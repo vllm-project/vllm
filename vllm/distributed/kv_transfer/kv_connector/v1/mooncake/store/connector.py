@@ -151,9 +151,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # ============================================================
 
     def get_num_new_matched_tokens(
-        self,
-        request: Request,
-        num_computed_tokens: int,
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -161,10 +159,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def update_state_after_alloc(
-        self,
-        request: Request,
-        blocks: KVCacheBlocks,
-        num_external_tokens: int,
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -172,23 +167,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-        self,
-        request: Request,
-        block_ids: list[int],
+        self, request: Request, block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         return self.request_finished_all_groups(request, (block_ids,))
 
     def request_finished_all_groups(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
+        self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -263,9 +253,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
 
-    def get_kv_connector_kv_cache_events(
-        self,
-    ) -> MooncakeStoreKVEvents | None:
+    def get_kv_connector_kv_cache_events(self) -> MooncakeStoreKVEvents | None:
         assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:

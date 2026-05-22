@@ -10,9 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    zero_experts_compute_triton,
-)
+from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,

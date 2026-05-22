@@ -29,10 +29,7 @@ from .clip import CLIPEncoder, CLIPVisionEmbeddings
 
 class MLPBlock(nn.Module):
     def __init__(
-        self,
-        embedding_dim: int,
-        mlp_dim: int,
-        act: type[nn.Module] = nn.GELU,
+        self, embedding_dim: int, mlp_dim: int, act: type[nn.Module] = nn.GELU
     ) -> None:
         super().__init__()
         self.lin1 = nn.Linear(embedding_dim, mlp_dim)
@@ -136,20 +133,9 @@ class ImageEncoderViT(nn.Module):
             self.blocks.append(block)
 
         self.neck = nn.Sequential(
-            Conv2dLayer(
-                embed_dim,
-                out_chans,
-                kernel_size=1,
-                bias=False,
-            ),
+            Conv2dLayer(embed_dim, out_chans, kernel_size=1, bias=False),
             LayerNorm2d(out_chans),
-            Conv2dLayer(
-                out_chans,
-                out_chans,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            ),
+            Conv2dLayer(out_chans, out_chans, kernel_size=3, padding=1, bias=False),
             LayerNorm2d(out_chans),
         )
 
@@ -531,10 +517,7 @@ def build_sam_vit_b():
 
 
 def _build_sam(
-    encoder_embed_dim,
-    encoder_depth,
-    encoder_num_heads,
-    encoder_global_attn_indexes,
+    encoder_embed_dim, encoder_depth, encoder_num_heads, encoder_global_attn_indexes
 ):
     prompt_embed_dim = 256
     image_size = 1024

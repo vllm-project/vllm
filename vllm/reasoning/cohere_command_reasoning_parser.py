@@ -21,9 +21,7 @@ except ImportError as e:
 
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     DeltaFunctionCall,
@@ -68,30 +66,25 @@ class CohereNormalizedTool(TypedDict):
 
 
 COMMAND_A_TOOLS_TAG = CohereTagRegistry(
-    trigger="<|START_ACTION|>",
-    end="<|END_ACTION|>",
+    trigger="<|START_ACTION|>", end="<|END_ACTION|>"
 )
 COMMAND_A_JSON_TAG = CohereTagRegistry(
-    trigger="<|START_RESPONSE|>",
-    end="<|END_RESPONSE|>",
+    trigger="<|START_RESPONSE|>", end="<|END_RESPONSE|>"
 )
 COMMAND_A_PLUS_JSON_TAG = CohereTagRegistry(
-    trigger="<|START_TEXT|>",
-    end="<|END_TEXT|>",
+    trigger="<|START_TEXT|>", end="<|END_TEXT|>"
 )
 
 MODEL_TO_TAG_STYLE: dict[str, CohereTagStyle] = {
     "Cohere2ForCausalLM": CohereTagStyle(
-        json_tags=(COMMAND_A_JSON_TAG,),
-        tools=COMMAND_A_TOOLS_TAG,
+        json_tags=(COMMAND_A_JSON_TAG,), tools=COMMAND_A_TOOLS_TAG
     ),
     "Cohere2VisionForConditionalGeneration": CohereTagStyle(
         json_tags=(COMMAND_A_JSON_TAG, COMMAND_A_PLUS_JSON_TAG),
         tools=COMMAND_A_TOOLS_TAG,
     ),
     "Cohere2MoeForCausalLM": CohereTagStyle(
-        json_tags=(COMMAND_A_JSON_TAG,),
-        tools=COMMAND_A_TOOLS_TAG,
+        json_tags=(COMMAND_A_JSON_TAG,), tools=COMMAND_A_TOOLS_TAG
     ),
 }
 
@@ -182,16 +175,13 @@ def _tool_definitions_to_schema_list(
         params = t.get("parameters")
         out.append(
             CohereNormalizedTool(
-                name=name,
-                parameters=params if isinstance(params, dict) else {},
+                name=name, parameters=params if isinstance(params, dict) else {}
             )
         )
     return out
 
 
-def _has_effective_tools(
-    tools: str | list[Any] | None,
-) -> TypeGuard[str | list[Any]]:
+def _has_effective_tools(tools: str | list[Any] | None) -> TypeGuard[str | list[Any]]:
     """
     True when ``tools`` contains at least one tool definition to convert.
 
@@ -257,11 +247,7 @@ def convert_schema_to_structural_tags(
     return json.dumps(
         {
             "type": "structural_tag",
-            "format": {
-                "type": "triggered_tags",
-                "triggers": triggers,
-                "tags": tags,
-            },
+            "format": {"type": "triggered_tags", "triggers": triggers, "tags": tags},
         }
     )
 
@@ -519,9 +505,7 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         if model_architecture is None:
             return request
         result = convert_schema_to_structural_tags(
-            schema=schema,
-            tools=tools,
-            model_architecture=model_architecture,
+            schema=schema, tools=tools, model_architecture=model_architecture
         )
         if result is None:
             # Unsupported architectures are not in ``MODEL_TO_TAG_STYLE``.

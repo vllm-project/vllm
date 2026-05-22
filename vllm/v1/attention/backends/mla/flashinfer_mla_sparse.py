@@ -22,9 +22,7 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
-)
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (

@@ -26,12 +26,7 @@ class DummyLoRAManager:
     def get_module_lora(self, module_name: str) -> LoRALayerWeights:
         return self._loras[module_name]
 
-    def init_random_lora(
-        self,
-        module_name: str,
-        weight: torch.Tensor,
-        rank: int = 8,
-    ):
+    def init_random_lora(self, module_name: str, weight: torch.Tensor, rank: int = 8):
         lora = LoRALayerWeights(
             module_name,
             rank=rank,
@@ -130,19 +125,11 @@ class PunicaTensors:
 
 
 def generate_data(
-    batches,
-    hidden_size,
-    lora_nums,
-    max_rank,
-    seq_length,
-    dtype,
-    op_type,
-    device,
+    batches, hidden_size, lora_nums, max_rank, seq_length, dtype, op_type, device
 ) -> PunicaTensors:
     seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches,)).to(device)
     b_seq_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-        dim=0,
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long), dim=0
     ).to(device)
     total_tokens = seq_len_tensor.sum()
     if op_type == "shrink":
@@ -160,20 +147,14 @@ def generate_data(
             device
         )
     else:
-        inputs_tensor = torch.rand(
-            (total_tokens, max_rank),
-            dtype=dtype,
-        ).to(device)
+        inputs_tensor = torch.rand((total_tokens, max_rank), dtype=dtype).to(device)
         lora_weights = torch.rand(
             (lora_nums, hidden_size, max_rank),  # col-major
             dtype=dtype,
         ).to(device)
         # expand op needs to complete y+=a@lora_b, so output is
         # initinized randomly
-        ref_out_tensor = torch.rand(
-            (total_tokens, hidden_size),
-            dtype=dtype,
-        ).to(device)
+        ref_out_tensor = torch.rand((total_tokens, hidden_size), dtype=dtype).to(device)
         # Ensure the same input.
         our_out_tensor = ref_out_tensor.clone()
     lora_indices_tensor = torch.randint(
@@ -201,25 +182,14 @@ def generate_data(
 
 
 def generate_data_for_expand_nslices(
-    batches,
-    hidden_size,
-    lora_nums,
-    max_rank,
-    seq_length,
-    dtype,
-    nslices,
-    device,
+    batches, hidden_size, lora_nums, max_rank, seq_length, dtype, nslices, device
 ) -> PunicaTensors:
     seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches,)).to(device)
     b_seq_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-        dim=0,
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long), dim=0
     ).to(device)
     total_tokens = seq_len_tensor.sum()
-    inputs_tensor = torch.rand(
-        (total_tokens, max_rank),
-        dtype=dtype,
-    ).to(device)
+    inputs_tensor = torch.rand((total_tokens, max_rank), dtype=dtype).to(device)
     lora_weights_lst = []
     for _ in range(nslices):
         lora_weights_lst.append(
@@ -273,8 +243,7 @@ def generate_data_for_nslices(
 ) -> PunicaTensors:
     seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches,)).to(device)
     b_seq_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-        dim=0,
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long), dim=0
     ).to(device)
     total_tokens = seq_len_tensor.sum()
 
@@ -293,14 +262,12 @@ def generate_data_for_nslices(
         # NOTE  shrink kernel using torch.float32 as output type
         # shrink op need atomic_add, so output is initinized by 0
         our_out_tensor = torch.zeros(
-            (nslices, total_tokens, max_rank),
-            dtype=torch.float32,
+            (nslices, total_tokens, max_rank), dtype=torch.float32
         ).to(device)
     else:
-        inputs_tensor = torch.rand(
-            (nslices, total_tokens, max_rank),
-            dtype=dtype,
-        ).to(device)
+        inputs_tensor = torch.rand((nslices, total_tokens, max_rank), dtype=dtype).to(
+            device
+        )
         for _ in range(nslices):
             lora_weights_lst.append(
                 torch.rand(

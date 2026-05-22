@@ -22,10 +22,7 @@ pytestmark = pytest.mark.skip(
 
 MODELS = ["jinaai/jina-reranker-m0"]
 
-MM_PROCESSOR_KWARGS = {
-    "min_pixels": 3136,
-    "max_pixels": 602112,
-}
+MM_PROCESSOR_KWARGS = {"min_pixels": 3136, "max_pixels": 602112}
 
 LIMIT_MM_PER_PROMPT = {"image": 2}
 
@@ -135,18 +132,14 @@ def create_score_multimodal_param(
     for part in content_parts:
         if "text" in part:
             formatted_content.append(
-                ChatCompletionContentPartTextParam(
-                    type="text",
-                    text=part["text"],
-                )
+                ChatCompletionContentPartTextParam(type="text", text=part["text"])
             )
         elif "image" in part:
             image_val = part["image"]
             if image_val.startswith(("http://", "https://")):
                 formatted_content.append(
                     ChatCompletionContentPartImageParam(
-                        type="image_url",
-                        image_url={"url": image_val},
+                        type="image_url", image_url={"url": image_val}
                     )
                 )
             else:
@@ -265,12 +258,7 @@ def _run_test(
     version.parse(transformers.__version__) == version.parse("4.57.5"),
     reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
 )
-def test_model_text_image(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_model_text_image(hf_runner, vllm_runner, model: str, dtype: str) -> None:
     """Visual Documents Reranking"""
     _run_test(
         hf_runner,
@@ -288,12 +276,7 @@ def test_model_text_image(
     version.parse(transformers.__version__) == version.parse("4.57.5"),
     reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
 )
-def test_model_text_text(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_model_text_text(hf_runner, vllm_runner, model: str, dtype: str) -> None:
     """Textual Documents Reranking"""
     _run_test(
         hf_runner,
@@ -311,12 +294,7 @@ def test_model_text_text(
     version.parse(transformers.__version__) == version.parse("4.57.5"),
     reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
 )
-def test_model_image_text(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_model_image_text(hf_runner, vllm_runner, model: str, dtype: str) -> None:
     """Image Querying for Textual Documents"""
     _run_test(
         hf_runner,
@@ -334,12 +312,7 @@ def test_model_image_text(
     version.parse(transformers.__version__) == version.parse("4.57.5"),
     reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
 )
-def test_model_image_image(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_model_image_image(hf_runner, vllm_runner, model: str, dtype: str) -> None:
     """Image Querying for Image Documents"""
     _run_test(
         hf_runner,
@@ -358,10 +331,7 @@ def test_model_image_image(
     reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
 )
 def test_model_text_mixed_documents(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, model: str, dtype: str
 ) -> None:
     """Text Query for Mixed Text and Image Documents"""
     _run_test(

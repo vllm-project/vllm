@@ -7,9 +7,7 @@ from typing import Any, Optional, Union
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -19,10 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -143,9 +138,7 @@ class xLAMToolParser(ToolParser):
             if not isinstance(tool_calls_data, list):
                 logger.debug("Tool calls data is not an array")
                 return ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=content or model_output,
+                    tools_called=False, tool_calls=[], content=content or model_output
                 )
 
             tool_calls: list[ToolCall] = []
@@ -174,9 +167,7 @@ class xLAMToolParser(ToolParser):
                 tool_calls.append(tool_call)
 
             return ExtractedToolCallInformation(
-                tools_called=len(tool_calls) > 0,
-                tool_calls=tool_calls,
-                content=content,
+                tools_called=len(tool_calls) > 0, tool_calls=tool_calls, content=content
             )
 
         except Exception as e:

@@ -15,10 +15,7 @@ def flatten_entries(entry_cls, profile_dict: dict):
         entries_and_depth.append((entry_cls(**node["entry"]), curr_depth))
 
         for child in node["children"]:
-            get_entries(
-                child,
-                curr_depth=curr_depth + 1,
-            )
+            get_entries(child, curr_depth=curr_depth + 1)
 
     for root in profile_dict:
         get_entries(root)

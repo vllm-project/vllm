@@ -85,9 +85,7 @@ def get_fake_sample_fn() -> SamplerOutput:
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
-                [sampled_token_ids],
-                device=DEVICE_TYPE,
-                dtype=torch.int32,
+                [sampled_token_ids], device=DEVICE_TYPE, dtype=torch.int32
             ),
             logprobs_tensors=None,
         )
@@ -137,17 +135,13 @@ def get_fake_propose_draft_token_ids_fn():
         )
 
         valid_sampled_tokens_count = torch.tensor(
-            [num_accepted_tokens],
-            device=DEVICE_TYPE,
-            dtype=torch.int32,
+            [num_accepted_tokens], device=DEVICE_TYPE, dtype=torch.int32
         )
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
         return torch.tensor(
-            proposed_draft_token_ids,
-            device=DEVICE_TYPE,
-            dtype=torch.int32,
+            proposed_draft_token_ids, device=DEVICE_TYPE, dtype=torch.int32
         )
 
     return fake_propose_draft_token_ids_fn
@@ -269,10 +263,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                     ].kv_cache
                     mamba_kv_cache_dict[
                         num_computed_tokens - num_computed_tokens % BLOCK_SIZE
-                    ] = (
-                        kv_cache[0][block_id].clone(),
-                        kv_cache[1][block_id].clone(),
-                    )
+                    ] = (kv_cache[0][block_id].clone(), kv_cache[1][block_id].clone())
 
             last_num_computed_tokens = num_computed_tokens
         else:
@@ -292,8 +283,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
 
 
 def get_fake_process_mamba_fn(
-    original_preprocess_mamba_fn: Callable,
-    original_copy_fn: Callable,
+    original_preprocess_mamba_fn: Callable, original_copy_fn: Callable
 ):
     copy_info: tuple[list[int], list[int], list[int]] | None = None
 
@@ -483,8 +473,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(KVCacheManager, "allocate_slots", fake_allocate_slots_fn)
 
     fake_preprocess_mamba_fn, fake_copy_fn = get_fake_process_mamba_fn(
-        mamba_utils.preprocess_mamba,
-        mamba_utils.do_mamba_copy_block,
+        mamba_utils.preprocess_mamba, mamba_utils.do_mamba_copy_block
     )
     monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)

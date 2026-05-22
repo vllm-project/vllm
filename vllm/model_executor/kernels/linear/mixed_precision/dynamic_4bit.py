@@ -38,12 +38,7 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
             return False, f"Unsupported quant type {c.weight_type}"
         if (
             current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-            and c.act_type
-            not in [
-                torch.float32,
-                torch.bfloat16,
-                torch.float16,
-            ]
+            and c.act_type not in [torch.float32, torch.bfloat16, torch.float16]
         ):
             return (
                 False,
@@ -114,10 +109,7 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         setattr(layer, self.w_s_name, None)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         # PyTorch / KleidiAI kernels natively support the following configs:
         # - channelwise with bfloat16 / float32 activations

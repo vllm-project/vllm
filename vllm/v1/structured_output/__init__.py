@@ -107,8 +107,7 @@ class StructuredOutputManager:
             # gate observes the same template kwargs used by the frontend.
             parser_kwargs = structured_req.reasoning_parser_kwargs or {}
             structured_req.reasoner = self.reasoner_cls(
-                tokenizer=self.tokenizer,
-                **parser_kwargs,
+                tokenizer=self.tokenizer, **parser_kwargs
             )
         return structured_req.reasoner
 
@@ -133,23 +132,17 @@ class StructuredOutputManager:
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
+                    self.vllm_config, tokenizer=self.tokenizer, vocab_size=vocab_size
                 )
             elif backend == "guidance":
                 self.backend = GuidanceBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
+                    self.vllm_config, tokenizer=self.tokenizer, vocab_size=vocab_size
                 )
             elif backend == "outlines":
                 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 
                 self.backend = OutlinesBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
+                    self.vllm_config, tokenizer=self.tokenizer, vocab_size=vocab_size
                 )
             elif backend == "lm-format-enforcer":
                 from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
@@ -157,9 +150,7 @@ class StructuredOutputManager:
                 )
 
                 self.backend = LMFormatEnforcerBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
+                    self.vllm_config, tokenizer=self.tokenizer, vocab_size=vocab_size
                 )
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")

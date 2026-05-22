@@ -27,8 +27,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _make_get_num_new_matched_tokens(
-    req_num_new_matched_tokens: dict[str, int],
-    async_load: bool,
+    req_num_new_matched_tokens: dict[str, int], async_load: bool
 ) -> Callable[[Request, int], tuple[int, bool]]:
     def get_num_new_matched_tokens(request: Request, _: int) -> tuple[int, bool]:
         value = req_num_new_matched_tokens.get(request.request_id, 0)
@@ -45,9 +44,7 @@ def fail_scheduler():
     return create_scheduler(vllm_config)
 
 
-def test_invalid_blocks_evicted_prevents_cache_pollution(
-    fail_scheduler: Scheduler,
-):
+def test_invalid_blocks_evicted_prevents_cache_pollution(fail_scheduler: Scheduler):
     """
     verify invalid blocks are evicted to prevent future cache hits.
 
@@ -70,9 +67,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     request1 = create_request(num_tokens=num_prompt_tokens, request_id=1)
     fail_scheduler.add_request(request=request1)
 
-    req_num_new_matched_tokens = {
-        request1.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request1.request_id: num_external_computed_tokens}
 
     # mock connector indicating sync load
     fail_scheduler.connector = Mock()
@@ -108,9 +103,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
 
     # report invalid blocks
     model_runner_output = create_model_runner_output(
-        [request1],
-        invalid_block_ids=invalid_block_ids,
-        use_eos=False,
+        [request1], invalid_block_ids=invalid_block_ids, use_eos=False
     )
 
     fail_scheduler.update_from_output(scheduler_output, model_runner_output)

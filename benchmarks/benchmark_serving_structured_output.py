@@ -301,9 +301,7 @@ def sample_requests(
 
 
 async def get_request(
-    input_requests: list[SampleRequest],
-    request_rate: float,
-    burstiness: float = 1.0,
+    input_requests: list[SampleRequest], request_rate: float, burstiness: float = 1.0
 ) -> AsyncGenerator[tuple[int, SampleRequest], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -889,10 +887,7 @@ def create_argument_parser():
         description="Benchmark the online serving throughput."
     )
     parser.add_argument(
-        "--backend",
-        type=str,
-        default="vllm",
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        "--backend", type=str, default="vllm", choices=list(ASYNC_REQUEST_FUNCS.keys())
     )
     parser.add_argument(
         "--base-url",
@@ -904,10 +899,7 @@ def create_argument_parser():
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--endpoint",
-        type=str,
-        default="/v1/completions",
-        help="API endpoint.",
+        "--endpoint", type=str, default="/v1/completions", help="API endpoint."
     )
     parser.add_argument(
         "--dataset",
@@ -930,12 +922,7 @@ def create_argument_parser():
         "actual request rate may be lower than specified with --request-rate, "
         "if the server is not processing requests fast enough to keep up.",
     )
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Name of the model.",
-    )
+    parser.add_argument("--model", type=str, required=True, help="Name of the model.")
     parser.add_argument(
         "--tokenizer",
         type=str,
@@ -948,16 +935,10 @@ def create_argument_parser():
         help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
-        "--num-prompts",
-        type=int,
-        default=1000,
-        help="Number of prompts to process.",
+        "--num-prompts", type=int, default=1000, help="Number of prompts to process."
     )
     parser.add_argument(
-        "--output-len",
-        type=int,
-        default=128,
-        help="Number of output tokens.",
+        "--output-len", type=int, default=128, help="Number of output tokens."
     )
     parser.add_argument(
         "--request-rate",

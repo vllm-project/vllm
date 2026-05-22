@@ -30,9 +30,7 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -53,7 +51,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
-            moe_config=self.moe,
+            moe_config=self.moe
         )
 
     @property
@@ -102,12 +100,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_up_dim = intermediate_size_per_partition
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w13_up_dim,
-                hidden_size,
-                dtype=params_dtype,
-            ),
+            torch.empty(num_experts, w13_up_dim, hidden_size, dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight", w13_weight)
@@ -154,18 +147,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         return weight
 
-    def _setup_kernel(
-        self,
-        layer: Module,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
-    ) -> None:
+    def _setup_kernel(self, layer: Module, w13: torch.Tensor, w2: torch.Tensor) -> None:
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
-            self.unquantized_backend,
-            layer=layer,
-            w13_weight=w13,
-            w2_weight=w2,
+            self.unquantized_backend, layer=layer, w13_weight=w13, w2_weight=w2
         )
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
@@ -260,24 +245,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13.data = w13.transpose(-1, -2).contiguous()
             w2.data = w2.transpose(-1, -2).contiguous()
 
-            self._setup_kernel(
-                layer=layer,
-                w13=w13,
-                w2=w2,
-            )
+            self._setup_kernel(layer=layer, w13=w13, w2=w2)
         else:
-            self._setup_kernel(
-                layer=layer,
-                w13=layer.w13_weight,
-                w2=layer.w2_weight,
-            )
+            self._setup_kernel(layer=layer, w13=layer.w13_weight, w2=layer.w2_weight)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
-            return biased_moe_quant_config(
-                layer.w13_bias,
-                layer.w2_bias,
-            )
+            return biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
         else:
             return FUSED_MOE_UNQUANTIZED_CONFIG
 
@@ -333,12 +307,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         return self.forward_native(
-            layer,
-            x,
-            topk_weights,
-            topk_ids,
-            shared_experts,
-            shared_experts_input,
+            layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input
         )
 
     def apply_monolithic(

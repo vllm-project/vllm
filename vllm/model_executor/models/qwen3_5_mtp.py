@@ -12,9 +12,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -28,11 +26,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    _require_is_multimodal,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, _require_is_multimodal
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -72,10 +66,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -145,9 +136,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
 
         if not get_pp_group().is_last_rank:
@@ -348,11 +337,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 )
 class Qwen3_5MTP(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
@@ -396,9 +381,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.model.embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, self.model.embed_input_ids, is_multimodal=is_multimodal
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -429,9 +412,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 

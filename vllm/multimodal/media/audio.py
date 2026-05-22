@@ -43,10 +43,7 @@ _BAD_SF_CODES = {0, 1, 3, 4}
 
 
 def load_audio_pyav(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
+    path: BytesIO | Path | str, *, sr: float | None = 22050, mono: bool = True
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
 
@@ -74,10 +71,7 @@ def load_audio_pyav(
 
             chunks: list[npt.NDArray] = []
             needs_resampling = not math.isclose(
-                float(sr),
-                float(native_sr),
-                rel_tol=0.0,
-                abs_tol=1e-6,
+                float(sr), float(native_sr), rel_tol=0.0, abs_tol=1e-6
             )
             resampler = (
                 av.AudioResampler(format="fltp", layout="mono", rate=sr)
@@ -110,10 +104,7 @@ def load_audio_pyav(
 
 
 def load_audio_soundfile(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
+    path: BytesIO | Path | str, *, sr: float | None = 22050, mono: bool = True
 ) -> tuple[np.ndarray, int]:
     """Load audio via soundfile"""
     with soundfile.SoundFile(path) as f:
@@ -130,10 +121,7 @@ def load_audio_soundfile(
 
 
 def load_audio(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
+    path: BytesIO | Path | str, *, sr: float | None = 22050, mono: bool = True
 ):
     try:
         return load_audio_soundfile(path, sr=sr, mono=mono)
@@ -180,21 +168,14 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         return load_audio(BytesIO(data), sr=None)
 
-    def load_base64(
-        self,
-        media_type: str,
-        data: str,
-    ) -> tuple[npt.NDArray, float]:
+    def load_base64(self, media_type: str, data: str) -> tuple[npt.NDArray, float]:
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         return load_audio(filepath, sr=None)
 
     def encode_base64(
-        self,
-        media: tuple[npt.NDArray, int],
-        *,
-        audio_format: str = "WAV",
+        self, media: tuple[npt.NDArray, int], *, audio_format: str = "WAV"
     ) -> str:
         audio, sr = media
 

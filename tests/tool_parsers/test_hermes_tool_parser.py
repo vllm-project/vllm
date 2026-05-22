@@ -12,12 +12,8 @@ from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 CONFIGS = {
-    "llama": {
-        "tool_parser": Hermes2ProToolParser,
-    },
-    "granite4": {
-        "tool_parser": Granite4ToolParser,
-    },
+    "llama": {"tool_parser": Hermes2ProToolParser},
+    "granite4": {"tool_parser": Granite4ToolParser},
 }
 
 
@@ -36,11 +32,7 @@ def hermes_parser(request, qwen_tokenizer: TokenizerLike) -> ToolParser:
 
 @pytest.fixture
 def any_chat_request() -> ChatCompletionRequest:
-    return ChatCompletionRequest(
-        seed=42,
-        model="Qwen/Qwen3-32B",
-        messages=[],
-    )
+    return ChatCompletionRequest(seed=42, model="Qwen/Qwen3-32B", messages=[])
 
 
 def test_hermes_parser_streaming_just_forward_text(
@@ -211,10 +203,7 @@ def test_hermes_streaming_tool_call_with_stream_interval(
 
     # Concatenated arguments must be valid JSON matching the original.
     args_str = "".join(tc.function.arguments or "" for tc in tool_deltas)
-    assert json.loads(args_str) == {
-        "location": "San Francisco",
-        "unit": "celsius",
-    }
+    assert json.loads(args_str) == {"location": "San Francisco", "unit": "celsius"}
 
 
 @pytest.mark.parametrize("stream_interval", [2, 3, 5, 8])
@@ -322,13 +311,11 @@ def test_hermes_streaming_just_forward_text_with_stream_interval(
 
 
 def test_hermes_parser_non_streaming_no_tool_call(
-    hermes_parser: ToolParser,
-    any_chat_request: ChatCompletionRequest,
+    hermes_parser: ToolParser, any_chat_request: ChatCompletionRequest
 ) -> None:
     text = """This is not a tool call."""
     tool_call = hermes_parser.extract_tool_calls(
-        model_output=text,
-        request=any_chat_request,
+        model_output=text, request=any_chat_request
     )
 
     assert tool_call is not None
@@ -336,15 +323,13 @@ def test_hermes_parser_non_streaming_no_tool_call(
 
 
 def test_hermes_parser_non_streaming_tool_call_between_tags(
-    hermes_parser: ToolParser,
-    any_chat_request: ChatCompletionRequest,
+    hermes_parser: ToolParser, any_chat_request: ChatCompletionRequest
 ) -> None:
     text = """<tool_call>
 {"name": "final_answer", "arguments": {"trigger": true}}
 </tool_call>"""
     tool_call = hermes_parser.extract_tool_calls(
-        model_output=text,
-        request=any_chat_request,
+        model_output=text, request=any_chat_request
     )
 
     assert tool_call is not None
@@ -354,8 +339,7 @@ def test_hermes_parser_non_streaming_tool_call_between_tags(
 
 
 def test_hermes_parser_non_streaming_tool_call_until_eos(
-    hermes_parser: ToolParser,
-    any_chat_request: ChatCompletionRequest,
+    hermes_parser: ToolParser, any_chat_request: ChatCompletionRequest
 ) -> None:
     if isinstance(hermes_parser, Granite4ToolParser):
         pytest.skip(reason="The Granite4 tool parser enforces a complete response")
@@ -363,8 +347,7 @@ def test_hermes_parser_non_streaming_tool_call_until_eos(
     text = """<tool_call>
 {"name": "final_answer", "arguments": {"trigger": true}}"""
     tool_call = hermes_parser.extract_tool_calls(
-        model_output=text,
-        request=any_chat_request,
+        model_output=text, request=any_chat_request
     )
 
     assert tool_call is not None
@@ -374,15 +357,13 @@ def test_hermes_parser_non_streaming_tool_call_until_eos(
 
 
 def test_hermes_parser_non_streaming_tool_call_invalid_json(
-    hermes_parser: ToolParser,
-    any_chat_request: ChatCompletionRequest,
+    hermes_parser: ToolParser, any_chat_request: ChatCompletionRequest
 ) -> None:
     # Missing closing brace to trigger exception
     text = """<tool_call>
 {"name": "final_answer", "arguments": {"trigger": true}"""
     tool_call = hermes_parser.extract_tool_calls(
-        model_output=text,
-        request=any_chat_request,
+        model_output=text, request=any_chat_request
     )
 
     assert tool_call is not None
@@ -390,19 +371,14 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
 
 def test_hermes_streaming_content_and_tool_call_in_single_chunk(
-    qwen_tokenizer: TokenizerLike,
-    any_chat_request: ChatCompletionRequest,
+    qwen_tokenizer: TokenizerLike, any_chat_request: ChatCompletionRequest
 ) -> None:
     """Content + complete tool call in one chunk must both be emitted."""
     text = 'Hi!<tool_call>{"name": "f", "arguments": {"x": 1}}</tool_call>'
     # Use a stream_interval large enough to guarantee a single chunk.
     parser = Hermes2ProToolParser(qwen_tokenizer)
     deltas = _simulate_streaming(
-        qwen_tokenizer,
-        parser,
-        any_chat_request,
-        text,
-        stream_interval=9999,
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval=9999
     )
 
     content_parts = [d.content for d in deltas if d.content]

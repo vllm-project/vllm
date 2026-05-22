@@ -104,10 +104,7 @@ def get_test_cases() -> list[RotaryEmbeddingTestCase]:
     ]
 
 
-def run_dispatch_test(
-    test_case: RotaryEmbeddingTestCase,
-    device: str,
-):
+def run_dispatch_test(test_case: RotaryEmbeddingTestCase, device: str):
     """Run a dispatch test for a RotaryEmbedding class."""
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["all", "+apply_rotary_emb"])
@@ -190,10 +187,7 @@ def run_dispatch_test(
 )
 @pytest.mark.parametrize("test_case", get_test_cases(), ids=lambda tc: tc.name)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_rotary_embedding_dispatch(
-    test_case: RotaryEmbeddingTestCase,
-    device: str,
-):
+def test_rotary_embedding_dispatch(test_case: RotaryEmbeddingTestCase, device: str):
     """
     Test that RotaryEmbedding classes dispatch to the correct ApplyRotaryEmb method.
 

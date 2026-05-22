@@ -44,47 +44,23 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     assert args.port == 8000
     args = serve_parser.parse_args(["--config", cli_config_file])
     assert args.port == 12312
-    args = serve_parser.parse_args(
-        [
-            "--config",
-            cli_config_file,
-            "--port",
-            "9000",
-        ]
-    )
+    args = serve_parser.parse_args(["--config", cli_config_file, "--port", "9000"])
     assert args.port == 9000
-    args = serve_parser.parse_args(
-        [
-            "--port",
-            "9000",
-            "--config",
-            cli_config_file,
-        ]
-    )
+    args = serve_parser.parse_args(["--port", "9000", "--config", cli_config_file])
     assert args.port == 9000
 
 
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
-    args = serve_parser.parse_args(
-        [
-            "--lora-modules",
-            "module1=/path/to/module1",
-        ]
-    )
+    args = serve_parser.parse_args(["--lora-modules", "module1=/path/to/module1"])
     expected = [LoRAModulePath(name="module1", path="/path/to/module1")]
     assert args.lora_modules == expected
 
 
 def test_valid_json_format(serve_parser):
     # Test valid JSON format input
-    args = serve_parser.parse_args(
-        [
-            "--lora-modules",
-            json.dumps(LORA_MODULE),
-        ]
-    )
+    args = serve_parser.parse_args(["--lora-modules", json.dumps(LORA_MODULE)])
     expected = [
         LoRAModulePath(name="module2", path="/path/to/module2", base_model_name="llama")
     ]
@@ -130,11 +106,7 @@ def test_empty_values(serve_parser):
 def test_multiple_valid_inputs(serve_parser):
     # Test multiple valid inputs (both old and JSON format)
     args = serve_parser.parse_args(
-        [
-            "--lora-modules",
-            "module1=/path/to/module1",
-            json.dumps(LORA_MODULE),
-        ]
+        ["--lora-modules", "module1=/path/to/module1", json.dumps(LORA_MODULE)]
     )
     expected = [
         LoRAModulePath(name="module1", path="/path/to/module1"),
@@ -157,11 +129,7 @@ def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
 def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     """Ensure validation passes with tool choice enabled with a call parser"""
     args = serve_parser.parse_args(
-        args=[
-            "--enable-auto-tool-choice",
-            "--tool-call-parser",
-            "mistral",
-        ]
+        args=["--enable-auto-tool-choice", "--tool-call-parser", "mistral"]
     )
     validate_parsed_serve_args(args)
 
@@ -169,11 +137,7 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
 def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(
-        args=[
-            "--enable-auto-tool-choice",
-            "--reasoning-parser",
-            "deepseek_r1",
-        ]
+        args=["--enable-auto-tool-choice", "--reasoning-parser", "deepseek_r1"]
     )
     with pytest.raises(TypeError):
         validate_parsed_serve_args(args)
@@ -182,12 +146,7 @@ def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
 def test_passes_with_reasoning_parser(serve_parser):
     """Ensure validation passes if reasoning is enabled
     with a reasoning parser"""
-    args = serve_parser.parse_args(
-        args=[
-            "--reasoning-parser",
-            "deepseek_r1",
-        ]
-    )
+    args = serve_parser.parse_args(args=["--reasoning-parser", "deepseek_r1"])
     validate_parsed_serve_args(args)
 
 

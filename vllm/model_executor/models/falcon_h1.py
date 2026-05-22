@@ -193,22 +193,15 @@ class FalconH1SSMDecoderLayer(nn.Module):
         # dt vector 2 * d_ssm + 2 * (n_group * d_state)
         # -> 2 * d_ssm + 2 * (n_group * d_state) + n_heads
         mup_vector[
-            :,
-            (2 * self.d_ssm + 2 * self.groups_time_state_size) // self.tp_size :,
+            :, (2 * self.d_ssm + 2 * self.groups_time_state_size) // self.tp_size :
         ] *= self.zxbcdt_multipliers[4]
 
         self.register_buffer("mup_vector", mup_vector, persistent=False)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
-        output = self.mamba(
-            hidden_states,
-            mup_vector=self.mup_vector,
-        )
+        output = self.mamba(hidden_states, mup_vector=self.mup_vector)
         return output, residual
 
 
@@ -288,10 +281,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self.key_multiplier = config.key_multiplier
 
     def self_attention(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -310,8 +300,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         **kwargs,
     ):
         hidden_states = self.self_attention(
-            positions=positions,
-            hidden_states=hidden_states,
+            positions=positions, hidden_states=hidden_states
         )
         return hidden_states, residual
 
@@ -372,12 +361,7 @@ class FalconH1ParallelHybrid(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
-    ):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Process input through the attention branch.
@@ -430,8 +414,7 @@ class FalconH1Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
+                self.vocab_size, config.hidden_size
             )
             self.embedding_multiplier = config.embedding_multiplier
         else:
@@ -483,16 +466,9 @@ class FalconH1Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-            )
+            hidden_states = layer(positions=positions, hidden_states=hidden_states)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
@@ -574,8 +550,7 @@ class FalconH1ForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -585,8 +560,7 @@ class FalconH1ForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -650,9 +624,7 @@ class FalconH1ForCausalLM(
             # Used to track and store by the Mamba cache between steps.
 
             self.logits_processor = LogitsProcessor(
-                config.vocab_size,
-                config.vocab_size,
-                scale=config.lm_head_multiplier,
+                config.vocab_size, config.vocab_size, scale=config.lm_head_multiplier
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -673,25 +645,18 @@ class FalconH1ForCausalLM(
         **kwargs,
     ):
         hidden_states = self.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
 
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
+            self, skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None)
         )
         return loader.load_weights(weights)

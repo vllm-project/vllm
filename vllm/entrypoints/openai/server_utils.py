@@ -159,8 +159,7 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
             if p.strip()
         ]
         return create_uvicorn_log_config(
-            excluded_paths=excluded_paths,
-            log_level=args.uvicorn_log_level,
+            excluded_paths=excluded_paths, log_level=args.uvicorn_log_level
         )
 
     return None
@@ -172,9 +171,7 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionStreamResponse,
         )
-        from vllm.entrypoints.openai.completion.protocol import (
-            CompletionStreamResponse,
-        )
+        from vllm.entrypoints.openai.completion.protocol import CompletionStreamResponse
 
         # Try using Completion types for type-safe parsing
         if chunk_data.get("object") == "chat.completion.chunk":
@@ -357,8 +354,7 @@ async def engine_error_handler(
         )
 
     terminate_if_errored(
-        server=req.app.state.server,
-        engine=req.app.state.engine_client,
+        server=req.app.state.server, engine=req.app.state.engine_client
     )
     err = create_error_response(exc)
     return JSONResponse(err.model_dump(), status_code=err.error.code)

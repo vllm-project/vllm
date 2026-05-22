@@ -11,11 +11,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.peft_helper import PEFTHelper
 
 ERROR_CASES = [
-    (
-        "test_rank",
-        {"r": 1024},
-        "is greater than max_lora_rank",
-    ),
+    ("test_rank", {"r": 1024}, "is greater than max_lora_rank"),
     ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
     (
         "test_modules_to_save",

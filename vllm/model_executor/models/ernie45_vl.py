@@ -42,9 +42,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -52,9 +50,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -155,8 +151,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            enable_fp32_compute=True,
+            enforce_enable=True, enable_fp32_compute=True
         )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -204,18 +199,12 @@ class Ernie4_5_VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb.cos(),
-                rotary_pos_emb.sin(),
+                qk_concat, rotary_pos_emb.cos(), rotary_pos_emb.sin()
             )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         output = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(output, "b s h d -> s b (h d)").contiguous()
 
@@ -399,8 +388,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
+            head_size=head_dim, dtype=torch.get_default_dtype()
         )
 
     @property
@@ -803,9 +791,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return {"image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
         max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
@@ -952,9 +938,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -965,11 +949,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
         return max(max_frames_per_video, 2)
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
         image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
@@ -984,9 +964,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
     def _pixel_values_norm(
-        self,
-        pixel_values: torch.Tensor,
-        mm_kwargs: object,
+        self, pixel_values: torch.Tensor, mm_kwargs: object
     ) -> torch.Tensor:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -1142,9 +1120,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         image_grid_sizes = image_grid_thw.prod(-1)
@@ -1259,15 +1235,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # To ensure correct weight loading and mapping.
@@ -1326,8 +1295,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Ernie4_5_VLMoeForCausalLM(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
         self.visual_token_mask = None
@@ -1352,16 +1320,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         else:
             self._visual_token_ids_tensor_cache = None
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def _vision_forward(
-        self,
-        pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
     ) -> torch.Tensor:
         if grid_thw is not None:
             grid_thw = grid_thw[grid_thw > 0]
@@ -1387,8 +1350,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             return
         # Create tensor on the correct device
         visual_token_ids_tensor = self._visual_token_ids_tensor_cache.to(
-            device=input_ids.device,
-            dtype=input_ids.dtype,
+            device=input_ids.device, dtype=input_ids.dtype
         )
 
         self.visual_token_mask = torch.isin(input_ids, visual_token_ids_tensor).reshape(
@@ -1396,19 +1358,14 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         )
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
 
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-        ) in self.iter_mm_grid_thw(mm_features):
+        for offset, llm_grid_t, llm_grid_h, llm_grid_w in self.iter_mm_grid_thw(
+            mm_features
+        ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
@@ -1620,10 +1577,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
             self.visual_token_mask = None
 
-        hidden_states = self.language_model.model(
-            **forward_kwargs,
-            **kwargs,
-        )
+        hidden_states = self.language_model.model(**forward_kwargs, **kwargs)
 
         return hidden_states
 

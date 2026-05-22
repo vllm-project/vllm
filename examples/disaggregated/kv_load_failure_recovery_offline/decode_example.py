@@ -53,9 +53,7 @@ def main():
         ktc = KVTransferConfig(
             kv_connector="ExampleConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={
-                "shared_storage_path": "local_storage",
-            },
+            kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
         out_file = "decode_output.txt"
 

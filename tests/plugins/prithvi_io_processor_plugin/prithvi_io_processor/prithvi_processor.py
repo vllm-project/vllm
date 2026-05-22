@@ -247,16 +247,13 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
         raise ValueError("Prompt data should be an `ImagePrompt`")
 
     def pre_process(
-        self,
-        prompt: ImagePrompt,
-        request_id: str | None = None,
-        **kwargs,
+        self, prompt: ImagePrompt, request_id: str | None = None, **kwargs
     ) -> PromptType | Sequence[PromptType]:
         image_data = dict(prompt)
 
         if request_id:
             self.requests_cache[request_id] = {
-                "out_format": image_data["out_data_format"],
+                "out_format": image_data["out_data_format"]
             }
 
         input_data, temporal_coords, location_coords, meta_data = load_image(
@@ -274,9 +271,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
         pad_h = (self.img_size - (self.original_h % self.img_size)) % self.img_size
         pad_w = (self.img_size - (self.original_w % self.img_size)) % self.img_size
         input_data = np.pad(
-            input_data,
-            ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w)),
-            mode="reflect",
+            input_data, ((0, 0), (0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="reflect"
         )
 
         batch = torch.tensor(input_data)
@@ -345,9 +340,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
         for output in model_output:
             y_hat = output.outputs.data.argmax(dim=0)
             pred = torch.nn.functional.interpolate(
-                y_hat[None, None, ...].float(),
-                size=self.img_size,
-                mode="nearest",
+                y_hat[None, None, ...].float(), size=self.img_size, mode="nearest"
             )
             pred_imgs_list.append(pred)
 
@@ -378,8 +371,4 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
             _convert_np_uint8(pred_imgs), self.meta_data, out_format
         )
 
-        return ImageRequestOutput(
-            type=out_format,
-            format="tiff",
-            data=out_data,
-        )
+        return ImageRequestOutput(type=out_format, format="tiff", data=out_data)

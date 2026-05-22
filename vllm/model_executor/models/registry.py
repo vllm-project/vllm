@@ -793,8 +793,7 @@ class _RegisteredModel(_BaseRegisteredModel):
     @staticmethod
     def from_model_cls(model_cls: type[nn.Module]):
         return _RegisteredModel(
-            interfaces=_ModelInfo.from_model_cls(model_cls),
-            model_cls=model_cls,
+            interfaces=_ModelInfo.from_model_cls(model_cls), model_cls=model_cls
         )
 
     def inspect_model_cls(self) -> _ModelInfo:
@@ -858,10 +857,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
 
         try:
-            modelinfo_dict = {
-                "hash": module_hash,
-                "modelinfo": asdict(mi),
-            }
+            modelinfo_dict = {"hash": module_hash, "modelinfo": asdict(mi)}
             cache_dir = self._get_cache_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
             modelinfo_path = cache_dir / self._get_cache_filename()
@@ -926,8 +922,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
 @lru_cache(maxsize=128)
 def _try_load_model_cls(
-    model_arch: str,
-    model: _BaseRegisteredModel,
+    model_arch: str, model: _BaseRegisteredModel
 ) -> type[nn.Module] | None:
     from vllm.platforms import current_platform
 
@@ -941,8 +936,7 @@ def _try_load_model_cls(
 
 @lru_cache(maxsize=128)
 def _try_inspect_model_cls(
-    model_arch: str,
-    model: _BaseRegisteredModel,
+    model_arch: str, model: _BaseRegisteredModel
 ) -> _ModelInfo | None:
     try:
         return model.inspect_model_cls()
@@ -959,11 +953,7 @@ class _ModelRegistry:
     def get_supported_archs(self) -> Set[str]:
         return self.models.keys()
 
-    def register_model(
-        self,
-        model_arch: str,
-        model_cls: type[nn.Module] | str,
-    ) -> None:
+    def register_model(self, model_arch: str, model_cls: type[nn.Module] | str) -> None:
         """
         Register an external model to be used in vLLM.
 
@@ -1051,9 +1041,7 @@ class _ModelRegistry:
         return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
     def _try_resolve_transformers(
-        self,
-        architecture: str,
-        model_config: ModelConfig,
+        self, architecture: str, model_config: ModelConfig
     ) -> str | None:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
@@ -1120,11 +1108,7 @@ class _ModelRegistry:
 
         return model_config._get_transformers_backend_cls()
 
-    def _normalize_arch(
-        self,
-        architecture: str,
-        model_config: ModelConfig,
-    ) -> str:
+    def _normalize_arch(self, architecture: str, model_config: ModelConfig) -> str:
         if architecture in self.models:
             return architecture
 
@@ -1147,9 +1131,7 @@ class _ModelRegistry:
         return architecture
 
     def inspect_model_cls(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> tuple[_ModelInfo, str]:
         if isinstance(architectures, str):
             architectures = [architectures]
@@ -1199,9 +1181,7 @@ class _ModelRegistry:
         return self._raise_for_unsupported(architectures)
 
     def resolve_model_cls(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> tuple[type[nn.Module], str]:
         if isinstance(architectures, str):
             architectures = [architectures]
@@ -1253,89 +1233,67 @@ class _ModelRegistry:
         return self._raise_for_unsupported(architectures)
 
     def is_text_generation_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_text_generation_model
 
     def is_pooling_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_pooling_model
 
     def is_multimodal_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_multimodal
 
     def is_multimodal_raw_input_only_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_multimodal_raw_input_only
 
     def is_pp_supported_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_pp
 
     def model_has_inner_state(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.has_inner_state
 
     def is_attention_free_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_attention_free
 
     def is_hybrid_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_hybrid
 
     def is_noops_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.has_noops
 
     def is_transcription_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_transcription
 
     def is_transcription_only_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
+        self, architectures: str | list[str], model_config: ModelConfig
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_transcription_only
@@ -1353,8 +1311,7 @@ def _resolve_module_name(mod_relname: str) -> str:
 ModelRegistry = _ModelRegistry(
     {
         model_arch: _LazyRegisteredModel(
-            module_name=_resolve_module_name(mod_relname),
-            class_name=cls_name,
+            module_name=_resolve_module_name(mod_relname), class_name=cls_name
         )
         for model_arch, (mod_relname, cls_name) in _VLLM_MODELS.items()
     }

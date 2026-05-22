@@ -9,10 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 def test_multimodal_processor(model_id):
-    model_config = ModelConfig(
-        model=model_id,
-        model_impl="transformers",
-    )
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
 
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 

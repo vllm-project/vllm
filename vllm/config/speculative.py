@@ -220,9 +220,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _resolve_synthetic_acceptance_rates(
-        n: int,
-        rates: list[float] | None,
-        length: float | None,
+        n: int, rates: list[float] | None, length: float | None
     ) -> list[float]:
         """Return per-position unconditional acceptance rates from exactly one
         of `rates` or `length` (validates range, length, and monotonicity)."""
@@ -300,11 +298,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in (
-            "deepseek_v3",
-            "deepseek_v32",
-            "glm_moe_dsa",
-        ):
+        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -382,10 +376,7 @@ class SpeculativeConfig:
             hf_config.model_type = "glm4_moe_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
-                {
-                    "n_predict": n_predict,
-                    "architectures": ["Glm4MoeMTPModel"],
-                }
+                {"n_predict": n_predict, "architectures": ["Glm4MoeMTPModel"]}
             )
 
         if hf_config.architectures[0] == "Glm4MoeLiteForCausalLM":
@@ -874,10 +865,7 @@ class SpeculativeConfig:
 
             return speculative_max_model_len
 
-        result = min(
-            draft_max_model_len,
-            target_max_model_len,
-        )
+        result = min(draft_max_model_len, target_max_model_len)
         if result != draft_max_model_len:
             logger.info(
                 "Overriding draft model max model len from %d to %d",
@@ -933,8 +921,7 @@ class SpeculativeConfig:
             self.draft_model_config.get_model_arch_config()
         )
         model_info, arch = self.draft_model_config.registry.inspect_model_cls(
-            self.draft_model_config.architectures,
-            self.draft_model_config,
+            self.draft_model_config.architectures, self.draft_model_config
         )
         self.draft_model_config._model_info = model_info
         self.draft_model_config._architecture = arch
@@ -1075,13 +1062,7 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method
-            in (
-                "ngram",
-                "suffix",
-                "extract_hidden_states",
-                "custom_class",
-            )
+            if method in ("ngram", "suffix", "extract_hidden_states", "custom_class")
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens

@@ -134,9 +134,7 @@ def resolve_tokenizer_args(
             tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
             # Get the HuggingFace Hub path for the GGUF file
             gguf_file = get_gguf_file_path_from_hf(
-                tokenizer_name,
-                quant_type,
-                revision=revision,
+                tokenizer_name, quant_type, revision=revision
             )
             kwargs["gguf_file"] = gguf_file
 
@@ -227,9 +225,7 @@ def get_tokenizer(
     config = None
     with contextlib.suppress(ValueError, OSError):
         config = get_config(
-            tokenizer_name,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
+            tokenizer_name, trust_remote_code=trust_remote_code, revision=revision
         )
 
     # Some models have an incorrect tokenizer_class on the hub.

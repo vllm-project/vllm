@@ -37,8 +37,7 @@ async def client(server):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="What is 123 * 456?",
+        model=model_name, input="What is 123 * 456?"
     )
     assert response is not None
     print("response: ", response)
@@ -50,9 +49,7 @@ async def test_basic(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_enable_response_messages(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="Hello?",
-        extra_body={"enable_response_messages": True},
+        model=model_name, input="Hello?", extra_body={"enable_response_messages": True}
     )
     assert response.status == "completed"
     assert response.input_messages[0]["type"] == "raw_message_tokens"
@@ -75,10 +72,7 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
                 "type": "reasoning",
                 "id": "lol",
                 "content": [
-                    {
-                        "type": "reasoning_text",
-                        "text": "We need to respond: greeting.",
-                    }
+                    {"type": "reasoning_text", "text": "We need to respond: greeting."}
                 ],
                 "summary": [],
             },
@@ -103,9 +97,7 @@ async def test_streaming_output_consistency(client: OpenAI, model_name: str):
     2. Matches the 'output_text' in the final 'response.completed' event
     """
     response = await client.responses.create(
-        model=model_name,
-        input="Say hello in one sentence.",
-        stream=True,
+        model=model_name, input="Say hello in one sentence.", stream=True
     )
 
     events = []
@@ -263,11 +255,7 @@ async def test_extra_sampling_params(client: OpenAI, model_name: str):
         max_output_tokens=50,
         temperature=0.7,
         top_p=0.9,
-        extra_body={
-            "top_k": 40,
-            "repetition_penalty": 1.2,
-            "seed": 42,
-        },
+        extra_body={"top_k": 40, "repetition_penalty": 1.2, "seed": 42},
     )
 
     # Verify request succeeded and parameters were accepted

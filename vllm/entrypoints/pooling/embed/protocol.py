@@ -36,9 +36,7 @@ class EmbeddingCompletionRequest(
 ):
     def to_pooling_params(self):
         return PoolingParams(
-            task="embed",
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
+            task="embed", dimensions=self.dimensions, use_activation=self.use_activation
         )
 
 
@@ -50,9 +48,7 @@ class EmbeddingChatRequest(
 ):
     def to_pooling_params(self):
         return PoolingParams(
-            task="embed",
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
+            task="embed", dimensions=self.dimensions, use_activation=self.use_activation
         )
 
 
@@ -89,12 +85,7 @@ class EmbeddingBytesResponse(OpenAIBaseModel):
 # Cohere /v2/embed — request models
 # ---------------------------------------------------------------------------
 
-CohereEmbeddingType = Literal[
-    "float",
-    "binary",
-    "ubinary",
-    "base64",
-]
+CohereEmbeddingType = Literal["float", "binary", "ubinary", "base64"]
 CohereTruncate = Literal["NONE", "START", "END"]
 
 
@@ -165,8 +156,7 @@ _UNSIGNED_TO_SIGNED_DIFF = 1 << 7  # 128
 
 
 def _pack_binary_embeddings(
-    float_embeddings: list[list[float]],
-    signed: bool,
+    float_embeddings: list[list[float]], signed: bool
 ) -> list[list[int]]:
     """Bit-pack float embeddings: positive -> 1, negative -> 0.
 
@@ -197,9 +187,7 @@ def _pack_binary_embeddings(
     return result
 
 
-def _encode_base64_embeddings(
-    float_embeddings: list[list[float]],
-) -> list[str]:
+def _encode_base64_embeddings(float_embeddings: list[list[float]]) -> list[str]:
     """Encode float embeddings as base64 (little-endian float32)."""
     result: list[str] = []
     for embedding in float_embeddings:
@@ -209,8 +197,7 @@ def _encode_base64_embeddings(
 
 
 def build_typed_embeddings(
-    float_embeddings: list[list[float]],
-    embedding_types: Sequence[str],
+    float_embeddings: list[list[float]], embedding_types: Sequence[str]
 ) -> CohereEmbedByTypeEmbeddings:
     """Convert float embeddings to all requested Cohere embedding types."""
     result = CohereEmbedByTypeEmbeddings()

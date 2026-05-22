@@ -23,11 +23,7 @@ logger = init_logger(__name__)
 
 
 class SymmMemCommunicator:
-    _WORLD_SIZES_MULTIMEM = {
-        "9.0": [4, 6, 8],
-        "10.0": [6, 8],
-        "10.3": [6, 8],
-    }
+    _WORLD_SIZES_MULTIMEM = {"9.0": [4, 6, 8], "10.0": [6, 8], "10.3": [6, 8]}
 
     def __init__(
         self,
@@ -80,8 +76,7 @@ class SymmMemCommunicator:
         if max_size_override is not None:
             self.max_size = max_size_override
             logger.info(
-                "SymmMemCommunicator: Using override max_size: %s bytes",
-                self.max_size,
+                "SymmMemCommunicator: Using override max_size: %s bytes", self.max_size
             )
         else:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][

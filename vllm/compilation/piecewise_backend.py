@@ -174,14 +174,10 @@ class PiecewiseBackend:
                     assert isinstance(size, int)
                     range = Range(start=size, end=size)
                     if range not in self.compile_ranges:
-                        self.range_entries[range] = RangeEntry(
-                            compile_range=range,
-                        )
+                        self.range_entries[range] = RangeEntry(compile_range=range)
 
         for range in self.compile_ranges:
-            self.range_entries[range] = RangeEntry(
-                compile_range=range,
-            )
+            self.range_entries[range] = RangeEntry(compile_range=range)
 
         # Track whether we've logged the graph for this subgraph (only log once)
         self._graph_logged = False
@@ -211,11 +207,7 @@ class PiecewiseBackend:
             def reducer_override(self, obj: object) -> Any:
                 if isinstance(obj, CachingAutotuner):
                     obj.prepare_for_pickle()
-                    return pickle.loads, (
-                        pickle.dumps(
-                            obj,
-                        ),
-                    )
+                    return pickle.loads, (pickle.dumps(obj),)
                 return NotImplemented
 
         def serialize(fn: Callable[..., Any]) -> bytes:
@@ -310,9 +302,7 @@ class PiecewiseBackend:
             assert self.graph is not None
             trace_structured(
                 "graph_dump",
-                metadata_fn=lambda: {
-                    "name": f"vllm_{submod_name}",
-                },
+                metadata_fn=lambda: {"name": f"vllm_{submod_name}"},
                 payload_fn=lambda: self.graph.print_readable(print_output=False),
             )
 

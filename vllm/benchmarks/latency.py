@@ -35,10 +35,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
-        "--n",
-        type=int,
-        default=1,
-        help="Number of generated sequences per prompt.",
+        "--n", type=int, default=1, help="Number of generated sequences per prompt."
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -114,9 +111,7 @@ def main(args: argparse.Namespace):
             llm.beam_search(
                 dummy_prompts,
                 BeamSearchParams(
-                    beam_width=args.n,
-                    max_tokens=args.output_len,
-                    ignore_eos=True,
+                    beam_width=args.n, max_tokens=args.output_len, ignore_eos=True
                 ),
             )
 

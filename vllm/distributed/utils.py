@@ -65,9 +65,7 @@ def divide(numerator, denominator):
 
 
 def split_tensor_along_last_dim(
-    tensor: torch.Tensor,
-    num_partitions: int,
-    contiguous_split_chunks: bool = False,
+    tensor: torch.Tensor, num_partitions: int, contiguous_split_chunks: bool = False
 ) -> Sequence[torch.Tensor]:
     """Split a tensor along its last dimension.
 
@@ -141,10 +139,7 @@ def get_pp_indices(
 
 
 def create_tcp_store(
-    host: str,
-    port: int,
-    listen_socket: socket.socket | None = None,
-    **kwargs: Any,
+    host: str, port: int, listen_socket: socket.socket | None = None, **kwargs: Any
 ) -> TCPStore:
     """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
     if listen_socket is None:
@@ -152,12 +147,7 @@ def create_tcp_store(
 
     listen_fd = listen_socket.detach()
     try:
-        return TCPStore(
-            host_name=host,
-            port=port,
-            master_listen_fd=listen_fd,
-            **kwargs,
-        )
+        return TCPStore(host_name=host, port=port, master_listen_fd=listen_fd, **kwargs)
     except Exception:
         socket.close(listen_fd)
         raise
@@ -502,21 +492,14 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
 
 
 def init_gloo_process_group(
-    prefix_store: PrefixStore,
-    group_rank: int,
-    group_size: int,
-    timeout: timedelta,
+    prefix_store: PrefixStore, group_rank: int, group_size: int, timeout: timedelta
 ) -> ProcessGroup:
     """
     Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
     with suppress_stdout():
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
+        pg = ProcessGroup(prefix_store, group_rank, group_size)
         from torch.distributed.distributed_c10d import ProcessGroupGloo
 
         backend_class = ProcessGroupGloo(

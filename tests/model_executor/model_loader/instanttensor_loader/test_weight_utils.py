@@ -17,8 +17,7 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="InstantTensor requires NVIDIA GPUs",
+    not current_platform.is_cuda(), reason="InstantTensor requires NVIDIA GPUs"
 )
 def test_instanttensor_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:

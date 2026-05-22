@@ -14,9 +14,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.lora.ops.triton_ops import fused_moe_lora
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
@@ -148,8 +146,7 @@ def use_fused_moe_lora_kernel(
 
     # init output tensors
     sorted_token_ids = torch.empty(
-        (max_loras * max_num_tokens_padded,),
-        dtype=torch.int32,
+        (max_loras * max_num_tokens_padded,), dtype=torch.int32
     )
     expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
     num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
@@ -294,36 +291,16 @@ def test_fused_moe_lora_kernel(
 
     # init lora weights
     lora_a_stacked = [
-        torch.rand(
-            (
-                max_loras,
-                num_experts,
-                max_lora_rank,
-                K,
-            ),
-            dtype=dtype,
-        )
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
         for _ in range(num_slices)
     ]
     lora_b_stacked = [
         torch.rand(
-            (
-                max_loras,
-                num_experts,
-                N // num_slices,
-                max_lora_rank,
-            ),
-            dtype=dtype,
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
         )
         for _ in range(num_slices)
     ]
-    hidden_states = torch.rand(
-        (
-            num_tokens,
-            K,
-        ),
-        dtype=dtype,
-    )
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
 
     # fused_moe_lora_kernel output
     output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
@@ -489,36 +466,16 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
 
     # init lora weights
     lora_a_stacked = [
-        torch.rand(
-            (
-                max_loras,
-                num_experts,
-                max_lora_rank,
-                K,
-            ),
-            dtype=dtype,
-        )
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
         for _ in range(num_slices)
     ]
     lora_b_stacked = [
         torch.rand(
-            (
-                max_loras,
-                num_experts,
-                N // num_slices,
-                max_lora_rank,
-            ),
-            dtype=dtype,
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
         )
         for _ in range(num_slices)
     ]
-    hidden_states = torch.rand(
-        (
-            num_tokens,
-            K,
-        ),
-        dtype=dtype,
-    )
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
 
     # fused_moe_lora_kernel output (naive path)
     output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
@@ -657,32 +614,12 @@ def use_fused_moe_lora_kernel_tensor_parallel(
     output_dim = N if column_parallel else K
 
     # init lora weights
-    lora_a = torch.rand(
-        (
-            max_loras,
-            num_experts,
-            max_lora_rank,
-            input_dim,
-        ),
-        dtype=dtype,
-    )
+    lora_a = torch.rand((max_loras, num_experts, max_lora_rank, input_dim), dtype=dtype)
     lora_b = torch.rand(
-        (
-            max_loras,
-            num_experts,
-            output_dim,
-            max_lora_rank,
-        ),
-        dtype=dtype,
+        (max_loras, num_experts, output_dim, max_lora_rank), dtype=dtype
     )
 
-    hidden_states = torch.rand(
-        (
-            num_tokens,
-            input_dim,
-        ),
-        dtype=dtype,
-    )
+    hidden_states = torch.rand((num_tokens, input_dim), dtype=dtype)
 
     output = torch.zeros((num_tokens, top_k_num, output_dim), dtype=dtype)
     topk_ids = topk_ids.to(device)
@@ -691,12 +628,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
     lora_ids = lora_ids.to(device)
 
     ref_output = use_torch(
-        hidden_states,
-        token_lora_mapping,
-        topk_ids,
-        [lora_a],
-        [lora_b],
-        top_k_num,
+        hidden_states, token_lora_mapping, topk_ids, [lora_a], [lora_b], top_k_num
     )
 
     if column_parallel:

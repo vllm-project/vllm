@@ -252,7 +252,7 @@ class OpenVLAProcessingInfo(BaseProcessingInfo):
         super().__init__(ctx)
         self.hf_processor = OpenVLAProcessor(
             image_processor=OpenVLAImageProcessor(
-                image_size=self.get_hf_config().image_sizes[0],
+                image_size=self.get_hf_config().image_sizes[0]
             ),
             tokenizer=self.get_tokenizer(),
         )
@@ -266,12 +266,7 @@ class OpenVLAProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         image_size = self.get_hf_config().image_sizes[0]
         return _get_num_image_tokens(image_size)
 
@@ -280,9 +275,7 @@ class OpenVLAProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=image_size, height=image_size)
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         image_size = self.get_hf_config().image_sizes[0]
         return {"image": _get_num_image_tokens(image_size)}
@@ -321,9 +314,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
     """
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -357,14 +348,12 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
             else:
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+                    image_width=image_size.width, image_height=image_size.height
                 )
 
             image_tokens = [image_token_id] * num_image_tokens
             return PromptUpdateDetails.select_token_id(
-                image_tokens,
-                embed_token_id=image_token_id,
+                image_tokens, embed_token_id=image_token_id
             )
 
         return [
@@ -432,8 +421,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> OpenVLAImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
@@ -449,8 +437,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _process_image_input(
-        self,
-        image_input: OpenVLAImagePixelInputs,
+        self, image_input: OpenVLAImagePixelInputs
     ) -> torch.Tensor:
         if self.vision_backbone.dinov2_featurizer is None:
             raise RuntimeError("OpenVLA vision backbone is not initialized.")
@@ -480,10 +467,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
 
         return self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:

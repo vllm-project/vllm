@@ -125,9 +125,7 @@ class TeleChat2Model(LlamaModel):
 
 class TeleChat2ForCausalLM(LlamaForCausalLM):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "transformer.": "model.",
-        },
+        orig_to_new_prefix={"transformer.": "model."},
         orig_to_new_substr={
             ".h.": ".layers.",
             ".self_attention.": ".self_attn.",

@@ -707,8 +707,7 @@ class EngineArgs:
     shutdown_timeout: int = 0
 
     weight_transfer_config: WeightTransferConfig | None = get_field(
-        VllmConfig,
-        "weight_transfer_config",
+        VllmConfig, "weight_transfer_config"
     )
 
     fail_on_environ_validation: bool = False
@@ -773,8 +772,7 @@ class EngineArgs:
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         model_group = parser.add_argument_group(
-            title="ModelConfig",
-            description=ModelConfig.__doc__,
+            title="ModelConfig", description=ModelConfig.__doc__
         )
         if not ("serve" in sys.argv[1:] and "--help" in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
@@ -858,15 +856,13 @@ class EngineArgs:
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
         model_group.add_argument(
-            "--renderer-num-workers",
-            **model_kwargs["renderer_num_workers"],
+            "--renderer-num-workers", **model_kwargs["renderer_num_workers"]
         )
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(
-            title="LoadConfig",
-            description=LoadConfig.__doc__,
+            title="LoadConfig", description=LoadConfig.__doc__
         )
         load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir", **load_kwargs["download_dir"])
@@ -893,8 +889,7 @@ class EngineArgs:
         # Attention arguments
         attention_kwargs = get_kwargs(AttentionConfig)
         attention_group = parser.add_argument_group(
-            title="AttentionConfig",
-            description=AttentionConfig.__doc__,
+            title="AttentionConfig", description=AttentionConfig.__doc__
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
@@ -903,8 +898,7 @@ class EngineArgs:
         # Mamba arguments
         mamba_kwargs = get_kwargs(MambaConfig)
         mamba_group = parser.add_argument_group(
-            title="MambaConfig",
-            description=MambaConfig.__doc__,
+            title="MambaConfig", description=MambaConfig.__doc__
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
@@ -919,8 +913,7 @@ class EngineArgs:
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
         structured_outputs_group = parser.add_argument_group(
-            title="StructuredOutputsConfig",
-            description=StructuredOutputsConfig.__doc__,
+            title="StructuredOutputsConfig", description=StructuredOutputsConfig.__doc__
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
@@ -935,8 +928,7 @@ class EngineArgs:
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
-            title="ParallelConfig",
-            description=ParallelConfig.__doc__,
+            title="ParallelConfig", description=ParallelConfig.__doc__
         )
         parallel_group.add_argument(
             "--distributed-executor-backend",
@@ -975,8 +967,7 @@ class EngineArgs:
             **parallel_kwargs["decode_context_parallel_size"],
         )
         parallel_group.add_argument(
-            "--dcp-comm-backend",
-            **parallel_kwargs["dcp_comm_backend"],
+            "--dcp-comm-backend", **parallel_kwargs["dcp_comm_backend"]
         )
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
@@ -1059,17 +1050,13 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
-            "--enable-ep-weight-filter",
-            **parallel_kwargs["enable_ep_weight_filter"],
+            "--enable-ep-weight-filter", **parallel_kwargs["enable_ep_weight_filter"]
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
-        parallel_group.add_argument(
-            "--ubatch-size",
-            **parallel_kwargs["ubatch_size"],
-        )
+        parallel_group.add_argument("--ubatch-size", **parallel_kwargs["ubatch_size"])
         parallel_group.add_argument(
             "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
         )
@@ -1111,8 +1098,7 @@ class EngineArgs:
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
         cache_group = parser.add_argument_group(
-            title="CacheConfig",
-            description=CacheConfig.__doc__,
+            title="CacheConfig", description=CacheConfig.__doc__
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
@@ -1127,10 +1113,7 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--enable-prefix-caching",
-            **{
-                **cache_kwargs["enable_prefix_caching"],
-                "default": None,
-            },
+            **{**cache_kwargs["enable_prefix_caching"], "default": None},
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
@@ -1168,8 +1151,7 @@ class EngineArgs:
         uva_kwargs = get_kwargs(UVAOffloadConfig)
         prefetch_kwargs = get_kwargs(PrefetchOffloadConfig)
         offload_group = parser.add_argument_group(
-            title="OffloadConfig",
-            description=OffloadConfig.__doc__,
+            title="OffloadConfig", description=OffloadConfig.__doc__
         )
         offload_group.add_argument(
             "--offload-backend", **offload_kwargs["offload_backend"]
@@ -1179,16 +1161,13 @@ class EngineArgs:
             "--cpu-offload-params", **uva_kwargs["cpu_offload_params"]
         )
         offload_group.add_argument(
-            "--offload-group-size",
-            **prefetch_kwargs["offload_group_size"],
+            "--offload-group-size", **prefetch_kwargs["offload_group_size"]
         )
         offload_group.add_argument(
-            "--offload-num-in-group",
-            **prefetch_kwargs["offload_num_in_group"],
+            "--offload-num-in-group", **prefetch_kwargs["offload_num_in_group"]
         )
         offload_group.add_argument(
-            "--offload-prefetch-step",
-            **prefetch_kwargs["offload_prefetch_step"],
+            "--offload-prefetch-step", **prefetch_kwargs["offload_prefetch_step"]
         )
         offload_group.add_argument(
             "--offload-params", **prefetch_kwargs["offload_params"]
@@ -1197,8 +1176,7 @@ class EngineArgs:
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
         multimodal_group = parser.add_argument_group(
-            title="MultiModalConfig",
-            description=MultiModalConfig.__doc__,
+            title="MultiModalConfig", description=MultiModalConfig.__doc__
         )
         multimodal_group.add_argument(
             "--language-model-only", **multimodal_kwargs["language_model_only"]
@@ -1232,12 +1210,10 @@ class EngineArgs:
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"]
         )
         multimodal_group.add_argument(
-            "--mm-encoder-attn-backend",
-            **multimodal_kwargs["mm_encoder_attn_backend"],
+            "--mm-encoder-attn-backend", **multimodal_kwargs["mm_encoder_attn_backend"]
         )
         multimodal_group.add_argument(
-            "--mm-encoder-attn-dtype",
-            **multimodal_kwargs["mm_encoder_attn_dtype"],
+            "--mm-encoder-attn-dtype", **multimodal_kwargs["mm_encoder_attn_dtype"]
         )
         multimodal_group.add_argument(
             "--mm-encoder-fp8-scale-path",
@@ -1268,8 +1244,7 @@ class EngineArgs:
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(
-            title="LoRAConfig",
-            description=LoRAConfig.__doc__,
+            title="LoRAConfig", description=LoRAConfig.__doc__
         )
         lora_group.add_argument(
             "--enable-lora",
@@ -1278,10 +1253,7 @@ class EngineArgs:
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
-        lora_group.add_argument(
-            "--lora-dtype",
-            **lora_kwargs["lora_dtype"],
-        )
+        lora_group.add_argument("--lora-dtype", **lora_kwargs["lora_dtype"])
         lora_group.add_argument(
             "--enable-tower-connector-lora",
             **lora_kwargs["enable_tower_connector_lora"],
@@ -1305,8 +1277,7 @@ class EngineArgs:
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
-            title="ObservabilityConfig",
-            description=ObservabilityConfig.__doc__,
+            title="ObservabilityConfig", description=ObservabilityConfig.__doc__
         )
         observability_group.add_argument(
             "--show-hidden-metrics-for-version",
@@ -1334,16 +1305,14 @@ class EngineArgs:
             **observability_kwargs["kv_cache_metrics_sample"],
         )
         observability_group.add_argument(
-            "--cudagraph-metrics",
-            **observability_kwargs["cudagraph_metrics"],
+            "--cudagraph-metrics", **observability_kwargs["cudagraph_metrics"]
         )
         observability_group.add_argument(
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
         )
         observability_group.add_argument(
-            "--enable-mfu-metrics",
-            **observability_kwargs["enable_mfu_metrics"],
+            "--enable-mfu-metrics", **observability_kwargs["enable_mfu_metrics"]
         )
         observability_group.add_argument(
             "--enable-logging-iteration-details",
@@ -1353,22 +1322,14 @@ class EngineArgs:
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
         scheduler_group = parser.add_argument_group(
-            title="SchedulerConfig",
-            description=SchedulerConfig.__doc__,
+            title="SchedulerConfig", description=SchedulerConfig.__doc__
         )
         scheduler_group.add_argument(
             "--max-num-batched-tokens",
-            **{
-                **scheduler_kwargs["max_num_batched_tokens"],
-                "default": None,
-            },
+            **{**scheduler_kwargs["max_num_batched_tokens"], "default": None},
         )
         scheduler_group.add_argument(
-            "--max-num-seqs",
-            **{
-                **scheduler_kwargs["max_num_seqs"],
-                "default": None,
-            },
+            "--max-num-seqs", **{**scheduler_kwargs["max_num_seqs"], "default": None}
         )
         scheduler_group.add_argument(
             "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
@@ -1388,10 +1349,7 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--enable-chunked-prefill",
-            **{
-                **scheduler_kwargs["enable_chunked_prefill"],
-                "default": None,
-            },
+            **{**scheduler_kwargs["enable_chunked_prefill"], "default": None},
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
@@ -1417,8 +1375,7 @@ class EngineArgs:
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
         compilation_group = parser.add_argument_group(
-            title="CompilationConfig",
-            description=CompilationConfig.__doc__,
+            title="CompilationConfig", description=CompilationConfig.__doc__
         )
         compilation_group.add_argument(
             "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
@@ -1431,8 +1388,7 @@ class EngineArgs:
         # Kernel arguments
         kernel_kwargs = get_kwargs(KernelConfig)
         kernel_group = parser.add_argument_group(
-            title="KernelConfig",
-            description=KernelConfig.__doc__,
+            title="KernelConfig", description=KernelConfig.__doc__
         )
         kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
@@ -1449,8 +1405,7 @@ class EngineArgs:
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
-            title="VllmConfig",
-            description=VllmConfig.__doc__,
+            title="VllmConfig", description=VllmConfig.__doc__
         )
         # We construct SpeculativeConfig using fields from other configs in
         # create_engine_config. So we set the type to a JSON string here to
@@ -1658,9 +1613,7 @@ class EngineArgs:
         )
 
     def create_speculative_config(
-        self,
-        target_model_config: ModelConfig,
-        target_parallel_config: ParallelConfig,
+        self, target_model_config: ModelConfig, target_parallel_config: ParallelConfig
     ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
@@ -1695,9 +1648,7 @@ class EngineArgs:
         return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(
-        self,
-        usage_context: UsageContext | None = None,
-        headless: bool = False,
+        self, usage_context: UsageContext | None = None, headless: bool = False
     ) -> VllmConfig:
         """
         Create the VllmConfig.
@@ -2005,14 +1956,11 @@ class EngineArgs:
         )
 
         speculative_config = self.create_speculative_config(
-            target_model_config=model_config,
-            target_parallel_config=parallel_config,
+            target_model_config=model_config, target_parallel_config=parallel_config
         )
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
-            usage_context,
-            model_config,
-            parallel_config,
+            usage_context, model_config, parallel_config
         )
 
         assert self.max_num_batched_tokens is not None, (
@@ -2280,8 +2228,7 @@ class EngineArgs:
 
     @classmethod
     def get_batch_defaults(
-        cls,
-        world_size: int,
+        cls, world_size: int
     ) -> tuple[dict[UsageContext | None, int], dict[UsageContext | None, int]]:
         from vllm.usage.usage_lib import UsageContext
 
@@ -2383,7 +2330,7 @@ class EngineArgs:
             logger.warning_once(
                 "This model does not officially support disabling chunked prefill. "
                 "Disabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
+                "or produce incorrect outputs."
             )
         elif (
             model_config.runner_type == "pooling"
@@ -2393,7 +2340,7 @@ class EngineArgs:
             logger.warning_once(
                 "This model does not officially support chunked prefill. "
                 "Enabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
+                "or produce incorrect outputs."
             )
 
         if self.enable_prefix_caching is None:
@@ -2411,7 +2358,7 @@ class EngineArgs:
             logger.warning_once(
                 "This model does not officially support prefix caching. "
                 "Enabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
+                "or produce incorrect outputs."
             )
 
         # Disable chunked prefill and prefix caching for:
@@ -2446,10 +2393,9 @@ class EngineArgs:
         parallel_config: ParallelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
-        (
-            default_max_num_batched_tokens,
-            default_max_num_seqs,
-        ) = self.get_batch_defaults(world_size)
+        (default_max_num_batched_tokens, default_max_num_seqs) = (
+            self.get_batch_defaults(world_size)
+        )
 
         orig_max_num_batched_tokens = self.max_num_batched_tokens
         orig_max_num_seqs = self.max_num_seqs
@@ -2461,14 +2407,12 @@ class EngineArgs:
                 )
             else:
                 self.max_num_batched_tokens = default_max_num_batched_tokens.get(
-                    usage_context,
-                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                    usage_context, SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS
                 )
 
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
-                usage_context,
-                SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
+                usage_context, SchedulerConfig.DEFAULT_MAX_NUM_SEQS
             )
 
         # If throughput mode is set, double max_num_batched_tokens and max_num_seqs.
@@ -2485,8 +2429,7 @@ class EngineArgs:
             if not self.enable_chunked_prefill:
                 # If max_model_len is too short, use the default for higher throughput.
                 self.max_num_batched_tokens = max(
-                    model_config.max_model_len,
-                    self.max_num_batched_tokens,
+                    model_config.max_model_len, self.max_num_batched_tokens
                 )
 
             # When using default settings,

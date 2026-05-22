@@ -558,16 +558,14 @@ class PydanticMsgspecMixin:
             # serialization (fields at their default value may be absent).
             if msgspec_field.default_factory is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
-                    schema=field_schema,
-                    default_factory=msgspec_field.default_factory,
+                    schema=field_schema, default_factory=msgspec_field.default_factory
                 )
                 fields[name] = core_schema.typed_dict_field(
                     wrapped_schema, required=False
                 )
             elif msgspec_field.default is not msgspec.NODEFAULT:
                 wrapped_schema = core_schema.with_default_schema(
-                    schema=field_schema,
-                    default=msgspec_field.default,
+                    schema=field_schema, default=msgspec_field.default
                 )
                 fields[name] = core_schema.typed_dict_field(
                     wrapped_schema, required=False
@@ -576,23 +574,18 @@ class PydanticMsgspecMixin:
                 # No default, so Pydantic will treat it as required
                 fields[name] = core_schema.typed_dict_field(field_schema)
         typed_dict_then_convert = core_schema.no_info_after_validator_function(
-            cls._validate_msgspec,
-            core_schema.typed_dict_schema(fields),
+            cls._validate_msgspec, core_schema.typed_dict_schema(fields)
         )
 
         # Build a serializer that strips private / excluded fields.
         serializer = core_schema.plain_serializer_function_ser_schema(
-            cls._serialize_msgspec,
-            info_arg=False,
+            cls._serialize_msgspec, info_arg=False
         )
 
         # Accept either an already-constructed msgspec.Struct instance or a
         # JSON/dict-like payload.
         return core_schema.union_schema(
-            [
-                core_schema.is_instance_schema(source_type),
-                typed_dict_then_convert,
-            ],
+            [core_schema.is_instance_schema(source_type), typed_dict_then_convert],
             serialization=serializer,
         )
 
@@ -618,8 +611,7 @@ class PydanticMsgspecMixin:
             return raw
 
         exclude: set[str] = cast(
-            set[str],
-            getattr(type(value), "__pydantic_msgspec_exclude__", set()),
+            set[str], getattr(type(value), "__pydantic_msgspec_exclude__", set())
         )
         for key in list(raw):
             if key.startswith("_") or key in exclude:

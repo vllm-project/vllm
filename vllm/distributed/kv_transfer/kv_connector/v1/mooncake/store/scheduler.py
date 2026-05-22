@@ -8,9 +8,7 @@
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     LoadSpec,
     MooncakeStoreConnectorMetadata,
@@ -47,11 +45,7 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-    ):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -82,9 +76,7 @@ class MooncakeStoreScheduler:
         self._unfinished_request_ids: set[str] = set()
 
     def get_num_new_matched_tokens(
-        self,
-        request: Request,
-        num_computed_tokens: int,
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         """Check for external KV cache hit."""
         # Look up against the full prefill range, not just the prompt.
@@ -126,10 +118,7 @@ class MooncakeStoreScheduler:
         return need_to_allocate, self.load_async
 
     def update_state_after_alloc(
-        self,
-        request: Request,
-        blocks: KVCacheBlocks,
-        num_external_tokens: int,
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """Update state after block allocation."""
         local_block_ids: tuple[list[int], ...] = ()
@@ -180,8 +169,7 @@ class MooncakeStoreScheduler:
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
-            self._unfinished_request_ids,
-            preempted_ids,
+            self._unfinished_request_ids, preempted_ids
         )
 
         # Handle new requests
@@ -366,9 +354,7 @@ class MooncakeStoreScheduler:
         return meta
 
     def request_finished(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
+        self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         """Determine whether to delay freeing blocks for async save."""
         if self.kv_role == "kv_consumer":

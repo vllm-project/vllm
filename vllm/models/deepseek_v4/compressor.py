@@ -120,11 +120,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
     def __init__(
-        self,
-        state_dim: int,
-        dtype: torch.dtype,
-        compress_ratio: int,
-        prefix: str,
+        self, state_dim: int, dtype: torch.dtype, compress_ratio: int, prefix: str
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -423,8 +419,4 @@ def _save_partial_states_kernel(
     ape_row = position % COMPRESS_RATIO
     ape = tl.load(ape_ptr + ape_row * ape_stride + block, mask=mask)
     score = tl.load(score_ptr + token_idx * score_stride + block, mask=mask)
-    tl.store(
-        base_ptr + STATE_WIDTH + block,
-        score + ape,
-        mask=mask,
-    )
+    tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)

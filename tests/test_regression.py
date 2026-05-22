@@ -23,18 +23,14 @@ from vllm.platforms import current_platform
         pytest.param(
             "distilbert/distilgpt2",
             marks=[
-                *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+                *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else [])
             ],
-        ),
+        )
     ],
 )
 def test_max_tokens_none(model):
     sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=None)
-    llm = LLM(
-        model=model,
-        max_num_batched_tokens=4096,
-        tensor_parallel_size=1,
-    )
+    llm = LLM(model=model, max_num_batched_tokens=4096, tensor_parallel_size=1)
     prompts = ["Just say hello!"]
     outputs = llm.generate(prompts, sampling_params=sampling_params)
 

@@ -5,9 +5,7 @@ from dataclasses import dataclass, field
 import pytest
 import torch
 
-from vllm.model_executor.models.paddleocr_vl import (
-    PaddleOCRVLForConditionalGeneration,
-)
+from vllm.model_executor.models.paddleocr_vl import PaddleOCRVLForConditionalGeneration
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldElem,
@@ -48,18 +46,14 @@ def make_model(config: DummyConfig) -> PaddleOCRVLForConditionalGeneration:
 
 
 def make_mm_feature(
-    *,
-    offset: int,
-    length: int,
-    image_grid_thw: tuple[int, int, int],
+    *, offset: int, length: int, image_grid_thw: tuple[int, int, int]
 ) -> MultiModalFeatureSpec:
     return MultiModalFeatureSpec(
         data=MultiModalKwargsItem(
             {
                 "image_grid_thw": MultiModalFieldElem(
-                    data=torch.tensor(image_grid_thw),
-                    field=None,
-                ),
+                    data=torch.tensor(image_grid_thw), field=None
+                )
             }
         ),
         modality="image",
@@ -72,16 +66,9 @@ def test_get_mrope_input_positions_text_only():
     model = make_model(DummyConfig())
     input_tokens = [11, 12, 13, 14, 15]
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=input_tokens,
-        mm_features=[],
+        input_tokens=input_tokens, mm_features=[]
     )
-    expected = torch.tensor(
-        [
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        ]
-    )
+    expected = torch.tensor([[0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0, 1, 2, 3, 4]])
     assert torch.equal(positions, expected)
     assert delta == 0
 
@@ -110,8 +97,7 @@ def test_get_mrope_input_positions_single_image():
     ]
 
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=input_tokens,
-        mm_features=mm_features,
+        input_tokens=input_tokens, mm_features=mm_features
     )
 
     expected = torch.tensor(
@@ -163,8 +149,7 @@ def test_get_mrope_input_positions_multiple_images():
     ]
 
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=input_tokens,
-        mm_features=mm_features,
+        input_tokens=input_tokens, mm_features=mm_features
     )
 
     assert positions.shape == (3, 15)
@@ -195,16 +180,11 @@ def test_get_mrope_input_positions_image_at_start():
     ]
 
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=input_tokens,
-        mm_features=mm_features,
+        input_tokens=input_tokens, mm_features=mm_features
     )
 
     expected = torch.tensor(
-        [
-            [0, 1, 1, 1, 1, 3, 4, 5],
-            [0, 1, 1, 2, 2, 3, 4, 5],
-            [0, 1, 2, 1, 2, 3, 4, 5],
-        ]
+        [[0, 1, 1, 1, 1, 3, 4, 5], [0, 1, 1, 2, 2, 3, 4, 5], [0, 1, 2, 1, 2, 3, 4, 5]]
     )
 
     assert torch.equal(positions, expected)

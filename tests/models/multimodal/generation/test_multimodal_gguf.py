@@ -120,26 +120,18 @@ def run_multimodal_gguf_test(
     ):
         gguf_outputs_per_case = [
             gguf_model.generate_greedy_logprobs(
-                prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                images=images,
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
             for prompts, images in inputs_per_image
         ]
 
     # Then run HfRunner for HuggingFace baseline comparison.
     with hf_runner(
-        model.original_model,
-        dtype=dtype,
-        auto_cls=AutoModelForImageTextToText,
+        model.original_model, dtype=dtype, auto_cls=AutoModelForImageTextToText
     ) as hf_model:
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(
-                prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                images=images,
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
             for prompts, images in inputs_per_image
         ]

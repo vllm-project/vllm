@@ -11,17 +11,8 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-NK_FACTORS = [
-    (256, 128),
-    (4096, 4096),
-    (16384, 4096),
-    (1023, 491),
-    (1001, 15),
-]
-M_FACTORS = [
-    (16, 1, 32, 128, 64),
-    (1, 17, 1, 31, 17),
-]
+NK_FACTORS = [(256, 128), (4096, 4096), (16384, 4096), (1023, 491), (1001, 15)]
+M_FACTORS = [(16, 1, 32, 128, 64), (1, 17, 1, 31, 17)]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
 
@@ -84,12 +75,7 @@ def onednn_int8_gemm_test_helper(
     bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     handler = ops.create_onednn_scaled_mm(
-        b,
-        scale_b,
-        out_dtype,
-        not per_tensor_a_quant,
-        use_azp,
-        primitive_cache_size,
+        b, scale_b, out_dtype, not per_tensor_a_quant, use_azp, primitive_cache_size
     )
 
     out = torch.zeros((m, n), dtype=out_dtype)
@@ -132,10 +118,7 @@ def onednn_gemm_test_helper(
         bias = None
         bias_f32 = None
 
-    handler = ops.create_onednn_mm(
-        b.t(),
-        primitive_cache_size,
-    )
+    handler = ops.create_onednn_mm(b.t(), primitive_cache_size)
 
     out = ops.onednn_mm(handler, a, bias)
     baseline = torch.nn.functional.linear(a.float(), b.float(), bias_f32).to(

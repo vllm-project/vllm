@@ -48,9 +48,7 @@ def apply_bad_words_with_drafts(
         if (bad_words_ids := bad_words_token_ids.get(i)) is not None:
             for draft_idx in range(start_idx, start_idx + n):
                 _apply_bad_words_single_batch(
-                    logits[draft_idx],
-                    bad_words_ids,
-                    past_tokens_ids[draft_idx],
+                    logits[draft_idx], bad_words_ids, past_tokens_ids[draft_idx]
                 )
             remaining -= 1
             if not remaining:

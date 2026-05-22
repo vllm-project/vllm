@@ -21,14 +21,9 @@ def test_out_of_vocab_token():
 
 def test_require_mm_embeds():
     llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        enforce_eager=True,
-        enable_mm_embeds=False,
+        model="llava-hf/llava-1.5-7b-hf", enforce_eager=True, enable_mm_embeds=False
     )
     with pytest.raises(ValueError, match="--enable-mm-embeds"):
         llm.generate(
-            {
-                "prompt": "<image>",
-                "multi_modal_data": {"image": torch.empty(1, 1, 1)},
-            }
+            {"prompt": "<image>", "multi_modal_data": {"image": torch.empty(1, 1, 1)}}
         )

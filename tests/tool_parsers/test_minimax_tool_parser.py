@@ -7,13 +7,8 @@ from typing import Any
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.minimax_tool_parser import MinimaxToolParser
 
@@ -112,11 +107,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -133,11 +124,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -145,11 +132,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Orlando",
-                                "state": "FL",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -165,11 +148,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Seattle",
-                                "state": "WA",
-                                "unit": "celsius",
-                            }
+                            {"city": "Seattle", "state": "WA", "unit": "celsius"}
                         ),
                     )
                 )
@@ -185,11 +164,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "New York",
-                                "state": "NY",
-                                "unit": "celsius",
-                            }
+                            {"city": "New York", "state": "NY", "unit": "celsius"}
                         ),
                     )
                 )
@@ -203,12 +178,7 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Boston",
-                                "state": "MA",
-                            }
-                        ),
+                        arguments=json.dumps({"city": "Boston", "state": "MA"}),
                     )
                 )
             ],

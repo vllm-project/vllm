@@ -74,10 +74,7 @@ async def test_fetch_image_base64(
 ):
     connector = MediaConnector(
         # Domain restriction should not apply to data URLs.
-        allowed_media_domains=[
-            "www.bogotobogo.com",
-            "github.com",
-        ]
+        allowed_media_domains=["www.bogotobogo.com", "github.com"]
     )
     url_image = url_images[raw_image_url]
 
@@ -197,13 +194,7 @@ async def test_fetch_image_error_conversion():
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
-    connector = MediaConnector(
-        media_io_kwargs={
-            "video": {
-                "num_frames": num_frames,
-            }
-        }
-    )
+    connector = MediaConnector(media_io_kwargs={"video": {"num_frames": num_frames}})
 
     try:
         video_sync, metadata_sync = connector.fetch_video(video_url)
@@ -229,10 +220,7 @@ async def test_fetch_video_http_with_dynamic_loader(
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
         connector = MediaConnector(
             media_io_kwargs={
-                "video": {
-                    "max_duration": max_duration,
-                    "requested_fps": requested_fps,
-                }
+                "video": {"max_duration": max_duration, "requested_fps": requested_fps}
             }
         )
 
@@ -248,24 +236,9 @@ async def test_fetch_video_http_with_dynamic_loader(
     "is_embed,start_idx,end_idx,expected",
     [
         (None, 2, 4, (2, 4)),
-        (
-            torch.tensor([False, True, False, True, True]),
-            3,
-            5,
-            (1, 3),
-        ),
-        (
-            torch.tensor([False, True, False, True, True]),
-            0,
-            2,
-            (0, 1),
-        ),
-        (
-            torch.tensor([True, False, True, False]),
-            2,
-            2,
-            (1, 1),
-        ),
+        (torch.tensor([False, True, False, True, True]), 3, 5, (1, 3)),
+        (torch.tensor([False, True, False, True, True]), 0, 2, (0, 1)),
+        (torch.tensor([True, False, True, False]), 2, 2, (1, 1)),
     ],
 )
 def test_placeholder_range_get_embeds_indices_in_range(
@@ -280,11 +253,7 @@ def test_placeholder_range_get_embeds_indices_in_range(
     "offset,is_embed,expected",
     [
         (0, None, [(0, 4)]),
-        (
-            2,
-            torch.tensor([False, True, False, True, True]),
-            [(3, 3), (5, 6)],
-        ),
+        (2, torch.tensor([False, True, False, True, True]), [(3, 3), (5, 6)]),
         (0, torch.tensor([True, True, True, True]), [(0, 3)]),
         (0, torch.tensor([False, False, False, False]), []),
     ],
@@ -300,15 +269,8 @@ def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_allowed_media_domains(video_url: str, num_frames: int):
     connector = MediaConnector(
-        media_io_kwargs={
-            "video": {
-                "num_frames": num_frames,
-            }
-        },
-        allowed_media_domains=[
-            "www.bogotobogo.com",
-            "github.com",
-        ],
+        media_io_kwargs={"video": {"num_frames": num_frames}},
+        allowed_media_domains=["www.bogotobogo.com", "github.com"],
     )
 
     video_sync, metadata_sync = connector.fetch_video(video_url)
@@ -342,9 +304,7 @@ async def test_ssrf_bypass_backslash_in_url(local_asset_server):
     # un-patched aiohttp would see host=example.com.
     bypass_url = f"http://127.0.0.1:{port}\\@example.com/{asset}"
 
-    connector = MediaConnector(
-        allowed_media_domains=["127.0.0.1"],
-    )
+    connector = MediaConnector(allowed_media_domains=["127.0.0.1"])
 
     # After the fix the request is made to 127.0.0.1 (the local asset
     # server) using the normalised URL.  The normalised path will be
@@ -368,9 +328,7 @@ async def test_ssrf_bypass_backslash_disallowed_domain():
     # allowlist, so this must be rejected before any request is made.
     bypass_url = "https://example.com\\@safe.example.org/image.png"
 
-    connector = MediaConnector(
-        allowed_media_domains=["safe.example.org"],
-    )
+    connector = MediaConnector(allowed_media_domains=["safe.example.org"])
 
     with pytest.raises(ValueError, match="allowed domains"):
         connector.fetch_image(bypass_url)

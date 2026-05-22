@@ -194,11 +194,7 @@ def append_logprobs_for_next_position(
     else:
         request_logprobs.append(
             {
-                token_id: Logprob(
-                    logprob=logprob,
-                    rank=rank,
-                    decoded_token=token,
-                )
+                token_id: Logprob(logprob=logprob, rank=rank, decoded_token=token)
                 for token_id, logprob, rank, token in zip(
                     token_ids, logprobs, ranks, decoded_tokens
                 )

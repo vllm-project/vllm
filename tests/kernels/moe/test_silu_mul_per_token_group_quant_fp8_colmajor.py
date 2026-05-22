@@ -87,8 +87,7 @@ def reference_with_clamp(
 @pytest.mark.parametrize("T", [128, 256, 512])
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="ROCm does not support DeepGemm.",
+    current_platform.is_rocm(), reason="ROCm does not support DeepGemm."
 )
 def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     set_random_seed(42)
@@ -113,8 +112,7 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
 @pytest.mark.parametrize("clamp_limit", [7.0, 10.0])
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="ROCm does not support DeepGemm.",
+    current_platform.is_rocm(), reason="ROCm does not support DeepGemm."
 )
 def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
     set_random_seed(42)

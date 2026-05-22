@@ -16,10 +16,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
-    load_aware_call,
-    with_cancellation,
-)
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -90,9 +87,7 @@ async def retrieve_responses(
         raise NotImplementedError("The model does not support Responses API")
 
     response = await handler.retrieve_responses(
-        response_id,
-        starting_after=starting_after,
-        stream=stream,
+        response_id, starting_after=starting_after, stream=stream
     )
 
     if isinstance(response, ErrorResponse):

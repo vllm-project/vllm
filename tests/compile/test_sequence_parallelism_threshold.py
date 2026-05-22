@@ -47,9 +47,7 @@ class TestGetSequenceParallelismThreshold:
             element_size = 2  # float16/bfloat16
 
             result = get_sequence_parallelism_threshold(
-                hidden_size=hidden_size,
-                tp_size=tp_size,
-                element_size=element_size,
+                hidden_size=hidden_size, tp_size=tp_size, element_size=element_size
             )
 
             # Verify calculation: (8 * 2 * 1024 * 1024) // (8192 * 2) = 1024
@@ -84,9 +82,7 @@ class TestGetSequenceParallelismThreshold:
         """Test threshold calculation with various parameter combinations."""
         with mock_cuda_platform(capability=(9, 0)):
             result = get_sequence_parallelism_threshold(
-                hidden_size=hidden_size,
-                tp_size=tp_size,
-                element_size=element_size,
+                hidden_size=hidden_size, tp_size=tp_size, element_size=element_size
             )
             assert result == expected
 
@@ -95,16 +91,12 @@ class TestGetSequenceParallelismThreshold:
         with mock_cuda_platform(capability=(9, 0)):
             # Just below threshold
             result = get_sequence_parallelism_threshold(
-                hidden_size=SP_MIN_HIDDEN_SIZE[90] - 1,
-                tp_size=2,
-                element_size=2,
+                hidden_size=SP_MIN_HIDDEN_SIZE[90] - 1, tp_size=2, element_size=2
             )
             assert result is None
 
             # Exactly at threshold
             result = get_sequence_parallelism_threshold(
-                hidden_size=SP_MIN_HIDDEN_SIZE[90],
-                tp_size=2,
-                element_size=2,
+                hidden_size=SP_MIN_HIDDEN_SIZE[90], tp_size=2, element_size=2
             )
             assert result is not None

@@ -278,10 +278,7 @@ class TestPreProcessCohereOnline:
         calls: list[tuple[str, object]] = []
 
         def batch_render_chat(
-            request,
-            all_messages,
-            truncate_prompt_tokens,
-            truncation_side,
+            request, all_messages, truncate_prompt_tokens, truncation_side
         ):
             calls.append(
                 (

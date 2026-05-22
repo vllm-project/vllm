@@ -111,9 +111,7 @@ def parse_args():
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--model",
-        type=str,
-        default="TomoroAI/tomoro-colqwen3-embed-4b",
+        "--model", type=str, default="TomoroAI/tomoro-colqwen3-embed-4b"
     )
     return parser.parse_args()
 
@@ -184,8 +182,7 @@ def main(args):
         "Python is a programming language.",
     ]
     resp = post_http_request(
-        {"model": model, "text_1": text_query, "text_2": text_docs},
-        score_url,
+        {"model": model, "text_1": text_query, "text_2": text_docs}, score_url
     )
     print(f'  Query: "{text_query}"\n')
     for item in resp.json()["data"]:

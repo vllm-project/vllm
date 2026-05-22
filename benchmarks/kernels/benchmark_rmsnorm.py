@@ -18,9 +18,7 @@ class HuggingFaceRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
@@ -211,18 +209,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        help="Batch size",
-    )
-    parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=128,
-        help="Sequence length",
-    )
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    parser.add_argument("--seq-len", type=int, default=128, help="Sequence length")
     parser.add_argument(
         "--hidden-size",
         type=int,

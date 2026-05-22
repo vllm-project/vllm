@@ -63,16 +63,14 @@ from .utils import (
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
     base = torch.tensor(
-        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
-        dtype=torch.float32,
+        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))), dtype=torch.float32
     )
     powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
     slopes = torch.pow(base, powers)
 
     if closest_power_of_2 != total_num_heads:
         extra_base = torch.tensor(
-            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))),
-            dtype=torch.float32,
+            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))), dtype=torch.float32
         )
         num_remaining_heads = min(
             closest_power_of_2, total_num_heads - closest_power_of_2
@@ -137,9 +135,7 @@ class BloomAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         del position_ids  # Unused.
         qkv, _ = self.query_key_value(hidden_states)
@@ -203,9 +199,7 @@ class BloomBlock(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
@@ -218,8 +212,7 @@ class BloomBlock(nn.Module):
 
         # Self attention.
         attention_output = self.self_attention(
-            position_ids=position_ids,
-            hidden_states=layernorm_output,
+            position_ids=position_ids, hidden_states=layernorm_output
         )
         attention_output = attention_output + residual
         layernorm_output = self.post_attention_layernorm(attention_output)
@@ -248,10 +241,7 @@ class BloomModel(nn.Module):
         self.embed_dim = config.hidden_size
 
         # Embedding + LN Embedding
-        self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size,
-            self.embed_dim,
-        )
+        self.word_embeddings = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
         self.word_embeddings_layernorm = nn.LayerNorm(
             self.embed_dim, eps=config.layer_norm_epsilon
         )
@@ -368,10 +358,7 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

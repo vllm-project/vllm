@@ -56,10 +56,7 @@ class TestGemma4ChatTemplate:
             {"role": "user", "content": "How are you?"},
         ]
         result = _render(
-            gemma4_template,
-            messages,
-            add_generation_prompt=True,
-            enable_thinking=True,
+            gemma4_template, messages, add_generation_prompt=True, enable_thinking=True
         )
         assert "<|turn>user\n" in result
         assert "<|turn>model\n" in result
@@ -80,10 +77,7 @@ class TestGemma4ChatTemplate:
     def test_thinking_enabled(self, gemma4_template):
         messages = [{"role": "user", "content": "Think about this"}]
         result = _render(
-            gemma4_template,
-            messages,
-            add_generation_prompt=True,
-            enable_thinking=True,
+            gemma4_template, messages, add_generation_prompt=True, enable_thinking=True
         )
         assert "<|think|>" in result
         assert "<|turn>system\n" in result
@@ -98,10 +92,7 @@ class TestGemma4ChatTemplate:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "city": {
-                                "type": "string",
-                                "description": "City name",
-                            }
+                            "city": {"type": "string", "description": "City name"}
                         },
                         "required": ["city"],
                     },
@@ -110,10 +101,7 @@ class TestGemma4ChatTemplate:
         ]
         messages = [{"role": "user", "content": "What is the weather?"}]
         result = _render(
-            gemma4_template,
-            messages,
-            tools=tools,
-            add_generation_prompt=True,
+            gemma4_template, messages, tools=tools, add_generation_prompt=True
         )
         assert "<|tool>" in result
         assert "declaration:get_weather" in result
@@ -184,14 +172,11 @@ class TestGemma4ChatTemplate:
                         "function": {
                             "name": "get_weather",
                             "arguments": {"city": "London"},
-                        },
+                        }
                     }
                 ],
                 "tool_responses": [
-                    {
-                        "name": "get_weather",
-                        "response": {"temperature": 20},
-                    }
+                    {"name": "get_weather", "response": {"temperature": 20}}
                 ],
             },
         ]
@@ -218,11 +203,7 @@ class TestGemma4ChatTemplate:
                     }
                 ],
             },
-            {
-                "role": "tool",
-                "tool_call_id": "call_1",
-                "content": "sunny",
-            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
         ]
         result = _render(gemma4_template, messages, add_generation_prompt=True)
         assert not result.strip().endswith("<|turn>model\n")
@@ -237,12 +218,7 @@ class TestGemma4ChatTemplate:
                 "content": "",
                 "reasoning": "Let me think about this...",
                 "tool_calls": [
-                    {
-                        "function": {
-                            "name": "calculator",
-                            "arguments": {"expr": "2+2"},
-                        },
-                    }
+                    {"function": {"name": "calculator", "arguments": {"expr": "2+2"}}}
                 ],
             },
         ]
@@ -259,14 +235,7 @@ class TestGemma4ChatTemplate:
                 "role": "assistant",
                 "content": "Response",
                 "reasoning": "Old reasoning that should be dropped",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "fn",
-                            "arguments": {},
-                        },
-                    }
-                ],
+                "tool_calls": [{"function": {"name": "fn", "arguments": {}}}],
             },
             {"role": "user", "content": "Second"},
         ]
@@ -296,10 +265,7 @@ class TestGemma4ChatTemplate:
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
-                    {
-                        "id": "c1",
-                        "function": {"name": "step1", "arguments": {}},
-                    },
+                    {"id": "c1", "function": {"name": "step1", "arguments": {}}}
                 ],
             },
             {"role": "tool", "tool_call_id": "c1", "content": "result1"},
@@ -307,10 +273,7 @@ class TestGemma4ChatTemplate:
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
-                    {
-                        "id": "c2",
-                        "function": {"name": "step2", "arguments": {}},
-                    },
+                    {"id": "c2", "function": {"name": "step2", "arguments": {}}}
                 ],
             },
             {"role": "tool", "tool_call_id": "c2", "content": "result2"},
@@ -329,12 +292,8 @@ class TestGemma4ChatTemplate:
                     {
                         "function": {
                             "name": "test_fn",
-                            "arguments": {
-                                "name": "Alice",
-                                "active": True,
-                                "count": 42,
-                            },
-                        },
+                            "arguments": {"name": "Alice", "active": True, "count": 42},
+                        }
                     }
                 ],
             },

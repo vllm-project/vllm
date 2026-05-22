@@ -98,9 +98,7 @@ def mhc_post_torch(
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
     mixed_residual = torch.einsum(
-        "...ij,...ih->...jh",
-        comb_res_mix.to(torch.float32),
-        residual.to(torch.float32),
+        "...ij,...ih->...jh", comb_res_mix.to(torch.float32), residual.to(torch.float32)
     )
     post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(torch.float32)
     return (mixed_residual + post_term).to(residual.dtype)

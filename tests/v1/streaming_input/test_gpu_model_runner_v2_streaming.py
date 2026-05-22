@@ -8,11 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.v1.core.sched.output import (
-    CachedRequestData,
-    NewRequestData,
-    SchedulerOutput,
-)
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -65,9 +61,7 @@ def _make_scheduler_output(new_reqs):
     )
 
 
-def test_e2e_streaming_request_update_basic_flow(
-    mock_model_runner_with_req_states,
-):
+def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_req_states):
     """Test that streaming sessions are updated correctly.
 
     This test validates that when a streaming session is updated with new
@@ -133,9 +127,7 @@ def test_e2e_streaming_request_update_basic_flow(
     )
 
 
-def test_e2e_streaming_with_multimodal_features(
-    mock_model_runner_with_req_states,
-):
+def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_req_states):
     """Test that streaming sessions with multimodal features are updated.
 
     This test validates that when a streaming session with mm features

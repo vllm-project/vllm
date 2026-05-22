@@ -73,7 +73,7 @@ class TwoPatternFusionPass(VllmFusionPatternMatcherPass):
 @pytest.fixture
 def vllm_config():
     return VllmConfig(
-        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
     )
 
 

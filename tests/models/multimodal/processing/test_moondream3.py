@@ -30,28 +30,19 @@ MAX_CROPS = 12
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
 def test_processor_creation(model_id: str):
     """Test that Moondream3 processor can be created."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     assert processor is not None
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_processor_apply(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_processor_apply(image_assets: ImageTestAssets, model_id: str):
     """Test that Moondream3 processor can process inputs.
 
     NOTE: The prompt includes the leading BOS token because Moondream3
     pre-fills BOS and image embeddings together.
     """
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501
@@ -70,15 +61,9 @@ def test_processor_apply(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_processor_pixel_values(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_processor_pixel_values(image_assets: ImageTestAssets, model_id: str):
     """Test that pixel values are correctly produced."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501
@@ -105,15 +90,9 @@ def test_processor_pixel_values(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_processor_image_token_expansion(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_processor_image_token_expansion(image_assets: ImageTestAssets, model_id: str):
     """Test that <image> placeholder is expanded to correct number of tokens."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe.<|md_reserved_2|>"  # noqa: E501
@@ -130,9 +109,7 @@ def test_processor_image_token_expansion(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_multi_crop_tiling(
-    model_id: str,
-):
+def test_multi_crop_tiling(model_id: str):
     """Test that large images produce correct multi-crop tiling."""
     from PIL import Image
 
@@ -151,19 +128,9 @@ def test_multi_crop_tiling(
     assert pixel_values.shape[0] == expected_crops
 
 
-@pytest.mark.parametrize(
-    "image_size",
-    [
-        (500, 500),
-        (800, 600),
-        (1920, 1080),
-    ],
-)
+@pytest.mark.parametrize("image_size", [(500, 500), (800, 600), (1920, 1080)])
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_tiling_various_sizes(
-    image_size: tuple[int, int],
-    model_id: str,
-):
+def test_tiling_various_sizes(image_size: tuple[int, int], model_id: str):
     """Test tiling with various image sizes."""
     from PIL import Image
 
@@ -186,9 +153,7 @@ def test_tiling_various_sizes(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_pixel_normalization(
-    model_id: str,
-):
+def test_pixel_normalization(model_id: str):
     """Test that pixel values are normalized to [-1, 1] range."""
     from PIL import Image
 
@@ -207,15 +172,9 @@ def test_pixel_normalization(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_chat_template_with_image(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_chat_template_with_image(image_assets: ImageTestAssets, model_id: str):
     """Test that chat template correctly formats BOS + image + prompt."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = ctx.tokenizer
 
@@ -265,14 +224,9 @@ def test_chat_template_with_image(
 )
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
 def test_chat_template_content_list_uses_moondream_image_prefix(
-    image_assets: ImageTestAssets,
-    content: list[dict[str, object]],
-    model_id: str,
+    image_assets: ImageTestAssets, content: list[dict[str, object]], model_id: str
 ):
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor = processor.info.get_hf_processor()
 
@@ -299,15 +253,9 @@ def test_chat_template_content_list_uses_moondream_image_prefix(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_bos_token_always_first(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_bos_token_always_first(image_assets: ImageTestAssets, model_id: str):
     """Test that BOS token (ID 0) is always at position 0."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     # Start with BOS token explicitly
@@ -328,9 +276,7 @@ def test_bos_token_always_first(
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
-def test_processor_with_small_image(
-    model_id: str,
-):
+def test_processor_with_small_image(model_id: str):
     """Test processor with image smaller than crop size."""
     from PIL import Image
 
@@ -358,9 +304,7 @@ def test_processor_with_small_image(
 )
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
 def test_preprocess_image_accepts_non_pil_inputs(
-    image_assets: ImageTestAssets,
-    image_kind: str,
-    model_id: str,
+    image_assets: ImageTestAssets, image_kind: str, model_id: str
 ):
     from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
@@ -387,14 +331,9 @@ def test_preprocess_image_accepts_non_pil_inputs(
 @pytest.mark.parametrize("image_kind", ["numpy_chw", "torch_chw"])
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
 def test_processor_apply_accepts_non_pil_image_inputs(
-    image_assets: ImageTestAssets,
-    image_kind: str,
-    model_id: str,
+    image_assets: ImageTestAssets, image_kind: str, model_id: str
 ):
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"image": 1},
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501

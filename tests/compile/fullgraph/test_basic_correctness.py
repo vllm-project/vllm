@@ -96,9 +96,7 @@ class TestSetting:
         # ),
     ],
 )
-def test_compile_correctness(
-    test_setting: TestSetting,
-):
+def test_compile_correctness(test_setting: TestSetting):
     # this test is run under multiple suits, with different GPUs.
     # make sure we only run the test with correct CUDA devices.
     # don't use "<", as it will duplicate the tests.

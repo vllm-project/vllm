@@ -73,24 +73,13 @@ def _mhc_pre_aiter_fake(
 
     # Create empty tensors with correct shapes for meta device / shape inference
     post_mix = torch.empty(
-        *outer_shape,
-        hc_mult,
-        1,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, 1, dtype=torch.float32, device=residual.device
     )
     comb_mix = torch.empty(
-        *outer_shape,
-        hc_mult,
-        hc_mult,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
     )
     layer_input = torch.empty(
-        *outer_shape,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=residual.device,
+        *outer_shape, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
     return post_mix, comb_mix, layer_input
@@ -107,12 +96,7 @@ def mhc_post_aiter(
     assert hidden_size % 256 == 0
     from vllm._aiter_ops import rocm_aiter_ops
 
-    return rocm_aiter_ops.mhc_post(
-        x,
-        residual,
-        post_layer_mix,
-        comb_res_mix,
-    )
+    return rocm_aiter_ops.mhc_post(x, residual, post_layer_mix, comb_res_mix)
 
 
 def _mhc_post_aiter_fake(

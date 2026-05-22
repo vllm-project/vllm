@@ -32,19 +32,12 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    HiddenStateCacheSpec,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, HiddenStateCacheSpec, KVCacheSpec
 
 ########## Custom Ops ########
 
 
-def unified_kv_cache_update(
-    to_cache: torch.Tensor,
-    layer_name: str,
-) -> torch.Tensor:
+def unified_kv_cache_update(to_cache: torch.Tensor, layer_name: str) -> torch.Tensor:
     """
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
@@ -63,10 +56,7 @@ def unified_kv_cache_update(
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
         attn_layer.impl.do_kv_cache_update(
-            attn_layer,
-            to_cache,
-            kv_cache,
-            layer_slot_mapping,
+            attn_layer, to_cache, kv_cache, layer_slot_mapping
         )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
@@ -98,10 +88,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
-        "bfloat16",
-    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -180,7 +167,7 @@ class CacheOnlyAttentionMetadataBuilder(
             )
 
         return CacheOnlyAttentionMetadata(
-            slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping=common_attn_metadata.slot_mapping
         )
 
 
@@ -207,13 +194,7 @@ class CacheOnlyAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = 1
 
-    def do_kv_cache_update(
-        self,
-        layer,
-        to_cache,
-        kv_cache,
-        slot_mapping,
-    ):
+    def do_kv_cache_update(self, layer, to_cache, kv_cache, slot_mapping):
         assert to_cache.dtype == self.kv_cache_torch_dtype, (
             f"Data to cache must be {self.kv_cache_torch_dtype}, got {to_cache.dtype}"
         )
@@ -274,11 +255,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         self.attn_backend = CacheOnlyAttentionBackend
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(
-            num_heads,
-            head_size,
-            kv_cache_dtype,
-            self.kv_cache_torch_dtype,
-            attn_type,
+            num_heads, head_size, kv_cache_dtype, self.kv_cache_torch_dtype, attn_type
         )
 
         assert not self.attn_backend.forward_includes_kv_cache_update, (

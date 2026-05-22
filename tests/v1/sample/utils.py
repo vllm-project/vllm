@@ -62,20 +62,10 @@ def get_test_batch(
         return [(None, None)]
     elif batch_logprobs_composition == BatchLogprobsComposition.SAMPLE:
         # Requests requiring sample logprobs or no logprobs
-        return [
-            (None, None),
-            (0, None),
-            (5, None),
-            (3, None),
-        ]
+        return [(None, None), (0, None), (5, None), (3, None)]
     elif batch_logprobs_composition == BatchLogprobsComposition.PROMPT:
         # Requests requiring prompt logprobs or no logprobs
-        return [
-            (None, None),
-            (None, 0),
-            (None, 6),
-            (None, 5),
-        ]
+        return [(None, None), (None, 0), (None, 6), (None, 5)]
     elif batch_logprobs_composition == BatchLogprobsComposition.SAMPLE_PROMPT:
         # Requests requiring either no logprobs, just
         # sample logprobs, just prompt logprobs, or
@@ -156,9 +146,7 @@ def create_penalty_tensor(
 
 
 def create_prompt_tokens_tensor(
-    prompt_token_ids: list[list[int]],
-    vocab_size: int,
-    device: torch.device,
+    prompt_token_ids: list[list[int]], vocab_size: int, device: torch.device
 ) -> torch.Tensor:
     return make_tensor_with_pad(
         prompt_token_ids,
@@ -176,8 +164,7 @@ class LogitsprocsTestFakes(NamedTuple):
     sampling_metadata: SamplingMetadata
 
     def get_logitsprocs_by_cls(
-        self,
-        cls: type[LogitsProcessor],
+        self, cls: type[LogitsProcessor]
     ) -> Iterator[LogitsProcessor]:
         """Yield logits processors of a specific class.
 
@@ -197,8 +184,7 @@ class LogitsprocsTestFakes(NamedTuple):
 
 
 def fake_update_logitsprocs_state(
-    test_fakes: LogitsprocsTestFakes,
-    batch_update: BatchUpdate | None,
+    test_fakes: LogitsprocsTestFakes, batch_update: BatchUpdate | None
 ) -> None:
     """Imitate logits processors persistent batch state update
     in engine core"""
@@ -239,10 +225,7 @@ def fake_apply_logitsprocs(
 
 
 def create_allowed_token_ids(
-    batch_size: int,
-    vocab_size: int,
-    num_allowed_token_ids: int,
-    device: torch.device,
+    batch_size: int, vocab_size: int, num_allowed_token_ids: int, device: torch.device
 ) -> torch.Tensor | None:
     mask: torch.Tensor | None = None
     for i in range(batch_size):

@@ -360,8 +360,7 @@ def flash_attn_triton_available() -> bool:
 
 
 def _get_backend_priorities(
-    use_mla: bool,
-    use_sparse: bool,
+    use_mla: bool, use_sparse: bool
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -376,13 +375,9 @@ def _get_backend_priorities(
                 AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
             ]
         else:
-            return [
-                AttentionBackendEnum.TRITON_MLA,
-            ]
+            return [AttentionBackendEnum.TRITON_MLA]
 
-    backends = [
-        AttentionBackendEnum.ROCM_ATTN,
-    ]
+    backends = [AttentionBackendEnum.ROCM_ATTN]
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
@@ -459,8 +454,7 @@ class RocmPlatform(Platform):
         invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla,
-            attn_selector_config.use_sparse,
+            attn_selector_config.use_mla, attn_selector_config.use_sparse
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -846,11 +840,7 @@ class RocmPlatform(Platform):
         timeout: timedelta,
     ) -> ProcessGroup:
         assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
         from torch.distributed.distributed_c10d import ProcessGroupNCCL
 
         backend_options = ProcessGroupNCCL.Options()

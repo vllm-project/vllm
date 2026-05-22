@@ -174,9 +174,7 @@ class KVBlockZeroer:
         blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
         self._id_cap = 8192
         self._ids_pinned = torch.empty(
-            self._id_cap,
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
+            self._id_cap, dtype=torch.int64, pin_memory=self.pin_memory
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
         self._meta = (
@@ -195,9 +193,7 @@ class KVBlockZeroer:
         if n_blocks > self._id_cap:
             self._id_cap = n_blocks * 2
             self._ids_pinned = torch.empty(
-                self._id_cap,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory,
+                self._id_cap, dtype=torch.int64, pin_memory=self.pin_memory
             )
             self._ids_gpu = torch.empty(
                 self._id_cap, dtype=torch.int64, device=self.device
@@ -244,10 +240,7 @@ class AttentionGroup:
         )
         self.metadata_builders = [
             self.backend.get_builder_cls()(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
+                kv_cache_spec_builder, self.layer_names, vllm_config, device
             )
             for _ in range(num_metadata_builders)
         ]
@@ -258,8 +251,7 @@ class AttentionGroup:
 
 
 def select_common_block_size(
-    kv_manager_block_size: int,
-    backends: list[type[AttentionBackend]],
+    kv_manager_block_size: int, backends: list[type[AttentionBackend]]
 ) -> int:
     """
     Select a block size that is supported by all backends and is a factor of
@@ -371,8 +363,7 @@ def prepare_kernel_block_sizes(
 
 
 def sanity_check_mm_encoder_outputs(
-    mm_embeddings: MultiModalEmbeddings,
-    expected_num_items: int,
+    mm_embeddings: MultiModalEmbeddings, expected_num_items: int
 ) -> None:
     """
     Perform sanity checks for the result of

@@ -6,10 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
-    UsageInfo,
-)
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 
 # Client -> Server Events

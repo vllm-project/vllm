@@ -34,11 +34,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    llm = LLM(
-        model=model,
-        compilation_config=compilation_config,
-        **model_kwargs,
-    )
+    llm = LLM(model=model, compilation_config=compilation_config, **model_kwargs)
     outputs = llm.generate(prompts, sampling_params)
 
     # Print the outputs.

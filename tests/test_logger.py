@@ -148,16 +148,10 @@ def test_an_error_is_raised_when_custom_logging_config_is_invalid_json(monkeypat
 
 
 @pytest.mark.parametrize(
-    "unexpected_config",
-    (
-        "Invalid string",
-        [{"version": 1, "loggers": []}],
-        0,
-    ),
+    "unexpected_config", ("Invalid string", [{"version": 1, "loggers": []}], 0)
 )
 def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
-    monkeypatch,
-    unexpected_config: Any,
+    monkeypatch, unexpected_config: Any
 ):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
@@ -181,12 +175,7 @@ def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
 
     valid_logging_config = {
-        "loggers": {
-            "vllm.test_logger.logger": {
-                "handlers": [],
-                "propagate": False,
-            }
-        },
+        "loggers": {"vllm.test_logger.logger": {"handlers": [], "propagate": False}},
         "version": 1,
     }
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
@@ -205,11 +194,7 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monke
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
 
     valid_logging_config = {
-        "loggers": {
-            "vllm.test_logger.logger": {
-                "handlers": [],
-            }
-        },
+        "loggers": {"vllm.test_logger.logger": {"handlers": []}},
         "version": 1,
     }
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
@@ -243,10 +228,7 @@ def test_prepare_object_to_dump():
     assert prepare_object_to_dump(list_obj) == "[1, 2, 3]"
 
     dict_obj = {"a": 1, "b": "b"}
-    assert prepare_object_to_dump(dict_obj) in [
-        "{a: 1, b: 'b'}",
-        "{b: 'b', a: 1}",
-    ]
+    assert prepare_object_to_dump(dict_obj) in ["{a: 1, b: 'b'}", "{b: 'b', a: 1}"]
 
     set_obj = {1, 2, 3}
     assert prepare_object_to_dump(set_obj) == "[1, 2, 3]"

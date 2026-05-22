@@ -198,10 +198,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
         self.mask_prompt = mask_prompt
         self.ignore_id = ignore_id
 
-        super().__init__(
-            tokenizer,
-            **kwargs,
-        )
+        super().__init__(tokenizer, **kwargs)
 
     @property
     def bos_id(self):
@@ -227,10 +224,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
         return self.tokenizer.decode(t, **kwargs)
 
     def process_one(
-        self,
-        prompt: str,
-        images: list[Image.Image],
-        crop_mode: bool = CROP_MODE,
+        self, prompt: str, images: list[Image.Image], crop_mode: bool = CROP_MODE
     ):
         """
 
@@ -291,11 +285,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
         crop_mode: bool = CROP_MODE,
         **kwargs,
     ):
-        prepare = self.process_one(
-            prompt=prompt,
-            images=images,
-            crop_mode=crop_mode,
-        )
+        prepare = self.process_one(prompt=prompt, images=images, crop_mode=crop_mode)
 
         return prepare
 

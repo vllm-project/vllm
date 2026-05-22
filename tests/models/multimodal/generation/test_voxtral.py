@@ -96,9 +96,7 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
         limit_mm_per_prompt={"audio": len(audio_assets)},
     ) as vllm_model:
         offline_outputs = vllm_model.generate_greedy(
-            [vllm_prompt],
-            max_tokens,
-            audios=[audio_data],
+            [vllm_prompt], max_tokens, audios=[audio_data]
         )
 
     offline_text = offline_outputs[0][1]
@@ -127,16 +125,11 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     ]
 
     with RemoteOpenAIServer(
-        MODEL_NAME,
-        server_args,
-        env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"},
+        MODEL_NAME, server_args, env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"}
     ) as remote_server:
         client = remote_server.get_client()
         completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0,
+            model=MODEL_NAME, messages=messages, max_tokens=max_tokens, temperature=0
         )
 
     assert len(completion.choices) == 1
@@ -180,24 +173,16 @@ def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
         limit_mm_per_prompt={"audio": len(audio_assets)},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
-            [vllm_prompt],
-            max_tokens,
-            num_logprobs,
-            audios=[audio_data],
+            [vllm_prompt], max_tokens, num_logprobs, audios=[audio_data]
         )
     assert vllm_outputs[0][1], "vLLM inference produced empty output"
 
     with hf_runner(
-        MODEL_NAME,
-        dtype="half",
-        auto_cls=VoxtralForConditionalGeneration,
+        MODEL_NAME, dtype="half", auto_cls=VoxtralForConditionalGeneration
     ) as hf_model:
         hf_model = model_utils.voxtral_patch_hf_runner(hf_model)
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            [question],
-            max_tokens,
-            num_logprobs,
-            audios=[audio_data],
+            [question], max_tokens, num_logprobs, audios=[audio_data]
         )
     assert hf_outputs[0][1], "HF Transformers produced empty output"
 
@@ -207,8 +192,5 @@ def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
         f"  HF:   {hf_outputs[0][1]!r}"
     )
     check_logprobs_close(
-        outputs_0_lst=vllm_outputs,
-        outputs_1_lst=hf_outputs,
-        name_0="vllm",
-        name_1="hf",
+        outputs_0_lst=vllm_outputs, outputs_1_lst=hf_outputs, name_0="vllm", name_1="hf"
     )

@@ -31,8 +31,7 @@ def _run_vllm(vllm_runner):
         max_num_batched_tokens=1024,
         load_format="dummy",
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            cudagraph_mode=CUDAGraphMode.NONE,
+            mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=CUDAGraphMode.NONE
         ),
         # Phi-tiny-MoE uses SWA, whose admission cap is `cdiv(L, block_size) + 1`
         # at default block_size=16 — i.e. 17 blocks for max_model_len=256. Use
@@ -45,8 +44,7 @@ def _run_vllm(vllm_runner):
 def _cold_start(vllm_runner):
     counters.clear()
     with compilation_counter.expect(
-        num_compiled_artifacts_saved=3,
-        num_compiled_artifacts_loaded=0,
+        num_compiled_artifacts_saved=3, num_compiled_artifacts_loaded=0
     ):
         _run_vllm(vllm_runner)
     assert counters["aot_autograd"]["total"] == 33
@@ -73,8 +71,7 @@ def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifa
     # Warm start — compiled artifacts loaded from disk cache.
     counters.clear()
     with compilation_counter.expect(
-        num_compiled_artifacts_loaded=3,
-        num_compiled_artifacts_saved=0,
+        num_compiled_artifacts_loaded=3, num_compiled_artifacts_saved=0
     ):
         _run_vllm(vllm_runner)
     mega_aot_active = envs.VLLM_USE_MEGA_AOT_ARTIFACT and is_torch_equal_or_newer(

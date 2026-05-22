@@ -13,17 +13,11 @@ from datetime import timedelta
 
 import numpy as np
 import torch
-from torch.distributed import (
-    P2POp,
-    ProcessGroup,
-    batch_isend_irecv,
-)
+from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
 
 import vllm.distributed.nixl_utils as nixl_utils
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper import (
-    ncclDataTypeEnum,
-)
+from vllm.distributed.device_communicators.pynccl_wrapper import ncclDataTypeEnum
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_pp_group,
@@ -46,19 +40,13 @@ class EplbCommunicator(ABC):
 
     @abstractmethod
     def add_send(
-        self,
-        tensors: list[torch.Tensor],
-        dst_rank: int,
-        expert_id: int,
+        self, tensors: list[torch.Tensor], dst_rank: int, expert_id: int
     ) -> None:
         pass
 
     @abstractmethod
     def add_recv(
-        self,
-        tensors: list[torch.Tensor],
-        src_rank: int,
-        expert_id: int,
+        self, tensors: list[torch.Tensor], src_rank: int, expert_id: int
     ) -> None:
         pass
 
@@ -84,9 +72,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     """EPLB communicator backed by torch.distributed isend/irecv."""
 
     def __init__(
-        self,
-        ep_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        self, ep_group: ProcessGroup, cuda_stream: torch.cuda.Stream | None = None
     ) -> None:
         self._ep_group = ep_group
         self._cuda_stream = cuda_stream
@@ -101,12 +87,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         for tensor in tensors:
             self._p2p_ops.append(
-                P2POp(
-                    torch.distributed.isend,
-                    tensor,
-                    dst_rank,
-                    self._ep_group,
-                )
+                P2POp(torch.distributed.isend, tensor, dst_rank, self._ep_group)
             )
 
     def add_recv(
@@ -117,12 +98,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         for tensor in tensors:
             self._p2p_ops.append(
-                P2POp(
-                    torch.distributed.irecv,
-                    tensor,
-                    src_rank,
-                    self._ep_group,
-                )
+                P2POp(torch.distributed.irecv, tensor, src_rank, self._ep_group)
             )
 
     def execute(self, old_indices: np.ndarray | None = None) -> None:
@@ -141,9 +117,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     """EPLB communicator using gloo P2P with CPU staging."""
 
     def __init__(
-        self,
-        cpu_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        self, cpu_group: ProcessGroup, cuda_stream: torch.cuda.Stream | None = None
     ) -> None:
         self._cpu_group = cpu_group
         self._cuda_stream = cuda_stream
@@ -191,10 +165,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                 cpu_tensor = torch.empty_like(tensor, device="cpu")
                 p2p_ops.append(
                     P2POp(
-                        torch.distributed.irecv,
-                        cpu_tensor,
-                        peer_rank,
-                        self._cpu_group,
+                        torch.distributed.irecv, cpu_tensor, peer_rank, self._cpu_group
                     )
                 )
                 recv_staging.append((tensor, cpu_tensor))
@@ -292,10 +263,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
     def add_send(
-        self,
-        tensors: list[torch.Tensor],
-        dst_rank: int,
-        expert_id: int,
+        self, tensors: list[torch.Tensor], dst_rank: int, expert_id: int
     ) -> None:
         assert dst_rank != self._rank, (
             "EPLB communicator should not enqueue same-rank sends: "
@@ -306,10 +274,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._expert_send_map[expert_id] = tensors
 
     def add_recv(
-        self,
-        tensors: list[torch.Tensor],
-        src_rank: int,
-        expert_id: int,
+        self, tensors: list[torch.Tensor], src_rank: int, expert_id: int
     ) -> None:
         assert src_rank != self._rank, (
             "EPLB communicator should not enqueue same-rank recvs: "
@@ -372,9 +337,7 @@ class NixlEplbCommunicator(EplbCommunicator):
 
     @staticmethod
     def _pack_send_buffer(
-        in_tensors: list[torch.Tensor],
-        send_buffer: torch.Tensor,
-        byte_offset: int,
+        in_tensors: list[torch.Tensor], send_buffer: torch.Tensor, byte_offset: int
     ) -> None:
         for tensor in in_tensors:
             raw = tensor.reshape(-1).view(torch.uint8)
@@ -387,17 +350,14 @@ class NixlEplbCommunicator(EplbCommunicator):
 
     @staticmethod
     def _unpack_recv_buffer(
-        recv_buffer: torch.Tensor,
-        out_tensors: list[torch.Tensor],
-        byte_offset: int,
+        recv_buffer: torch.Tensor, out_tensors: list[torch.Tensor], byte_offset: int
     ) -> None:
         for tensor in out_tensors:
             num_bytes = tensor.numel() * tensor.element_size()
             if num_bytes == 0:
                 continue
             tensor.reshape(-1).view(torch.uint8).copy_(
-                recv_buffer[byte_offset : byte_offset + num_bytes],
-                non_blocking=True,
+                recv_buffer[byte_offset : byte_offset + num_bytes], non_blocking=True
             )
             byte_offset += num_bytes
 
@@ -433,26 +393,18 @@ class NixlEplbCommunicator(EplbCommunicator):
         local_desc = self._nixl_wrapper.get_xfer_descs(
             local_descs, self._nixl_memory_type
         )
-        local_handle = self._nixl_wrapper.prep_xfer_dlist(
-            "NIXL_INIT_AGENT",
-            local_desc,
-        )
+        local_handle = self._nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", local_desc)
 
         remote_desc = self._nixl_wrapper.get_xfer_descs(
             remote_descs, self._nixl_memory_type
         )
         remote_handle = self._nixl_wrapper.prep_xfer_dlist(
-            self._remote_agents[src],
-            remote_desc,
+            self._remote_agents[src], remote_desc
         )
 
         indices = list(range(len(local_descs)))
         xfer_handle = self._nixl_wrapper.make_prepped_xfer(
-            "READ",
-            local_handle,
-            indices,
-            remote_handle,
-            indices,
+            "READ", local_handle, indices, remote_handle, indices
         )
         return (local_handle, remote_handle, xfer_handle)
 
@@ -489,8 +441,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             # We use monitored_barrier so a rank that crashes or exits early
             # produces a diagnostic timeout instead of a silent hang.
             torch.distributed.monitored_barrier(
-                group=self._cpu_group,
-                timeout=timedelta(minutes=5),
+                group=self._cpu_group, timeout=timedelta(minutes=5)
             )
 
             # Phase 2: issue one batched READ per peer.
@@ -535,9 +486,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             with torch.cuda.stream(self._cuda_stream):
                 for (src, expert_id), offset in recv_offsets.items():
                     self._unpack_recv_buffer(
-                        self._recv_buffer,
-                        self._recv_map[src][expert_id],
-                        offset,
+                        self._recv_buffer, self._recv_map[src][expert_id], offset
                     )
         finally:
             for local_h, remote_h, xfer_h in xfer_entries:
@@ -703,8 +652,7 @@ def create_eplb_communicator(
             )
         try:
             return NixlEplbCommunicator(
-                cpu_group=group_coordinator.cpu_group,
-                expert_weights=expert_weights,
+                cpu_group=group_coordinator.cpu_group, expert_weights=expert_weights
             )
         except Exception as exc:
             raise RuntimeError(
@@ -712,7 +660,7 @@ def create_eplb_communicator(
             ) from exc
     elif backend == "torch_gloo":
         return TorchDistGlooStagedEplbCommunicator(
-            cpu_group=group_coordinator.cpu_group,
+            cpu_group=group_coordinator.cpu_group
         )
     elif backend == "torch_nccl":
         return TorchDistNcclEplbCommunicator(ep_group=torch_group)

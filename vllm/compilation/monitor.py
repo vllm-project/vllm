@@ -78,10 +78,7 @@ def monitor_profiling_run() -> Generator[None, None, None]:
         "backend compilation occurred during the initial profiling run; "
         "all compilation should be complete before the profiling run starts."
     )
-    logger.info_once(
-        "Initial profiling/warmup run took %.2f s",
-        elapsed,
-    )
+    logger.info_once("Initial profiling/warmup run took %.2f s", elapsed)
 
 
 cudagraph_capturing_enabled: bool = True

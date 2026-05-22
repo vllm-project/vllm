@@ -187,12 +187,6 @@ if __name__ == "__main__":
         save_dir = f"bench_nvfp4_res_n{N}_k{K}"
         os.makedirs(save_dir, exist_ok=True)
 
-        benchmark.run(
-            print_data=True,
-            show_plots=True,
-            save_path=save_dir,
-            N=N,
-            K=K,
-        )
+        benchmark.run(print_data=True, show_plots=True, save_path=save_dir, N=N, K=K)
 
     print("Benchmark finished!")

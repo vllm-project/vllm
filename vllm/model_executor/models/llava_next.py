@@ -101,20 +101,14 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return hf_processor
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         """Get the number of image tokens for the given image dimensions."""
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
         base_feature_size = get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
+                image_width=image_width, image_height=image_height
             ),
             hf_config.vision_feature_select_strategy,
         )
@@ -125,10 +119,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
             patch_size=vision_encoder_info.get_image_size(),
         )
 
-        (
-            unpadded_feature_size,
-            newline_feature_size,
-        ) = self._get_num_unpadded_features(
+        (unpadded_feature_size, newline_feature_size) = self._get_num_unpadded_features(
             original_height=image_height,
             original_width=image_width,
             npatches=vision_encoder_info.get_patch_grid_length(),
@@ -197,9 +188,7 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
     # Copied from BaseMultiModalProcessor
     @abstractmethod
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         raise NotImplementedError
 
@@ -208,9 +197,7 @@ class LlavaNextMultiModalProcessor(
     BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]
 ):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -321,17 +308,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
                 type="pixel_values",
                 pixel_values=pixel_values,
                 image_sizes=image_sizes,
-                resolve_bindings={
-                    "h": expected_h,
-                    "w": expected_w,
-                },
+                resolve_bindings={"h": expected_h, "w": expected_w},
             )
 
         if image_embeds is not None:
-            return LlavaNextImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return LlavaNextImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("This line should be unreachable.")
 
@@ -435,8 +416,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 
     def _process_image_pixels(
-        self,
-        inputs: LlavaNextImagePixelInputs,
+        self, inputs: LlavaNextImagePixelInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         pixel_values = inputs["pixel_values"]
 
@@ -465,8 +445,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         )
 
     def _process_image_input(
-        self,
-        image_input: LlavaNextImageInputs,
+        self, image_input: LlavaNextImageInputs
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -575,10 +554,7 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

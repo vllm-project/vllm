@@ -37,20 +37,14 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
     @classmethod
     def is_available(cls) -> bool:
         try:
-            from tokenspeed_mla import (
-                tokenspeed_mla_prefill,  # noqa: F401
-            )
+            from tokenspeed_mla import tokenspeed_mla_prefill  # noqa: F401
 
             return True
         except ImportError:
             return False
 
     @classmethod
-    def validate_configuration(
-        cls,
-        device_capability,
-        selector_config,
-    ) -> list[str]:
+    def validate_configuration(cls, device_capability, selector_config) -> list[str]:
         # Replace the generic "required dependencies not available" message
         # from the base class with a specific install hint so users know
         # exactly which package to install when they explicitly select this
@@ -93,10 +87,7 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
                 enable_pdl=False,
             )
 
-    def prepare_metadata(
-        self,
-        prefill_metadata: "MLACommonPrefillMetadata",
-    ) -> None:
+    def prepare_metadata(self, prefill_metadata: "MLACommonPrefillMetadata") -> None:
         super().prepare_metadata(prefill_metadata)
         # Kernel signature requires `seq_lens` but the implementation never reads
         # it (per-batch lengths are derived from `cum_seq_lens` diffs); compute
@@ -145,11 +136,7 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         return ret
 
     def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        self, chunk_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 

@@ -12,9 +12,7 @@ import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
-)
+from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 
@@ -69,19 +67,14 @@ def make_test_tensors(
 @pytest.mark.parametrize("activation", NO_MUL_ACTIVATIONS)
 @torch.inference_mode()
 def test_triton_experts_no_mul_activation(
-    m: int,
-    n: int,
-    k: int,
-    topk: int,
-    activation: MoEActivation,
+    m: int, n: int, k: int, topk: int, activation: MoEActivation
 ):
     hidden_states, w1, w2, topk_weights, topk_ids = make_test_tensors(
         m, n, k, NUM_EXPERTS, topk
     )
 
     experts = TritonExperts(
-        moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        moe_config=make_dummy_moe_config(), quant_config=FUSED_MOE_UNQUANTIZED_CONFIG
     )
 
     ws1_shape, ws2_shape, out_shape = experts.workspace_shapes(
@@ -156,8 +149,7 @@ def test_workspace_shapes_no_mul_vs_gated():
     M, N, K, topk = 64, 256, 128, 2
 
     experts = TritonExperts(
-        moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        moe_config=make_dummy_moe_config(), quant_config=FUSED_MOE_UNQUANTIZED_CONFIG
     )
 
     ws1_no_mul, _, out_no_mul = experts.workspace_shapes(
@@ -195,8 +187,7 @@ def test_adjust_n_for_activation():
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
     experts = TritonExperts(
-        moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        moe_config=make_dummy_moe_config(), quant_config=FUSED_MOE_UNQUANTIZED_CONFIG
     )
 
     N = 256

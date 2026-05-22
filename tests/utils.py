@@ -47,13 +47,8 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.kernels.linear import _KernelT, init_fp8_linear_kernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -686,10 +681,7 @@ class RemoteVLLMServer:
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
         return anthropic.Anthropic(
-            base_url=self.url_for(),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-            **kwargs,
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
 
     def get_async_client_anthropic(self, **kwargs):
@@ -872,10 +864,7 @@ def _test_completion(
 
     # test using token IDs
     completion = client.completions.create(
-        model=model,
-        prompt=token_ids,
-        max_tokens=5,
-        temperature=0.0,
+        model=model, prompt=token_ids, max_tokens=5, temperature=0.0
     )
 
     results.append(
@@ -904,11 +893,7 @@ def _test_completion(
 
         # test seeded random sampling with multiple prompts
         completion = client.completions.create(
-            model=model,
-            prompt=[prompt, prompt],
-            max_tokens=5,
-            seed=33,
-            temperature=1.0,
+            model=model, prompt=[prompt, prompt], max_tokens=5, seed=33, temperature=1.0
         )
 
         results.append(
@@ -924,10 +909,7 @@ def _test_completion(
 
     # test simple list
     batch = client.completions.create(
-        model=model,
-        prompt=[prompt, prompt],
-        max_tokens=5,
-        temperature=0.0,
+        model=model, prompt=[prompt, prompt], max_tokens=5, temperature=0.0
     )
 
     results.append(
@@ -940,11 +922,7 @@ def _test_completion(
 
     # test streaming
     batch = client.completions.create(
-        model=model,
-        prompt=[prompt, prompt],
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
+        model=model, prompt=[prompt, prompt], max_tokens=5, temperature=0.0, stream=True
     )
 
     texts = [""] * 2
@@ -953,21 +931,12 @@ def _test_completion(
         choice = chunk.choices[0]
         texts[choice.index] += choice.text
 
-    results.append(
-        {
-            "test": "streaming",
-            "texts": texts,
-        }
-    )
+    results.append({"test": "streaming", "texts": texts})
 
     return results
 
 
-def _test_completion_close(
-    client: openai.OpenAI,
-    model: str,
-    prompt: str,
-):
+def _test_completion_close(client: openai.OpenAI, model: str, prompt: str):
     results = []
 
     # test with text prompt
@@ -978,21 +947,12 @@ def _test_completion_close(
     logprobs = completion.choices[0].logprobs.top_logprobs[0]
     logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
-    results.append(
-        {
-            "test": "completion_close",
-            "logprobs": logprobs,
-        }
-    )
+    results.append({"test": "completion_close", "logprobs": logprobs})
 
     return results
 
 
-def _test_chat(
-    client: openai.OpenAI,
-    model: str,
-    prompt: str,
-):
+def _test_chat(client: openai.OpenAI, model: str, prompt: str):
     results = []
 
     messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -1014,18 +974,12 @@ def _test_chat(
     return results
 
 
-def _test_embeddings(
-    client: openai.OpenAI,
-    model: str,
-    text: str,
-):
+def _test_embeddings(client: openai.OpenAI, model: str, text: str):
     results = []
 
     # test with text input
     embeddings = client.embeddings.create(
-        model=model,
-        input=text,
-        encoding_format="float",
+        model=model, input=text, encoding_format="float"
     )
 
     results.append(
@@ -1039,20 +993,14 @@ def _test_embeddings(
     return results
 
 
-def _test_image_text(
-    client: openai.OpenAI,
-    model_name: str,
-    image_url: str,
-):
+def _test_image_text(client: openai.OpenAI, model_name: str, image_url: str):
     results = []
 
     # test pure text input
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": "How do you feel today?"},
-            ],
+            "content": [{"type": "text", "text": "How do you feel today?"}],
         }
     ]
 
@@ -1069,12 +1017,7 @@ def _test_image_text(
     for x in top_logprobs:
         x.logprob = round(x.logprob, 2)
 
-    results.append(
-        {
-            "test": "pure_text",
-            "logprobs": top_logprobs,
-        }
-    )
+    results.append({"test": "pure_text", "logprobs": top_logprobs})
 
     messages = [
         {
@@ -1096,12 +1039,7 @@ def _test_image_text(
     )
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
-    results.append(
-        {
-            "test": "text_image",
-            "logprobs": top_logprobs,
-        }
-    )
+    results.append({"test": "text_image", "logprobs": top_logprobs})
 
     return results
 
@@ -1174,9 +1112,7 @@ def compare_all_settings(
             break
 
     tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=trust_remote_code,
-        tokenizer_mode=tokenizer_mode,
+        model, trust_remote_code=trust_remote_code, tokenizer_mode=tokenizer_mode
     )
 
     can_force_load_format = True
@@ -1341,10 +1277,7 @@ def init_test_distributed_environment(
 
 
 def multi_process_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    pp_size: int,
-    test_target: Any,
+    monkeypatch: pytest.MonkeyPatch, tp_size: int, pp_size: int, test_target: Any
 ) -> None:
     import ray
 
@@ -1375,12 +1308,8 @@ def multi_process_parallel(
     for rank in range(tp_size * pp_size):
         refs.append(
             test_target.remote(
-                monkeypatch,
-                tp_size,
-                pp_size,
-                rank,
-                distributed_init_port,
-            ),
+                monkeypatch, tp_size, pp_size, rank, distributed_init_port
+            )
         )
     ray.get(refs)
 
@@ -1665,9 +1594,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             env[_SPAWN_CHILD_ENV] = "1"
 
             result = subprocess.run(
-                [sys.executable, "-c", child_script],
-                input=payload,
-                env=env,
+                [sys.executable, "-c", child_script], input=payload, env=env
             )
 
             if result.returncode != 0:
@@ -1728,8 +1655,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
     except Exception as e:
         warnings.warn(
-            f"An error occurred when finding the available memory: {e}",
-            stacklevel=2,
+            f"An error occurred when finding the available memory: {e}", stacklevel=2
         )
         memory_gb = 0
 

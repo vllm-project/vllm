@@ -11,12 +11,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
@@ -109,12 +105,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
         ),
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description="Additional kwargs to pass to the HF processor.",
+        default=None, description="Additional kwargs to pass to the HF processor."
     )
     tools: list[ChatCompletionToolsParam] | None = Field(
-        default=None,
-        description="A list of tools the model may call.",
+        default=None, description="A list of tools the model may call."
     )
 
     @model_validator(mode="before")
@@ -123,7 +117,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True.",
+                "`add_generation_prompt` to True."
             )
         return data
 
@@ -172,9 +166,7 @@ class DetokenizeRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=None,
-            max_output_tokens=0,
-            needs_detokenization=True,
+            max_total_tokens=None, max_output_tokens=0, needs_detokenization=True
         )
 
 

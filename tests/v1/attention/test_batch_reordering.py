@@ -65,9 +65,7 @@ REORDER_TEST_CASES = {
         expected_modified=False,
     ),
     "single_request": ReorderTestCase(
-        requests=[(1, 10, 10)],
-        expected_order=[0],
-        expected_modified=False,
+        requests=[(1, 10, 10)], expected_order=[0], expected_modified=False
     ),
     "higher_threshold": ReorderTestCase(
         requests=[(2, 10, 10), (3, 20, 20), (5, 30, 30), (6, 40, 40)],

@@ -30,10 +30,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -174,12 +171,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         return sorted(set(ratios), key=lambda x: x[0] * x[1])
 
     def _get_grid_layout(
-        self,
-        height: int,
-        width: int,
-        min_tiles: int,
-        max_tiles: int,
-        tile_size: int,
+        self, height: int, width: int, min_tiles: int, max_tiles: int, tile_size: int
     ) -> tuple[int, int, int]:
         aspect_ratio = width / height
         target_ratios = self._target_ratios(min_tiles, max_tiles)
@@ -274,9 +266,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         image_thumbnail_token = processor.image_thumbnail_token
 
         num_thumbnail_tokens, num_tokens_per_tile = self.get_num_image_tokens(
-            spatial_shapes=spatial_shapes,
-            processor=processor,
-            mm_kwargs=mm_kwargs,
+            spatial_shapes=spatial_shapes, processor=processor, mm_kwargs=mm_kwargs
         )
         tile_img_placeholder = grid_placeholder + (image_token * num_tokens_per_tile)
 
@@ -375,7 +365,7 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -396,10 +386,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -423,9 +410,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
 
@@ -459,10 +444,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 processor=hf_processor,
                 mm_kwargs=hf_processor_mm_kwargs,
             )
-            return PromptUpdateDetails.select_text(
-                image_repl,
-                embed_text=image_token,
-            )
+            return PromptUpdateDetails.select_text(image_repl, embed_text=image_token)
 
         return [
             PromptReplacement(
@@ -474,11 +456,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
 
 
 class Lfm2VLMultiModalProjector(nn.Module):
-    def __init__(
-        self,
-        config: Lfm2VlConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, config: Lfm2VlConfig, prefix: str = ""):
         super().__init__()
         self.use_data_parallel = is_vit_use_data_parallel()
 
@@ -488,9 +466,7 @@ class Lfm2VLMultiModalProjector(nn.Module):
         if self.projector_use_layernorm:
             self.layer_norm = nn.LayerNorm(in_channels)
         self.linear_1 = nn.Linear(
-            in_channels,
-            config.projector_hidden_size,
-            bias=config.projector_bias,
+            in_channels, config.projector_hidden_size, bias=config.projector_bias
         )
         self.act = ACT2FN[config.projector_hidden_act]
         self.linear_2 = nn.Linear(
@@ -500,9 +476,7 @@ class Lfm2VLMultiModalProjector(nn.Module):
         )
 
     def forward(
-        self,
-        vision_features_packed: torch.Tensor,
-        spatial_shapes: torch.Tensor,
+        self, vision_features_packed: torch.Tensor, spatial_shapes: torch.Tensor
     ) -> torch.Tensor:
         """Project packed vision features without materializing padded tensors.
 
@@ -601,18 +575,15 @@ class Lfm2VLForConditionalGeneration(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.short_conv_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int]]:
         """Calculate shapes for LFM2's convolutional cache.
 
@@ -661,8 +632,7 @@ class Lfm2VLForConditionalGeneration(
                 )
 
             self.multi_modal_projector = Lfm2VLMultiModalProjector(
-                config=config,
-                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+                config=config, prefix=maybe_prefix(prefix, "multi_modal_projector")
             )
 
         with self._mark_language_model(vllm_config):
@@ -694,9 +664,7 @@ class Lfm2VLForConditionalGeneration(
         )
 
     def image_pixels_to_features(
-        self,
-        pixel_values: torch.FloatTensor,
-        spatial_shapes: torch.Tensor,
+        self, pixel_values: torch.FloatTensor, spatial_shapes: torch.Tensor
     ) -> torch.Tensor:
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -741,9 +709,7 @@ class Lfm2VLForConditionalGeneration(
             lengths_list, dtype=torch.int32, device=pixel_values.device
         )
         cu_seqlens = torch.zeros(
-            lengths.shape[0] + 1,
-            dtype=torch.int32,
-            device=pixel_values.device,
+            lengths.shape[0] + 1, dtype=torch.int32, device=pixel_values.device
         )
         cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
 
@@ -773,8 +739,7 @@ class Lfm2VLForConditionalGeneration(
             projected_lengths_list.append((height // factor) * (width // factor))
 
         projected_packed = self.multi_modal_projector(
-            vision_features_packed=vision_features_packed,
-            spatial_shapes=spatial_shapes,
+            vision_features_packed=vision_features_packed, spatial_shapes=spatial_shapes
         )
 
         image_features: list[torch.Tensor] = []
@@ -786,16 +751,14 @@ class Lfm2VLForConditionalGeneration(
         return image_features
 
     def _process_image_input(
-        self,
-        image_input: LFM2VLImageInputs,
+        self, image_input: LFM2VLImageInputs
     ) -> torch.Tensor | list[torch.Tensor]:
         pixel_values = image_input["pixel_values"]
         spatial_shapes = image_input["spatial_shapes"]
         num_patches = image_input["num_patches"]
 
         image_features = self.image_pixels_to_features(
-            pixel_values,
-            spatial_shapes=spatial_shapes,
+            pixel_values, spatial_shapes=spatial_shapes
         )
 
         # Group patches by image - num_patches is on CPU (keep_on_cpu=True)
@@ -838,10 +801,7 @@ class Lfm2VLForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

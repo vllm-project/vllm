@@ -101,9 +101,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         )
     else:
         logger.debug(
-            "cudaHostRegister rank=%d %.2f GB",
-            rank,
-            region.total_size_bytes / 1e9,
+            "cudaHostRegister rank=%d %.2f GB", rank, region.total_size_bytes / 1e9
         )
         region.is_pinned = True
 

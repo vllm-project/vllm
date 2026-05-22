@@ -27,9 +27,7 @@ logger = init_logger(__name__)
 
 
 def extract_from_kv_cache(
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    num_tokens: int,
+    kv_cache: torch.Tensor, slot_mapping: torch.Tensor, num_tokens: int
 ) -> torch.Tensor:
     """Extract data from KV cache."""
     block_size = kv_cache.shape[1]
@@ -49,10 +47,7 @@ class ReqMeta:
 
     @staticmethod
     def make_meta(
-        req_id: str,
-        filename: str,
-        token_ids: list[int],
-        new_req: bool,
+        req_id: str, filename: str, token_ids: list[int], new_req: bool
     ) -> "ReqMeta":
         return ReqMeta(
             req_id=req_id,
@@ -67,11 +62,7 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
 
     def add_request(
-        self,
-        req_id: str,
-        filename: str,
-        token_ids: list[int],
-        new_req: bool = True,
+        self, req_id: str, filename: str, token_ids: list[int], new_req: bool = True
     ) -> None:
         self.requests.append(ReqMeta.make_meta(req_id, filename, token_ids, new_req))
 
@@ -100,9 +91,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config,
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
         self._block_size = vllm_config.cache_config.block_size
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
@@ -205,9 +194,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
@@ -234,8 +221,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         assert num_external_tokens == 0, "This connector is store-only"
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -249,11 +235,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
             filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
-            meta.add_request(
-                new_req.req_id,
-                filename=filename,
-                token_ids=token_ids,
-            )
+            meta.add_request(new_req.req_id, filename=filename, token_ids=token_ids)
             self._request_filenames[new_req.req_id] = filename
             self._active_requests[new_req.req_id] = new_req
             self._req_blocks[new_req.req_id] = list(new_req.block_ids[0])
@@ -286,9 +268,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         return meta
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished, before its blocks are
@@ -312,9 +292,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         return False, {"hidden_states_path": req_filename}
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         return self.request_finished(request, block_ids[0])
 

@@ -199,10 +199,7 @@ class OuroAttention(nn.Module):
             )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        current_ut: int,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, current_ut: int
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -315,8 +312,7 @@ class OuroModel(nn.Module):
                 "This model uses sliding window but `max_window_layers` = {} "
                 "is less than `num_hidden_layers` = {}. Please open an issue "
                 "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
+                    config.max_window_layers, config.num_hidden_layers
                 )
             )
 
@@ -438,15 +434,8 @@ class OuroModel(nn.Module):
 
 class OuroForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -492,10 +481,7 @@ class OuroForCausalLM(nn.Module, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

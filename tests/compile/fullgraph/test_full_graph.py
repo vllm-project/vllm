@@ -21,10 +21,7 @@ from ...utils import create_new_process_for_each_test
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
-        (
-            "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
-            {"dtype": torch.float16},
-        ),
+        ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {"dtype": torch.float16}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
@@ -131,7 +128,7 @@ def test_full_graph(
             ),
             "facebook/opt-125m",
             {},
-        ),
+        )
     ]
     + [
         # graph inductor partition
@@ -161,15 +158,13 @@ def test_full_graph(
             ),
             "facebook/opt-125m",
             {},
-        ),
+        )
     ],
 )
 # only test some of the models
 @create_new_process_for_each_test()
 def test_custom_compile_config(
-    compilation_config: CompilationConfig,
-    model: str,
-    model_kwargs: dict[str, Any],
+    compilation_config: CompilationConfig, model: str, model_kwargs: dict[str, Any]
 ):
     if (
         "w8a8" in model
@@ -189,8 +184,7 @@ def test_custom_compile_config(
 
 
 @pytest.mark.parametrize(
-    "compilation_mode",
-    [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
+    "compilation_mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]
 )
 @pytest.mark.parametrize(
     "model, backend",
@@ -203,9 +197,7 @@ def test_custom_compile_config(
     ],
 )
 def test_fp8_kv_scale_compile(
-    compilation_mode: int,
-    model: str,
-    backend: AttentionBackendEnum | None,
+    compilation_mode: int, model: str, backend: AttentionBackendEnum | None
 ):
     model_kwargs = {
         "quantization": "fp8",
@@ -241,11 +233,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-    llm = LLM(
-        model=model,
-        compilation_config=compilation_config,
-        **model_kwargs,
-    )
+    llm = LLM(model=model, compilation_config=compilation_config, **model_kwargs)
     outputs = llm.generate(prompts, sampling_params)
 
     # Print the outputs.

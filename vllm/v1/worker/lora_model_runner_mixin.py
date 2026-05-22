@@ -29,19 +29,14 @@ logger = init_logger(__name__)
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
     def load_lora_model(
-        self,
-        model: nn.Module,
-        vllm_config: VllmConfig,
-        device: torch.device,
+        self, model: nn.Module, vllm_config: VllmConfig, device: torch.device
     ) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
-            vllm_config,
-            device,
-            model.embedding_modules,
+            vllm_config, device, model.embedding_modules
         )
         return self.lora_manager.create_lora_manager(model, vllm_config)
 
@@ -59,10 +54,7 @@ class LoRAModelRunnerMixin:
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(
-            token_lora_mapping,
-            prompt_lora_mapping,
-            is_prefill=True,
-            type=mapping_type,
+            token_lora_mapping, prompt_lora_mapping, is_prefill=True, type=mapping_type
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
@@ -193,8 +185,7 @@ class LoRAModelRunnerMixin:
                     # This ensures prepare_tensors sees both LoRA and no-LoRA
                     # tokens, computing num_active_loras = effective_num_loras+1
                     cycle_values = np.array(
-                        list(range(1, effective_num_loras + 1)),
-                        dtype=np.int32,
+                        list(range(1, effective_num_loras + 1)), dtype=np.int32
                     )
                     prompt_lora_mapping = cycle_values[
                         np.arange(num_reqs, dtype=np.int32) % len(cycle_values)

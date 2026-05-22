@@ -164,9 +164,7 @@ class Lfm2Attention(nn.Module):
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         n_tokens, _ = hidden_states.shape
         qkv, _ = self.qkv_proj(hidden_states)
@@ -275,10 +273,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -286,10 +281,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.short_conv(
-            hidden_states,
-            output,
-        )
+        self.short_conv(hidden_states, output)
         hidden_states, residual = self.ffn_norm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
@@ -363,9 +355,7 @@ class Lfm2Model(nn.Module):
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -415,24 +405,15 @@ class Lfm2ForCausalLM(
     nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "w13": [
-            "w1",
-            "w3",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "w13": ["w1", "w3"],
         "in_proj": ["in_proj"],
     }
 
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child (ShortConv has a child self.conv, so
     # naming the container .conv too makes _match_target_modules match both)
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".conv.": ".short_conv."},
-    )
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".conv.": ".short_conv."})
 
     # LoRA specific attributes
     embedding_modules = {
@@ -442,18 +423,15 @@ class Lfm2ForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.short_conv_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int]]:
         """Calculate shapes for LFM2's convolutional cache.
 

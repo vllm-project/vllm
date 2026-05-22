@@ -134,23 +134,13 @@ def get_rope(
             )
         else:
             rotary_emb = RotaryEmbedding(
-                head_size,
-                rotary_dim,
-                max_position,
-                base,
-                is_neox_style,
-                dtype,
+                head_size, rotary_dim, max_position, base, is_neox_style, dtype
             )
     elif scaling_type == "proportional":
         # Proportional RoPE is used by Gemma4 for global (full) attention.
         # Gemma4 uses a sparse/fractional RoPE with cross-mixing between halves.
         rotary_emb = Gemma4RotaryEmbedding(
-            head_size,
-            rotary_dim,
-            max_position,
-            base,
-            is_neox_style,
-            dtype,
+            head_size, rotary_dim, max_position, base, is_neox_style, dtype
         )
     elif scaling_type == "llama3":
         scaling_factor = rope_parameters["factor"]

@@ -12,9 +12,7 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="jason9693/Qwen2.5-1.5B-apeach",
-        runner="pooling",
-        enforce_eager=True,
+        model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling", enforce_eager=True
     )
     return parser.parse_args()
 

@@ -12,9 +12,7 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="jinaai/jina-embeddings-v3",
-        runner="pooling",
-        trust_remote_code=True,
+        model="jinaai/jina-embeddings-v3", runner="pooling", trust_remote_code=True
     )
     return parser.parse_args()
 

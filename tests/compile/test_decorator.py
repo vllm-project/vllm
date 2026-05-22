@@ -37,18 +37,14 @@ def run_model(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             model(torch.randn(2, MLP_SIZE).cuda())
         with set_forward_context(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=1,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=1),
         ):
             model(torch.randn(1, MLP_SIZE).cuda())
 
@@ -57,9 +53,7 @@ def run_model(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             output = model(torch.randn(2, MLP_SIZE).cuda())
 
@@ -209,9 +203,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     vllm_config = VllmConfig(
-        cache_config=CacheConfig(
-            kv_sharing_fast_prefill=True,
-        ),
+        cache_config=CacheConfig(kv_sharing_fast_prefill=True),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             splitting_ops=["silly::attention"],
@@ -250,9 +242,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     # Set kv_sharing_fast_prefill=False
     # which will cause A to be compiled and B to not be compiled
     vllm_config = VllmConfig(
-        cache_config=CacheConfig(
-            kv_sharing_fast_prefill=False,
-        ),
+        cache_config=CacheConfig(kv_sharing_fast_prefill=False),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             splitting_ops=["silly::attention"],

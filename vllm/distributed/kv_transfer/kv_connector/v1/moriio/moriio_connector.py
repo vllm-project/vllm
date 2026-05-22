@@ -53,11 +53,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.utils.network_utils import (
-    get_ip,
-    make_zmq_path,
-    make_zmq_socket,
-)
+from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
@@ -71,11 +67,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 try:
-    from mori.io import (
-        BackendType,
-        IOEngine,
-        IOEngineConfig,
-    )
+    from mori.io import BackendType, IOEngine, IOEngineConfig
 
     logger.info("MoRIIO is available")
     MoRIIO_enabled = True
@@ -157,16 +149,13 @@ class MoRIIOConnector(KVConnectorBase_V1):
         )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -306,9 +295,7 @@ class MoRIIOConnectorScheduler:
             )
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -440,8 +427,7 @@ class MoRIIOConnectorScheduler:
             params["do_remote_prefill"] = False
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
         meta.transfer_id_to_request_id = self.transfer_id_to_request_id
@@ -465,11 +451,7 @@ class MoRIIOConnectorScheduler:
                         if new_req.sampling_params.extra_args
                         else {}
                     )
-                    meta.add_new_req(
-                        red_id,
-                        local_block_ids,
-                        kv_transfer_params,
-                    )
+                    meta.add_new_req(red_id, local_block_ids, kv_transfer_params)
             if get_role() == ROLE.PRODUCER:
                 # This is the logic for checking against chunked prefill.
                 # When the last chunk is identified,
@@ -542,9 +524,7 @@ class MoRIIOConnectorScheduler:
         self.paths.clear()
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks

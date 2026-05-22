@@ -21,7 +21,7 @@ from vllm.transformers_utils.repo_utils import (
         (
             ["*.json", "correct*.txt"],
             ["json_file.json", "subfolder/correct.txt", "correct_2.txt"],
-        ),
+        )
     ],
 )
 def test_list_filtered_repo_files(
@@ -59,10 +59,7 @@ def test_list_filtered_repo_files(
         assert out_files == sorted(expected_relative_files)
         assert mock_list_repo_files.call_count == 1
         assert mock_list_repo_files.call_args_list[0] == call(
-            repo_id=tmp_dir,
-            revision="revision",
-            repo_type="model",
-            token="token",
+            repo_id=tmp_dir, revision="revision", repo_type="model", token="token"
         )
 
 
@@ -70,14 +67,8 @@ def test_list_filtered_repo_files(
     ("allow_patterns", "expected_bool"),
     [
         (["*.json", "correct*.txt"], True),
-        (
-            ["*.jpeg"],
-            True,
-        ),
-        (
-            ["not_found.jpeg"],
-            False,
-        ),
+        (["*.jpeg"], True),
+        (["not_found.jpeg"], False),
     ],
 )
 def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool):
@@ -108,10 +99,7 @@ def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool)
             ) is expected_bool
         assert mock_list_repo_files.call_count == 1
         assert mock_list_repo_files.call_args_list[0] == call(
-            repo_id=tmp_dir,
-            revision="revision",
-            repo_type="model",
-            token="token",
+            repo_id=tmp_dir, revision="revision", repo_type="model", token="token"
         )
 
 
@@ -120,10 +108,7 @@ def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool)
     [
         (["consolidated.safetensors", "incorrect.txt"], True),
         (["consolidated-1.safetensors", "incorrect.txt"], True),
-        (
-            ["consolidated-1.json"],
-            False,
-        ),
+        (["consolidated-1.json"], False),
     ],
 )
 def test_is_mistral_model_repo(files: list[str], expected_bool: bool):
@@ -151,8 +136,5 @@ def test_is_mistral_model_repo(files: list[str], expected_bool: bool):
             )
         assert mock_list_repo_files.call_count == 1
         assert mock_list_repo_files.call_args_list[0] == call(
-            repo_id=tmp_dir,
-            revision="revision",
-            repo_type="model",
-            token="token",
+            repo_id=tmp_dir, revision="revision", repo_type="model", token="token"
         )

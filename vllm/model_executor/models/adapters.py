@@ -13,9 +13,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import (
-    try_get_dense_modules,
-)
+from vllm.transformers_utils.config import try_get_dense_modules
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces import supports_multimodal
@@ -137,11 +135,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
         is_pooling_model = True
 
         def __init__(
-            self,
-            *,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-            **kwargs: Any,
+            self, *, vllm_config: "VllmConfig", prefix: str = "", **kwargs: Any
         ) -> None:
             with no_init_weights(
                 self,
@@ -166,11 +160,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
             self.pooler = pooler
 
-        def _init_pooler(
-            self,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-        ) -> "Pooler":
+        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = "") -> "Pooler":
             raise NotImplementedError
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -246,11 +236,7 @@ def as_embedding_model(cls: _T) -> _T:
     from vllm.model_executor.layers.pooler import DispatchPooler
 
     class ModelForEmbedding(_create_pooling_model_cls(cls)):
-        def _init_pooler(
-            self,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-        ) -> "Pooler":
+        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = "") -> "Pooler":
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
@@ -287,11 +273,7 @@ def as_seq_cls_model(cls: _T) -> _T:
     class ModelForSequenceClassification(
         _create_pooling_model_cls(cls), SupportsCrossEncoding
     ):
-        def _init_pooler(
-            self,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-        ) -> "Pooler":
+        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = "") -> "Pooler":
             hf_config = vllm_config.model_config.hf_config
             text_config = hf_config.get_text_config()
             model_config = vllm_config.model_config
@@ -303,11 +285,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                 "classifier_from_token",
                 getattr(text_config, "classifier_from_token", None),
             )
-            method = getattr(
-                hf_config,
-                "method",
-                getattr(text_config, "method", None),
-            )
+            method = getattr(hf_config, "method", getattr(text_config, "method", None))
 
             # Online conversion: no score weights in checkpoint, don't
             # quantize (small output_dim breaks FP8/Marlin tile alignment).
@@ -494,8 +472,7 @@ def load_weights_using_from_2_way_softmax(
     using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size,
-        text_config.hidden_size,
+        text_config.vocab_size, text_config.hidden_size
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
@@ -568,8 +545,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size,
-        text_config.hidden_size,
+        text_config.vocab_size, text_config.hidden_size
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not

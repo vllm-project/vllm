@@ -87,8 +87,7 @@ class TestECExampleConnectorBasics:
     def test_initialization_producer(self, mock_vllm_config_producer, temp_storage):
         """Test connector initializes correctly as producer."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         assert connector.role == ECConnectorRole.SCHEDULER
@@ -99,8 +98,7 @@ class TestECExampleConnectorBasics:
     def test_initialization_consumer(self, mock_vllm_config_consumer, temp_storage):
         """Test connector initializes correctly as consumer."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         assert connector.role == ECConnectorRole.WORKER
@@ -110,12 +108,10 @@ class TestECExampleConnectorBasics:
     def test_role_assignment(self, mock_vllm_config_producer):
         """Test role is correctly assigned."""
         scheduler_connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
         worker_connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         assert scheduler_connector.role == ECConnectorRole.SCHEDULER
@@ -134,8 +130,7 @@ class TestCacheExistence:
         """Test has_cache_item returns True when all 3 caches exist."""
         # Test for producer first
         producer = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Create cache files using save_caches (proper way)
@@ -158,8 +153,7 @@ class TestCacheExistence:
 
         # Also test consumer can check if cache exists
         consumer = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.SCHEDULER
         )
 
         # Test using has_cache_item API
@@ -177,8 +171,7 @@ class TestCacheExistence:
     ):
         """Test has_caches returns False when no caches exist."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Test without creating any files
@@ -196,8 +189,7 @@ class TestCacheExistence:
     ):
         """Test has_caches with some caches existing (1 of 3)."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Create only the second cache file
@@ -226,8 +218,7 @@ class TestStateManagement:
     ):
         """Test state update after allocation for 3 MM items."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Initial state should be empty
@@ -252,8 +243,7 @@ class TestStateManagement:
     ):
         """Test metadata building for 3 MM items."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Setup state for all 3 items (mock cache existence)
@@ -281,8 +271,7 @@ class TestStateManagement:
     def test_build_connector_meta_empty(self, mock_vllm_config_producer):
         """Test metadata building with empty state."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         scheduler_output = Mock(spec=SchedulerOutput)
@@ -296,8 +285,7 @@ class TestStateManagement:
     ):
         """Test that state is properly cleared after building metadata."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         # Add state (mock cache existence)
@@ -326,8 +314,7 @@ class TestCacheSaving:
     ):
         """Test cache saving as producer for 3 different MM items."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         # Create and save 3 different caches
@@ -355,8 +342,7 @@ class TestCacheSaving:
     def test_save_caches_consumer_skips(self, mock_vllm_config_consumer):
         """Test cache saving is skipped for consumer."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "test_hash_consumer"
@@ -384,8 +370,7 @@ class TestCacheLoading:
         """Test consumer loads 3 caches from storage."""
         # First, create producer to save caches
         producer = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         # Producer saves 3 caches
@@ -397,8 +382,7 @@ class TestCacheLoading:
 
         # Now consumer loads
         consumer = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         # Setup metadata for all 3
@@ -428,8 +412,7 @@ class TestCacheLoading:
         """Test cache loading skips already cached items."""
         # Setup: producer saves cache
         producer = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "existing_hash"
@@ -438,8 +421,7 @@ class TestCacheLoading:
 
         # Consumer setup
         consumer = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         metadata = ECExampleConnectorMetadata()
@@ -462,8 +444,7 @@ class TestCacheLoading:
     def test_start_load_caches_empty_metadata(self, mock_vllm_config_consumer):
         """Test loading with empty metadata does nothing."""
         consumer = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         # Setup empty metadata
@@ -484,8 +465,7 @@ class TestFilenameGeneration:
     def test_generate_foldername(self, mock_vllm_config_producer, temp_storage):
         """Test folder name generation."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "test_folder_hash"
@@ -497,8 +477,7 @@ class TestFilenameGeneration:
     def test_generate_filename(self, mock_vllm_config_producer, temp_storage):
         """Test filename generation."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "test_file_hash"
@@ -511,8 +490,7 @@ class TestFilenameGeneration:
     def test_generate_filename_consistency(self, mock_vllm_config_producer):
         """Test filename generation is consistent."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "consistency_hash"
@@ -528,8 +506,7 @@ class TestMetadataBindingLifecycle:
     def test_bind_connector_metadata(self, mock_vllm_config_consumer):
         """Test binding connector metadata."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         metadata = ECExampleConnectorMetadata()
@@ -542,8 +519,7 @@ class TestMetadataBindingLifecycle:
     def test_clear_connector_metadata(self, mock_vllm_config_consumer):
         """Test clearing connector metadata."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         metadata = ECExampleConnectorMetadata()
@@ -556,8 +532,7 @@ class TestMetadataBindingLifecycle:
     def test_get_connector_metadata(self, mock_vllm_config_consumer):
         """Test getting connector metadata."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         metadata = ECExampleConnectorMetadata()
@@ -570,8 +545,7 @@ class TestMetadataBindingLifecycle:
     def test_get_connector_metadata_not_set(self, mock_vllm_config_consumer):
         """Test getting metadata when not set raises."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         with pytest.raises(AssertionError):
@@ -584,8 +558,7 @@ class TestEdgeCases:
     def test_save_empty_cache(self, mock_vllm_config_producer):
         """Test saving empty tensor."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.WORKER
         )
 
         mm_hash = "empty_hash"
@@ -597,8 +570,7 @@ class TestEdgeCases:
     def test_load_nonexistent_cache(self, mock_vllm_config_consumer):
         """Test loading cache that doesn't exist raises error."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_consumer,
-            role=ECConnectorRole.WORKER,
+            vllm_config=mock_vllm_config_consumer, role=ECConnectorRole.WORKER
         )
 
         metadata = ECExampleConnectorMetadata()
@@ -614,8 +586,7 @@ class TestEdgeCases:
     def test_has_cache_item_empty_request(self, mock_vllm_config_producer):
         """Test has_cache_item with a nonexistent identifier."""
         connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
+            vllm_config=mock_vllm_config_producer, role=ECConnectorRole.SCHEDULER
         )
 
         result = connector.has_cache_item("nonexistent_hash")

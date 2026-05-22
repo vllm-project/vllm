@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 FIXTURES_PATH = VLLM_PATH / "tests/models/fixtures"
 assert FIXTURES_PATH.exists()
 FIXTURE_REWARD_RESULT = {
-    "Qwen/Qwen2.5-Math-PRM-7B": FIXTURES_PATH / "qwen2_5_math_prm_reward_step.json",
+    "Qwen/Qwen2.5-Math-PRM-7B": FIXTURES_PATH / "qwen2_5_math_prm_reward_step.json"
 }
 
 
@@ -89,16 +89,12 @@ def load_reward_outputs(filename: "StrPath") -> list[list[float]]:
         pytest.param(
             "Qwen/Qwen2.5-Math-PRM-7B",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
+        )
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_prm_models(
-    hf_runner,
-    vllm_runner,
-    math_step_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, math_step_prompts, model: str, dtype: str
 ) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_transformers_version(on_fail="skip")
@@ -113,10 +109,7 @@ def test_prm_models(
         hf_model = step_reward_patch_hf_model(hf_model)
         hf_outputs = hf_model.reward(math_step_prompts)
 
-    dump_reward_outputs(
-        hf_outputs,
-        FIXTURE_REWARD_RESULT[model],
-    )
+    dump_reward_outputs(hf_outputs, FIXTURE_REWARD_RESULT[model])
 
     # check logits difference
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
@@ -132,15 +125,12 @@ def test_prm_models(
         pytest.param(
             "Qwen/Qwen2.5-Math-PRM-7B",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
+        )
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_prm_models_with_golden_outputs(
-    vllm_runner,
-    math_step_prompts,
-    model: str,
-    dtype: str,
+    vllm_runner, math_step_prompts, model: str, dtype: str
 ) -> None:
     if not FIXTURE_REWARD_RESULT.get(model):
         pytest.skip(f"No available golden outputs for {model}.")

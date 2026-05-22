@@ -8,13 +8,7 @@ from http import HTTPStatus
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    model_serializer,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger

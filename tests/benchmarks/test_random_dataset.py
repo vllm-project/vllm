@@ -141,9 +141,7 @@ def test_random_dataset_different_seeds(
 # -----------------------------
 
 
-def _mm_fingerprint_sample(
-    req: SampleRequest,
-) -> tuple[str, int, int, int, list[str]]:
+def _mm_fingerprint_sample(req: SampleRequest) -> tuple[str, int, int, int, list[str]]:
     """Create a compact fingerprint for multimodal samples.
 
     Includes:
@@ -221,9 +219,7 @@ def test_random_mm_same_seed(hf_tokenizer: PreTrainedTokenizerBase) -> None:
 
 
 @pytest.mark.benchmark
-def test_random_mm_different_seeds(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
+def test_random_mm_different_seeds(hf_tokenizer: PreTrainedTokenizerBase) -> None:
     ds_a = RandomMultiModalDataset(random_seed=0)
     ds_b = RandomMultiModalDataset(random_seed=999)
     a = _collect_mm_samples(ds_a, hf_tokenizer)
@@ -234,9 +230,7 @@ def test_random_mm_different_seeds(
 
 
 @pytest.mark.benchmark
-def test_random_mm_respects_limits(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
+def test_random_mm_respects_limits(hf_tokenizer: PreTrainedTokenizerBase) -> None:
     ds = RandomMultiModalDataset(random_seed=0)
     # Requesting 3 items with a per-prompt limit of 1 should error per current
     # design (dataset refuses to silently clamp below the requested baseline).
@@ -417,7 +411,7 @@ def test_random_mm_video_only_sampling(hf_tokenizer: PreTrainedTokenizerBase) ->
     ds = RandomMultiModalDataset(random_seed=42)
 
     bucket_config = {
-        (64, 64, 8): 1.0,  # Only videos
+        (64, 64, 8): 1.0  # Only videos
     }
 
     limit_mm_per_prompt = {"image": 0, "video": 1}
@@ -454,7 +448,7 @@ def test_random_mm_video_deterministic_sampling(
     ds_b = RandomMultiModalDataset(random_seed=seed)
 
     bucket_config = {
-        (64, 64, 8): 1.0,  # Only videos
+        (64, 64, 8): 1.0  # Only videos
     }
 
     limit_mm_per_prompt = {"image": 0, "video": 1}

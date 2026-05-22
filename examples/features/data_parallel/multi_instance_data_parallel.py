@@ -60,11 +60,7 @@ async def main():
         daemon=True,
     )
     logging_thread.start()
-    sampling_params = SamplingParams(
-        temperature=0.7,
-        top_p=0.9,
-        max_tokens=100,
-    )
+    sampling_params = SamplingParams(temperature=0.7, top_p=0.9, max_tokens=100)
     num_prompts = 10
     for i in range(num_prompts):
         prompt = "Who won the 2004 World Series?"

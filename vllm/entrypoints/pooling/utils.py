@@ -84,9 +84,7 @@ def encode_pooling_output_float_or_ndarray(output: PoolingRequestOutput) -> Any:
 
 
 def encode_pooling_output_base64(
-    output: PoolingRequestOutput,
-    embed_dtype: EmbedDType,
-    endianness: Endianness,
+    output: PoolingRequestOutput, embed_dtype: EmbedDType, endianness: Endianness
 ) -> str:
     embedding_bytes = tensor2binary(output.outputs.data, embed_dtype, endianness)
     return pybase64.b64encode(embedding_bytes).decode("utf-8")
@@ -102,9 +100,7 @@ def encode_pooling_bytes(
     offset = 0
     for idx, output in enumerate(pooling_outputs):
         binary = tensor2binary(
-            tensor=output.outputs.data,
-            embed_dtype=embed_dtype,
-            endianness=endianness,
+            tensor=output.outputs.data, embed_dtype=embed_dtype, endianness=endianness
         )
         size = len(binary)
 
@@ -126,9 +122,7 @@ def encode_pooling_bytes(
 
 
 def get_pooling_output_encoder(
-    encoding_format: JsonEncodingFormat,
-    embed_dtype: EmbedDType,
-    endianness: Endianness,
+    encoding_format: JsonEncodingFormat, embed_dtype: EmbedDType, endianness: Endianness
 ) -> Callable[[PoolingRequestOutput], JsonEncodedPoolingOutput]:
     return cast(
         Callable[[PoolingRequestOutput], JsonEncodedPoolingOutput],
@@ -144,27 +138,19 @@ def get_pooling_output_encoder(
     )
 
 
-def get_pooling_usage(
-    pooling_outputs: Sequence[PoolingRequestOutput],
-) -> UsageInfo:
+def get_pooling_usage(pooling_outputs: Sequence[PoolingRequestOutput]) -> UsageInfo:
     num_prompt_tokens = sum(
         len(output.prompt_token_ids) if output.prompt_token_ids is not None else 0
         for output in pooling_outputs
     )
-    return UsageInfo(
-        prompt_tokens=num_prompt_tokens,
-        total_tokens=num_prompt_tokens,
-    )
+    return UsageInfo(prompt_tokens=num_prompt_tokens, total_tokens=num_prompt_tokens)
 
 
 def get_pooling_usage_payload(
     pooling_outputs: Sequence[PoolingRequestOutput],
 ) -> dict[str, int]:
     usage = get_pooling_usage(pooling_outputs)
-    return {
-        "prompt_tokens": usage.prompt_tokens,
-        "total_tokens": usage.total_tokens,
-    }
+    return {"prompt_tokens": usage.prompt_tokens, "total_tokens": usage.total_tokens}
 
 
 def build_pooling_bytes_streaming_response(
@@ -177,9 +163,7 @@ def build_pooling_bytes_streaming_response(
     endianness: Endianness,
 ) -> StreamingResponse:
     content, items = encode_pooling_bytes(
-        pooling_outputs=pooling_outputs,
-        embed_dtype=embed_dtype,
-        endianness=endianness,
+        pooling_outputs=pooling_outputs, embed_dtype=embed_dtype, endianness=endianness
     )
 
     headers = (
@@ -199,19 +183,14 @@ def build_pooling_bytes_streaming_response(
     )
 
     return StreamingResponse(
-        content=content,
-        headers=headers,
-        media_type="application/octet-stream",
+        content=content, headers=headers, media_type="application/octet-stream"
     )
 
 
 def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.Tensor]:
     return [
         binary2tensor(
-            body[item.start : item.end],
-            item.shape,
-            item.embed_dtype,
-            item.endianness,
+            body[item.start : item.end], item.shape, item.embed_dtype, item.endianness
         )
         for item in sorted(items, key=lambda x: x.index)
     ]

@@ -23,10 +23,7 @@ from tests.kernels.moe.utils import (
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import (
-    MoEActivation,
-    fused_topk,
-)
+from vllm.model_executor.layers.fused_moe import MoEActivation, fused_topk
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
@@ -1110,17 +1107,11 @@ def test_fused_marlin_moe_non_gated(
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
     w1_data = MarlinMoEWeightData.make(
-        w=w1,
-        quant_type=quant_type,
-        group_size=group_size,
-        act_order=False,
+        w=w1, quant_type=quant_type, group_size=group_size, act_order=False
     )
 
     w2_data = MarlinMoEWeightData.make(
-        w=w2,
-        quant_type=quant_type,
-        group_size=group_size,
-        act_order=False,
+        w=w2, quant_type=quant_type, group_size=group_size, act_order=False
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -1129,12 +1120,7 @@ def test_fused_marlin_moe_non_gated(
 
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe(
-            a,
-            w1_data.w_ref,
-            w2_data.w_ref,
-            score,
-            topk,
-            activation=activation,
+            a, w1_data.w_ref, w2_data.w_ref, score, topk, activation=activation
         )
 
     marlin_output = fused_marlin_moe(
@@ -1670,9 +1656,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         )
 
         trtllm_output = quant_method.apply_monolithic(
-            layer=layer,
-            x=a,
-            router_logits=router_logits,
+            layer=layer, x=a, router_logits=router_logits
         )
 
         # Compute torch baseline

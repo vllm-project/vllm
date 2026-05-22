@@ -155,28 +155,17 @@ class mp(torch.autograd.Function):
         return multiplier * mask_for_one
 
     @staticmethod
-    def backward(
-        ctx,
-        grad_at_output: torch.Tensor,
-    ):
+    def backward(ctx, grad_at_output: torch.Tensor):
         multiplier, selected_experts, masked_gates = ctx.saved_tensors
 
         grad_at_output = grad_at_output * multiplier
 
         grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
         grad_at_scores_expanded.scatter_add_(
-            dim=-1,
-            index=selected_experts,
-            src=grad_at_output,
+            dim=-1, index=selected_experts, src=grad_at_output
         )
 
-        return (
-            grad_at_scores_expanded,
-            None,
-            None,
-            None,
-            None,
-        )
+        return (grad_at_scores_expanded, None, None, None, None)
 
 
 def sparsemixer(scores, jitter_eps=0.01):
@@ -201,12 +190,7 @@ def sparsemixer(scores, jitter_eps=0.01):
     multiplier = multiplier_o
 
     # masked out first expert
-    masked_scores = torch.scatter(
-        scores,
-        -1,
-        selected_experts,
-        float("-inf"),
-    )
+    masked_scores = torch.scatter(scores, -1, selected_experts, float("-inf"))
     with torch.no_grad():
         # compute mask for sparsity
         mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
@@ -225,10 +209,7 @@ def sparsemixer(scores, jitter_eps=0.01):
     multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
     selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
 
-    return (
-        multiplier,
-        selected_experts,
-    )
+    return (multiplier, selected_experts)
 
 
 def phimoe_routing_function(
@@ -370,9 +351,7 @@ class PhiMoEAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -432,10 +411,7 @@ class PhiMoEDecoderLayer(nn.Module):
         # Self Attention
         hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = hidden_states + residual
 
         # Fully Connected
@@ -461,10 +437,7 @@ class PhiMoEModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: PhiMoEDecoderLayer(
@@ -502,11 +475,7 @@ class PhiMoEModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -607,13 +576,7 @@ class PhiMoEModel(nn.Module):
 class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # LoRA specific attributes
     embedding_modules = {

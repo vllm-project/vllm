@@ -14,21 +14,13 @@ import pytest
 
 from vllm.platforms import current_platform
 
-MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-    "google/gemma-3-1b-it",
-]
-FP8_KV_MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-]
+MODEL_NAMES = ["Qwen/Qwen3-1.7B", "google/gemma-3-1b-it"]
+FP8_KV_MODEL_NAMES = ["Qwen/Qwen3-1.7B"]
 NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
-EXPECTED_VALUES = {
-    "Qwen/Qwen3-1.7B": 0.68,
-    "google/gemma-3-1b-it": 0.25,
-}
+EXPECTED_VALUES = {"Qwen/Qwen3-1.7B": 0.68, "google/gemma-3-1b-it": 0.25}
 
 
 def run_test(model_name, more_args=None):
@@ -40,10 +32,7 @@ def run_test(model_name, more_args=None):
         model_args = "{},{}".format(model_args, more_args)
 
     results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks="gsm8k",
-        batch_size="auto",
+        model="vllm", model_args=model_args, tasks="gsm8k", batch_size="auto"
     )
 
     measured_value = results["results"][TASK][FILTER]

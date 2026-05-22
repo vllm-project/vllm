@@ -69,9 +69,7 @@ def convert_to_pytorch_benchmark_format(
                     "use_compile": use_compile(args, extra_info),
                 },
             },
-            "model": {
-                "name": args.model,
-            },
+            "model": {"name": args.model},
             "metric": {
                 "name": name,
                 "benchmark_values": benchmark_values,

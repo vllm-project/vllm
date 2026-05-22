@@ -28,18 +28,12 @@ async def lifespan(app: FastAPI):
     app.state.prefill_client = httpx.AsyncClient(
         timeout=None,
         base_url=prefiller_base_url,
-        limits=httpx.Limits(
-            max_connections=None,
-            max_keepalive_connections=None,
-        ),
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
     )
     app.state.decode_client = httpx.AsyncClient(
         timeout=None,
         base_url=decoder_base_url,
-        limits=httpx.Limits(
-            max_connections=None,
-            max_keepalive_connections=None,
-        ),
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
     )
 
     yield

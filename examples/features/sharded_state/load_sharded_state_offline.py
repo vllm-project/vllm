@@ -66,9 +66,7 @@ def main():
 
     # Prepare sampling parameters
     sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_tokens=args.max_tokens,
+        temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens
     )
 
     print("\nRunning inference:")

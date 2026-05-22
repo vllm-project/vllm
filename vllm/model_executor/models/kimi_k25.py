@@ -88,8 +88,7 @@ class KimiK25MediaPixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
 
     pixel_values: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("np", 3, "ps", "ps"),
+        torch.Tensor | list[torch.Tensor], TensorShape("np", 3, "ps", "ps")
     ]
 
     grid_thws: Annotated[torch.Tensor, TensorShape("nm", 3)]
@@ -212,9 +211,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     """
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Indicates how to slice media input into multiple items.
 
@@ -267,7 +264,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
                 modality="vision_chunk",
                 target=[media_token_id],
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -315,11 +312,7 @@ class KimiK25ForConditionalGeneration(
 
         raise ValueError(f"Unsupported modality: {modality}")
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config
         config: KimiK25Config = model_config.hf_config
@@ -403,9 +396,7 @@ class KimiK25ForConditionalGeneration(
         )
 
         return KimiK25MediaPixelInputs(
-            type="pixel_values",
-            pixel_values=pixel_values,
-            grid_thws=grid_thws,
+            type="pixel_values", pixel_values=pixel_values, grid_thws=grid_thws
         )
 
     def _process_media_input(

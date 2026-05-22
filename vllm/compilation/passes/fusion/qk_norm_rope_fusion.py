@@ -86,13 +86,7 @@ class QkNormRopePattern:
             cos_sin_cache = empty_fp32(4096, self.head_dim)
         else:
             cos_sin_cache = empty_bf16(4096, self.head_dim)
-        return [
-            qkv,
-            positions,
-            q_weight,
-            k_weight,
-            cos_sin_cache,
-        ]
+        return [qkv, positions, q_weight, k_weight, cos_sin_cache]
 
     @staticmethod
     def wrap_trace_fn(
@@ -178,8 +172,7 @@ class QkNormRopePattern:
             replacement,
             self.get_inputs(),
             QkNormRopePattern.wrap_trace_fn(
-                pm.fwd_only,
-                QkNormRopePattern.fx_view_to_reshape,
+                pm.fwd_only, QkNormRopePattern.fx_view_to_reshape
             ),
             pm_pass,
         )

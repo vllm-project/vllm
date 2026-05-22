@@ -19,11 +19,7 @@ from vllm.platforms import current_platform
 class TritonOrCutlassExperts(FallbackExperts):
     """Cutlass with fallback to Triton for low latency shapes on SM100."""
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         self.is_sm100 = current_platform.has_device_capability(100)
         super().__init__(
             experts=CutlassExpertsFp8(moe_config, quant_config),
@@ -32,8 +28,7 @@ class TritonOrCutlassExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEExpertsModular],
-        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular], type[mk.FusedMoEExpertsModular]
     ]:
         return (CutlassExpertsFp8, TritonExperts)
 
@@ -73,10 +68,7 @@ class TritonOrCutlassExperts(FallbackExperts):
             )
 
     def _select_experts_impl(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
+        self, hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
     ) -> mk.FusedMoEExpertsModular:
         # Small batch fallback for sm100.
         if self.is_sm100 and hidden_states.shape[0] <= 8:

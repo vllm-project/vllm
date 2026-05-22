@@ -93,9 +93,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         return False
 
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:

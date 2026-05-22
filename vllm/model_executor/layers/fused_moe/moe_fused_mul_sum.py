@@ -43,32 +43,17 @@ def moe_fused_mul_sum_kernel(
             id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
             expert_mask = tl.load(expert_map_ptr + id_val) >= 0
             a_vec = tl.load(
-                a_base + n * size,
-                mask=mask & expert_mask[:, None],
-                other=0.0,
+                a_base + n * size, mask=mask & expert_mask[:, None], other=0.0
             ).to(tl.float32)
         else:
-            a_vec = tl.load(
-                a_base + n * size,
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
+            a_vec = tl.load(a_base + n * size, mask=mask, other=0.0).to(tl.float32)
         acc += a_vec * b_val[:, None]
 
     out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
-    tl.store(
-        out_ptrs,
-        acc.to(outputs_ptr.dtype.element_ty),
-        mask=mask,
-    )
+    tl.store(out_ptrs, acc.to(outputs_ptr.dtype.element_ty), mask=mask)
 
 
-def _heuristic_config(
-    num_tokens: int,
-    top_k: int,
-    size: int,
-    element_size: int,
-):
+def _heuristic_config(num_tokens: int, top_k: int, size: int, element_size: int):
     is_fp32 = element_size > 2
     is_sm90_plus = current_platform.has_device_capability(90)
     is_sm80_before = not current_platform.has_device_capability(80)
@@ -176,10 +161,7 @@ def moe_fused_mul_sum(
 
     if not isinstance(inputs, FakeTensor):
         BLOCK_M, BLOCK_K, num_warps, num_stages = _heuristic_config(
-            num_tokens,
-            top_k,
-            size,
-            inputs.element_size(),
+            num_tokens, top_k, size, inputs.element_size()
         )
         grid = (triton.cdiv(size, BLOCK_K), triton.cdiv(num_tokens, BLOCK_M))
         moe_fused_mul_sum_kernel[grid](

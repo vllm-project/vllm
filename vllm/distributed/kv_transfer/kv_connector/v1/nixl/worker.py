@@ -40,9 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     TransferHandle,
     compute_nixl_compatibility_hash,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
-    NixlKVConnectorStats,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import NixlKVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     TPMapping,
@@ -169,8 +167,7 @@ class NixlConnectorWorker:
 
         has_ssm_descs = num_fa_descs < len(src_blocks_data)
         ssm_idx = next(
-            (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)),
-            None,
+            (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)), None
         )
         ssm_num_splits = (
             len(plan.source_ranks_per_group[ssm_idx])
@@ -263,8 +260,7 @@ class NixlConnectorWorker:
                 if isinstance(spec, MambaSpec)
             )
             self._conv_decomp = derive_mamba_conv_split(
-                mamba_spec,
-                vllm_config.parallel_config.tensor_parallel_size,
+                mamba_spec, vllm_config.parallel_config.tensor_parallel_size
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
@@ -471,11 +467,7 @@ class NixlConnectorWorker:
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
     def _nixl_handshake(
-        self,
-        host: str,
-        port: int,
-        remote_tp_size: int,
-        expected_engine_id: str,
+        self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
     ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
 
@@ -696,11 +688,7 @@ class NixlConnectorWorker:
         )
 
     def _ensure_handshake(
-        self,
-        engine_id: EngineId,
-        host: str,
-        port: int,
-        tp_size: int,
+        self, engine_id: EngineId, host: str, port: int, tp_size: int
     ) -> Future[dict[int, str]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
@@ -718,11 +706,7 @@ class NixlConnectorWorker:
             if fut is not None:
                 return fut
             fut = self._handshake_initiation_executor.submit(
-                self._nixl_handshake,
-                host,
-                port,
-                tp_size,
-                engine_id,
+                self._nixl_handshake, host, port, tp_size, engine_id
             )
             self._handshake_futures[engine_id] = fut
 
@@ -748,10 +732,7 @@ class NixlConnectorWorker:
         # Do NIXL handshake in background and add to _ready_requests when done.
         assert meta.remote is not None
         fut = self._ensure_handshake(
-            remote_engine_id,
-            meta.remote.host,
-            meta.remote.port,
-            meta.tp_size,
+            remote_engine_id, meta.remote.host, meta.remote.port, meta.tp_size
         )
         if fut is None:
             # Already handshaked — only happens if caller does not pre-check.
@@ -765,10 +746,7 @@ class NixlConnectorWorker:
                 self._ready_requests.put(entry)
             except Exception as e:
                 self._log_failure(
-                    failure_type="handshake_failed",
-                    req_id=req_id,
-                    error=e,
-                    meta=meta,
+                    failure_type="handshake_failed", req_id=req_id, error=e, meta=meta
                 )
                 self._handle_failed_transfer(req_id, None)
 
@@ -1012,9 +990,7 @@ class NixlConnectorWorker:
         )
 
     def _build_mamba_local(
-        self,
-        base_addresses: list[int],
-        block_size_ratio: int,
+        self, base_addresses: list[int], block_size_ratio: int
     ) -> list[tuple[int, int, int]]:
         """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
         blocks, enabling the 3-read transfer with DS conv layout."""
@@ -1097,9 +1073,7 @@ class NixlConnectorWorker:
         return result
 
     def _build_fa_local(
-        self,
-        base_addresses: list[int],
-        block_size_ratio: int,
+        self, base_addresses: list[int], block_size_ratio: int
     ) -> list[tuple[int, int, int]]:
         """Build local FA descriptors for all layers."""
         assert self.transfer_topo is not None
@@ -1133,10 +1107,7 @@ class NixlConnectorWorker:
         return result
 
     def _build_fa_remote(
-        self,
-        plan: TPMapping,
-        nixl_agent_meta: NixlAgentMetadata,
-        block_size_ratio: int,
+        self, plan: TPMapping, nixl_agent_meta: NixlAgentMetadata, block_size_ratio: int
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
@@ -1182,8 +1153,7 @@ class NixlConnectorWorker:
         return result
 
     def register_local_xfer_handler(
-        self,
-        block_size: int,
+        self, block_size: int
     ) -> tuple[int, list[tuple[int, int, int]]]:
         """
         Function used for register local xfer handler with local block_size or
@@ -1353,9 +1323,7 @@ class NixlConnectorWorker:
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             for handle_data in self._build_local_splits_from_plan(
-                plan,
-                self.src_blocks_data,
-                self.num_descs,
+                plan, self.src_blocks_data, self.num_descs
             ):
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
@@ -1370,11 +1338,7 @@ class NixlConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        blocks_data = self._build_fa_remote(
-            plan,
-            nixl_agent_meta,
-            block_size_ratio,
-        )
+        blocks_data = self._build_fa_remote(plan, nixl_agent_meta, block_size_ratio)
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1389,11 +1353,7 @@ class NixlConnectorWorker:
                 remote_tp_rank,
             )
             blocks_data.extend(
-                self._build_mamba_remote(
-                    nixl_agent_meta,
-                    tp_ratio,
-                    transfer_info,
-                )
+                self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
             )
 
         # Register with NIXL.
@@ -1612,9 +1572,7 @@ class NixlConnectorWorker:
                 )
 
     def post_process_device_kv_on_receive(
-        self,
-        block_size_ratio: int,
-        block_ids_list: list[list[int]],
+        self, block_size_ratio: int, block_ids_list: list[list[int]]
     ):
         """
         Post process device kv cache after receiving from remote.
@@ -1733,8 +1691,7 @@ class NixlConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 logger.warning(
-                    "Skipping KV post-processing for failed request %s",
-                    req_id,
+                    "Skipping KV post-processing for failed request %s", req_id
                 )
                 continue
 
@@ -2026,8 +1983,7 @@ class NixlConnectorWorker:
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
+            meta.remote.block_ids, remote_info.remote_physical_blocks_per_logical
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
@@ -2372,9 +2328,7 @@ class NixlConnectorWorker:
         group_specs = self.kv_cache_config.kv_cache_groups
         result = [
             BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                remote_physical_per_logical,
-                remote_arange,
+                np.array(group), remote_physical_per_logical, remote_arange
             ).tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group

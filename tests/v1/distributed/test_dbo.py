@@ -39,10 +39,7 @@ MIN_ACCURACY = 0.62  # Expected 0.64 with 2% buffer (based on vLLM test data)
 MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 
 # DeepEP backends to test
-DEEPEP_BACKENDS = [
-    "deepep_low_latency",
-    "deepep_high_throughput",
-]
+DEEPEP_BACKENDS = ["deepep_low_latency", "deepep_high_throughput"]
 
 
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
@@ -95,10 +92,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
 
         # Run GSM8K evaluation
         results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_SHOTS,
-            host=host,
-            port=port,
+            num_questions=NUM_QUESTIONS, num_shots=NUM_SHOTS, host=host, port=port
         )
 
         # Validate accuracy is reasonable

@@ -29,9 +29,7 @@ class Pooler(nn.Module, ABC):
 
     @abstractmethod
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> PoolerOutput:
         raise NotImplementedError
 

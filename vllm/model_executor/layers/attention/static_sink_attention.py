@@ -39,8 +39,7 @@ logger = init_logger(__name__)
 
 @functools.lru_cache
 def create_static_sink_attention_backend(
-    underlying_attn_backend: type[AttentionBackend],
-    sink_len: int = 0,
+    underlying_attn_backend: type[AttentionBackend], sink_len: int = 0
 ) -> type[AttentionBackend]:
     prefix = "StaticSink_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -71,10 +70,7 @@ def create_static_sink_attention_backend(
                 dtype=torch.int32,
             )
             self.block_table_with_sink[:, : self.num_sink_blocks] = torch.arange(
-                1,
-                self.num_sink_blocks + 1,
-                device=device,
-                dtype=torch.int32,
+                1, self.num_sink_blocks + 1, device=device, dtype=torch.int32
             )
 
         def build(
@@ -229,10 +225,7 @@ class StaticSinkAttention(Attention, CustomOp):
         )
 
 
-def maybe_populate_sink(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
+def maybe_populate_sink(self_kv_cache: torch.Tensor, layer_name: LayerNameType) -> None:
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -242,8 +235,7 @@ def maybe_populate_sink(
 
 
 def maybe_populate_sink_fake(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
+    self_kv_cache: torch.Tensor, layer_name: LayerNameType
 ) -> None:
     return
 

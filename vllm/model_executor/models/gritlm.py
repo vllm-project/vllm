@@ -7,10 +7,7 @@ import torch
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (
-    DispatchPooler,
-    PoolingParamsUpdate,
-)
+from vllm.model_executor.layers.pooler import DispatchPooler, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.activations import PoolerNormalize
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
@@ -151,9 +148,7 @@ class GritLMMeanPool(SequencePoolingMethod):
         return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolingMethodOutput:
         prompt_lens = pooling_metadata.prompt_lens
         prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
@@ -190,8 +185,7 @@ class GritLMPooler(SequencePooler):
                 else get_seq_pooling_method(pooler_config.seq_pooling_type)
             ),
             head=EmbeddingPoolerHead(
-                head_dtype=model_config.head_dtype,
-                activation=PoolerNormalize(),
+                head_dtype=model_config.head_dtype, activation=PoolerNormalize()
             ),
         )
 
@@ -217,12 +211,7 @@ class GritLM(LlamaForCausalLM):
 
     is_pooling_model = True
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        **kwargs,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
         if vllm_config.model_config.runner_type == "pooling":
             hf_config = vllm_config.model_config.hf_config
             hf_config.is_causal = False

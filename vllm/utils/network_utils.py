@@ -6,10 +6,7 @@ import os
 import socket
 import sys
 import warnings
-from collections.abc import (
-    Iterator,
-    Sequence,
-)
+from collections.abc import Iterator, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -188,8 +185,7 @@ def get_open_ports_list(count: int = 5) -> list[int]:
 
 
 def _get_open_port(
-    start_port: int | None = None,
-    max_attempts: int | None = None,
+    start_port: int | None = None, max_attempts: int | None = None
 ) -> int:
     start_port = start_port if start_port is not None else envs.VLLM_PORT
     port = start_port

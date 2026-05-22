@@ -4,9 +4,7 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser

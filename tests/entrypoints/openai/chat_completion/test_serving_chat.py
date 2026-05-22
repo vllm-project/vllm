@@ -69,9 +69,7 @@ def with_tool_parser(request) -> bool:
 
 
 @pytest.fixture(
-    scope="module",
-    params=[True],
-    ids=["exclude_tools_when_tool_choice_none"],
+    scope="module", params=[True], ids=["exclude_tools_when_tool_choice_none"]
 )
 def exclude_tools_when_tool_choice_none(request) -> bool:
     return request.param
@@ -79,8 +77,7 @@ def exclude_tools_when_tool_choice_none(request) -> bool:
 
 @pytest.fixture(scope="module")
 def default_server_args(
-    with_tool_parser: bool,
-    exclude_tools_when_tool_choice_none: bool,
+    with_tool_parser: bool, exclude_tools_when_tool_choice_none: bool
 ):
     args = [
         # use half precision for speed and memory savings in CI environment
@@ -93,13 +90,7 @@ def default_server_args(
         "0.85",
     ]
     if with_tool_parser:
-        args.extend(
-            [
-                "--tool-call-parser",
-                "openai",
-                "--enable-auto-tool-choice",
-            ]
-        )
+        args.extend(["--tool-call-parser", "openai", "--enable-auto-tool-choice"])
     if exclude_tools_when_tool_choice_none:
         args.append("--exclude-tools-when-tool-choice-none")
     return args
@@ -176,9 +167,7 @@ class TestGPTOSSChat:
             }
         ]
 
-        messages = [
-            {"role": "user", "content": "What is the weather in Dallas, TX?"},
-        ]
+        messages = [{"role": "user", "content": "What is the weather in Dallas, TX?"}]
 
         stream = await gptoss_client.chat.completions.create(
             model=GPT_OSS_MODEL_NAME,
@@ -245,10 +234,7 @@ class TestGPTOSSChat:
         ]
 
         first = await gptoss_client.chat.completions.create(
-            model=GPT_OSS_MODEL_NAME,
-            messages=messages,
-            tools=tools,
-            temperature=0.0,
+            model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, temperature=0.0
         )
         first_msg = first.choices[0].message
         assert first_msg.tool_calls is not None and len(first_msg.tool_calls) > 0
@@ -264,10 +250,7 @@ class TestGPTOSSChat:
         )
 
         second = await gptoss_client.chat.completions.create(
-            model=GPT_OSS_MODEL_NAME,
-            messages=messages,
-            tools=tools,
-            temperature=0.0,
+            model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, temperature=0.0
         )
         second_msg = second.choices[0].message
         assert (second_msg.content is not None and len(second_msg.content) > 0) or (
@@ -438,7 +421,7 @@ class TestGPTOSSChat:
             {
                 "role": "user",
                 "content": "What's the temperature(in degrees Celsius) in Dallas?",
-            },
+            }
         ]
 
         tool_choice_auto = await gptoss_client.chat.completions.create(
@@ -466,22 +449,17 @@ class TestGPTOSSChat:
 class TestGPTOSSSpeculativeChat:
     @pytest.mark.asyncio
     async def test_gpt_oss_speculative_reasoning_leakage(
-        self,
-        gptoss_speculative_client: OpenAI,
-        with_tool_parser: bool,
+        self, gptoss_speculative_client: OpenAI, with_tool_parser: bool
     ):
         if not with_tool_parser:
             pytest.skip("skip non-tool for array content tests")
 
         messages = [
-            {"role": "user", "content": "Calculate 2+2. Return the answer 4 only."},
+            {"role": "user", "content": "Calculate 2+2. Return the answer 4 only."}
         ]
 
         stream = await gptoss_speculative_client.chat.completions.create(
-            model=GPT_OSS_MODEL_NAME,
-            messages=messages,
-            stream=True,
-            temperature=0.0,
+            model=GPT_OSS_MODEL_NAME, messages=messages, stream=True, temperature=0.0
         )
 
         content = ""
@@ -577,8 +555,7 @@ def _build_serving_render(
 
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     models = OpenAIServingModels(
-        engine_client=engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
     )
     openai_serving_render = _build_serving_render(engine, models.registry)
 
@@ -666,8 +643,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     serving_chat = _build_serving_chat(mock_engine)
 
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     with suppress(Exception):
@@ -698,8 +674,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     # Test Case 1: No max_tokens specified in request
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     with suppress(Exception):
@@ -740,8 +715,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     # Test Case 3.1: No max_tokens — uses override as default
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     with suppress(Exception):
@@ -782,8 +756,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     # Test case 1: No max_tokens specified, defaults to context_window
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     with suppress(Exception):
@@ -838,9 +811,7 @@ async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
     # With truncate_prompt_tokens=5 (less than 7): the effective prompt length
     # is 5, so max_tokens should be 100 - 5 = 95, not 93.
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=messages,
-        truncate_prompt_tokens=5,
+        model=MODEL_NAME, messages=messages, truncate_prompt_tokens=5
     )
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
@@ -850,9 +821,7 @@ async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
     # truncation limit, i.e., no practical truncation vs the window): effective
     # length = min(7, 100) = 7 -> max_tokens = 93 again.
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=messages,
-        truncate_prompt_tokens=-1,
+        model=MODEL_NAME, messages=messages, truncate_prompt_tokens=-1
     )
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
@@ -865,8 +834,7 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
     model_config.model = MODEL_NAME_SHORT
     model_config.tokenizer = MODEL_NAME_SHORT
     mock_engine = MockEngine(
-        model_config=model_config,
-        renderer=_build_renderer(model_config),
+        model_config=model_config, renderer=_build_renderer(model_config)
     )
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -878,9 +846,7 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
     ]
 
     full_token_ids = await _render_chat_prompt_token_ids(
-        serving_chat,
-        messages,
-        model_name=MODEL_NAME_SHORT,
+        serving_chat, messages, model_name=MODEL_NAME_SHORT
     )
     assert len(full_token_ids) > 4
 
@@ -923,10 +889,7 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     # Choose a prompt length that is < max_model_len, but large enough that
     # adding max_tokens should exceed the model context window.
     mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(prompt_token_ids=list(range(95))),
-        )
+        return_value=([], TokensPrompt(prompt_token_ids=list(range(95))))
     )
     mock_engine.renderer = mock_renderer
 
@@ -1000,8 +963,7 @@ async def test_serving_chat_could_load_correct_generation_config():
     serving_chat = _build_serving_chat(mock_engine)
 
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     with suppress(Exception):
@@ -1059,8 +1021,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
     # Test cache_salt
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     # By default, cache_salt in the engine prompt is not set
@@ -1121,8 +1082,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
 
     # Test when data_parallel_rank is present in header
     req = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 1+1?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 1+1?"}]
     )
 
     # Mock request with X-data-parallel-rank header
@@ -1139,8 +1099,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
 
     # Test when data_parallel_rank is not present (defaults to None)
     req_no_dp = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "what is 2+2?"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "what is 2+2?"}]
     )
 
     # Mock request with no header
@@ -1226,11 +1185,7 @@ class TestServingChatWithHarmony:
     ) -> RequestOutput:
         # Our tests don't use most fields, so just get the token ids correct
         completion_output = CompletionOutput(
-            index=0,
-            text="",
-            token_ids=token_ids,
-            cumulative_logprob=0.0,
-            logprobs=None,
+            index=0, text="", token_ids=token_ids, cumulative_logprob=0.0, logprobs=None
         )
         return RequestOutput(
             request_id=req.request_id,
@@ -1251,23 +1206,16 @@ class TestServingChatWithHarmony:
                     "description": "Get the weather in a given location",
                     "parameters": {
                         "type": "object",
-                        "properties": {
-                            "location": {"type": "string"},
-                        },
+                        "properties": {"location": {"type": "string"}},
                         "required": ["location"],
                     },
                 },
-            },
+            }
         ]
 
     @pytest.fixture
     def weather_messages_start(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "role": "user",
-                "content": "What's the weather like in Paris today?",
-            },
-        ]
+        return [{"role": "user", "content": "What's the weather like in Paris today?"}]
 
     async def generate_response_from_harmony_str(
         self,
@@ -1306,8 +1254,7 @@ class TestServingChatWithHarmony:
             conversation=[],
             tokenizer=get_tokenizer(req.model),
             request_metadata=RequestResponseMetadata(
-                request_id=req.request_id,
-                model_name=req.model,
+                request_id=req.request_id, model_name=req.model
             ),
         )
 
@@ -1326,10 +1273,7 @@ class TestServingChatWithHarmony:
         )
         verify_harmony_messages(
             input_messages,
-            [
-                {"role": "system"},
-                {"role": "user", "content": messages[0]["content"]},
-            ],
+            [{"role": "system"}, {"role": "user", "content": messages[0]["content"]}],
         )
 
         # Test the Chat Completion response for the first turn's output
@@ -1414,7 +1358,7 @@ class TestServingChatWithHarmony:
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": "20 degrees Celsius",
-            },
+            }
         )
 
         # Test the Harmony messages for the second turn's input
@@ -1499,7 +1443,7 @@ class TestServingChatWithHarmony:
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": "20 degrees Celsius",
-            },
+            }
         )
 
         # Test the Harmony messages for the second turn's input
@@ -1513,11 +1457,7 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_str,
-                },
+                {"role": "assistant", "channel": "analysis", "content": reasoning_str},
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1584,7 +1524,7 @@ class TestServingChatWithHarmony:
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": "20 degrees Celsius",
-            },
+            }
         )
 
         # Test the Harmony messages for the second turn's input
@@ -1598,11 +1538,7 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_str,
-                },
+                {"role": "assistant", "channel": "analysis", "content": reasoning_str},
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1633,10 +1569,7 @@ class TestServingChatWithHarmony:
 
         # Add a new user message for the third turn
         messages.append(
-            {
-                "role": "user",
-                "content": "What's the weather like in Boston today?",
-            },
+            {"role": "user", "content": "What's the weather like in Boston today?"}
         )
 
         # Test the Harmony messages for the third turn's input
@@ -1663,11 +1596,7 @@ class TestServingChatWithHarmony:
                     "recipient": "assistant",
                     "content": "20 degrees Celsius",
                 },
-                {
-                    "role": "assistant",
-                    "channel": "final",
-                    "content": paris_weather_str,
-                },
+                {"role": "assistant", "channel": "final", "content": paris_weather_str},
                 {"role": "user", "content": messages[-1]["content"]},
             ],
         )
@@ -1701,7 +1630,7 @@ class TestServingChatWithHarmony:
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": "10 degrees Celsius",
-            },
+            }
         )
 
         # Test the Harmony messages for the fourth turn's input
@@ -1717,16 +1646,9 @@ class TestServingChatWithHarmony:
                 {"role": "user"},
                 {"role": "assistant"},
                 {"role": "tool"},
-                {
-                    "role": "assistant",
-                    "channel": "final",
-                },
+                {"role": "assistant", "channel": "final"},
                 {"role": "user"},
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_str,
-                },
+                {"role": "assistant", "channel": "analysis", "content": reasoning_str},
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1746,10 +1668,7 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_non_tool_reasoning(self, serving_chat):
         messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": "What's 2+2?",
-            },
+            {"role": "user", "content": "What's 2+2?"},
             {
                 "role": "assistant",
                 "reasoning": "Adding 2 and 2 is easy. The result is 4.",
@@ -1779,10 +1698,7 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_non_tool_reasoning_empty_content(self, serving_chat):
         messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": "What's 2+2?",
-            },
+            {"role": "user", "content": "What's 2+2?"},
             {
                 "role": "assistant",
                 "reasoning": "Adding 2 and 2 is easy. The result is 4.",
@@ -1810,10 +1726,7 @@ class TestServingChatWithHarmony:
     @pytest.mark.asyncio
     async def test_non_tool_reasoning_empty_content_list(self, serving_chat):
         messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": "What's 2+2?",
-            },
+            {"role": "user", "content": "What's 2+2?"},
             {
                 "role": "assistant",
                 "reasoning": "Adding 2 and 2 is easy. The result is 4.",
@@ -1850,8 +1763,7 @@ async def test_tool_choice_validation_without_parser():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
-        engine_client=mock_engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=mock_engine, base_model_paths=BASE_MODEL_PATHS
     )
     openai_serving_render = _build_serving_render(mock_engine, models.registry)
 
@@ -1919,8 +1831,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
-        engine_client=mock_engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=mock_engine, base_model_paths=BASE_MODEL_PATHS
     )
     openai_serving_render = _build_serving_render(mock_engine, models.registry)
 
@@ -2030,8 +1941,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         conversation=[],
         tokenizer=tokenizer,
         request_metadata=RequestResponseMetadata(
-            request_id="test-req",
-            model_name=MODEL_NAME,
+            request_id="test-req", model_name=MODEL_NAME
         ),
     ):
         if not chunk_str.strip() or "data: [DONE]" in chunk_str:
@@ -2093,8 +2003,7 @@ class TestCreateRemainingArgsDelta:
                     id="call_abc123",
                     type="function",
                     function=DeltaFunctionCall(
-                        name="get_weather",
-                        arguments='{"location": "Paris"}',
+                        name="get_weather", arguments='{"location": "Paris"}'
                     ),
                 )
             ]
@@ -2187,12 +2096,7 @@ class TestCreateRemainingArgsDelta:
 
         original_delta = DeltaMessage(
             tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_nofunc",
-                    type="function",
-                    function=None,
-                )
+                DeltaToolCall(index=0, id="call_nofunc", type="function", function=None)
             ]
         )
 

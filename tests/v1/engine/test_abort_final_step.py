@@ -81,17 +81,12 @@ class DummyKVConnector(KVConnectorBase_V1):
                 pass
 
     def get_num_new_matched_tokens(
-        self,
-        request: Request,
-        num_computed_tokens: int,
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         return (0, False)
 
     def update_state_after_alloc(
-        self,
-        request: Request,
-        blocks: Any,
-        num_external_tokens: int,
+        self, request: Request, blocks: Any, num_external_tokens: int
     ):
         pass
 
@@ -101,9 +96,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         return DummyKVConnectorMetadata()
 
     def request_finished(
-        self,
-        request: Request,
-        block_ids: list[int],
+        self, request: Request, block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """Capture the request status when finished by writing to a file."""
         if self.status_file:
@@ -123,11 +116,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         pass
 
     def save_kv_layer(
-        self,
-        layer_name: str,
-        kv_layer: Any,
-        attn_metadata: Any,
-        **kwargs: Any,
+        self, layer_name: str, kv_layer: Any, attn_metadata: Any, **kwargs: Any
     ) -> None:
         pass
 
@@ -219,9 +208,7 @@ async def test_abort_during_final_step(async_scheduling: bool):
             try:
                 # Create a request that will complete after just 1 token
                 sampling_params = SamplingParams(
-                    max_tokens=1,
-                    ignore_eos=True,
-                    output_kind=RequestOutputKind.DELTA,
+                    max_tokens=1, ignore_eos=True, output_kind=RequestOutputKind.DELTA
                 )
 
                 # Start generation in a task

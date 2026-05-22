@@ -36,7 +36,7 @@ def mock_request() -> ChatCompletionRequest:
     request = Mock(spec=ChatCompletionRequest)
     request.tools = [
         ChatCompletionToolsParam(
-            function=FunctionDefinition(name="get_current_date", parameters={}),
+            function=FunctionDefinition(name="get_current_date", parameters={})
         ),
         ChatCompletionToolsParam(
             function=FunctionDefinition(
@@ -48,7 +48,7 @@ def mock_request() -> ChatCompletionRequest:
                         "date": {"type": "string"},
                     },
                 },
-            ),
+            )
         ),
     ]
     request.tool_choice = "auto"
@@ -125,9 +125,7 @@ class TestHYV3ExtractToolCalls:
 
 
 def _simulate_streaming(
-    parser: HYV3ToolParser,
-    deltas: list[str],
-    request: ChatCompletionRequest,
+    parser: HYV3ToolParser, deltas: list[str], request: ChatCompletionRequest
 ) -> list[DeltaMessage | None]:
     results: list[DeltaMessage | None] = []
     previous_text = ""

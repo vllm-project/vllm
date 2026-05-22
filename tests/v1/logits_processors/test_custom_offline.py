@@ -61,11 +61,7 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
     """
 
     # Create a vLLM instance and load custom logitproc
-    llm_logitproc = LLM(
-        model=MODEL_NAME,
-        gpu_memory_utilization=0.1,
-        **kwargs,
-    )
+    llm_logitproc = LLM(model=MODEL_NAME, gpu_memory_utilization=0.1, **kwargs)
 
     # Create a reference vLLM instance without custom logitproc
     llm_ref = LLM(model=MODEL_NAME, gpu_memory_utilization=0.1)

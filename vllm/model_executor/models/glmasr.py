@@ -26,10 +26,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityDataItems,
@@ -138,10 +135,7 @@ class GlmAsrEncoderAttention(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.config = config
@@ -256,10 +250,7 @@ class GlmAsrEncoderMLP(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.config = config
@@ -298,24 +289,17 @@ class GlmAsrEncoderLayer(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         self.self_attn = GlmAsrEncoderAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
 
         self.mlp = GlmAsrEncoderMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
+            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
 
         layer_norm_eps = getattr(config, "layer_norm_eps", 1e-5)
@@ -391,32 +375,20 @@ class GlmAsrEncoder(nn.Module):
     """
 
     # Mapping for weight loading: transformers uses separate q/k/v, we use fused qkv
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.config = config
 
         # Convolutional feature extraction layers
         self.conv1 = nn.Conv1d(
-            config.num_mel_bins,
-            config.hidden_size,
-            kernel_size=3,
-            padding=1,
+            config.num_mel_bins, config.hidden_size, kernel_size=3, padding=1
         )
         self.conv2 = nn.Conv1d(
-            config.hidden_size,
-            config.hidden_size,
-            kernel_size=3,
-            stride=2,
-            padding=1,
+            config.hidden_size, config.hidden_size, kernel_size=3, stride=2, padding=1
         )
 
         # Transformer encoder layers
@@ -554,8 +526,7 @@ class GlmAsrFeatureInputs(TensorSchema):
         TensorShape("num_chunks", "chunk_length", dynamic_dims={"chunk_length"}),
     ]
     chunk_counts: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("num_audios"),
+        torch.Tensor | list[torch.Tensor], TensorShape("num_audios")
     ]
 
 
@@ -570,8 +541,7 @@ class GlmAsrEmbeddingInputs(TensorSchema):
 
     type: Literal["audio_embeds"] = "audio_embeds"
     audio_embeds: Annotated[
-        list[torch.Tensor],
-        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
+        list[torch.Tensor], TensorShape("bn", "naf", "hs", dynamic_dims={"naf"})
     ]
 
 
@@ -666,8 +636,7 @@ class GlmAsrMultiModalDataParser(MultiModalDataParser):
     """
 
     def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
+        self, data: dict[str, torch.Tensor] | ModalityData[Any]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -740,9 +709,7 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -794,17 +761,11 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
 
         # Handle sampling_rate
         feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
-        )
+        mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
 
         # Call parent method
         outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         # Postprocess: rename mask and add chunk counts
@@ -817,9 +778,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             if isinstance(input_features, torch.Tensor):
                 # Create a mask of all ones matching the sequence length
                 mask = torch.ones(
-                    input_features.shape[0],
-                    input_features.shape[-1],
-                    dtype=torch.long,
+                    input_features.shape[0], input_features.shape[-1], dtype=torch.long
                 )
                 outputs["feature_attention_mask"] = mask
 
@@ -835,9 +794,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         return outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _glmasr_field_config(hf_inputs)
 
@@ -915,15 +872,12 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
 
             audio_tokens = [audio_token_id] * int(num_features)
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
+                audio_tokens, embed_token_id=audio_token_id
             )
 
         return [
             PromptReplacement(
-                modality="audio",
-                target=audio_token,
-                replacement=get_replacement_glmasr,
+                modality="audio", target=audio_token, replacement=get_replacement_glmasr
             )
         ]
 
@@ -1044,9 +998,7 @@ class GlmAsrForConditionalGeneration(
 
         # Reshape to merge consecutive frames
         audio_hidden_states = audio_hidden_states.reshape(
-            num_chunks,
-            -1,
-            intermediate_size,
+            num_chunks, -1, intermediate_size
         )
 
         audio_features = self.multi_modal_projector(audio_hidden_states)
@@ -1055,10 +1007,7 @@ class GlmAsrForConditionalGeneration(
         conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
 
         audio_output_lengths = _get_audio_output_lengths_for_tower(
-            self.audio_tower,
-            feature_attention_mask.sum(-1),
-            merge_factor,
-            conv_params,
+            self.audio_tower, feature_attention_mask.sum(-1), merge_factor, conv_params
         )
 
         masked_audio_features = _flatten_audio_features_by_length(
@@ -1091,17 +1040,11 @@ class GlmAsrForConditionalGeneration(
             inputs_embeds = None
 
         hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1158,6 +1101,5 @@ class GlmAsrForConditionalGeneration(
         prompt_token_ids = tokenizer.encode(prompt)
 
         return TokensPrompt(
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_data={"audio": audio},
+            prompt_token_ids=prompt_token_ids, multi_modal_data={"audio": audio}
         )

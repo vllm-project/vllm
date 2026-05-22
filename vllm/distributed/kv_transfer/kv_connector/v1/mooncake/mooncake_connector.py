@@ -107,9 +107,7 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 
 
 def _expand_transfer_regions(
-    base_addrs: list[int],
-    block_lens: list[int],
-    is_kv_layout_blocks_first: bool,
+    base_addrs: list[int], block_lens: list[int], is_kv_layout_blocks_first: bool
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert len(base_addrs) == len(block_lens), (
@@ -121,9 +119,7 @@ def _expand_transfer_regions(
         kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
-                base_addr=base_addr,
-                block_len=block_len,
-                kv_block_len=kv_block_len,
+                base_addr=base_addr, block_len=block_len, kv_block_len=kv_block_len
             )
         )
         if is_kv_layout_blocks_first:
@@ -403,24 +399,19 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, (block_ids,))
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -485,10 +476,7 @@ class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        engine_id: str,
-        kv_cache_config: "KVCacheConfig",
+        self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig"
     ):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -534,8 +522,7 @@ class MooncakeConnectorScheduler:
         ]
 
     def get_sw_clipped_blocks(
-        self,
-        block_ids: tuple[list[int], ...] | list[list[int]],
+        self, block_ids: tuple[list[int], ...] | list[list[int]]
     ) -> list[list[int]]:
         """Clip per-group block IDs to sliding window size."""
         if len(block_ids) == 0 or not self._is_hma_required:
@@ -635,8 +622,7 @@ class MooncakeConnectorScheduler:
                 self._reqs_need_send[request.request_id] = (request, [])
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
 
@@ -667,9 +653,7 @@ class MooncakeConnectorScheduler:
         return meta
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
@@ -1014,8 +998,7 @@ class MooncakeConnectorWorker:
             )
             logger.error(msg)
             response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=msg,
+                status=MooncakeXferResponseStatus.ERROR, err_msg=msg
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
@@ -1034,8 +1017,7 @@ class MooncakeConnectorWorker:
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=validation_err,
+                status=MooncakeXferResponseStatus.ERROR, err_msg=validation_err
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
@@ -1114,10 +1096,7 @@ class MooncakeConnectorWorker:
                 err_reqs,
                 err_msg,
             ) = await self._build_transfer_params(
-                ready_reqs,
-                meta,
-                local_regions,
-                remote_regions,
+                ready_reqs, meta, local_regions, remote_regions
             )
             err_req_set = set(err_reqs)
             ok_ready_reqs = [
@@ -1368,9 +1347,7 @@ class MooncakeConnectorWorker:
         duration = time.perf_counter() - start_time
         if ret_value == 0:
             self.xfer_stats.record_transfer(
-                duration_s=duration,
-                total_bytes=sum(lengths),
-                num_descs=len(src_ptrs),
+                duration_s=duration, total_bytes=sum(lengths), num_descs=len(src_ptrs)
             )
             logger.debug("Sending to %s done, took %s", remote_session, duration)
         else:
@@ -1531,9 +1508,7 @@ class MooncakeConnectorWorker:
         return self.xfer_stats.clone_and_reset()
 
     async def receive_kv_from_single_worker(
-        self,
-        worker_addr: str,
-        pull_metas: dict[ReqId, PullReqMeta],
+        self, worker_addr: str, pull_metas: dict[ReqId, PullReqMeta]
     ):
         req_ids = set(pull_metas)
         metadata = MooncakeXferMetadata(
@@ -1589,9 +1564,7 @@ class MooncakeConnectorWorker:
             return
 
     def process_pulling_result(
-        self,
-        response: MooncakeXferResponse,
-        pull_metas: dict[ReqId, PullReqMeta],
+        self, response: MooncakeXferResponse, pull_metas: dict[ReqId, PullReqMeta]
     ):
         ok_reqs: list[ReqId] = response.ok_reqs or []
 
@@ -1631,9 +1604,7 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
-                remote_bootstrap_addr,
-                e,
+                "Failed to connect to bootstrap server %s: %s", remote_bootstrap_addr, e
             )
 
         # Always notify others regardless of connection success or failure.
@@ -1641,9 +1612,7 @@ class MooncakeConnectorWorker:
         del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
     def receive_kv(
-        self,
-        remote_engine_id: EngineId,
-        pull_metas: dict[ReqId, PullReqMeta],
+        self, remote_engine_id: EngineId, pull_metas: dict[ReqId, PullReqMeta]
     ):
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
             self._tp_size[remote_engine_id]
@@ -1663,9 +1632,7 @@ class MooncakeConnectorWorker:
             )
 
     async def handle_new_engine_id(
-        self,
-        remote_engine_id: EngineId,
-        pull_metas: dict[ReqId, PullReqMeta],
+        self, remote_engine_id: EngineId, pull_metas: dict[ReqId, PullReqMeta]
     ):
         remote_bootstrap_addr = next(iter(pull_metas.values())).remote_bootstrap_addr
         if remote_bootstrap_addr not in self._pending_bootstrap_queries:

@@ -50,10 +50,7 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True,
-        },
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
         logprobs=5,
     )
 
@@ -94,10 +91,7 @@ async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True,
-        },
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
         logprobs=True,
         top_logprobs=5,
     )

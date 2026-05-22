@@ -10,8 +10,7 @@ from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
     pytest.skip(
-        "ROCm skinny GEMM tests are not supported on CUDA.",
-        allow_module_level=True,
+        "ROCm skinny GEMM tests are not supported on CUDA.", allow_module_level=True
     )
 
 from vllm.model_executor.layers import utils

@@ -25,10 +25,7 @@ DTYPE = "half"
 def test_colmodernvbert_text_token_embed(vllm_runner):
     """Text query produces per-token embeddings with shape (seq_len, 128)."""
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        dtype=DTYPE,
-        enforce_eager=True,
+        MODEL_NAME, runner="pooling", dtype=DTYPE, enforce_eager=True
     ) as vllm_model:
         outputs = vllm_model.token_embed(["What is machine learning?"])
 
@@ -48,10 +45,7 @@ def test_colmodernvbert_text_relevance_ordering(vllm_runner):
     ]
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        dtype=DTYPE,
-        enforce_eager=True,
+        MODEL_NAME, runner="pooling", dtype=DTYPE, enforce_eager=True
     ) as vllm_model:
         scores = vllm_model.score(query, documents)
 
@@ -65,10 +59,7 @@ def test_colmodernvbert_text_late_interaction(vllm_runner):
     doc = "The capital of France is Paris."
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        dtype=DTYPE,
-        enforce_eager=True,
+        MODEL_NAME, runner="pooling", dtype=DTYPE, enforce_eager=True
     ) as vllm_model:
         q_out = vllm_model.token_embed([query])
         d_out = vllm_model.token_embed([doc])
@@ -91,20 +82,11 @@ def test_colmodernvbert_text_late_interaction(vllm_runner):
 def test_colmodernvbert_image_token_embed(vllm_runner, image_assets):
     """Image input produces per-token embeddings including vision tokens."""
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        dtype=DTYPE,
-        enforce_eager=True,
+        MODEL_NAME, runner="pooling", dtype=DTYPE, enforce_eager=True
     ) as vllm_model:
         image = image_assets[0].pil_image
-        inputs = vllm_model.get_inputs(
-            [""],
-            images=[image],
-        )
-        req_outputs = vllm_model.llm.encode(
-            inputs,
-            pooling_task="token_embed",
-        )
+        inputs = vllm_model.get_inputs([""], images=[image])
+        req_outputs = vllm_model.llm.encode(inputs, pooling_task="token_embed")
         outputs = [req_output.outputs.data for req_output in req_outputs]
 
         assert len(outputs) == 1

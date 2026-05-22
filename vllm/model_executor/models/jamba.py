@@ -150,9 +150,7 @@ class JambaMambaDecoderLayer(nn.Module):
         num_experts = config.layers_num_experts[layer_idx]
         if num_experts > 1:
             self.feed_forward = JambaMoE(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.feed_forward",
+                config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
             )
         else:
             self.feed_forward = JambaMLP(
@@ -166,10 +164,7 @@ class JambaMambaDecoderLayer(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -246,9 +241,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         num_experts = config.layers_num_experts[layer_idx]
         if num_experts > 1:
             self.feed_forward = JambaMoE(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.feed_forward",
+                config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
             )
         else:
             self.feed_forward = JambaMLP(
@@ -262,10 +255,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def self_attention(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -287,8 +277,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attention(
-            positions=positions,
-            hidden_states=hidden_states,
+            positions=positions, hidden_states=hidden_states
         )
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
@@ -316,10 +305,7 @@ class JambaModel(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         extra_kwargs = {"is_lora_enabled": bool(vllm_config.lora_config)}
 
@@ -469,14 +455,10 @@ class JambaForCausalLM(
     SupportsMambaPrefixCaching,
 ):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".self_attn.": ".", ".A_log": ".A"},
+        orig_to_new_substr={".self_attn.": ".", ".A_log": ".A"}
     )
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj": ["in_proj"],
     }
@@ -537,8 +519,7 @@ class JambaForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba1_state_dtype(
             vllm_config.model_config.dtype,
@@ -548,8 +529,7 @@ class JambaForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -566,10 +546,7 @@ class JambaForCausalLM(
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.mamba1_state_copy_func()
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

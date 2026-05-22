@@ -83,19 +83,11 @@ class RoutedExpertsCapturer:
         - ``device_buffer.dtype`` is ``torch.int32``.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: int,
-        vllm_config: VllmConfig,
-    ) -> None:
+    def __init__(self, max_num_batched_tokens: int, vllm_config: VllmConfig) -> None:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
         self.device_buffer = torch.zeros(
-            (
-                max_num_batched_tokens,
-                hf_config.num_hidden_layers,
-                num_experts_per_tok,
-            ),
+            (max_num_batched_tokens, hf_config.num_hidden_layers, num_experts_per_tok),
             # Use int32 for the device / host transit buffers: it
             # matches the router's native topk_ids dtype, is universally
             # supported by NCCL (uint8/uint16 are version-dependent),
@@ -245,11 +237,7 @@ class RoutedExpertsManager:
     this can reach multiple GB; see the init log for the exact size.
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
         # Pick the attention group for block/slot mapping. We require
         # a FullAttentionSpec group rather than any AttentionSpec to
         # stay consistent with the worker-side lookup in
@@ -278,11 +266,7 @@ class RoutedExpertsManager:
         # whole block pool and can reach multiple GB.
         expert_id_dtype = np.uint8 if num_experts <= 256 else np.uint16
         self.routed_experts_by_slot = np.zeros(
-            (
-                max_num_slots,
-                hf_config.num_hidden_layers,
-                num_experts_per_tok,
-            ),
+            (max_num_slots, hf_config.num_hidden_layers, num_experts_per_tok),
             dtype=expert_id_dtype,
         )
         logger.info(
@@ -305,10 +289,7 @@ class RoutedExpertsManager:
         self.routed_experts_by_slot[slot_mapping] = data
 
     def get(
-        self,
-        block_ids: list[int],
-        num_tokens: int,
-        token_start: int = 0,
+        self, block_ids: list[int], num_tokens: int, token_start: int = 0
     ) -> np.ndarray:
         """Read routed experts data for a completed / preempted request.
 

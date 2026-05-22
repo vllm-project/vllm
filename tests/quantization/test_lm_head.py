@@ -23,10 +23,7 @@ MODELS_QUANT = [
 
 @pytest.mark.parametrize("model_id, lm_head_quantized", MODELS_QUANT)
 def test_lm_head(
-    vllm_runner,
-    model_id: str,
-    lm_head_quantized: bool,
-    monkeypatch,
+    vllm_runner, model_id: str, lm_head_quantized: bool, monkeypatch
 ) -> None:
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -37,10 +34,7 @@ def test_lm_head(
         def check_model(model):
             lm_head_layer = model.lm_head
             if lm_head_quantized:
-                assert isinstance(
-                    lm_head_layer.quant_method,
-                    AutoGPTQLinearMethod,
-                )
+                assert isinstance(lm_head_layer.quant_method, AutoGPTQLinearMethod)
             else:
                 assert isinstance(
                     lm_head_layer.quant_method, UnquantizedEmbeddingMethod

@@ -85,9 +85,7 @@ def verify_events(
         else:
             stores.append(set(event.keys))
 
-    def to_key_sets(
-        int_sets: tuple[set[int], ...],
-    ) -> tuple[set[OffloadKey], ...]:
+    def to_key_sets(int_sets: tuple[set[int], ...]) -> tuple[set[OffloadKey], ...]:
         return tuple([set(to_keys(list(int_set))) for int_set in int_sets])
 
     assert tuple(evictions) == to_key_sets(expected_evictions)
@@ -111,9 +109,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
         - After complete_store([2, 3, 4, 5]), block 2 must still be present.
     """
     manager = CPUOffloadingManager(
-        num_blocks=4,
-        cache_policy=eviction_policy,
-        enable_events=True,
+        num_blocks=4, cache_policy=eviction_policy, enable_events=True
     )
 
     # store [1, 2] and complete
@@ -158,9 +154,7 @@ def test_cpu_manager():
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
-            keys_to_store=[1, 2],
-            store_block_ids=[0, 1],
-            evicted_keys=[],
+            keys_to_store=[1, 2], store_block_ids=[0, 1], evicted_keys=[]
         ),
     )
 
@@ -187,9 +181,7 @@ def test_cpu_manager():
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
-            keys_to_store=[3, 4, 5],
-            store_block_ids=[2, 3, 0],
-            evicted_keys=[1],
+            keys_to_store=[3, 4, 5], store_block_ids=[2, 3, 0], evicted_keys=[1]
         ),
     )
 
@@ -225,9 +217,7 @@ def test_cpu_manager():
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
-            keys_to_store=[6, 7, 8],
-            store_block_ids=[3, 2, 1],
-            evicted_keys=[2, 3, 4],
+            keys_to_store=[6, 7, 8], store_block_ids=[3, 2, 1], evicted_keys=[2, 3, 4]
         ),
     )
 
@@ -242,9 +232,7 @@ def test_cpu_manager():
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
-            keys_to_store=[9],
-            store_block_ids=[1],
-            evicted_keys=[8],
+            keys_to_store=[9], store_block_ids=[1], evicted_keys=[8]
         ),
     )
 
@@ -306,9 +294,7 @@ class TestARCPolicy:
         self, num_blocks: int = 4, enable_events: bool = True
     ) -> tuple[CPUOffloadingManager, ARCCachePolicy]:
         manager = CPUOffloadingManager(
-            num_blocks=num_blocks,
-            cache_policy="arc",
-            enable_events=enable_events,
+            num_blocks=num_blocks, cache_policy="arc", enable_events=enable_events
         )
         policy = manager._policy
         assert isinstance(policy, ARCCachePolicy)
@@ -328,9 +314,7 @@ class TestARCPolicy:
         verify_store_output(
             prepare_store_output,
             ExpectedPrepareStoreOutput(
-                keys_to_store=[1, 2],
-                store_block_ids=[0, 1],
-                evicted_keys=[],
+                keys_to_store=[1, 2], store_block_ids=[0, 1], evicted_keys=[]
             ),
         )
 

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionImpl,
-)
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,

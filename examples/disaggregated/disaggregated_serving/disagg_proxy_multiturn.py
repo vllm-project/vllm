@@ -111,17 +111,13 @@ class ConversationKVCache:
                 self._ttl,
             )
             return None
-        logger.info(
-            "conv=%s: cache HIT (age=%.1fs)",
-            conversation_id,
-            age,
-        )
+        logger.info("conv=%s: cache HIT (age=%.1fs)", conversation_id, age)
         return dict(entry.kv_transfer_params)
 
     def put(self, conversation_id: str, kv_params: dict[str, Any]) -> None:
         """Store D's kv_transfer_params for a conversation."""
         self._store[conversation_id] = CachedKVEntry(
-            kv_transfer_params=dict(kv_params),  # defensive copy
+            kv_transfer_params=dict(kv_params)  # defensive copy
         )
         logger.info(
             "conv=%s: cached D blocks (remote_request_id=%s, blocks=%d)",
@@ -176,10 +172,7 @@ def _make_headers(request_id: str) -> dict[str, str]:
 
 
 async def _send_to_prefill(
-    client: ServiceClient,
-    endpoint: str,
-    req_data: dict[str, Any],
-    request_id: str,
+    client: ServiceClient, endpoint: str, req_data: dict[str, Any], request_id: str
 ) -> dict[str, Any]:
     """Send a non-streaming prefill request (max_tokens=1).
 
@@ -193,9 +186,7 @@ async def _send_to_prefill(
     payload.pop("stream_options", None)
 
     resp = await client.client.post(
-        endpoint,
-        json=payload,
-        headers=_make_headers(request_id),
+        endpoint, json=payload, headers=_make_headers(request_id)
     )
     resp.raise_for_status()
     return resp.json()
@@ -224,10 +215,7 @@ async def _stream_from_decode(
     captured_kv: dict[str, Any] | None = None
 
     async with client.client.stream(
-        "POST",
-        endpoint,
-        json=payload,
-        headers=_make_headers(request_id),
+        "POST", endpoint, json=payload, headers=_make_headers(request_id)
     ) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
@@ -281,10 +269,7 @@ async def _stream_from_decode_sse(
     payload["stream"] = True
 
     async with client.client.stream(
-        "POST",
-        endpoint,
-        json=payload,
-        headers=_make_headers(request_id),
+        "POST", endpoint, json=payload, headers=_make_headers(request_id)
     ) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
@@ -316,8 +301,7 @@ async def lifespan(app: FastAPI):
         app.state.prefill_clients.append(
             ServiceClient(
                 client=httpx.AsyncClient(
-                    timeout=None,
-                    base_url=f"http://{host}:{port}/v1",
+                    timeout=None, base_url=f"http://{host}:{port}/v1"
                 ),
                 host=host,
                 port=port,
@@ -329,8 +313,7 @@ async def lifespan(app: FastAPI):
         app.state.decode_clients.append(
             ServiceClient(
                 client=httpx.AsyncClient(
-                    timeout=None,
-                    base_url=f"http://{host}:{port}/v1",
+                    timeout=None, base_url=f"http://{host}:{port}/v1"
                 ),
                 host=host,
                 port=port,
@@ -407,16 +390,9 @@ async def _handle_request(api_path: str, request: Request):
     prefill_client = _next_client(request.app.state, "prefill")
     t0 = time.time()
     prefill_resp = await _send_to_prefill(
-        prefill_client,
-        api_path,
-        req_data,
-        request_id,
+        prefill_client, api_path, req_data, request_id
     )
-    logger.info(
-        "[%s] Prefill done in %.0fms",
-        request_id,
-        (time.time() - t0) * 1000,
-    )
+    logger.info("[%s] Prefill done in %.0fms", request_id, (time.time() - t0) * 1000)
 
     # Attach P's kv_transfer_params for D to read P's blocks
     p_kv_params = prefill_resp.get("kv_transfer_params", {})
@@ -430,21 +406,13 @@ async def _handle_request(api_path: str, request: Request):
     if client_wants_stream:
         return StreamingResponse(
             _stream_from_decode_sse(
-                decode_client,
-                api_path,
-                req_data,
-                request_id,
-                conversation_id,
+                decode_client, api_path, req_data, request_id, conversation_id
             ),
             media_type="text/event-stream",
         )
 
     text, finish_reason, _, resp_id, model, created = await _stream_from_decode(
-        decode_client,
-        api_path,
-        req_data,
-        request_id,
-        conversation_id,
+        decode_client, api_path, req_data, request_id, conversation_id
     )
 
     # Build OpenAI-compatible response
@@ -507,7 +475,7 @@ async def health():
 # CLI
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Disaggregated P/D proxy with bidirectional KV transfer",
+        description="Disaggregated P/D proxy with bidirectional KV transfer"
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)

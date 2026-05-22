@@ -22,10 +22,7 @@ class FakeHfTokenizer:
         return {"</think>": 100}
 
     def encode(
-        self,
-        text: str,
-        add_special_tokens: bool = False,
-        **kwargs,
+        self, text: str, add_special_tokens: bool = False, **kwargs
     ) -> list[int]:
         self.last_encode = (text, add_special_tokens, kwargs)
         return [len(text)]
@@ -54,9 +51,7 @@ def _load_reference_case(case_id: int):
 def _render_reference_case(case_id: int, **kwargs):
     messages, tools = _load_reference_case(case_id)
     conversation, _, _ = parse_chat_messages(
-        messages,
-        _model_config(),
-        content_format="string",
+        messages, _model_config(), content_format="string"
     )
     return _tokenizer().apply_chat_template(
         conversation=conversation,
@@ -78,8 +73,7 @@ def test_deepseek_v4_tokenizer_registered():
 
 def test_deepseek_v4_defaults_to_chat_mode():
     prompt = _tokenizer().apply_chat_template(
-        [{"role": "user", "content": "Hello"}],
-        tokenize=False,
+        [{"role": "user", "content": "Hello"}], tokenize=False
     )
 
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
@@ -88,9 +82,7 @@ def test_deepseek_v4_defaults_to_chat_mode():
 @pytest.mark.parametrize("kwargs", [{"thinking": True}, {"enable_thinking": True}])
 def test_deepseek_v4_enables_thinking_with_compatible_kwargs(kwargs):
     prompt = _tokenizer().apply_chat_template(
-        [{"role": "user", "content": "Hello"}],
-        tokenize=False,
-        **kwargs,
+        [{"role": "user", "content": "Hello"}], tokenize=False, **kwargs
     )
 
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>")
@@ -113,9 +105,7 @@ def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():
     ]
 
     prompt = _tokenizer().apply_chat_template(
-        [{"role": "user", "content": "Weather?"}],
-        tools=tools,
-        tokenize=False,
+        [{"role": "user", "content": "Weather?"}], tools=tools, tokenize=False
     )
 
     assert "## Tools" in prompt
@@ -142,11 +132,7 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
                 }
             ],
         },
-        {
-            "role": "tool",
-            "tool_call_id": "call_1",
-            "content": "file list",
-        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "file list"},
     ]
     tools = [
         {
@@ -166,16 +152,11 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
         }
     ]
     conversation, _, _ = parse_chat_messages(
-        messages,
-        _model_config(),
-        content_format="string",
+        messages, _model_config(), content_format="string"
     )
 
     prompt = _tokenizer().apply_chat_template(
-        conversation=conversation,
-        messages=messages,
-        tools=tools,
-        tokenize=False,
+        conversation=conversation, messages=messages, tools=tools, tokenize=False
     )
 
     assert '<｜DSML｜parameter name="command" string="true">view' in prompt
@@ -221,10 +202,7 @@ def test_deepseek_v4_none_reasoning_effort_disables_thinking():
     ],
 )
 def test_deepseek_v4_maps_compatible_thinking_reasoning_effort_values(
-    monkeypatch: pytest.MonkeyPatch,
-    reasoning_effort,
-    expected_mode,
-    expected_effort,
+    monkeypatch: pytest.MonkeyPatch, reasoning_effort, expected_mode, expected_effort
 ):
     captured_kwargs = []
 
@@ -233,8 +211,7 @@ def test_deepseek_v4_maps_compatible_thinking_reasoning_effort_values(
         return "prompt"
 
     monkeypatch.setattr(
-        "vllm.tokenizers.deepseek_v4.encode_messages",
-        fake_encode_messages,
+        "vllm.tokenizers.deepseek_v4.encode_messages", fake_encode_messages
     )
 
     _tokenizer().apply_chat_template(

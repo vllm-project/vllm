@@ -14,11 +14,7 @@ from vllm.config import PoolerConfig
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models_using_activation(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(
         model,
@@ -48,19 +44,10 @@ def test_classify_models_using_activation(
         )
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "intfloat/multilingual-e5-small",
-    ],
-)
+@pytest.mark.parametrize("model", ["intfloat/multilingual-e5-small"])
 @pytest.mark.parametrize("dtype", ["half"])
 def test_embed_models_using_normalize(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(
         model,
@@ -86,19 +73,10 @@ def test_embed_models_using_normalize(
     ), "w_normal should be close to normal(wo_normal)."
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "internlm/internlm2-1_8b-reward",
-    ],
-)
+@pytest.mark.parametrize("model", ["internlm/internlm2-1_8b-reward"])
 @pytest.mark.parametrize("dtype", ["half"])
 def test_reward_models_using_activation(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(
         model,
@@ -128,19 +106,10 @@ def test_reward_models_using_activation(
         )
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "intfloat/multilingual-e5-small",
-    ],
-)
+@pytest.mark.parametrize("model", ["intfloat/multilingual-e5-small"])
 @pytest.mark.parametrize("dtype", ["half"])
 def test_multi_vector_retrieval_models_using_normalize(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(
         model,

@@ -223,9 +223,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
+                    self.sampler, self.speculative_config, self.device
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
             self.structured_outputs_worker = StructuredOutputsWorker(
@@ -310,9 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
         eplb_models_added |= self.eplb.maybe_register_model(
-            self.model,
-            self.model_config,
-            load_dummy_weights,
+            self.model, self.model_config, load_dummy_weights
         )
         self.eplb.maybe_start_async_loop(eplb_models_added)
 
@@ -432,9 +428,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
-                self.model_state,
-                self.kv_cache_config,
-                self.block_tables,
+                self.model_state, self.kv_cache_config, self.block_tables
             )
 
         self.kv_caches: list[torch.Tensor] = []
@@ -526,9 +520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs = (
                     [],
                     torch.zeros(
-                        input_batch.num_tokens,
-                        dtype=torch.bool,
-                        device=self.device,
+                        input_batch.num_tokens, dtype=torch.bool, device=self.device
                     ),
                 )
 
@@ -912,8 +904,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
         block_tables = self.block_tables.gather_block_tables(
-            input_batch.idx_mapping,
-            num_reqs_padded=input_batch.num_reqs_after_padding,
+            input_batch.idx_mapping, num_reqs_padded=input_batch.num_reqs_after_padding
         )
         # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
         # Kernel pads beyond num_tokens with PAD_SLOT_ID.
@@ -1135,9 +1126,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
             # to obtain inputs_embeds, because the compiled model expects this input.
             inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs,
-                input_batch,
-                self.req_states,
+                scheduler_output.scheduled_encoder_inputs, input_batch, self.req_states
             )
 
         model_inputs = {
@@ -1436,9 +1425,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb.suppressed = suppressed
 
     def setup_eplb_from_mapping(
-        self,
-        expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
+        self, expanded_physical_to_logical: torch.Tensor, old_num_physical_experts: int
     ) -> None:
         self.eplb.setup_from_mapping(
             self.model,

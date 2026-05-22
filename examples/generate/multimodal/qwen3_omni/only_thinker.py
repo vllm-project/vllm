@@ -75,13 +75,8 @@ def get_use_audio_in_video_query() -> QueryResult:
     return QueryResult(
         inputs={
             "prompt": prompt,
-            "multi_modal_data": {
-                "video": asset.np_ndarrays,
-                "audio": audio,
-            },
-            "mm_processor_kwargs": {
-                "use_audio_in_video": True,
-            },
+            "multi_modal_data": {"video": asset.np_ndarrays, "audio": audio},
+            "mm_processor_kwargs": {"use_audio_in_video": True},
         },
         limit_mm_per_prompt={"audio": 1, "video": 1},
     )
@@ -103,12 +98,10 @@ def get_multi_audios_query() -> QueryResult:
                 "audio": [
                     AudioAsset("winning_call").audio_and_sample_rate,
                     AudioAsset("mary_had_lamb").audio_and_sample_rate,
-                ],
+                ]
             },
         },
-        limit_mm_per_prompt={
-            "audio": 2,
-        },
+        limit_mm_per_prompt={"audio": 2},
     )
 
 
@@ -128,12 +121,10 @@ def get_multi_images_query() -> QueryResult:
                 "image": [
                     convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB"),
                     convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB"),
-                ],
+                ]
             },
         },
-        limit_mm_per_prompt={
-            "image": 2,
-        },
+        limit_mm_per_prompt={"image": 2},
     )
 
 
@@ -184,10 +175,7 @@ def parse_args():
         help="Query type.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     parser.add_argument(
         "--model",
@@ -209,10 +197,7 @@ def parse_args():
         help="GPU memory utilization (0.0 to 1.0).",
     )
     parser.add_argument(
-        "--max-model-len",
-        type=int,
-        default=12800,
-        help="Maximum model context length.",
+        "--max-model-len", type=int, default=12800, help="Maximum model context length."
     )
 
     return parser.parse_args()

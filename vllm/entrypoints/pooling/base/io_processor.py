@@ -80,19 +80,14 @@ class PoolingIOProcessor:
             )
         elif isinstance(request, PoolingCompletionLikeRequest):
             engine_inputs = self._preprocess_cmpl_online(
-                request,
-                prompt_input=request.input,
-                prompt_embeds=None,
+                request, prompt_input=request.input, prompt_embeds=None
             )
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
         ctx.engine_inputs = engine_inputs
 
-    def post_process_online(
-        self,
-        ctx: PoolingServeContext,
-    ):
+    def post_process_online(self, ctx: PoolingServeContext):
         pass
 
     #######################################
@@ -110,8 +105,7 @@ class PoolingIOProcessor:
         return self._preprocess_cmpl_offline(prompts=prompts_seq, tok_params=tok_params)
 
     def post_process_offline(
-        self,
-        ctx: OfflineOutputsContext,
+        self, ctx: OfflineOutputsContext
     ) -> list[PoolingRequestOutput]:
         return ctx.outputs
 
@@ -167,10 +161,7 @@ class PoolingIOProcessor:
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
-            ),
+            dict(tools=tool_dicts, tokenize=is_mistral_tokenizer(renderer.tokenizer)),
         )
 
         mm_config = self.model_config.multimodal_config
@@ -237,9 +228,7 @@ class PoolingIOProcessor:
         return None
 
     def _params_to_seq(
-        self,
-        params: PoolingParams | Sequence[PoolingParams],
-        num_requests: int,
+        self, params: PoolingParams | Sequence[PoolingParams], num_requests: int
     ) -> Sequence[PoolingParams]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:

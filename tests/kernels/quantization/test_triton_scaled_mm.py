@@ -47,12 +47,7 @@ def get_8bit_types():
 
 
 # This test is to check regressions for int8 support on ROCm.
-@pytest.mark.parametrize(
-    "model_path",
-    [
-        "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    ],
-)
+@pytest.mark.parametrize("model_path", ["neuralmagic/Llama-3.2-1B-quantized.w8a8"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Should only run on ROCm")

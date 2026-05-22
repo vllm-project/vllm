@@ -25,13 +25,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    disable_inplace,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_inplace
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -165,11 +160,7 @@ PrepareResultType = tuple[
 #
 # See `prepare_monolithic` method below.
 #
-PrepareMonolithicResultType = tuple[
-    torch.Tensor,
-    torch.Tensor | None,
-    torch.Tensor,
-]
+PrepareMonolithicResultType = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
 
 ReceiverType = Callable[[], PrepareResultType]
 
@@ -556,8 +547,7 @@ class FusedMoEExperts(ABC):
         ):
             return False, _make_reason(f"routing method {moe_config.routing_method}")
         elif not cls._supports_router_logits_dtype(
-            moe_config.router_logits_dtype,
-            moe_config.routing_method,
+            moe_config.router_logits_dtype, moe_config.routing_method
         ):
             return False, _make_reason(
                 f"router logits dtype {moe_config.router_logits_dtype}"
@@ -595,8 +585,7 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         raise NotImplementedError
 
@@ -635,8 +624,7 @@ class FusedMoEExperts(ABC):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         """
         Whether a kernel supports a particular dtype for router logits input.
@@ -968,8 +956,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         """
         Whether the kernel supports a dtype for router logits.
@@ -1086,8 +1073,7 @@ class FusedMoEKernelModularImpl:
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
-            ((max_shape_size,), workspace_dtype),
-            (workspace2_shape, workspace_dtype),
+            ((max_shape_size,), workspace_dtype), (workspace2_shape, workspace_dtype)
         )
         workspace13 = _resize_cache(common_workspace, workspace13_shape)
         fused_out = _resize_cache(common_workspace, fused_out_shape)
@@ -1102,8 +1088,7 @@ class FusedMoEKernelModularImpl:
         if shared_experts is not None:
             assert shared_experts_input is not None
             shared_experts.apply(
-                shared_experts_input,
-                SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
+                shared_experts_input, SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
             )
 
     def _prepare(
@@ -1512,19 +1497,14 @@ class FusedMoEKernel:
             prepare_finalize, FusedMoEPrepareAndFinalizeModular
         ) and isinstance(fused_experts, FusedMoEExpertsModular):
             self.impl = FusedMoEKernelModularImpl(
-                prepare_finalize,
-                fused_experts,
-                inplace,
+                prepare_finalize, fused_experts, inplace
             )
 
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
             assert not inplace
-            self.impl = FusedMoEKernelMonolithicImpl(
-                prepare_finalize,
-                fused_experts,
-            )
+            self.impl = FusedMoEKernelMonolithicImpl(prepare_finalize, fused_experts)
 
         else:
             raise ValueError(

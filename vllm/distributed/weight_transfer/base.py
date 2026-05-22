@@ -156,8 +156,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     @staticmethod
     @abstractmethod
     def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any] | Any,
+        iterator: Iterator[tuple[str, torch.Tensor]], trainer_args: dict[str, Any] | Any
     ) -> None:
         """
         Send weights from trainer to inference workers.

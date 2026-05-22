@@ -8,9 +8,7 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,10 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -116,8 +111,7 @@ class DeepSeekV32ToolParser(ToolParser):
 
     @staticmethod
     def _repair_param_dict(
-        param_dict: dict[str, Any],
-        param_config: dict[str, dict],
+        param_dict: dict[str, Any], param_config: dict[str, dict]
     ) -> dict[str, Any]:
         """Unwrap single 'arguments' / 'input' wrappers when the wrapper
         is not part of the requested tool schema and the wrapped object
@@ -137,9 +131,7 @@ class DeepSeekV32ToolParser(ToolParser):
         return param_dict
 
     def _convert_params_with_schema(
-        self,
-        function_name: str,
-        param_dict: dict[str, tuple[str, str]],
+        self, function_name: str, param_dict: dict[str, tuple[str, str]]
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
         param_config = find_tool_properties(self.tools, function_name)
@@ -155,9 +147,7 @@ class DeepSeekV32ToolParser(ToolParser):
         return self._repair_param_dict(converted, param_config)
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from complete model output (non-streaming)."""
         # Quick check
@@ -214,9 +204,7 @@ class DeepSeekV32ToolParser(ToolParser):
         self.streamed_args_for_tool.clear()
 
     def _extract_delta_tool_calls(
-        self,
-        current_text: str,
-        request: ChatCompletionRequest | None,
+        self, current_text: str, request: ChatCompletionRequest | None
     ) -> list[DeltaToolCall]:
         """Extract DeltaToolCalls from newly completed <invoke> blocks.
 
@@ -244,10 +232,7 @@ class DeepSeekV32ToolParser(ToolParser):
                 DeltaToolCall(
                     index=idx,
                     id=self._generate_tool_call_id(),
-                    function=DeltaFunctionCall(
-                        name=invoke_name,
-                        arguments=args_json,
-                    ),
+                    function=DeltaFunctionCall(name=invoke_name, arguments=args_json),
                     type="function",
                 )
             )

@@ -318,9 +318,7 @@ class Grok1Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -372,9 +370,7 @@ class Grok1DecoderLayer(nn.Module):
             intermediate_size=moe_intermediate_size,
             router_logit_soft_cap=max(
                 getattr(
-                    config,
-                    "router_logit_softcapping",
-                    DEFAULT_ROUTER_LOGIT_SOFTCAP,
+                    config, "router_logit_softcapping", DEFAULT_ROUTER_LOGIT_SOFTCAP
                 ),
                 0.0,
             ),
@@ -411,10 +407,7 @@ class Grok1DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.pre_attn_norm(hidden_states, residual)
 
-        hidden_states = self.attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.attn(positions=positions, hidden_states=hidden_states)
 
         # Post attention normalization
         hidden_states = self.post_attn_norm(hidden_states)
@@ -467,9 +460,7 @@ class Grok1Model(nn.Module):
         )
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
+            self.vocab_size, config.hidden_size, quant_config=quant_config
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -643,13 +634,7 @@ class GrokBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
     # Subclasses should override these
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # Expert weight naming - subclasses override these
     ckpt_gate_proj_name: str = "linear"
@@ -716,10 +701,7 @@ class GrokBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -727,10 +709,7 @@ class GrokBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # Skip lm_head when tie_word_embeddings is True
         skip_prefixes = ["lm_head"] if self.config.tie_word_embeddings else None
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -755,15 +734,8 @@ class Grok2ForCausalLM(GrokBaseForCausalLM):
 
     # Grok2 has additional packed modules for MLP
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # Grok2 expert weight naming
@@ -773,10 +745,7 @@ class Grok2ForCausalLM(GrokBaseForCausalLM):
 
     def get_weight_name_remapping(self) -> dict[str, str]:
         # Grok2 checkpoint uses different naming conventions
-        return {
-            ".self_attn.": ".attn.",
-            ".block_sparse_moe.": ".moe_block.",
-        }
+        return {".self_attn.": ".attn.", ".block_sparse_moe.": ".moe_block."}
 
 
 # Version dispatch mapping

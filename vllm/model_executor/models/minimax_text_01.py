@@ -24,9 +24,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -527,9 +525,7 @@ class MiniMaxText01Model(nn.Module):
         self._layer_barrier = False
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                org_num_embeddings=self.vocab_size,
+                self.vocab_size, config.hidden_size, org_num_embeddings=self.vocab_size
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -981,18 +977,15 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, ...], ...]:
         """Calculate shape for MiniMaxText01LinearAttention cache.
 

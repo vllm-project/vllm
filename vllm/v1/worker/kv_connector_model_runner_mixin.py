@@ -56,8 +56,7 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def maybe_get_kv_connector_output(
-        scheduler_output: "SchedulerOutput",
-        defer_finalize: bool = False,
+        scheduler_output: "SchedulerOutput", defer_finalize: bool = False
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
             KVConnectorModelRunnerMixin._get_kv_connector_output(
@@ -120,8 +119,7 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def use_uniform_kv_cache(
-        attn_groups: list[list[AttentionGroup]],
-        cache_dtype: CacheDType,
+        attn_groups: list[list[AttentionGroup]], cache_dtype: CacheDType
     ) -> bool:
         """
         Determines whether a uniform KV layout should be used.

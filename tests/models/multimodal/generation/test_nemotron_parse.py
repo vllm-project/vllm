@@ -28,8 +28,7 @@ class DummyLogprobs(dict[int, Logprob]):
 
 
 def mask_bbox_tokens(
-    output: tuple[list[int], str, SampleLogprobs],
-    tokenizer: TokenizerLike,
+    output: tuple[list[int], str, SampleLogprobs], tokenizer: TokenizerLike
 ) -> tuple[list[int], str, SampleLogprobs]:
     """
     Always pass check_logprobs_close check for bounding box tokens
@@ -70,10 +69,7 @@ def run_test(
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
-                prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                images=images,
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
             )
             for prompts, images in inputs
         ]
@@ -114,9 +110,7 @@ def test_models(
     run_test(
         hf_runner,
         vllm_runner,
-        inputs=[
-            ([PROMPT] * 10, [IMAGE] * 10),
-        ],
+        inputs=[([PROMPT] * 10, [IMAGE] * 10)],
         model=model,
         dtype=dtype,
         max_tokens=100,

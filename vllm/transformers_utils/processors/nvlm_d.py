@@ -34,9 +34,7 @@ class NVLMProcessor(InternVLProcessor):
         )
 
     def get_image_repl(
-        self,
-        num_patches: int | None,
-        num_features: int | None = None,
+        self, num_patches: int | None, num_features: int | None = None
     ) -> PromptUpdateDetails[str]:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")

@@ -45,12 +45,7 @@ from ...utils import check_embeddings_close
         ),
     ],
 )
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model,
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model) -> None:
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["pooler_config"] = PoolerConfig(

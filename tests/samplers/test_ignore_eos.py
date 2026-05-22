@@ -18,11 +18,7 @@ MODELS = ["distilbert/distilgpt2", "meta-llama/Llama-3.2-1B"]
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [512])
 def test_ignore_eos(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
+    vllm_runner, example_prompts, model: str, dtype: str, max_tokens: int
 ) -> None:
     with vllm_runner(model, dtype=dtype) as vllm_model:
         sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)

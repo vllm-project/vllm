@@ -42,9 +42,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .utils import (
-    _flatten_embeddings,
-)
+from .utils import _flatten_embeddings
 
 logger = init_logger(__name__)
 
@@ -271,8 +269,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         async def feed_tokens():
             while True:
                 all_outputs = await asyncio.wait_for(
-                    input_stream.get(),
-                    timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S,
+                    input_stream.get(), timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S
                 )
                 await buffer.append_tokens(all_outputs[-1:])
 
@@ -463,10 +460,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
     @classmethod
     # for speech-to-text transcription
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         audio = stt_params.audio
         model_config = stt_params.model_config
         stt_config = stt_params.stt_config

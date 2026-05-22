@@ -97,9 +97,7 @@ class ServingTokens(OpenAIServing):
         )
 
     async def serve_tokens(
-        self,
-        request: GenerateRequest,
-        raw_request: Request | None = None,
+        self, request: GenerateRequest, raw_request: Request | None = None
     ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -185,10 +183,7 @@ class ServingTokens(OpenAIServing):
             sampling_params.output_kind = RequestOutputKind.DELTA
 
         self._log_inputs(
-            request_id,
-            engine_input,
-            params=sampling_params,
-            lora_request=lora_request,
+            request_id, engine_input, params=sampling_params, lora_request=lora_request
         )
 
         trace_headers = (
@@ -214,11 +209,7 @@ class ServingTokens(OpenAIServing):
 
         if request.stream:
             return self.serve_tokens_stream_generator(
-                request,
-                result_generator,
-                request_id,
-                model_name,
-                request_metadata,
+                request, result_generator, request_id, model_name, request_metadata
             )
 
         return await self.serve_tokens_full_generator(
@@ -419,9 +410,7 @@ class ServingTokens(OpenAIServing):
 
             if include_usage:
                 final_chunk = GenerateStreamResponse(
-                    request_id=request_id,
-                    choices=[],
-                    usage=final_usage_info,
+                    request_id=request_id, choices=[], usage=final_usage_info
                 )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
@@ -450,11 +439,7 @@ class ServingTokens(OpenAIServing):
             token = f"token_id:{token_id}"
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
-                logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                    )
-                )
+                logprobs_content.append(ChatCompletionLogProbsContent(token=token))
             else:
                 step_token = step_top_logprobs[token_id]
 

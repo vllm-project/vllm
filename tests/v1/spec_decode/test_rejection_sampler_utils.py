@@ -6,9 +6,7 @@ import math
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    rejection_sample,
-)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
 
@@ -130,13 +128,7 @@ def _assert_distribution_match(
 
 
 @pytest.mark.parametrize(
-    "num_speculative_steps,temperature",
-    [
-        (1, 0.6),
-        (3, 0.6),
-        (1, 1.0),
-        (3, 1.0),
-    ],
+    "num_speculative_steps,temperature", [(1, 0.6), (3, 0.6), (1, 1.0), (3, 1.0)]
 )
 def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: float):
     """
@@ -229,9 +221,7 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
     ],
 )
 def test_synthetic_rejection_sample(
-    num_speculative_steps: int,
-    temperature: float,
-    unconditional_rates: list[float],
+    num_speculative_steps: int, temperature: float, unconditional_rates: list[float]
 ):
     """
     Verify that synthetic rejection sampling produces the expected

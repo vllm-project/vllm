@@ -99,12 +99,7 @@ class TarsierHfConfig(Protocol):  # Based on the Tarsier's LlavaConfig
 
 
 class TarsierProcessorKwargs(ProcessingKwargs, total=False):
-    _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "images_kwargs": {},
-    }
+    _defaults = {"text_kwargs": {"padding": False}, "images_kwargs": {}}
 
 
 class TarsierProcessor(LlavaProcessor):
@@ -221,18 +216,12 @@ class TarsierProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
         num_projected_patches = get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
+                image_width=image_width, image_height=image_height
             ),
             hf_config.vision_feature_select_strategy,
         )
@@ -240,8 +229,7 @@ class TarsierProcessingInfo(BaseProcessingInfo):
             default_size = self.get_image_size_with_most_features()
             num_projected_patches_default = get_num_selected_vision_tokens(
                 vision_encoder_info.get_num_image_tokens(
-                    image_width=default_size.width,
-                    image_height=default_size.height,
+                    image_width=default_size.width, image_height=default_size.height
                 ),
                 hf_config.vision_feature_select_strategy,
             )
@@ -260,8 +248,7 @@ class TarsierProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_width, image_height=target_height
         )
 
     def get_image_newline_idx(self) -> int:
@@ -280,9 +267,7 @@ class TarsierDummyInputsBuilder(LlavaDummyInputsBuilder[_I_Tarsier]):
 
 class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -311,8 +296,7 @@ class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
             else:
                 image_size = images.get_image_size(item_idx)
                 num_final_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+                    image_width=image_size.width, image_height=image_size.height
                 )
 
             return [image_token_id] * num_final_image_tokens
@@ -322,7 +306,7 @@ class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
                 modality="image",
                 target=[image_token_id],  # Replace each single <IMAGE> token
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -449,15 +433,11 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
         if pixel_values is not None:
             return TarsierImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
+                type="pixel_values", pixel_values=pixel_values
             )
 
         if image_embeds is not None:
-            return TarsierImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return TarsierImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("This line should be unreachable.")
 
@@ -522,8 +502,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return final_image_features
 
     def _process_image_pixels(
-        self,
-        inputs: TarsierImagePixelInputs,
+        self, inputs: TarsierImagePixelInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         pixel_values = inputs["pixel_values"]
         image_features_selected = self._image_pixels_to_features(
@@ -540,8 +519,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             )
 
     def _process_image_input(
-        self,
-        image_input: TarsierImageInputs,
+        self, image_input: TarsierImageInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             projected_features = image_input["data"]
@@ -580,10 +558,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

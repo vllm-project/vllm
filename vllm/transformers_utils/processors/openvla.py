@@ -53,10 +53,7 @@ def to_rgb_image(image: Any) -> Image.Image:
 
 def preprocess_openvla_image(image: Any, image_size: int) -> torch.Tensor:
     rgb_image = to_rgb_image(image)
-    rgb_image = rgb_image.resize(
-        (image_size, image_size),
-        Image.Resampling.BICUBIC,
-    )
+    rgb_image = rgb_image.resize((image_size, image_size), Image.Resampling.BICUBIC)
 
     raw = np.asarray(rgb_image, dtype=np.float32) / 255.0
     dinov2_pixels = ((raw - IMAGENET_MEAN) / IMAGENET_STD).transpose(2, 0, 1)
@@ -70,9 +67,7 @@ class OpenVLAImageProcessor:
         self.image_size = image_size
 
     def __call__(
-        self,
-        images: Any | None = None,
-        **kwargs: object,
+        self, images: Any | None = None, **kwargs: object
     ) -> dict[str, object]:
         if images is None:
             return {}
@@ -93,10 +88,7 @@ class OpenVLAImageProcessor:
 
 class OpenVLAProcessor(ProcessorMixin):
     def __init__(
-        self,
-        *,
-        image_processor: OpenVLAImageProcessor,
-        tokenizer: Any,
+        self, *, image_processor: OpenVLAImageProcessor, tokenizer: Any
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer

@@ -10,9 +10,7 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
@@ -39,9 +37,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
     """
 
     def __init__(
-        self,
-        weight_quant_spec: dict[str, Any],
-        input_quant_spec: dict[str, Any],
+        self, weight_quant_spec: dict[str, Any], input_quant_spec: dict[str, Any]
     ):
         self.out_dtype = None
 
@@ -132,10 +128,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         # INPUT SCALE (FP8 per-tensor static scale)
         if self.is_static_input_scheme:
             input_scale = PerTensorScaleParameter(
-                data=torch.empty(
-                    len(output_partition_sizes),
-                    dtype=torch.float32,
-                ),
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                 weight_loader=weight_loader,
             )
             # Initialize to avoid NaN
@@ -156,15 +149,11 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
                 input_scale = input_scale.max()
 
             layer.input_scale = torch.nn.Parameter(
-                torch.tensor(input_scale, dtype=torch.float32),
-                requires_grad=False,
+                torch.tensor(input_scale, dtype=torch.float32), requires_grad=False
             )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.use_aiter_kernel:
             return self._apply_aiter_kernel(layer, x, bias)
@@ -172,10 +161,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
             return self._apply_emulation(layer, x, bias)
 
     def _apply_aiter_kernel(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         M = x.shape[0]
         out_dtype = x.dtype if self.out_dtype is None else self.out_dtype
@@ -196,20 +182,13 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         return y
 
     def _apply_emulation(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
             dequant_mxfp4,
         )
 
-        weight_dq = dequant_mxfp4(
-            layer.weight,
-            layer.weight_scale,
-            x.dtype,
-        )
+        weight_dq = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
 
         input_scale = layer.input_scale
         x_fp8 = (x / input_scale).clamp(self.fp8_min, self.fp8_max).to(self.fp8_dtype)

@@ -39,10 +39,7 @@ def resolve_h2ovl_min_max_num(
 
 
 def get_h2ovl_target_ratios(
-    min_num: int,
-    max_num: int,
-    *,
-    prior_aspect_ratio: tuple[int, int] | None,
+    min_num: int, max_num: int, *, prior_aspect_ratio: tuple[int, int] | None
 ) -> list[tuple[int, int]]:
     target_ratios = get_internvl_target_ratios(min_num, max_num)
 
@@ -102,17 +99,14 @@ def dynamic_preprocess_h2ovl(
     orig_width, orig_height = image.size
 
     # calculate the number of blocks without thumbnail
-    (
-        blocks,
-        target_width,
-        target_height,
-        target_aspect_ratio,
-    ) = calculate_h2ovl_targets(
-        orig_width=orig_width,
-        orig_height=orig_height,
-        target_ratios=target_ratios,
-        image_size=image_size,
-        use_thumbnail=False,
+    (blocks, target_width, target_height, target_aspect_ratio) = (
+        calculate_h2ovl_targets(
+            orig_width=orig_width,
+            orig_height=orig_height,
+            target_ratios=target_ratios,
+            image_size=image_size,
+            use_thumbnail=False,
+        )
     )
 
     # resize the image
@@ -148,9 +142,7 @@ def _preprocess_image(
     prior_aspect_ratio: tuple[int, int] | None,
 ) -> tuple[torch.Tensor, tuple[int, int]]:
     target_ratios = get_h2ovl_target_ratios(
-        min_num,
-        max_num,
-        prior_aspect_ratio=prior_aspect_ratio,
+        min_num, max_num, prior_aspect_ratio=prior_aspect_ratio
     )
 
     transform = build_transform(input_size=input_size)
@@ -328,17 +320,11 @@ class H2OVLProcessor(InternVLProcessor):
             min_num = override_min_num
 
         return get_h2ovl_target_ratios(
-            min_num,
-            max_num,
-            prior_aspect_ratio=prior_aspect_ratio,
+            min_num, max_num, prior_aspect_ratio=prior_aspect_ratio
         )
 
     def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        use_msac: bool | None = None,
+        self, *, image_width: int, image_height: int, use_msac: bool | None = None
     ) -> int:
         image_processor = self.image_processor
         use_msac = image_processor.use_msac if use_msac is None else use_msac
@@ -374,7 +360,7 @@ class H2OVLProcessor(InternVLProcessor):
             num_patches = num_patches_1 + num_patches_2 - 1
         else:
             target_ratios = self.resolve_target_ratios(
-                use_thumbnail=False,  # Applied in calculate_targets
+                use_thumbnail=False  # Applied in calculate_targets
             )
             num_patches, _, _, _ = calculate_h2ovl_targets(
                 orig_width=image_width,

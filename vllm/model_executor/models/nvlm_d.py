@@ -23,10 +23,7 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
-    PromptReplacement,
-    PromptUpdateDetails,
-)
+from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
 
@@ -144,9 +141,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
 
         # See note in dummy data regarding why we have the extra newline
         return PromptReplacement(
-            modality="image",
-            target="<image>\n",
-            replacement=get_replacement_nvlm,
+            modality="image", target="<image>\n", replacement=get_replacement_nvlm
         )
 
 

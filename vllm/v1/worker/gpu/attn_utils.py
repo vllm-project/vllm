@@ -85,10 +85,7 @@ def init_attn_backend(
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
@@ -125,8 +122,7 @@ def init_attn_backend(
                     builder.set_workspace_buffer(attn_backend_workspace)
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(
-                vllm_config,
-                cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec),
+                vllm_config, cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec)
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
@@ -136,8 +132,7 @@ def init_attn_backend(
         attn_backends,
         attn_groups,
         AttentionCGSupportInfo(
-            min_cg_support=min_cg_support,
-            min_cg_attn_backend=min_cg_attn_backend,
+            min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
         ),
         kernel_block_sizes,
     )
@@ -233,9 +228,7 @@ def _reshape_kv_cache(
                     strides = list(torch.empty(kv_cache_shape).stride())
                     strides[inv_order[0]] = page_stride
                     kv_cache = torch.as_strided(
-                        kv_tensor,
-                        size=kv_cache_shape,
-                        stride=tuple(strides),
+                        kv_tensor, size=kv_cache_shape, stride=tuple(strides)
                     )
                 else:
                     # No padding — safe to use a contiguous view.
@@ -274,8 +267,7 @@ def _reshape_kv_cache(
 
 
 def _update_hybrid_attention_layout(
-    kv_caches: dict[str, Any],
-    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, Any], kv_cache_config: KVCacheConfig
 ) -> None:
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         for layer_name in kv_cache_group_spec.layer_names:
@@ -292,11 +284,7 @@ def _update_hybrid_attention_layout(
                 hidden_size = kv_cache.shape[2:].numel()
                 kv_cache.as_strided_(
                     size=kv_cache.shape,
-                    stride=(
-                        hidden_size,
-                        2 * hidden_size,
-                        *kv_cache.stride()[2:],
-                    ),
+                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                 )
 
 
@@ -393,8 +381,7 @@ def build_attn_metadata(
             else:
                 attn_metadata_extra_kwargs = (
                     model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
+                        attn_metadata_builder, num_reqs
                     )
                     if model_specific_attn_metadata is not None
                     else {}

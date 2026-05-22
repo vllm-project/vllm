@@ -182,9 +182,7 @@ class ExaoneAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -221,14 +219,9 @@ class ExaoneBlockAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        return self.attention(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        return self.attention(positions=positions, hidden_states=hidden_states)
 
 
 class ExaoneDecoderLayer(nn.Module):
@@ -283,10 +276,7 @@ class ExaoneDecoderLayer(nn.Module):
             hidden_states = self.ln_1(hidden_states)
         else:
             hidden_states, residual = self.ln_1(hidden_states, residual)
-        hidden_states = self.attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.ln_2(hidden_states, residual)
@@ -312,9 +302,7 @@ class ExaoneModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.wte = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.wte = PPMissingLayer()
@@ -359,11 +347,7 @@ class ExaoneModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.h, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -440,22 +424,12 @@ class ExaoneModel(nn.Module):
 
 class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "c_fc_0",
-            "c_fc_1",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["c_fc_0", "c_fc_1"],
     }
 
     # LoRA specific attributes
-    embedding_modules = {
-        "wte": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
+    embedding_modules = {"wte": "input_embeddings", "lm_head": "output_embeddings"}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -467,8 +441,7 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
 
         self.transformer = ExaoneModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -506,10 +479,7 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

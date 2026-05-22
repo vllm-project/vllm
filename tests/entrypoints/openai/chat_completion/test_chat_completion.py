@@ -36,10 +36,7 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
@@ -66,21 +63,13 @@ async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) 
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             extra_body={"structured_outputs": {"json": invalid_json_schema}},
         )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
     prompt = (
         "Generate an email address for Alan Turing, who works in Enigma."
@@ -91,21 +80,13 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             extra_body={"structured_outputs": {"regex": r"[.*"}, "stop": ["\n"]},
         )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
     invalid_simplified_sql_grammar = """
         root ::= select_statementinvalidsyntax
@@ -128,12 +109,7 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             extra_body={
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
@@ -141,20 +117,12 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> None:
     prompt = "Say hello"
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             extra_body={"structured_outputs": {"grammar": ""}},
         )

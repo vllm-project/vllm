@@ -294,8 +294,7 @@ class Eagle2_5_VLForConditionalGeneration(
 
         if image_embeds is not None:
             return Eagle2_5_VLImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         image_token_id = kwargs.get("image_token_id")
@@ -322,8 +321,7 @@ class Eagle2_5_VLForConditionalGeneration(
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-        self,
-        image_input: Eagle2_5_VLImageInputs,
+        self, image_input: Eagle2_5_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process image input to get embeddings."""
         if image_input["type"] == "image_embeds":
@@ -395,10 +393,7 @@ class Eagle2_5_VLForConditionalGeneration(
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         """Compute logits from hidden states."""
         return self.language_model.compute_logits(hidden_states)
 

@@ -256,23 +256,11 @@ def chunk_local_cumsum(
         )
     if len(g.shape) == 3:
         return chunk_local_cumsum_scalar(
-            g,
-            chunk_size,
-            reverse,
-            cu_seqlens,
-            chunk_indices,
-            head_first,
-            output_dtype,
+            g, chunk_size, reverse, cu_seqlens, chunk_indices, head_first, output_dtype
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(
-            g,
-            chunk_size,
-            reverse,
-            cu_seqlens,
-            chunk_indices,
-            head_first,
-            output_dtype,
+            g, chunk_size, reverse, cu_seqlens, chunk_indices, head_first, output_dtype
         )
     else:
         raise ValueError(

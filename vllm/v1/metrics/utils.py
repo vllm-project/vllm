@@ -9,8 +9,7 @@ PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
 def create_metric_per_engine(
-    metric: PromMetric,
-    per_engine_labelvalues: dict[int, list[object]],
+    metric: PromMetric, per_engine_labelvalues: dict[int, list[object]]
 ) -> dict[int, PromMetric]:
     """Create a labeled metric child for each engine index."""
     return {

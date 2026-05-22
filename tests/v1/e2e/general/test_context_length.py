@@ -67,8 +67,7 @@ def test_decoder_max_context_length_validation(
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 def test_auto_fit_max_model_len_rejects_oversized_input(
-    model: str,
-    vllm_runner: type[VllmRunner],
+    model: str, vllm_runner: type[VllmRunner]
 ) -> None:
     """When max_model_len='auto' and KV cache memory is very limited,
     the engine auto-fits max_model_len to a small value. The frontend

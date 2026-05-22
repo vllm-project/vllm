@@ -46,9 +46,7 @@ def sync_openai(
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
             extra_body=dict(
-                seed=4419,
-                repetition_penalty=repetition_penalty,
-                hotwords=hotwords,
+                seed=4419, repetition_penalty=repetition_penalty, hotwords=hotwords
             ),
         )
         print("transcription result [sync]:", transcription.text)
@@ -69,11 +67,7 @@ async def stream_openai_response(
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
-            extra_body=dict(
-                seed=420,
-                top_p=0.6,
-                hotwords=hotwords,
-            ),
+            extra_body=dict(seed=420, top_p=0.6, hotwords=hotwords),
             stream=True,
         )
         async for chunk in transcription:
@@ -131,10 +125,7 @@ def main(args):
     # Modify OpenAI's API key and API base to use vLLM's API server.
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     model = client.models.list().data[0].id
     print(f"Using model: {model}")
@@ -150,10 +141,7 @@ def main(args):
 
     # Run the asynchronous function
     if "openai" in model:
-        client = AsyncOpenAI(
-            api_key=openai_api_key,
-            base_url=openai_api_base,
-        )
+        client = AsyncOpenAI(api_key=openai_api_key, base_url=openai_api_base)
         asyncio.run(
             stream_openai_response(
                 args.audio_path if args.audio_path else winning_call,
@@ -164,9 +152,7 @@ def main(args):
         )
     else:
         stream_api_response(
-            args.audio_path if args.audio_path else winning_call,
-            model,
-            openai_api_base,
+            args.audio_path if args.audio_path else winning_call, model, openai_api_base
         )
 
 
@@ -182,16 +168,8 @@ if __name__ == "__main__":
         help="The path to the audio file to transcribe.",
     )
     parser.add_argument(
-        "--repetition_penalty",
-        type=float,
-        default=1.3,
-        help="repetition penalty",
+        "--repetition_penalty", type=float, default=1.3, help="repetition penalty"
     )
-    parser.add_argument(
-        "--hotwords",
-        type=str,
-        default=None,
-        help="hotwords",
-    )
+    parser.add_argument("--hotwords", type=str, default=None, help="hotwords")
     args = parser.parse_args()
     main(args)

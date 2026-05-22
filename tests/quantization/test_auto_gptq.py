@@ -16,9 +16,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
 
 PROMPT = "On the surface of Mars, we found"
 
-MODELS = [
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
-]
+MODELS = ["TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"]
 
 
 @pytest.mark.skipif(

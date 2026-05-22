@@ -28,10 +28,7 @@ TEXT_EXPECTED_LORA_OUTPUT = [
 
 # visual caption
 VL_QUESTION = "What is in the image?"
-VL_TEST_IMAGES = [
-    ImageAsset("stop_sign"),
-    ImageAsset("cherry_blossom"),
-]
+VL_TEST_IMAGES = [ImageAsset("stop_sign"), ImageAsset("cherry_blossom")]
 VL_EXPECTED_LORA_OUTPUT = [
     'A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters "中華門" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.',  # noqa: E501
     "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",  # noqa: E501
@@ -47,8 +44,7 @@ def _assert_exact_outputs(
 
 
 def _assert_prefix_outputs(
-    generated_texts: list[str],
-    expected_outputs: list[str],
+    generated_texts: list[str], expected_outputs: list[str]
 ) -> None:
     assert len(generated_texts) == len(expected_outputs)
     for generated_text, expected_text in zip(generated_texts, expected_outputs):
@@ -58,11 +54,7 @@ def _assert_prefix_outputs(
         )
 
 
-def _run_text_lora_sample(
-    llm: vllm.LLM,
-    lora_path: str,
-    lora_id: int,
-) -> list[str]:
+def _run_text_lora_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         TEXT_PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         TEXT_PROMPT_TEMPLATE.format(
@@ -101,30 +93,19 @@ def _run_text_lora_sample(
 
 
 def _run_vl_lora_sample(
-    llm: vllm.LLM,
-    lora_path: str | None = None,
-    lora_id: int = 0,
+    llm: vllm.LLM, lora_path: str | None = None, lora_id: int = 0
 ) -> list[str]:
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": VL_QUESTION},
-            ],
+            "content": [{"type": "image"}, {"type": "text", "text": VL_QUESTION}],
         }
     ]
     prompt = TOKENIZER.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
     prompts = [
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": asset.pil_image},
-        }
+        {"prompt": prompt, "multi_modal_data": {"image": asset.pil_image}}
         for asset in VL_TEST_IMAGES
     ]
     outputs = llm.generate(
@@ -162,10 +143,7 @@ def _build_text_prompts() -> list[str]:
     for prompt_text in prompts:
         messages = [{"role": "user", "content": prompt_text}]
         prompt = TOKENIZER.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         input_templates.append(prompt)
     return input_templates
@@ -175,23 +153,14 @@ def _build_vl_prompts() -> list[dict]:
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": VL_QUESTION},
-            ],
+            "content": [{"type": "image"}, {"type": "text", "text": VL_QUESTION}],
         }
     ]
     prompt = TOKENIZER.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
     return [
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": asset.pil_image},
-        }
+        {"prompt": prompt, "multi_modal_data": {"image": asset.pil_image}}
         for asset in VL_TEST_IMAGES
     ]
 
@@ -205,12 +174,7 @@ def _run_mixed_lora_sample(
 ) -> list[str]:
     text_prompts = _build_text_prompts()[:2]
     vl_prompts = _build_vl_prompts()
-    prompts = [
-        text_prompts[0],
-        vl_prompts[0],
-        text_prompts[1],
-        vl_prompts[1],
-    ]
+    prompts = [text_prompts[0], vl_prompts[0], text_prompts[1], vl_prompts[1]]
     lora_requests = [
         LoRARequest("qwen35-text", text_lora_id, text_lora_path),
         LoRARequest("qwen35-vl", vl_lora_id, vl_lora_path),
@@ -240,12 +204,7 @@ def _run_mixed_lora_and_base_sample(
 ) -> list[str]:
     text_prompt = _build_text_prompts()[0]
     vl_prompt = _build_vl_prompts()[0]
-    prompts = [
-        text_prompt,
-        vl_prompt,
-        text_prompt,
-        vl_prompt,
-    ]
+    prompts = [text_prompt, vl_prompt, text_prompt, vl_prompt]
     lora_requests = [
         LoRARequest("qwen35-text", text_lora_id, text_lora_path),
         LoRARequest("qwen35-vl", vl_lora_id, vl_lora_path),
@@ -267,23 +226,13 @@ def _run_mixed_lora_and_base_sample(
 
 
 def _assert_qwen35_text_vl_and_mixed_lora(
-    llm: vllm.LLM,
-    qwen35_text_lora_files: str,
-    qwen35_vl_lora_files: str,
+    llm: vllm.LLM, qwen35_text_lora_files: str, qwen35_vl_lora_files: str
 ) -> None:
-    generated_texts = _run_text_lora_sample(
-        llm,
-        qwen35_text_lora_files,
-        TEXT_LORA_ID,
-    )
+    generated_texts = _run_text_lora_sample(llm, qwen35_text_lora_files, TEXT_LORA_ID)
 
     _assert_exact_outputs(generated_texts, TEXT_EXPECTED_LORA_OUTPUT)
 
-    generated_texts = _run_vl_lora_sample(
-        llm,
-        qwen35_vl_lora_files,
-        VL_LORA_ID,
-    )
+    generated_texts = _run_vl_lora_sample(llm, qwen35_vl_lora_files, VL_LORA_ID)
     _assert_prefix_outputs(generated_texts, VL_EXPECTED_LORA_OUTPUT)
 
     generated_texts = _run_mixed_lora_sample(
@@ -335,9 +284,7 @@ def test_qwen35_text_lora(
     )
 
     _assert_qwen35_text_vl_and_mixed_lora(
-        llm,
-        qwen35_text_lora_files,
-        qwen35_vl_lora_files,
+        llm, qwen35_text_lora_files, qwen35_vl_lora_files
     )
 
 
@@ -359,12 +306,10 @@ def test_qwen35_text_lora_tp4(
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
         compilation_config=vllm.config.CompilationConfig(
-            cudagraph_specialize_lora=False,
+            cudagraph_specialize_lora=False
         ),
     )
 
     _assert_qwen35_text_vl_and_mixed_lora(
-        llm,
-        qwen35_text_lora_files,
-        qwen35_vl_lora_files,
+        llm, qwen35_text_lora_files, qwen35_vl_lora_files
     )

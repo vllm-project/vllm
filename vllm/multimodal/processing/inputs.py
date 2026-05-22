@@ -61,9 +61,7 @@ class ProcessorInputs:
             else:
                 mm_hashes[modality] = [
                     hasher.hash_kwargs(
-                        model_id=model_id,
-                        **{modality: item},
-                        **hf_processor_mm_kwargs,
+                        model_id=model_id, **{modality: item}, **hf_processor_mm_kwargs
                     )
                     for item in data_items
                 ]

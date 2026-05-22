@@ -89,8 +89,7 @@ def _create_mock_engine():
 def _create_serving(mock_engine) -> OpenAIServingGenerativeScoring:
     """Create an OpenAIServingGenerativeScoring instance with mocks."""
     models = OpenAIServingModels(
-        engine_client=mock_engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=mock_engine, base_model_paths=BASE_MODEL_PATHS
     )
     return OpenAIServingGenerativeScoring(mock_engine, models, request_logger=None)
 

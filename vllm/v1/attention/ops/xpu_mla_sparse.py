@@ -210,10 +210,7 @@ def triton_bf16_mla_sparse_interface(
     sm_scale *= LOG2E
 
     kv_group_num = num_heads_q // num_heads_kv
-    grid = (
-        num_tokens,
-        triton.cdiv(num_heads_q, min(BLOCK_H, kv_group_num)),
-    )
+    grid = (num_tokens, triton.cdiv(num_heads_q, min(BLOCK_H, kv_group_num)))
 
     out = torch.zeros((num_tokens, num_heads_q, d_v), dtype=q.dtype, device=q.device)
     softmax_lse = torch.zeros(

@@ -48,11 +48,7 @@ class _LoRAResolverRegistry:
         """Get all registered resolver names."""
         return self.resolvers.keys()
 
-    def register_resolver(
-        self,
-        resolver_name: str,
-        resolver: LoRAResolver,
-    ) -> None:
+    def register_resolver(self, resolver_name: str, resolver: LoRAResolver) -> None:
         """Register a LoRA resolver.
         Args:
             resolver_name: Name to register the resolver under.

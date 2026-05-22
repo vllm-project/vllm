@@ -50,9 +50,7 @@ def test_multi_node_assignment() -> None:
             )
 
             worker = ray.remote(
-                num_cpus=0,
-                num_gpus=1,
-                scheduling_strategy=scheduling_strategy,
+                num_cpus=0, num_gpus=1, scheduling_strategy=scheduling_strategy
             )(Actor).remote()
             worker_ip = ray.get(worker.get_ip.remote())
             assert worker_ip == current_ip

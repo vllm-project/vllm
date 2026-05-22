@@ -353,13 +353,7 @@ class OpType(Enum):
             return ((num_slices, m, k), b_shape, (m, n * num_slices))
         if self.is_fused_moe_lora_fn():
             return self.matmul_shapes_fused_moe_lora(
-                m,
-                k,
-                n,
-                num_loras,
-                num_slices,
-                top_k_num,
-                num_experts,
+                m, k, n, num_loras, num_slices, top_k_num, num_experts
             )
         raise ValueError(f"Unrecognized op_type {self}")
 
@@ -616,10 +610,7 @@ class BenchmarkTensors:
         return num_seqs, num_tokens, max_seq_len, num_slices
 
     def fused_moe_lora_data_prepare(
-        self,
-        block_size: int,
-        token_lora_mapping: torch.Tensor,
-        ctx: BenchmarkContext,
+        self, block_size: int, token_lora_mapping: torch.Tensor, ctx: BenchmarkContext
     ):
         def moe_lora_align_block_size(
             topk_ids: torch.Tensor,

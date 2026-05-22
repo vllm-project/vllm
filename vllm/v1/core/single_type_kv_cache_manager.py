@@ -150,8 +150,7 @@ class SingleTypeKVCacheManager(ABC):
         # local-computed blocks inside the window, they contribute to the
         # required capacity; otherwise, skipped blocks dominate.
         num_new_blocks = max(
-            num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
-            0,
+            num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks), 0
         )
 
         # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
@@ -276,10 +275,7 @@ class SingleTypeKVCacheManager(ABC):
         return ids
 
     def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        alignment_tokens: int | None = None,
+        self, request: Request, num_tokens: int, alignment_tokens: int | None = None
     ) -> None:
         """
         Cache the blocks for the request.
@@ -321,10 +317,7 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block[request.request_id] = num_full_blocks
 
     def _cache_block_mask(
-        self,
-        num_cached_blocks: int,
-        num_full_blocks: int,
-        alignment_tokens: int,
+        self, num_cached_blocks: int, num_full_blocks: int, alignment_tokens: int
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -1098,10 +1091,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return num_computed_tokens - 1
 
     def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        alignment_tokens: int | None = None,
+        self, request: Request, num_tokens: int, alignment_tokens: int | None = None
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(request, num_tokens, alignment_tokens=alignment_tokens)
@@ -1134,10 +1124,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         assert len(new_computed_blocks) == 0
 
     def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        alignment_tokens: int | None = None,
+        self, request: Request, num_tokens: int, alignment_tokens: int | None = None
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.

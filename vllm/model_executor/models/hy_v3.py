@@ -196,10 +196,7 @@ class HYV3MoEFused(nn.Module):
             shared_experts=self.shared_mlp,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -292,9 +289,7 @@ class HYV3Attention(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -375,10 +370,7 @@ class HYV3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
@@ -405,8 +397,7 @@ class HYV3Model(nn.Module):
         self.quant_config = quant_config
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -455,9 +446,7 @@ class HYV3Model(nn.Module):
         return self.embed_tokens(input_ids)
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -682,10 +671,7 @@ class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

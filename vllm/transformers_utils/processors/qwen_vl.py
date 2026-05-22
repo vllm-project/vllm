@@ -30,9 +30,7 @@ class QwenVLProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
     def __init__(
-        self,
-        image_processor: QwenVLImageProcessorFast,
-        tokenizer: QwenVLTokenizer,
+        self, image_processor: QwenVLImageProcessorFast, tokenizer: QwenVLTokenizer
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer

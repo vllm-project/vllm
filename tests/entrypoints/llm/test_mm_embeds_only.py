@@ -60,8 +60,7 @@ def test_raw_image_rejected(llm: LLM):
 def test_text_only_prompt(llm: LLM):
     """Text-only prompts still work under this config."""
     outputs = llm.generate(
-        TEXT_ONLY_PROMPT,
-        sampling_params=SamplingParams(max_tokens=16, temperature=0.0),
+        TEXT_ONLY_PROMPT, sampling_params=SamplingParams(max_tokens=16, temperature=0.0)
     )
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].text) > 0

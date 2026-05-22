@@ -59,10 +59,7 @@ class NvFp4LinearKernel(ABC):
 
     @abstractmethod
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Run the quantized GEMM."""
         raise NotImplementedError

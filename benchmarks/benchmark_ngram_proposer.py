@@ -177,10 +177,7 @@ def invoke_main() -> None:
         "--num-token", type=int, default=1500, help="Number of tokens for each request"
     )
     parser.add_argument(
-        "--min-ngram",
-        type=int,
-        default=3,
-        help="Minimum n-gram to match",
+        "--min-ngram", type=int, default=3, help="Minimum n-gram to match"
     )
     parser.add_argument(
         "--max-ngram",

@@ -43,11 +43,7 @@ def process_layer_params(module_obj):
         param_info = conv_params
     elif isinstance(
         module_obj,
-        (
-            torch.nn.ConvTranspose1d,
-            torch.nn.ConvTranspose2d,
-            torch.nn.ConvTranspose3d,
-        ),
+        (torch.nn.ConvTranspose1d, torch.nn.ConvTranspose2d, torch.nn.ConvTranspose3d),
     ):
         convtranspose_params = {}
         convtranspose_params["in_chan"] = module_obj.in_channels
@@ -81,10 +77,7 @@ def process_layer_params(module_obj):
         module_obj, (torch.nn.AvgPool1d, torch.nn.AvgPool2d, torch.nn.AvgPool3d)
     ):
         pooling_params = {}
-        pooling_params["filter_dim"] = [
-            module_obj.kernel_size,
-            module_obj.kernel_size,
-        ]
+        pooling_params["filter_dim"] = [module_obj.kernel_size, module_obj.kernel_size]
         pooling_params["stride"] = [module_obj.stride, module_obj.stride]
         pooling_params["padding"] = [module_obj.padding, module_obj.padding]
         pooling_params["ceil_mode"] = module_obj.ceil_mode
@@ -99,17 +92,13 @@ def process_layer_params(module_obj):
         ),
     ):
         pooling_params = {}
-        pooling_params["output_size"] = [
-            module_obj.output_size,
-            module_obj.output_size,
-        ]
+        pooling_params["output_size"] = [module_obj.output_size, module_obj.output_size]
         param_info = pooling_params
     elif isinstance(module_obj, torch.nn.Linear):
         param_info["in_features"] = module_obj.in_features
         param_info["out_features"] = module_obj.out_features
     elif isinstance(
-        module_obj,
-        (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d),
+        module_obj, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
     ):
         param_info["num_features"] = module_obj.num_features
         param_info["epsilon"] = module_obj.eps
@@ -191,10 +180,7 @@ def layerwise_nvtx_marker_context(module_name, module_obj, in_tensor=None, kwarg
 
     # Push input marker
     construct_marker_dict_and_push(
-        module_name,
-        module_obj,
-        in_tensor=in_tensor,
-        kwargs=kwargs,
+        module_name, module_obj, in_tensor=in_tensor, kwargs=kwargs
     )
     try:
         yield holder

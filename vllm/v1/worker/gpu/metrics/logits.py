@@ -8,11 +8,7 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _num_nans_kernel(
-    logits_ptr,
-    logits_stride,
-    num_nans_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
+    logits_ptr, logits_stride, num_nans_ptr, vocab_size, BLOCK_SIZE: tl.constexpr
 ):
     req_idx = tl.program_id(0)
     num_nans = 0
@@ -33,10 +29,6 @@ def get_num_nans(logits: torch.Tensor) -> torch.Tensor:
     BLOCK_SIZE = 8192
     num_nans = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
     _num_nans_kernel[(num_reqs,)](
-        logits,
-        logits.stride(0),
-        num_nans,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
+        logits, logits.stride(0), num_nans, vocab_size, BLOCK_SIZE=BLOCK_SIZE
     )
     return num_nans

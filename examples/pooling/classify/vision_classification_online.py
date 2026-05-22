@@ -41,18 +41,11 @@ def main(args):
 
     print("Text classification output:")
     messages = [
-        {
-            "role": "assistant",
-            "content": "Please classify this text request.",
-        },
-        {
-            "role": "user",
-            "content": input_text,
-        },
+        {"role": "assistant", "content": "Please classify this text request."},
+        {"role": "user", "content": input_text},
     ]
     response = requests.post(
-        classify_url,
-        json={"model": model_name, "messages": messages},
+        classify_url, json={"model": model_name, "messages": messages}
     )
     pprint.pprint(response.json())
 
@@ -67,8 +60,7 @@ def main(args):
         }
     ]
     response = requests.post(
-        classify_url,
-        json={"model": model_name, "messages": messages},
+        classify_url, json={"model": model_name, "messages": messages}
     )
     pprint.pprint(response.json())
 
@@ -83,8 +75,7 @@ def main(args):
         }
     ]
     response = requests.post(
-        classify_url,
-        json={"model": model_name, "messages": messages},
+        classify_url, json={"model": model_name, "messages": messages}
     )
     pprint.pprint(response.json())
 
@@ -99,8 +90,7 @@ def main(args):
         }
     ]
     response = requests.post(
-        classify_url,
-        json={"model": model_name, "messages": messages},
+        classify_url, json={"model": model_name, "messages": messages}
     )
     pprint.pprint(response.json())
 

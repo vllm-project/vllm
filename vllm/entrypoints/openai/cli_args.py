@@ -170,10 +170,7 @@ class BaseFrontendArgs:
     """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
 
     @classmethod
-    def _customize_cli_kwargs(
-        cls,
-        frontend_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _customize_cli_kwargs(cls, frontend_kwargs: dict[str, Any]) -> dict[str, Any]:
         """Customize argparse kwargs before arguments are registered.
 
         Subclasses should override this and call
@@ -209,8 +206,7 @@ class BaseFrontendArgs:
 
         group_name = cls.__name__.replace("Args", "")
         frontend_group = parser.add_argument_group(
-            title=group_name,
-            description=cls.__doc__,
+            title=group_name, description=cls.__doc__
         )
         for key, value in frontend_kwargs.items():
             extra_flags = value.pop("flags", [])
@@ -306,10 +302,7 @@ class FrontendArgs(BaseFrontendArgs):
     Can significantly improve late-interaction scoring performance."""
 
     @classmethod
-    def _customize_cli_kwargs(
-        cls,
-        frontend_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _customize_cli_kwargs(cls, frontend_kwargs: dict[str, Any]) -> dict[str, Any]:
         frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
 
         # Special case: allowed_origins, allowed_methods, allowed_headers all

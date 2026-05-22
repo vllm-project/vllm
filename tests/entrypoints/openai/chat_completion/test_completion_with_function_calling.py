@@ -74,7 +74,7 @@ tools = [
                                 "enum": ["zh-CN", "en-US", "ja-JP"],
                             },
                         },
-                    },
+                    }
                 },
             },
         },
@@ -353,17 +353,11 @@ async def test_no_args_tool_call(
             current_time = datetime.datetime.now()
             result = current_time.isoformat()
             messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                }
+                {"role": "tool", "tool_call_id": tool_call.id, "content": result}
             )
             # Step 5: Send tool result back to model to continue conversation
             final_response = await client.chat.completions.create(
-                **shared_kwargs,
-                messages=messages,
-                max_completion_tokens=128,
+                **shared_kwargs, messages=messages, max_completion_tokens=128
             )
             # Output final natural language response
             assert (
@@ -377,10 +371,7 @@ async def test_no_args_tool_call(
 
 
 @pytest.mark.asyncio
-async def test_named_tool_use(
-    client: openai.AsyncOpenAI,
-    sample_json_schema,
-):
+async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
         {

@@ -15,9 +15,7 @@ import torch
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.sampling_params import SamplingParams
 
 # any model with a chat template should work here
@@ -115,10 +113,7 @@ async def test_zero_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME, "zephyr-lora"],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME, "zephyr-lora"])
 async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
@@ -141,10 +136,7 @@ async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME, "zephyr-lora"],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME, "zephyr-lora"])
 async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: str):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
@@ -219,10 +211,7 @@ async def test_prompt_logprobs_chat(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_more_than_one_prompt_logprobs_chat(
     client: openai.AsyncOpenAI, model_name: str
 ):
@@ -250,10 +239,7 @@ async def test_more_than_one_prompt_logprobs_chat(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME, "zephyr-lora"],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME, "zephyr-lora"])
 async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
@@ -285,9 +271,7 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=5,
+        model=model_name, messages=messages, max_completion_tokens=5
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -307,10 +291,7 @@ async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=10, temperature=0.0
     )
     output = chat_completion.choices[0].message.content
     stop_reason = chat_completion.choices[0].finish_reason
@@ -341,10 +322,7 @@ async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
-)
+@pytest.mark.parametrize("model_name", ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"])
 async def test_chat_completion_stream_options(
     client: openai.AsyncOpenAI, model_name: str
 ):
@@ -421,10 +399,7 @@ async def test_chat_completion_stream_options(
         extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True,
-        },
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
     )
     last_completion_tokens = 0
     async for chunk in stream:
@@ -447,8 +422,7 @@ async def test_chat_completion_stream_options(
 
 @pytest.mark.asyncio
 async def test_structured_outputs_choice_chat(
-    client: openai.AsyncOpenAI,
-    sample_structured_outputs_choices,
+    client: openai.AsyncOpenAI, sample_structured_outputs_choices
 ):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
@@ -487,8 +461,7 @@ async def test_structured_outputs_choice_chat(
 
 @pytest.mark.asyncio
 async def test_structured_outputs_json_chat(
-    client: openai.AsyncOpenAI,
-    sample_json_schema,
+    client: openai.AsyncOpenAI, sample_json_schema
 ):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
@@ -528,10 +501,7 @@ async def test_structured_outputs_json_chat(
 
 
 @pytest.mark.asyncio
-async def test_structured_outputs_regex_chat(
-    client: openai.AsyncOpenAI,
-    sample_regex,
-):
+async def test_structured_outputs_regex_chat(client: openai.AsyncOpenAI, sample_regex):
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
         {
@@ -642,8 +612,7 @@ async def test_response_format_json_schema(client: openai.AsyncOpenAI):
     # Check that this prompt cannot lead to a valid JSON without json_schema
     for _ in range(2):
         resp = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
+            model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
         )
         content = resp.choices[0].message.content
         assert content is not None
@@ -661,9 +630,7 @@ async def test_response_format_json_schema(client: openai.AsyncOpenAI):
                     "name": "foo_test",
                     "schema": {
                         "type": "object",
-                        "properties": {
-                            "result": {"type": "integer"},
-                        },
+                        "properties": {"result": {"type": "integer"}},
                     },
                 },
             },
@@ -681,12 +648,7 @@ async def test_response_format_text(client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "what is 1+1?",
-                }
-            ],
+            messages=[{"role": "user", "content": "what is 1+1?"}],
             max_completion_tokens=10,
             response_format={"type": "text"},
         )
@@ -699,13 +661,7 @@ async def test_response_format_text(client: openai.AsyncOpenAI):
 async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[
-            {
-                "role": "user",
-                "content": "what is 1+1?",
-                "extra_field": "0",
-            }
-        ],  # type: ignore
+        messages=[{"role": "user", "content": "what is 1+1?", "extra_field": "0"}],  # type: ignore
         temperature=0,
         seed=0,
     )
@@ -724,12 +680,7 @@ async def test_complex_message_content(client: openai.AsyncOpenAI):
     ]
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[
-            {
-                "role": "user",
-                "content": content,
-            }
-        ],
+        messages=[{"role": "user", "content": content}],
         temperature=0,
         seed=0,
     )
@@ -744,12 +695,7 @@ async def test_custom_role(client: openai.AsyncOpenAI):
 
     resp1 = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[
-            {
-                "role": "my-custom-role",
-                "content": "what is 1+1?",
-            }
-        ],  # type: ignore
+        messages=[{"role": "my-custom-role", "content": "what is 1+1?"}],  # type: ignore
         temperature=0,
         seed=0,
     )
@@ -778,10 +724,7 @@ async def test_long_seed(client: openai.AsyncOpenAI):
             await client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant.",
-                    }
+                    {"role": "system", "content": "You are a helpful assistant."}
                 ],
                 temperature=0,
                 seed=seed,
@@ -828,10 +771,7 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_completion_n_parameter_non_streaming(
     client: openai.AsyncOpenAI, model_name: str
 ):
@@ -865,10 +805,7 @@ async def test_chat_completion_n_parameter_non_streaming(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_completion_n_parameter_streaming(
     client: openai.AsyncOpenAI, model_name: str
 ):
@@ -907,15 +844,10 @@ async def test_chat_completion_n_parameter_streaming(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_completion_n_with_seed(client: openai.AsyncOpenAI, model_name: str):
     """Test that n parameter works correctly with seed parameter."""
-    messages = [
-        {"role": "user", "content": "Say hello."},
-    ]
+    messages = [{"role": "user", "content": "Say hello."}]
 
     # Test that seed parameter is accepted and works with n > 1
     chat_completion = await client.chat.completions.create(
@@ -939,15 +871,10 @@ async def test_chat_completion_n_with_seed(client: openai.AsyncOpenAI, model_nam
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_completion_n_equals_1(client: openai.AsyncOpenAI, model_name: str):
     """Test that n=1 (default) still works correctly."""
-    messages = [
-        {"role": "user", "content": "Hello!"},
-    ]
+    messages = [{"role": "user", "content": "Hello!"}]
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -975,8 +902,7 @@ def test_chat_completion_request_n_parameter_to_sampling_params():
     )
 
     sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
+        max_tokens=10, default_sampling_params={}
     )
 
     assert isinstance(sampling_params, SamplingParams)
@@ -994,8 +920,7 @@ def test_chat_completion_request_n_parameter_default():
 
     assert request.n == 1, "n should default to 1"
     sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
+        max_tokens=10, default_sampling_params={}
     )
 
     # SamplingParams.from_optional converts None to 1
@@ -1010,8 +935,7 @@ def test_chat_completion_request_accepts_model_specific_reasoning_effort():
     )
 
     chat_params = request.build_chat_params(
-        default_template=None,
-        default_template_content_format="auto",
+        default_template=None, default_template_content_format="auto"
     )
 
     assert request.reasoning_effort == "max"
@@ -1038,8 +962,7 @@ def test_chat_completion_request_n_parameter_various_values():
         )
 
         sampling_params = request.to_sampling_params(
-            max_tokens=10,
-            default_sampling_params={},
+            max_tokens=10, default_sampling_params={}
         )
 
         assert sampling_params.n == n_value, (
@@ -1066,15 +989,10 @@ def test_chat_completion_request_n_parameter_exceeds_default_limit(
     )
 
     with pytest.raises(ValueError, match="n must be at most"):
-        request.to_sampling_params(
-            max_tokens=10,
-            default_sampling_params={},
-        )
+        request.to_sampling_params(max_tokens=10, default_sampling_params={})
 
 
-def test_chat_completion_request_n_parameter_at_limit(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_chat_completion_request_n_parameter_at_limit(monkeypatch: pytest.MonkeyPatch):
     """Test that n at exactly the limit is accepted."""
     import vllm.envs as envs
 
@@ -1091,8 +1009,7 @@ def test_chat_completion_request_n_parameter_at_limit(
     )
 
     sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
+        max_tokens=10, default_sampling_params={}
     )
     assert sampling_params.n == max_n
 
@@ -1115,8 +1032,7 @@ def test_chat_completion_request_n_parameter_custom_limit(
     )
 
     sampling_params = request.to_sampling_params(
-        max_tokens=10,
-        default_sampling_params={},
+        max_tokens=10, default_sampling_params={}
     )
     assert sampling_params.n == 128
 
@@ -1128,10 +1044,7 @@ def test_chat_completion_request_n_parameter_custom_limit(
     )
 
     with pytest.raises(ValueError, match="n must be at most 128"):
-        request_over.to_sampling_params(
-            max_tokens=10,
-            default_sampling_params={},
-        )
+        request_over.to_sampling_params(max_tokens=10, default_sampling_params={})
 
 
 def test_chat_completion_request_n_parameter_massive_value(
@@ -1152,7 +1065,4 @@ def test_chat_completion_request_n_parameter_massive_value(
     )
 
     with pytest.raises(ValueError, match="n must be at most"):
-        request.to_sampling_params(
-            max_tokens=1,
-            default_sampling_params={},
-        )
+        request.to_sampling_params(max_tokens=1, default_sampling_params={})

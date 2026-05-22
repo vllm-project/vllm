@@ -304,10 +304,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -347,10 +344,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -396,10 +390,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -476,11 +467,7 @@ class NemotronHAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         attn_output = self.attn(q, k, v)
@@ -556,10 +543,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         self.has_moe = "E" in config.hybrid_override_pattern
 
@@ -613,9 +597,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
@@ -794,13 +776,7 @@ class NemotronHForCausalLM(
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
     )
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # LoRA specific attributes
     embedding_modules = {
@@ -813,8 +789,7 @@ class NemotronHForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -824,8 +799,7 @@ class NemotronHForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -907,9 +881,7 @@ class NemotronHForCausalLM(
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -940,10 +912,7 @@ class NemotronHForCausalLM(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

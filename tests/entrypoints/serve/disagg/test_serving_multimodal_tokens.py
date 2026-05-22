@@ -53,10 +53,7 @@ async def client(server: RemoteOpenAIServer):
     transport = httpx.AsyncHTTPTransport(uds=server.uds) if server.uds else None
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     async with httpx.AsyncClient(
-        transport=transport,
-        base_url=server.url_root,
-        timeout=600,
-        headers=headers,
+        transport=transport, base_url=server.url_root, timeout=600, headers=headers
     ) as c:
         yield c
 
@@ -125,10 +122,7 @@ async def test_render_to_generate_roundtrip(client, test_image):
 
     # Build generate request from render output
     generate_payload = render_data
-    generate_payload["sampling_params"] = {
-        "max_tokens": 10,
-        "temperature": 0.0,
-    }
+    generate_payload["sampling_params"] = {"max_tokens": 10, "temperature": 0.0}
 
     gen_resp = await client.post(GEN_ENDPOINT, json=generate_payload)
     gen_resp.raise_for_status()
@@ -144,8 +138,7 @@ async def test_render_to_generate_roundtrip(client, test_image):
     assert all(isinstance(t, int) for t in choice["token_ids"])
 
     detok_resp = await client.post(
-        DETOKENIZE_ENDPOINT,
-        json={"model": MODEL_NAME, "tokens": choice["token_ids"]},
+        DETOKENIZE_ENDPOINT, json={"model": MODEL_NAME, "tokens": choice["token_ids"]}
     )
     detok_resp.raise_for_status()
     detok_data = detok_resp.json()

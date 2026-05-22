@@ -28,8 +28,7 @@ def is_fp4_marlin_supported():
 
 
 def _nvfp4_compute_scale_factor(
-    marlin_scales: torch.Tensor,
-    a_dtype: torch.dtype | None = None,
+    marlin_scales: torch.Tensor, a_dtype: torch.dtype | None = None
 ) -> float:
     """Compute the power-of-2 scale_factor needed so that all non-zero
     values in marlin_scales * 2^7 are >= 2 after rescaling.

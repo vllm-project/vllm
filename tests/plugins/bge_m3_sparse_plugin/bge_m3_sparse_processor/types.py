@@ -11,11 +11,7 @@ from vllm.entrypoints.pooling.base.protocol import (
     EmbedRequestMixin,
 )
 
-EmbedTask = Literal[
-    "sparse",
-    "dense",
-    "dense&sparse",
-]
+EmbedTask = Literal["sparse", "dense", "dense&sparse"]
 
 EMBED_TASKS: tuple[EmbedTask, ...] = get_args(EmbedTask)
 

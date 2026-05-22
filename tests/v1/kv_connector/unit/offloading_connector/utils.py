@@ -26,10 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.core.kv_cache_utils import (
-    get_request_block_hasher,
-    init_none_hash,
-)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
@@ -318,16 +315,10 @@ class RequestRunner:
         self._block_hasher = get_request_block_hasher(block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
-            no_compile_layers={},
-            attn_metadata={},
-            slot_mapping={},
+            no_compile_layers={}, attn_metadata={}, slot_mapping={}
         )
 
-    def new_request(
-        self,
-        token_ids: list[int],
-        kv_transfer_params: dict | None = None,
-    ):
+    def new_request(self, token_ids: list[int], kv_transfer_params: dict | None = None):
         self.req_id += 1
 
         sampling_params = SamplingParams(max_tokens=1000)
@@ -624,7 +615,5 @@ def request_runner():
 def generate_store_output(keys: Iterable[OffloadKey]):
     keys = list(keys)
     return PrepareStoreOutput(
-        keys_to_store=list(keys),
-        store_spec=MockLoadStoreSpec(keys),
-        evicted_keys=[],
+        keys_to_store=list(keys), store_spec=MockLoadStoreSpec(keys), evicted_keys=[]
     )

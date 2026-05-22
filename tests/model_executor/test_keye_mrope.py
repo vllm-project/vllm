@@ -54,7 +54,7 @@ def make_mm_feature(
                 field_name: MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
                     field=None,  # HACK.
-                ),
+                )
             }
         ),
         modality=modality,
@@ -67,17 +67,10 @@ def test_get_mrope_input_positions_text_only():
     model = make_model(DummyConfig())
 
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=[11, 12, 13, 14, 15],
-        mm_features=[],
+        input_tokens=[11, 12, 13, 14, 15], mm_features=[]
     )
 
-    expected = torch.tensor(
-        [
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        ]
-    )
+    expected = torch.tensor([[0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0, 1, 2, 3, 4]])
 
     assert torch.equal(positions, expected)
     assert delta == 0
@@ -86,25 +79,15 @@ def test_get_mrope_input_positions_text_only():
 def test_get_mrope_input_positions_single_image():
     model = make_model(DummyConfig())
     mm_features = [
-        make_mm_feature(
-            modality="image",
-            offset=1,
-            length=4,
-            grid_thw=(1, 4, 4),
-        )
+        make_mm_feature(modality="image", offset=1, length=4, grid_thw=(1, 4, 4))
     ]
 
     positions, delta = model.get_mrope_input_positions(
-        input_tokens=[10, 20, 21, 22, 23, 30, 31],
-        mm_features=mm_features,
+        input_tokens=[10, 20, 21, 22, 23, 30, 31], mm_features=mm_features
     )
 
     expected = torch.tensor(
-        [
-            [0, 1, 1, 1, 1, 3, 4],
-            [0, 1, 1, 2, 2, 3, 4],
-            [0, 1, 2, 1, 2, 3, 4],
-        ]
+        [[0, 1, 1, 1, 1, 3, 4], [0, 1, 1, 2, 2, 3, 4], [0, 1, 2, 1, 2, 3, 4]]
     )
 
     assert torch.equal(positions, expected)
@@ -114,18 +97,8 @@ def test_get_mrope_input_positions_single_image():
 def test_get_mrope_input_positions_interleaved_image_and_video():
     model = make_model(DummyConfig())
     mm_features = [
-        make_mm_feature(
-            modality="image",
-            offset=1,
-            length=4,
-            grid_thw=(1, 4, 4),
-        ),
-        make_mm_feature(
-            modality="video",
-            offset=7,
-            length=4,
-            grid_thw=[(2, 4, 2)],
-        ),
+        make_mm_feature(modality="image", offset=1, length=4, grid_thw=(1, 4, 4)),
+        make_mm_feature(modality="video", offset=7, length=4, grid_thw=[(2, 4, 2)]),
     ]
 
     positions, delta = model.get_mrope_input_positions(

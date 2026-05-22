@@ -58,13 +58,7 @@ def test_compiled_vs_eager(
     torch.testing.assert_close(native_out, cuda_out, atol=1e-3, rtol=1e-2)
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        (1, 16, 32, 128),
-        (2, 8, 16, 64),
-    ],
-)
+@pytest.mark.parametrize("shape", [(1, 16, 32, 128), (2, 8, 16, 64)])
 @pytest.mark.parametrize("activation", ACTIVATIONS)
 @pytest.mark.parametrize("elementwise_affine", ELEMENTWISE_AFFINE)
 @pytest.mark.parametrize("dtype", DTYPES)

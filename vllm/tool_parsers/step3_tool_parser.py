@@ -8,9 +8,7 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,10 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -78,11 +73,7 @@ class Step3ToolParser(ToolParser):
             params[name] = value.strip()
         return func_name, params
 
-    def _cast_arguments(
-        self,
-        func_name: str,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _cast_arguments(self, func_name: str, params: dict[str, Any]) -> dict[str, Any]:
         for tool in self.tools or []:
             if tool.function.name == func_name:
                 schema = tool.function.parameters or {}
@@ -253,9 +244,7 @@ class Step3ToolParser(ToolParser):
             return None
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         if self.TOOL_CALLS_BEGIN not in model_output:
             return ExtractedToolCallInformation(

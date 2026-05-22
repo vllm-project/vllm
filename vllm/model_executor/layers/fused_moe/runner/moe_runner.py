@@ -17,15 +17,11 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
@@ -37,11 +33,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    _USE_LAYERNAME,
-    LayerName,
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import _USE_LAYERNAME, LayerName, direct_register_custom_op
 
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:
@@ -97,11 +89,7 @@ def _moe_forward(
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
-        layer,
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+        layer, hidden_states, router_logits, shared_experts_input, input_ids
     )
 
 
@@ -132,11 +120,7 @@ def _moe_forward_shared(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
-        layer,
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+        layer, hidden_states, router_logits, shared_experts_input, input_ids
     )
 
 
@@ -298,8 +282,7 @@ class MoERunner(MoERunnerInterface):
         if self._combined_gate_weight is None:
             assert self.gate is not None and self.shared_expert_gate is not None
             self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
+                [self.gate.weight, self.shared_expert_gate.weight], dim=0
             )
 
     def is_internal_router(self) -> bool:
@@ -330,10 +313,7 @@ class MoERunner(MoERunnerInterface):
             hidden_states if self._shared_experts is not None else None,
         )
 
-    def apply_routed_output_transform(
-        self,
-        fused_output: torch.Tensor,
-    ) -> torch.Tensor:
+    def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
         """Apply transform to routed expert output (e.g., latent to full dim).
 
         Used by latent MoE models (e.g., NemotronH) where routed experts
@@ -346,9 +326,7 @@ class MoERunner(MoERunnerInterface):
         return fused_output
 
     def _maybe_apply_routed_scale_to_output(
-        self,
-        shared_output: torch.Tensor | None,
-        fused_output: torch.Tensor,
+        self, shared_output: torch.Tensor | None, fused_output: torch.Tensor
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Apply routed_scaling_factor to the output with FP16 overflow
         protection.
@@ -372,8 +350,7 @@ class MoERunner(MoERunnerInterface):
         )
 
     def _maybe_reduce_shared_expert_output(
-        self,
-        shared_output: torch.Tensor | None,
+        self, shared_output: torch.Tensor | None
     ) -> torch.Tensor | None:
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
@@ -392,9 +369,7 @@ class MoERunner(MoERunnerInterface):
         return shared_output
 
     def _maybe_reduce_final_output(
-        self,
-        states: torch.Tensor,
-        trunc_size: int,
+        self, states: torch.Tensor, trunc_size: int
     ) -> torch.Tensor:
         """Truncate padded dimensions and all-reduce the combined output.
 
@@ -450,9 +425,7 @@ class MoERunner(MoERunnerInterface):
         return 0
 
     def _maybe_pad_hidden_states(
-        self,
-        shared_experts_input: torch.Tensor | None,
-        hidden_states: torch.Tensor,
+        self, shared_experts_input: torch.Tensor | None, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, int]:
         """Pad hidden_states to moe_config.hidden_dim and compute the
         original dimension for later truncation.
@@ -485,9 +458,7 @@ class MoERunner(MoERunnerInterface):
         return hidden_states, orig_hidden_dims
 
     def _maybe_apply_shared_experts(
-        self,
-        shared_experts_input: torch.Tensor | None,
-        order: SharedExpertsOrder,
+        self, shared_experts_input: torch.Tensor | None, order: SharedExpertsOrder
     ):
         if self._shared_experts is not None:
             assert shared_experts_input is not None
@@ -537,8 +508,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+            shared_experts_input, SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
         )
 
         return (
@@ -562,8 +532,7 @@ class MoERunner(MoERunnerInterface):
         )
 
     def _maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor | None,
+        self, shared_experts_input: torch.Tensor | None
     ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
@@ -573,10 +542,7 @@ class MoERunner(MoERunnerInterface):
             assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
-    def _maybe_add_zero_expert_output(
-        self,
-        result: torch.Tensor,
-    ) -> torch.Tensor:
+    def _maybe_add_zero_expert_output(self, result: torch.Tensor) -> torch.Tensor:
         """Add the zero expert's contribution to the final result.
 
         When a ZeroExpertRouter is used, it computes a bias-like output
@@ -627,8 +593,7 @@ class MoERunner(MoERunnerInterface):
         # shared+routed add / latent up proj if needed.
         routed_hidden_dim = hidden_states.shape[-1]
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
-            shared_experts_input,
-            hidden_states,
+            shared_experts_input, hidden_states
         )
         hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
@@ -695,9 +660,7 @@ class MoERunner(MoERunnerInterface):
         # MoEKernel framework.
         if self.do_naive_dispatch_combine:
             result = get_ep_group().dispatch_router_logits(
-                hidden_states,
-                router_logits,
-                self.moe_config.is_sequence_parallel,
+                hidden_states, router_logits, self.moe_config.is_sequence_parallel
             )
             assert len(result) == 2
             hidden_states, router_logits = result
@@ -706,21 +669,13 @@ class MoERunner(MoERunnerInterface):
         # simplicity, AgRsAll2All was added separately for PCP here. Maybe
         # we should modify All2AllManager abstraction to better support PCP.
         if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
 
         return hidden_states, router_logits
 
     def _maybe_combine(
-        self,
-        shared_output: torch.Tensor | None,
-        hidden_states: torch.Tensor,
+        self, shared_output: torch.Tensor | None, hidden_states: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         if self.do_naive_dispatch_combine:
             hidden_states = get_ep_group().combine(
@@ -728,10 +683,7 @@ class MoERunner(MoERunnerInterface):
             )
 
         if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(
-                hidden_states,
-                dim=0,
-            )
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None
@@ -780,9 +732,7 @@ class MoERunner(MoERunnerInterface):
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
             hidden_states, router_logits = self._maybe_dispatch(
-                layer,
-                hidden_states,
-                router_logits,
+                layer, hidden_states, router_logits
             )
 
             shared_output, hidden_states = self._apply_quant_method(
@@ -793,7 +743,4 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
-            return self._maybe_combine(
-                shared_output,
-                hidden_states,
-            )
+            return self._maybe_combine(shared_output, hidden_states)

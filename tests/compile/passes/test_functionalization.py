@@ -8,9 +8,7 @@ import torch
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
-from vllm.compilation.passes.fusion.act_quant_fusion import (
-    ActivationQuantFusionPass,
-)
+from vllm.compilation.passes.fusion.act_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.passes.utility.fix_functionalization import (
@@ -270,8 +268,7 @@ MODELS_AND_DO_FUSION = {
     ],
 )
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Only test on cuda and rocm platform",
+    not current_platform.is_cuda_alike(), reason="Only test on cuda and rocm platform"
 )
 def test_fix_functionalization(
     model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype

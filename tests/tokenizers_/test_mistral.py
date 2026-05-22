@@ -10,10 +10,7 @@ from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.tokenizers.mistral import (
-    MistralTokenizer,
-    _validate_apply_chat_template_args,
-)
+from vllm.tokenizers.mistral import MistralTokenizer, _validate_apply_chat_template_args
 
 
 def test_validate_apply_chat_template_args():
@@ -165,17 +162,11 @@ class TestMistralTokenizer:
         # Test 3: special tokens + truncation
         assert mistral_tokenizer(
             "Hello world !", add_special_tokens=True, truncation=True, max_length=3
-        ) == {
-            "attention_mask": attn_mask[:-1],
-            "input_ids": token_ids[:-1],
-        }
+        ) == {"attention_mask": attn_mask[:-1], "input_ids": token_ids[:-1]}
         # Test 4: special tokens + no truncation + max length
         assert mistral_tokenizer(
             "Hello world !", add_special_tokens=True, max_length=3
-        ) == {
-            "attention_mask": attn_mask,
-            "input_ids": token_ids,
-        }
+        ) == {"attention_mask": attn_mask, "input_ids": token_ids}
         # Test 5: empty string
         assert mistral_tokenizer("", add_special_tokens=False) == {
             "attention_mask": [],
@@ -192,14 +183,7 @@ class TestMistralTokenizer:
         "openai_request,add_generation_prompt,continue_final_message,expected_output,decoded_expected_output",
         [
             (
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": "Hello world !",
-                        }
-                    ],
-                },
+                {"messages": [{"role": "user", "content": "Hello world !"}]},
                 True,
                 False,
                 ([1, 3, 23325, 2294, 1686, 4], [1, 3, 22177, 4304, 2662, 4]),
@@ -208,15 +192,9 @@ class TestMistralTokenizer:
             (
                 {
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": "I am an AI",
-                        },
-                        {
-                            "role": "user",
-                            "content": "Hello world !",
-                        },
-                    ],
+                        {"role": "system", "content": "I am an AI"},
+                        {"role": "user", "content": "Hello world !"},
+                    ]
                 },
                 True,
                 False,
@@ -234,14 +212,8 @@ class TestMistralTokenizer:
             (
                 {
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": "I am an AI",
-                        },
-                        {
-                            "role": "user",
-                            "content": "Hello world !",
-                        },
+                        {"role": "system", "content": "I am an AI"},
+                        {"role": "user", "content": "Hello world !"},
                     ],
                     "tools": [
                         {
@@ -448,14 +420,8 @@ class TestMistralTokenizer:
             (
                 {
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": "I am an AI",
-                        },
-                        {
-                            "role": "user",
-                            "content": "Hello world !",
-                        },
+                        {"role": "system", "content": "I am an AI"},
+                        {"role": "user", "content": "Hello world !"},
                         {
                             "role": "assistant",
                             "content": "",
@@ -783,15 +749,9 @@ class TestMistralTokenizer:
             (
                 {
                     "messages": [
-                        {
-                            "role": "user",
-                            "content": "Hello world !",
-                        },
-                        {
-                            "role": "assistant",
-                            "content": "Hello ",
-                        },
-                    ],
+                        {"role": "user", "content": "Hello world !"},
+                        {"role": "assistant", "content": "Hello "},
+                    ]
                 },
                 False,
                 True,
@@ -905,29 +865,12 @@ class TestMistralTokenizer:
             == expected_tokens[mistral_tokenizer.is_tekken]
         )
 
-    def test_decode_empty(
-        self,
-        mistral_tokenizer: MistralTokenizer,
-    ):
-        assert (
-            mistral_tokenizer.decode(
-                [],
-            )
-            == ""
-        )
+    def test_decode_empty(self, mistral_tokenizer: MistralTokenizer):
+        assert mistral_tokenizer.decode([]) == ""
 
-    def test_decode_int(
-        self,
-        mistral_tokenizer: MistralTokenizer,
-    ):
+    def test_decode_int(self, mistral_tokenizer: MistralTokenizer):
         ids = 1
-        assert (
-            mistral_tokenizer.decode(
-                ids,
-                skip_special_tokens=False,
-            )
-            == "<s>"
-        )
+        assert mistral_tokenizer.decode(ids, skip_special_tokens=False) == "<s>"
 
     @pytest.mark.parametrize(
         "skip_special_tokens,expected_tokens",
@@ -960,13 +903,8 @@ class TestMistralTokenizer:
             == expected_tokens[mistral_tokenizer.is_tekken]
         )
 
-    def test_batch_decode_empty(
-        self,
-        mistral_tokenizer: MistralTokenizer,
-    ):
-        assert mistral_tokenizer.batch_decode(
-            [[]],
-        ) == [""]
+    def test_batch_decode_empty(self, mistral_tokenizer: MistralTokenizer):
+        assert mistral_tokenizer.batch_decode([[]]) == [""]
 
     def test_convert_tokens_to_string(self, mistral_tokenizer: MistralTokenizer):
         tokens = (
@@ -2138,18 +2076,11 @@ class TestMistralTokenizer:
                             {
                                 "id": "123456789",
                                 "type": "function",
-                                "function": {
-                                    "name": "do_nothing",
-                                    "arguments": None,
-                                },
+                                "function": {"name": "do_nothing", "arguments": None},
                             }
                         ],
                     },
-                    {
-                        "role": "tool",
-                        "tool_call_id": "123456789",
-                        "content": "done",
-                    },
+                    {"role": "tool", "tool_call_id": "123456789", "content": "done"},
                 ],
                 [{"type": "function", "function": {"name": "do_nothing"}}],
                 ["do_nothing"],
@@ -2182,9 +2113,7 @@ class TestMistralTokenizer:
     def test_apply_chat_template_tools_not_mutated(
         self, mistral_tokenizer: MistralTokenizer
     ) -> None:
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": "Hello"},
-        ]
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "Hello"}]
         tools: list[dict[str, Any]] = [
             {
                 "type": "function",
@@ -2193,12 +2122,10 @@ class TestMistralTokenizer:
                     "description": "Gets weather.",
                     "parameters": {
                         "type": "object",
-                        "properties": {
-                            "city": {"type": "string"},
-                        },
+                        "properties": {"city": {"type": "string"}},
                     },
                 },
-            },
+            }
         ]
         original_tools = copy.deepcopy(tools)
 
@@ -2208,10 +2135,7 @@ class TestMistralTokenizer:
 
         assert tools == original_tools
 
-    @pytest.mark.parametrize(
-        "reasoning_key",
-        ["reasoning", "reasoning_content"],
-    )
+    @pytest.mark.parametrize("reasoning_key", ["reasoning", "reasoning_content"])
     def test_apply_chat_template_reasoning_assistant(
         self, mistral_tokenizer: MistralTokenizer, reasoning_key: str
     ) -> None:
@@ -2220,11 +2144,7 @@ class TestMistralTokenizer:
 
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": "What is 2+2?"},
-            {
-                "role": "assistant",
-                "content": "4",
-                reasoning_key: "2+2 equals 4",
-            },
+            {"role": "assistant", "content": "4", reasoning_key: "2+2 equals 4"},
             {"role": "user", "content": "Are you sure?"},
         ]
 

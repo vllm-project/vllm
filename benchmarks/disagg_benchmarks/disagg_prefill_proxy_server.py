@@ -128,10 +128,7 @@ def main():
         return headers
 
     async def _run_prefill(
-        request_path: str,
-        payload: dict,
-        headers: dict[str, str],
-        request_id: str,
+        request_path: str, payload: dict, headers: dict[str, str], request_id: str
     ):
         url = f"{PREFILL_BASE}{request_path}"
         start_ts = time.perf_counter()
@@ -159,10 +156,7 @@ def main():
             raise RuntimeError(f"Prefill service unavailable at {url}") from exc
 
     async def _stream_decode(
-        request_path: str,
-        payload: dict,
-        headers: dict[str, str],
-        request_id: str,
+        request_path: str, payload: dict, headers: dict[str, str], request_id: str
     ):
         url = f"{DECODE_BASE}{request_path}"
         # Stream tokens from the decode service once the prefill stage has

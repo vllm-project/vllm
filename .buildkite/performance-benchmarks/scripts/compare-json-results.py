@@ -289,9 +289,7 @@ def split_json_by_tp_pp(
 # Styling helpers
 # -----------------------------
 def _highlight_threshold(
-    df: pd.DataFrame,
-    threshold: float,
-    slack_pct: float = 0.0,
+    df: pd.DataFrame, threshold: float, slack_pct: float = 0.0
 ) -> pd.io.formats.style.Styler:
     conc_col = _find_concurrency_col(df)
     key_cols = [
@@ -376,15 +374,7 @@ def _sanitize_sheet_name(name: str) -> str:
 
     # Replace illegal characters with underscore.
     trans = str.maketrans(
-        {
-            ":": "_",
-            "\\": "_",
-            "/": "_",
-            "?": "_",
-            "*": "_",
-            "[": "_",
-            "]": "_",
-        }
+        {":": "_", "\\": "_", "/": "_", "?": "_", "*": "_", "[": "_", "]": "_"}
     )
     name = name.translate(trans)
 
@@ -851,8 +841,7 @@ def _add_limit_line(fig, y_value: float, label: str):
                 y=[None],
                 mode="lines",
                 line=dict(
-                    dash="dash",
-                    color="red" if "ttft" in label.lower() else "blue",
+                    dash="dash", color="red" if "ttft" in label.lower() else "blue"
                 ),
                 name=label,
             )
@@ -1001,10 +990,7 @@ def build_group_suffix(group_cols: list[str], name) -> str:
 
 
 def render_metric_table_html(
-    display_group: pd.DataFrame,
-    metric_label: str,
-    group_suffix: str,
-    args,
+    display_group: pd.DataFrame, metric_label: str, group_suffix: str, args
 ) -> str:
     title = (
         f'<div style="font-size: 1.25em; font-weight: 600; margin: 12px 0;">'
@@ -1047,9 +1033,7 @@ def maybe_write_plot(
 
     df = group_df[raw_data_cols].sort_values(by=y_axis_col)
     df_melted = df.melt(
-        id_vars=y_axis_col,
-        var_name="Configuration",
-        value_name=metric_label,
+        id_vars=y_axis_col, var_name="Configuration", value_name=metric_label
     )
 
     fig = px.line(

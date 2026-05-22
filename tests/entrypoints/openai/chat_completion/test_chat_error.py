@@ -81,8 +81,7 @@ def _build_renderer(model_config: MockModelConfig):
 
 def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     models = OpenAIServingModels(
-        engine_client=engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
     )
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
@@ -175,8 +174,7 @@ async def test_openai_chat_keeps_mm_cache_for_engine_execution():
     serving_chat = _build_serving_chat(mock_engine)
 
     request = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Test prompt"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "Test prompt"}]
     )
 
     result = await serving_chat.render_chat_request(request)
@@ -201,8 +199,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
     serving_chat = _build_serving_chat(mock_engine)
 
     request = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Test prompt"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "Test prompt"}]
     )
 
     result = await serving_chat.openai_serving_render.render_chat_request(request)
@@ -310,13 +307,7 @@ def test_system_message_warns_on_image(image_content):
         "vllm.entrypoints.openai.chat_completion.protocol.logger"
     ) as mock_logger:
         ChatCompletionRequest(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": image_content,
-                }
-            ],
+            model=MODEL_NAME, messages=[{"role": "system", "content": image_content}]
         )
 
     mock_logger.warning_once.assert_called()
@@ -330,9 +321,7 @@ def test_system_message_accepts_text():
     # Should not raise an exception
     request = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-        ],
+        messages=[{"role": "system", "content": "You are a helpful assistant."}],
     )
     assert request.messages[0]["role"] == "system"
 
@@ -346,7 +335,7 @@ def test_system_message_accepts_text_array():
             {
                 "role": "system",
                 "content": [{"type": "text", "text": "You are a helpful assistant."}],
-            },
+            }
         ],
     )
     assert request.messages[0]["role"] == "system"
@@ -367,7 +356,7 @@ def test_user_message_accepts_image():
                         "image_url": {"url": "https://example.com/image.jpg"},
                     },
                 ],
-            },
+            }
         ],
     )
     assert request.messages[0]["role"] == "user"
@@ -391,13 +380,7 @@ def test_system_message_warns_on_audio(audio_content):
         "vllm.entrypoints.openai.chat_completion.protocol.logger"
     ) as mock_logger:
         ChatCompletionRequest(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": audio_content,
-                }
-            ],
+            model=MODEL_NAME, messages=[{"role": "system", "content": audio_content}]
         )
 
     mock_logger.warning_once.assert_called()
@@ -419,13 +402,7 @@ def test_system_message_warns_on_video(video_content):
         "vllm.entrypoints.openai.chat_completion.protocol.logger"
     ) as mock_logger:
         ChatCompletionRequest(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": video_content,
-                }
-            ],
+            model=MODEL_NAME, messages=[{"role": "system", "content": video_content}]
         )
 
     mock_logger.warning_once.assert_called()

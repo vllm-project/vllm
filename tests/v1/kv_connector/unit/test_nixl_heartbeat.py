@@ -121,9 +121,7 @@ def test_update_connector_output_stops_heartbeat():
 
     s.update_connector_output(
         KVConnectorOutput(
-            finished_sending=None,
-            finished_recving={"id-1"},
-            invalid_block_ids=set(),
+            finished_sending=None, finished_recving={"id-1"}, invalid_block_ids=set()
         )
     )
 

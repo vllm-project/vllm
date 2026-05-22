@@ -58,13 +58,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         if _USE_LAYERNAME:
 
             def _pattern_with_ln(  # type: ignore[misc]
-                q,
-                kv_c_normed,
-                k_pe,
-                output_attn,
-                scale,
-                kv_cache_dummy_dep,
-                layer_name,
+                q, kv_c_normed, k_pe, output_attn, scale, kv_cache_dummy_dep, layer_name
             ):
                 at1 = auto_functionalized(
                     MLA_ATTN_OP,
@@ -106,19 +100,11 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         if _USE_LAYERNAME:
 
             def _replacement_with_ln(  # type: ignore[misc]
-                q,
-                kv_c_normed,
-                k_pe,
-                output_attn,
-                scale,
-                kv_cache_dummy_dep,
-                layer_name,
+                q, kv_c_normed, k_pe, output_attn, scale, kv_cache_dummy_dep, layer_name
             ):
                 # MLA output in quant_dtype
                 output_attn = torch.empty(
-                    [q.shape[0], self._output_dim],
-                    dtype=FP8_DTYPE,
-                    device=q.device,
+                    [q.shape[0], self._output_dim], dtype=FP8_DTYPE, device=q.device
                 )
                 at1 = auto_functionalized(
                     MLA_ATTN_OP,
@@ -138,9 +124,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         def _replacement(q, kv_c_normed, k_pe, output_attn, scale, kv_cache_dummy_dep):
             # MLA output in quant_dtype
             output_attn = torch.empty(
-                [q.shape[0], self._output_dim],
-                dtype=FP8_DTYPE,
-                device=q.device,
+                [q.shape[0], self._output_dim], dtype=FP8_DTYPE, device=q.device
             )
             at1 = auto_functionalized(
                 MLA_ATTN_OP,
@@ -194,9 +178,7 @@ class MLAAttnNvfp4QuantPattern(
         self._QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
 
     @property
-    def pattern(
-        self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
@@ -271,9 +253,7 @@ class MLAAttnNvfp4QuantPattern(
         return _pattern
 
     @property
-    def replacement(
-        self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
@@ -323,9 +303,7 @@ class MLAAttnNvfp4QuantPattern(
         ):
             # MLA output in quant_dtype (FP4 packed as uint8)
             output_attn = torch.empty(
-                [q.shape[0], self._output_dim // 2],
-                dtype=FP4_DTYPE,
-                device=q.device,
+                [q.shape[0], self._output_dim // 2], dtype=FP4_DTYPE, device=q.device
             )
             output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
             at2 = auto_functionalized(
@@ -401,21 +379,13 @@ class MLAAttnFp8GroupQuantPattern(
         )
 
     @property
-    def pattern(
-        self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
 
             def _pattern_with_ln(  # type: ignore[misc]
-                q,
-                kv_c_normed,
-                k_pe,
-                output_attn,
-                kv_cache_dummy_dep,
-                scale,
-                layer_name,
+                q, kv_c_normed, k_pe, output_attn, kv_cache_dummy_dep, scale, layer_name
             ):
                 at1 = auto_functionalized(
                     MLA_ATTN_OP,
@@ -492,26 +462,16 @@ class MLAAttnFp8GroupQuantPattern(
         return _pattern
 
     @property
-    def replacement(
-        self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
 
             def _replacement_with_ln(  # type: ignore[misc]
-                q,
-                kv_c_normed,
-                k_pe,
-                output_attn,
-                kv_cache_dummy_dep,
-                scale,
-                layer_name,
+                q, kv_c_normed, k_pe, output_attn, kv_cache_dummy_dep, scale, layer_name
             ):
                 output_attn = torch.empty(
-                    [q.shape[0], self._output_dim],
-                    dtype=FP8_DTYPE,
-                    device=q.device,
+                    [q.shape[0], self._output_dim], dtype=FP8_DTYPE, device=q.device
                 )
                 at1 = auto_functionalized(
                     MLA_ATTN_OP,
@@ -534,9 +494,7 @@ class MLAAttnFp8GroupQuantPattern(
 
         def _replacement(q, kv_c_normed, k_pe, output_attn, kv_cache_dummy_dep, scale):
             output_attn = torch.empty(
-                [q.shape[0], self._output_dim],
-                dtype=FP8_DTYPE,
-                device=q.device,
+                [q.shape[0], self._output_dim], dtype=FP8_DTYPE, device=q.device
             )
             at1 = auto_functionalized(
                 MLA_ATTN_OP,

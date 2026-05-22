@@ -479,12 +479,7 @@ class CpuPlatform(Platform):
                 "FP8 KV cache is not yet supported with KV transfer on CPU"
             )
         cpu_attn_reshape_and_cache(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            isa,
+            key, value, key_cache, value_cache, slot_mapping, isa
         )
 
     @classmethod

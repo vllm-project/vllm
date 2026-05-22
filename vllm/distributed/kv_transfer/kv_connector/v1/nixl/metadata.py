@@ -173,9 +173,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
 
     def _add_new_req(
-        self,
-        local_block_ids: BlockIds,
-        kv_transfer_params: dict[str, Any],
+        self, local_block_ids: BlockIds, kv_transfer_params: dict[str, Any]
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,

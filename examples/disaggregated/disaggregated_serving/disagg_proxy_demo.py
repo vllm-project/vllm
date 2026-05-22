@@ -437,12 +437,7 @@ def parse_args():
         help="List of decode node URLs (host:port)",
     )
 
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Server port number",
-    )
+    parser.add_argument("--port", type=int, default=8000, help="Server port number")
     return parser.parse_args()
 
 

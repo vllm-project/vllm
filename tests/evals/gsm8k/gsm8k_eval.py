@@ -111,8 +111,7 @@ async def call_vllm_api(
 
 
 def _build_gsm8k_prompts(
-    num_questions: int = 1319,
-    num_shots: int = 5,
+    num_questions: int = 1319, num_shots: int = 5
 ) -> tuple[list[str], list[int]]:
     """Build few-shot GSM8K completion prompts and ground-truth labels."""
     if num_questions == 0:

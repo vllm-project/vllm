@@ -15,10 +15,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
@@ -296,10 +293,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             kv_cache_dtype = "auto"
 
         underlying_attn_backend = get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            attn_type=attn_type,
+            head_size, dtype, kv_cache_dtype, attn_type=attn_type
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
             underlying_attn_backend, block_pool_size
@@ -424,9 +418,7 @@ class WhisperCausalAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor | None = None,
+        self, hidden_states: torch.Tensor, positions: torch.Tensor | None = None
     ):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -479,9 +471,7 @@ class WhisperCausalEncoderLayer(nn.Module):
         self.final_layer_norm = CausalRMSNorm(self.embed_dim)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor | None = None,
+        self, hidden_states: torch.Tensor, positions: torch.Tensor | None = None
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)

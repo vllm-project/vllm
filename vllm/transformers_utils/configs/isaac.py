@@ -16,10 +16,7 @@ class PixelShuffleSiglip2VisionConfig(Siglip2VisionConfig):
     base_config_key = "vision_config"
 
     def __init__(
-        self,
-        pixel_shuffle_scale_factor: int = 1,
-        num_patches: int = 256,
-        **kwargs,
+        self, pixel_shuffle_scale_factor: int = 1, num_patches: int = 256, **kwargs
     ):
         super().__init__(**kwargs)
 
@@ -80,20 +77,13 @@ class IsaacConfig(Qwen3Config):
 
         # Ensure compatibility with pretrained checkpoints
         self.vision_config.pixel_shuffle_scale_factor = getattr(
-            self.vision_config,
-            "pixel_shuffle_scale_factor",
-            pixel_shuffle_scale,
+            self.vision_config, "pixel_shuffle_scale_factor", pixel_shuffle_scale
         )
         self.vision_config.num_patches = getattr(
-            self.vision_config,
-            "num_patches",
-            vision_max_num_patches,
+            self.vision_config, "num_patches", vision_max_num_patches
         )
         self.vision_attn_implementation = vision_attn_implementation
         super().__init__(**kwargs)
 
 
-__all__ = [
-    "IsaacConfig",
-    "PixelShuffleSiglip2VisionConfig",
-]
+__all__ = ["IsaacConfig", "PixelShuffleSiglip2VisionConfig"]

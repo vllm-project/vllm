@@ -36,56 +36,28 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
     def _shrink_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
+        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
     ):
         # No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_shrink(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            scale,
-        )
+        sgmv_shrink(x, w_t_all, y, *self.prefill_metadata, scale)
 
     def _shrink_decode(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
+        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
     ):
         bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def _expand_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        add_inputs: bool,
+        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, add_inputs: bool
     ):
         # No LoRA request, so return directly
         if self.no_lora:
             return
-        sgmv_expand(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            add_inputs,
-        )
+        sgmv_expand(x, w_t_all, y, *self.prefill_metadata, add_inputs)
 
     def _expand_decode(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        add_inputs: bool,
+        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, add_inputs: bool
     ):
         bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
@@ -102,13 +74,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         if self.no_lora:
             return
         sgmv_expand_slice(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            y_offset,
-            y_slice_size,
-            add_inputs,
+            x, w_t_all, y, *self.prefill_metadata, y_offset, y_slice_size, add_inputs
         )
 
     def _expand_slice_decode(

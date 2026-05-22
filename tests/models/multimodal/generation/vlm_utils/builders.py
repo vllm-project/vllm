@@ -173,9 +173,7 @@ def build_multi_image_inputs_from_test_info(
 
     # Currently, we only have one multi-image list & one multi-image prompt
     return build_multi_image_inputs(
-        image_lists=[images],
-        model_prompts=model_prompts,
-        size_wrapper=size_wrapper,
+        image_lists=[images], model_prompts=model_prompts, size_wrapper=size_wrapper
     )
 
 
@@ -252,8 +250,7 @@ def build_video_inputs_from_test_info(
 
     sampled_vids = [
         sample_frames_with_video_metadata(
-            (asset.np_ndarrays, asset.metadata),
-            num_frames,
+            (asset.np_ndarrays, asset.metadata), num_frames
         )
         for asset in video_assets
     ]
@@ -279,8 +276,7 @@ def build_video_inputs_from_test_info(
 
 
 def sample_frames_with_video_metadata(
-    video_with_meta: tuple[npt.NDArray, dict[str, Any]],
-    num_frames: int,
+    video_with_meta: tuple[npt.NDArray, dict[str, Any]], num_frames: int
 ) -> tuple[npt.NDArray, dict[str, Any]]:
     video, meta = video_with_meta
     video = sample_frames_from_video(video, num_frames)
@@ -311,8 +307,7 @@ def apply_image_size_scaling(image, size: float | tuple[int, int], size_type: Si
 
 
 def build_audio_inputs_from_test_info(
-    test_info: VLMTestInfo,
-    audio_assets: AudioTestAssets,
+    test_info: VLMTestInfo, audio_assets: AudioTestAssets
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build audio inputs")
@@ -326,19 +321,10 @@ def build_audio_inputs_from_test_info(
     resampler = AudioResampler(target_sr=16000)
     audios = [asset.audio_and_sample_rate for asset in audio_assets]
     resampled_audios = [
-        (
-            resampler.resample(
-                audio,
-                orig_sr=sr,
-            ),
-            int(resampler.target_sr),
-        )
+        (resampler.resample(audio, orig_sr=sr), int(resampler.target_sr))
         for audio, sr in audios
     ]
 
     return [
-        PromptWithMultiModalInput(
-            prompts=model_prompts,
-            audio_data=resampled_audios,
-        )
+        PromptWithMultiModalInput(prompts=model_prompts, audio_data=resampled_audios)
     ]

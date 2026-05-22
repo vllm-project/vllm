@@ -391,9 +391,7 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
     return output_items
 
 
-def _parse_message_no_recipient(
-    message: Message,
-) -> list[ResponseOutputItem]:
+def _parse_message_no_recipient(message: Message) -> list[ResponseOutputItem]:
     """Parse a Harmony message with no recipient based on its channel."""
     if message.channel == "analysis":
         return _parse_reasoning(message)
@@ -413,8 +411,7 @@ def _parse_message_no_recipient(
 
 
 def harmony_to_response_output(
-    message: Message,
-    function_tool_names: frozenset[str] | None = None,
+    message: Message, function_tool_names: frozenset[str] | None = None
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
@@ -454,8 +451,7 @@ def harmony_to_response_output(
 
 
 def parser_state_to_response_output(
-    parser: StreamableParser,
-    function_tool_names: frozenset[str] | None = None,
+    parser: StreamableParser, function_tool_names: frozenset[str] | None = None
 ) -> list[ResponseOutputItem]:
     """Extract in-progress response items from incomplete parser state.
 

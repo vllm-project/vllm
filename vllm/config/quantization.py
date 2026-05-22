@@ -119,21 +119,17 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         moe=QuantSpec(weight=kFp8Static128BlockSym),
     ),
     "mxfp8": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kMxfp8Dynamic),
-        moe=QuantSpec(weight=kMxfp8Dynamic),
+        linear=QuantSpec(weight=kMxfp8Dynamic), moe=QuantSpec(weight=kMxfp8Dynamic)
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
-        moe=QuantSpec(weight=kInt8StaticChannelSym),
+        moe=QuantSpec(weight=kInt8StaticChannelSym)
     ),
 }
 
 
 # Names accepted by `--quantization`; "online" means "use quantization_config".
-ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
-    *_ONLINE_SHORTHANDS.keys(),
-    "online",
-)
+ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (*_ONLINE_SHORTHANDS.keys(), "online")
 
 
 def resolve_quantization_config(

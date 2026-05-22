@@ -72,8 +72,7 @@ def prompt_embeds_b64(hf_runner) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_single_prompt_embeds_part(
-    client: openai.AsyncOpenAI,
-    prompt_embeds_b64: list[str],
+    client: openai.AsyncOpenAI, prompt_embeds_b64: list[str]
 ):
     """A user message with one prompt_embeds part + text."""
     b64 = prompt_embeds_b64[0]
@@ -97,8 +96,7 @@ async def test_single_prompt_embeds_part(
 
 @pytest.mark.asyncio
 async def test_multiple_prompt_embeds_parts(
-    client: openai.AsyncOpenAI,
-    prompt_embeds_b64: list[str],
+    client: openai.AsyncOpenAI, prompt_embeds_b64: list[str]
 ):
     """Multiple prompt_embeds parts in a single message."""
     b64_a, b64_b = prompt_embeds_b64
@@ -123,8 +121,7 @@ async def test_multiple_prompt_embeds_parts(
 
 @pytest.mark.asyncio
 async def test_multi_message_conversation(
-    client: openai.AsyncOpenAI,
-    prompt_embeds_b64: list[str],
+    client: openai.AsyncOpenAI, prompt_embeds_b64: list[str]
 ):
     """prompt_embeds in both system and user messages."""
     b64_sys, b64_usr = prompt_embeds_b64
@@ -154,10 +151,7 @@ async def test_multi_message_conversation(
 
 
 @pytest.mark.asyncio
-async def test_streaming(
-    client: openai.AsyncOpenAI,
-    prompt_embeds_b64: list[str],
-):
+async def test_streaming(client: openai.AsyncOpenAI, prompt_embeds_b64: list[str]):
     """Streaming chat completion with prompt_embeds."""
     b64 = prompt_embeds_b64[0]
 
@@ -220,8 +214,7 @@ def aligned_content_and_embeds_b64(hf_runner) -> tuple[str, str]:
 
 @pytest.mark.asyncio
 async def test_text_content_and_prompt_embeds_match(
-    client: openai.AsyncOpenAI,
-    aligned_content_and_embeds_b64: tuple[str, str],
+    client: openai.AsyncOpenAI, aligned_content_and_embeds_b64: tuple[str, str]
 ):
     """Equal content in text and `prompt_embeds` should yield identical
     Chat Completions output under greedy decoding.
@@ -256,27 +249,18 @@ async def test_text_content_and_prompt_embeds_match(
 
 
 @pytest.mark.asyncio
-async def test_missing_data_field(
-    client: openai.AsyncOpenAI,
-):
+async def test_missing_data_field(client: openai.AsyncOpenAI):
     """A prompt_embeds part without `data` should return a clear error."""
     with pytest.raises(BadRequestError):
         await client.chat.completions.create(
             model=MODEL_NAME,
             max_tokens=5,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [{"type": "prompt_embeds"}],
-                }
-            ],
+            messages=[{"role": "user", "content": [{"type": "prompt_embeds"}]}],
         )
 
 
 @pytest.mark.asyncio
-async def test_invalid_base64(
-    client: openai.AsyncOpenAI,
-):
+async def test_invalid_base64(client: openai.AsyncOpenAI):
     """Invalid base64 in the `data` field should return a clear error."""
     with pytest.raises(BadRequestError):
         await client.chat.completions.create(
@@ -286,7 +270,7 @@ async def test_invalid_base64(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "prompt_embeds", "data": "not_valid_base64!!"},
+                        {"type": "prompt_embeds", "data": "not_valid_base64!!"}
                     ],
                 }
             ],

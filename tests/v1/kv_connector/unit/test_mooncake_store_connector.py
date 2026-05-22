@@ -5,9 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorRole,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     connector as mooncake_store_connector,
 )
@@ -26,10 +24,7 @@ from .utils import create_vllm_config
 
 
 def _make_vllm_config():
-    return create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-    )
+    return create_vllm_config(kv_connector="MooncakeStoreConnector", kv_role="kv_both")
 
 
 def _make_kv_cache_config() -> KVCacheConfig:

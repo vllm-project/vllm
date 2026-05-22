@@ -118,22 +118,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
-                (
-                    self.decode_cudagraph_max_bs,
-                    max_num_blocks,
-                ),
+                (self.decode_cudagraph_max_bs, max_num_blocks),
                 dtype=torch.int32,
                 device=device,
             )
             self.block_idx_last_scheduled_token: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
             self.block_idx_last_computed_token: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
             if self.use_spec_decode:
                 self.block_idx_last_scheduled_token_prev_step: torch.Tensor = (
@@ -154,9 +147,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # for CUDA graph capture during decode
         if self.num_spec_tokens > 0:
             self.decode_num_accepted_tokens: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
@@ -192,9 +183,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and self.vllm_config.cache_config.mamba_cache_mode == "all"
         ):
             prev_last_scheduled_idx = torch.zeros(
-                (m.num_reqs,),
-                dtype=torch.int32,
-                device=m.query_start_loc.device,
+                (m.num_reqs,), dtype=torch.int32, device=m.query_start_loc.device
             )
 
         return self.build(
@@ -287,10 +276,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return cu_chunk_seqlen, seq_idx, last_chunk_indices
 
     def _build_chunk_metadata_tensors(
-        self,
-        chunk_size: int,
-        common: M,
-        common_attn_metadata: CommonAttentionMetadata,
+        self, chunk_size: int, common: M, common_attn_metadata: CommonAttentionMetadata
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute chunk metadata and return as device tensors.
@@ -316,10 +302,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
-            chunk_size,
-            num_prefills,
-            num_computed_tokens_p_cpu,
-            query_start_loc_p_cpu,
+            chunk_size, num_prefills, num_computed_tokens_p_cpu, query_start_loc_p_cpu
         )
 
         device = common_attn_metadata.query_start_loc.device
@@ -335,9 +318,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 
     def _compute_prefix_caching_block_indices(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        mamba_block_size: int,
+        self, common_attn_metadata: CommonAttentionMetadata, mamba_block_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
         # Block index of the last computed token
@@ -451,9 +432,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     (num_computed_tokens - 1) // mamba_block_size, min=0
                 )
                 block_idx_last_scheduled_token_prev_step = torch.where(
-                    prev_last_scheduled_idx >= 0,
-                    prev_last_scheduled_idx,
-                    fallback,
+                    prev_last_scheduled_idx >= 0, prev_last_scheduled_idx, fallback
                 )
         else:
             state_indices_tensor = mamba_get_block_table_tensor(
@@ -467,9 +446,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
+            state_indices_tensor, [num_decodes, num_prefills], dim=0
         )
         if self.vllm_config.cache_config.mamba_cache_mode != "all":
             state_indices_tensor_d = state_indices_tensor_d[
@@ -545,10 +522,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return self._update_metadata_for_cudagraph_capture(metadata)
 
-    def _update_metadata_for_cudagraph_capture(
-        self,
-        metadata: M,
-    ) -> M:
+    def _update_metadata_for_cudagraph_capture(self, metadata: M) -> M:
         """
         Update the metadata for cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
@@ -635,10 +609,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
     def update_block_table(
-        self,
-        metadata: M,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        self, metadata: M, blk_table: torch.Tensor, slot_mapping: torch.Tensor
     ) -> M:
         state_indices_tensor = mamba_get_block_table_tensor(
             blk_table,
@@ -659,9 +630,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [metadata.num_decodes, metadata.num_prefills],
-            dim=0,
+            state_indices_tensor, [metadata.num_decodes, metadata.num_prefills], dim=0
         )
         if self.vllm_config.cache_config.mamba_cache_mode != "all":
             state_indices_tensor_d = state_indices_tensor_d[

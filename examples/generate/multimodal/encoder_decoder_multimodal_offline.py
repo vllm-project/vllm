@@ -35,24 +35,21 @@ def run_whisper():
         {  # Test implicit prompt
             "prompt": "<|startoftranscript|>",
             "multi_modal_data": {
-                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate
             },
         },
         {  # Test explicit encoder/decoder prompt
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": AudioAsset("winning_call").audio_and_sample_rate,
+                    "audio": AudioAsset("winning_call").audio_and_sample_rate
                 },
             },
             "decoder_prompt": "<|startoftranscript|>",
         },
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_fireredasr2():
@@ -78,21 +75,18 @@ def run_fireredasr2():
         {  # Implicit prompt with audio
             "prompt": prompt_str,
             "multi_modal_data": {
-                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate
             },
         },
         {  # Another audio sample
             "prompt": prompt_str,
             "multi_modal_data": {
-                "audio": AudioAsset("winning_call").audio_and_sample_rate,
+                "audio": AudioAsset("winning_call").audio_and_sample_rate
             },
         },
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_fireredlid():
@@ -115,7 +109,7 @@ def run_fireredlid():
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                    "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate
                 },
             },
             "decoder_prompt": "<sos>",
@@ -124,17 +118,14 @@ def run_fireredlid():
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": AudioAsset("winning_call").audio_and_sample_rate,
+                    "audio": AudioAsset("winning_call").audio_and_sample_rate
                 },
             },
             "decoder_prompt": "<sos>",
         },
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 model_example_map = {
@@ -158,10 +149,7 @@ def parse_args():
         help='Huggingface "model_type".',
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     return parser.parse_args()
 
@@ -185,10 +173,7 @@ def main(args):
 
     # Create a sampling params object.
     sampling_params = SamplingParams(
-        temperature=0,
-        top_p=1.0,
-        max_tokens=64,
-        skip_special_tokens=False,
+        temperature=0, top_p=1.0, max_tokens=64, skip_special_tokens=False
     )
 
     start = time.time()

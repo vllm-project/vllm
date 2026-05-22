@@ -28,10 +28,7 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
 
 def _test_online_quant_peak_mem_impl(
-    quantization_arg_value,
-    vllm_runner,
-    caplog_mp_spawn,
-    monkeypatch,
+    quantization_arg_value, vllm_runner, caplog_mp_spawn, monkeypatch
 ) -> None:
     # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
     # 1. it covers both Linear and MoE paths
@@ -50,9 +47,7 @@ def _test_online_quant_peak_mem_impl(
     with (
         caplog_mp_spawn(logging.DEBUG) as log_holder,
         vllm_runner(
-            model_name,
-            quantization=quantization_arg_value,
-            enforce_eager=True,
+            model_name, quantization=quantization_arg_value, enforce_eager=True
         ) as llm,
     ):
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)

@@ -209,10 +209,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
 
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
-            hidden_states,
-            router_logits,
-            is_sequence_parallel,
-            extra_tensors,
+            hidden_states, router_logits, is_sequence_parallel, extra_tensors
         )
 
     def dispatch(
@@ -247,7 +244,4 @@ class XpuCommunicator(DeviceCommunicatorBase):
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
-        )
+        return self.all2all_manager.combine(hidden_states, is_sequence_parallel)

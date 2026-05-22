@@ -33,10 +33,7 @@ def main():
     )  # , max_model_len=2048, max_num_batched_tokens=2048)
 
     # 1ST generation (prefill instance)
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-    )
+    outputs = llm.generate(prompts, sampling_params)
 
     new_prompts = []
     print("-" * 30)

@@ -121,20 +121,15 @@ GDN_BUILD_TEST_CASES = {
 }
 
 
-def _create_gdn_builder(
-    num_speculative_tokens: int = 0,
-) -> GDNAttentionMetadataBuilder:
+def _create_gdn_builder(num_speculative_tokens: int = 0) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(block_size=BLOCK_SIZE)
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
-            method="ngram",
-            num_speculative_tokens=num_speculative_tokens,
+            method="ngram", num_speculative_tokens=num_speculative_tokens
         )
     mamba_spec = MambaSpec(
-        block_size=BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
+        block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
     )
     return GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,

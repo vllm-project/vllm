@@ -31,9 +31,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -42,15 +40,9 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .glm4 import Glm4DecoderLayer, get_spec_layer_idx_from_weight_name
-from .glm4_moe_lite_mtp import (
-    Glm4MoeLiteMultiTokenPredictor,
-    SharedHead,
-)
+from .glm4_moe_lite_mtp import Glm4MoeLiteMultiTokenPredictor, SharedHead
 from .interfaces import SupportsPP
-from .utils import (
-    is_pp_missing_parameter,
-    maybe_prefix,
-)
+from .utils import is_pp_missing_parameter, maybe_prefix
 
 
 class GlmOcrMultiTokenPredictorLayer(nn.Module):
@@ -108,8 +100,7 @@ class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): GlmOcrMultiTokenPredictorLayer(
-                    vllm_config=vllm_config,
-                    prefix=f"{prefix}.layers.{idx}",
+                    vllm_config=vllm_config, prefix=f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -118,8 +109,7 @@ class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -159,9 +149,7 @@ class GlmOcrMTP(nn.Module, SupportsPP):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 

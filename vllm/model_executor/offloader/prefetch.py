@@ -72,10 +72,7 @@ class StaticBufferPool:
     """
 
     def __init__(
-        self,
-        param_infos: list[ParamInfo],
-        slot_capacity: int,
-        device: torch.device,
+        self, param_infos: list[ParamInfo], slot_capacity: int, device: torch.device
     ):
         self.slot_capacity = slot_capacity
         self.total_bytes = 0
@@ -94,10 +91,7 @@ class StaticBufferPool:
             for _ in range(slot_capacity):
                 # Use empty_strided to preserve parameter's memory layout
                 buf = torch.empty_strided(
-                    size=info.shape,
-                    stride=info.stride,
-                    dtype=info.dtype,
-                    device=device,
+                    size=info.shape, stride=info.stride, dtype=info.dtype, device=device
                 )
                 slot_tensors.append(buf)
                 self.total_bytes += info.num_bytes
@@ -161,8 +155,7 @@ class PrefetchOffloader(BaseOffloader):
         self.total_offloaded_bytes = 0
 
     def wrap_modules(
-        self,
-        modules_generator: Generator[nn.Module, None, None],
+        self, modules_generator: Generator[nn.Module, None, None]
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
@@ -337,9 +330,7 @@ class PrefetchOffloader(BaseOffloader):
 
         # Allocate static buffer pool
         self.buffer_pool = StaticBufferPool(
-            param_infos=param_infos,
-            slot_capacity=self.prefetch_step,
-            device=device,
+            param_infos=param_infos, slot_capacity=self.prefetch_step, device=device
         )
 
         # Assign buffer slots and point parameters to GPU buffers

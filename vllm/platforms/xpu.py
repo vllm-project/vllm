@@ -136,10 +136,7 @@ class XPUPlatform(Platform):
         torch.xpu.manual_seed_all(seed)
 
     @classmethod
-    def get_device_capability(
-        cls,
-        device_id: int = 0,
-    ) -> DeviceCapability | None:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         # capacity format differs from cuda's and will cause unexpected
         # failure, so use None directly
         return None
@@ -239,9 +236,7 @@ class XPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
         from vllm.config.vllm import get_layers_from_vllm_config
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
+        from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
         from vllm.utils.math_utils import cdiv
 
         cache_config = vllm_config.cache_config

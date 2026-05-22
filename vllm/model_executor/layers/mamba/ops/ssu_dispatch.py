@@ -191,8 +191,7 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
 def initialize_mamba_ssu_backend(
-    mamba_config: MambaConfig,
-    kv_cache_config: KVCacheConfig,
+    mamba_config: MambaConfig, kv_cache_config: KVCacheConfig
 ) -> None:
     """Initialize the global Mamba SSU backend.
 

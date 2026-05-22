@@ -543,9 +543,7 @@ def rocm_fp8_mqa_logits(
 
 
 def _topk_indices_torch(
-    logits: torch.Tensor,
-    topk_tokens: int,
-    row_starts: torch.Tensor | None = None,
+    logits: torch.Tensor, topk_tokens: int, row_starts: torch.Tensor | None = None
 ) -> torch.Tensor:
     k = min(topk_tokens, logits.shape[-1])
     values, indices = torch.topk(logits, k=k, dim=-1)
@@ -564,10 +562,7 @@ def _topk_indices_torch(
     if k == topk_tokens:
         return indices
     padded = torch.full(
-        (logits.shape[0], topk_tokens),
-        -1,
-        dtype=torch.int32,
-        device=logits.device,
+        (logits.shape[0], topk_tokens), -1, dtype=torch.int32, device=logits.device
     )
     padded[:, :k] = indices
     return padded
@@ -655,19 +650,11 @@ def rocm_aiter_sparse_attn_indexer(
     if not skip_k_cache_insert:
         if _ON_GFX942:
             ops.indexer_k_quant_and_cache(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
+                k, kv_cache, slot_mapping, quant_block_size, scale_fmt
             )
         else:
             indexer_k_quant_and_cache_triton(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
+                k, kv_cache, slot_mapping, quant_block_size, scale_fmt
             )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
@@ -676,22 +663,14 @@ def rocm_aiter_sparse_attn_indexer(
         assert prefill_metadata is not None
         for chunk in prefill_metadata.chunks:
             k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=device,
-                dtype=fp8_dtype,
+                [chunk.total_seq_lens, head_dim], device=device, dtype=fp8_dtype
             )
             k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=device,
-                dtype=torch.uint8,
+                [chunk.total_seq_lens, 4], device=device, dtype=torch.uint8
             )
             if _ON_GFX942:
                 ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
+                    kv_cache, k_fp8, k_scale, chunk.block_table, chunk.cu_seq_lens
                 )
             else:
                 cp_gather_indexer_k_quant_cache_triton(
@@ -800,11 +779,7 @@ def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
     return scale.to(torch.float32)
 
 
-def _expand_2d_block_scales(
-    scale: torch.Tensor,
-    rows: int,
-    cols: int,
-) -> torch.Tensor:
+def _expand_2d_block_scales(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     scale = _decode_e8m0_scales(scale)
     row_blocks, col_blocks = scale.shape[-2:]
     row_block = math.ceil(rows / row_blocks)
@@ -815,10 +790,7 @@ def _expand_2d_block_scales(
 
 
 def _apply_gptj_inv_rope_ref(
-    x: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    rope_dim: int,
+    x: torch.Tensor, positions: torch.Tensor, cos_sin_cache: torch.Tensor, rope_dim: int
 ) -> torch.Tensor:
     if rope_dim == 0 or x.numel() == 0:
         return x
@@ -836,8 +808,7 @@ def _apply_gptj_inv_rope_ref(
     y_even = rope[..., 0::2]
     y_odd = rope[..., 1::2]
     rope_out = torch.stack(
-        (y_even * cos + y_odd * sin, y_odd * cos - y_even * sin),
-        dim=-1,
+        (y_even * cos + y_odd * sin, y_odd * cos - y_even * sin), dim=-1
     ).flatten(-2)
     x = x.clone()
     x[..., nope_dim:] = rope_out
@@ -845,18 +816,12 @@ def _apply_gptj_inv_rope_ref(
 
 
 def _apply_inv_rope_ref(
-    rotary_emb: torch.nn.Module,
-    x: torch.Tensor,
-    positions: torch.Tensor,
-    rope_dim: int,
+    rotary_emb: torch.nn.Module, x: torch.Tensor, positions: torch.Tensor, rope_dim: int
 ) -> torch.Tensor:
     if hasattr(rotary_emb, "forward_native"):
         try:
             query, _ = rotary_emb.forward_native(
-                positions,
-                x.clone(),
-                None,
-                inverse=True,
+                positions, x.clone(), None, inverse=True
             )
             return query
         except TypeError:
@@ -905,10 +870,7 @@ _DSV4_SPARSE_ROPE_DIM = 64
 
 
 def _validate_dsv4_sparse_dims(
-    head_dim: int,
-    nope_head_dim: int,
-    rope_head_dim: int,
-    op_name: str,
+    head_dim: int, nope_head_dim: int, rope_head_dim: int, op_name: str
 ) -> None:
     assert head_dim == nope_head_dim + rope_head_dim, (
         f"{op_name} expected head_dim={nope_head_dim + rope_head_dim}, got {head_dim}"
@@ -955,9 +917,7 @@ def _pack_dense_prefix_to_ragged_kernel(
 
 
 def build_ragged_indices_from_dense(
-    indices: torch.Tensor,
-    lengths: torch.Tensor,
-    num_rows: int = -1,
+    indices: torch.Tensor, lengths: torch.Tensor, num_rows: int = -1
 ) -> tuple[torch.Tensor, torch.Tensor]:
     indices = indices.reshape(indices.shape[0], -1)
     lengths = lengths.to(device=indices.device, dtype=torch.int32).reshape(-1)
@@ -1090,9 +1050,7 @@ def _sparse_attn_prefill_ragged_kernel(
         l_final = l_i * alpha + tl.exp(sink - m_final)
         denom = tl.maximum(l_final, 1.0e-30)
         out = tl.where(
-            l_final[:, None] > 0.0,
-            (acc * alpha[:, None]) / denom[:, None],
-            0.0,
+            l_final[:, None] > 0.0, (acc * alpha[:, None]) / denom[:, None], 0.0
         )
     else:
         denom = tl.maximum(l_i, 1.0e-30)
@@ -1156,9 +1114,7 @@ def _sparse_attn_decode_ragged_kernel(
         other=0.0,
     )
     q_rope = tl.load(
-        q_row_ptr + NOPE_DIM + rope_offsets[None, :],
-        mask=head_mask[:, None],
-        other=0.0,
+        q_row_ptr + NOPE_DIM + rope_offsets[None, :], mask=head_mask[:, None], other=0.0
     )
 
     neg_large = -3.4028234663852886e38
@@ -1209,9 +1165,7 @@ def _sparse_attn_decode_ragged_kernel(
 
         rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
         k_rope = tl.load(
-            rope_ptr[:, None] + rope_offsets[None, :],
-            mask=valid[:, None],
-            other=0.0,
+            rope_ptr[:, None] + rope_offsets[None, :], mask=valid[:, None], other=0.0
         )
         k_rope = tl.where(valid[:, None], k_rope, zero_rope)
         k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
@@ -1284,10 +1238,7 @@ def _sparse_attn_decode_ragged_kernel(
             k_rope = tl.where(valid[:, None], k_rope, zero_rope)
             k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
 
-            scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(
-                q_rope,
-                tl.trans(k_rope),
-            )
+            scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(q_rope, tl.trans(k_rope))
             scores *= scale
             scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
@@ -1312,14 +1263,10 @@ def _sparse_attn_decode_ragged_kernel(
         l_final = l_i * alpha + tl.exp(sink - m_final)
         denom = tl.maximum(l_final, 1.0e-30)
         out_nope = tl.where(
-            l_final[:, None] > 0.0,
-            (acc_nope * alpha[:, None]) / denom[:, None],
-            0.0,
+            l_final[:, None] > 0.0, (acc_nope * alpha[:, None]) / denom[:, None], 0.0
         )
         out_rope = tl.where(
-            l_final[:, None] > 0.0,
-            (acc_rope * alpha[:, None]) / denom[:, None],
-            0.0,
+            l_final[:, None] > 0.0, (acc_rope * alpha[:, None]) / denom[:, None], 0.0
         )
     else:
         denom = tl.maximum(l_i, 1.0e-30)
@@ -1478,10 +1425,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         f"expected main_indptr shape [{num_queries + 1}], got {main_indptr.shape}"
     )
     _validate_dsv4_sparse_dims(
-        head_dim,
-        nope_head_dim,
-        rope_head_dim,
-        "_rocm_sparse_attn_decode_ragged_triton",
+        head_dim, nope_head_dim, rope_head_dim, "_rocm_sparse_attn_decode_ragged_triton"
     )
 
     has_extra = (
@@ -1619,10 +1563,7 @@ def rocm_sparse_attn_prefill(
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
     )
     _validate_dsv4_sparse_dims(
-        head_dim,
-        nope_head_dim,
-        rope_head_dim,
-        "rocm_sparse_attn_prefill",
+        head_dim, nope_head_dim, rope_head_dim, "rocm_sparse_attn_prefill"
     )
     if ragged_indices is not None and ragged_indptr is not None:
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
@@ -1675,10 +1616,7 @@ def rocm_sparse_attn_decode(
         f"got {swa_k_cache.dtype}"
     )
     _validate_dsv4_sparse_dims(
-        head_dim,
-        nope_head_dim,
-        rope_head_dim,
-        "rocm_sparse_attn_decode",
+        head_dim, nope_head_dim, rope_head_dim, "rocm_sparse_attn_decode"
     )
 
     main_indices = swa_indices.reshape(swa_indices.shape[0], -1)

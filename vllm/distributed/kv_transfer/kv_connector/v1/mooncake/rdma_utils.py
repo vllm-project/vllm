@@ -43,9 +43,7 @@ def get_requester_local_hostname(local_ip: str) -> str:
     return local_ip
 
 
-def get_configured_preferred_segment(
-    extra_config: Mapping[str, Any],
-) -> str | None:
+def get_configured_preferred_segment(extra_config: Mapping[str, Any]) -> str | None:
     preferred_segment = normalize_string_override(extra_config.get("preferred_segment"))
     if preferred_segment is not None:
         return preferred_segment
@@ -57,8 +55,7 @@ def get_configured_preferred_segment(
     env_value = normalize_string_override(envs.MOONCAKE_PREFERRED_SEGMENT)
     if env_value is not None:
         logger.info(
-            "Mooncake preferred_segment from MOONCAKE_PREFERRED_SEGMENT: %s",
-            env_value,
+            "Mooncake preferred_segment from MOONCAKE_PREFERRED_SEGMENT: %s", env_value
         )
         return env_value
     return None
@@ -92,11 +89,7 @@ def _get_explicit_worker_rnic(device_list: str) -> str:
     return device_name
 
 
-def get_configured_worker_rnic(
-    *,
-    protocol: str,
-    configured_device: str,
-) -> str:
+def get_configured_worker_rnic(*, protocol: str, configured_device: str) -> str:
     normalized_device = normalize_string_override(configured_device)
     if normalized_device is not None:
         return _get_explicit_worker_rnic(normalized_device)

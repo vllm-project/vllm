@@ -79,8 +79,7 @@ def make_test_data(
 
 
 def make_e_score_correction_bias(
-    e_score_correction_bias_val: float,
-    num_experts: int,
+    e_score_correction_bias_val: float, num_experts: int
 ) -> torch.Tensor:
     # return torch.randn(num_experts, device="cuda") * e_score_correction_bias_val
     return torch.full(
@@ -166,10 +165,7 @@ def assert_aiter_routing_valid(
         expected_sum = routed_scaling_factor
         sums = topk_weights.sum(dim=-1)
         torch.testing.assert_close(
-            sums,
-            torch.full_like(sums, expected_sum),
-            atol=1e-3,
-            rtol=1e-3,
+            sums, torch.full_like(sums, expected_sum), atol=1e-3, rtol=1e-3
         )
 
 
@@ -391,8 +387,7 @@ def test_fused_topk_bias(
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
-        e_score_correction_bias_val,
-        global_num_experts,
+        e_score_correction_bias_val, global_num_experts
     )
 
     router = create_fused_moe_router(
@@ -455,8 +450,7 @@ def test_grouped_topk(
     eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
 
     e_score_correction_bias = make_e_score_correction_bias(
-        e_score_correction_bias_val,
-        global_num_experts,
+        e_score_correction_bias_val, global_num_experts
     )
 
     router = create_fused_moe_router(
@@ -679,11 +673,7 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
 
     torch.manual_seed(0)
     topk_ids = torch.randint(
-        1,
-        num_logical,
-        (num_tokens, top_k),
-        dtype=torch.int32,
-        device="cuda",
+        1, num_logical, (num_tokens, top_k), dtype=torch.int32, device="cuda"
     )
     topk_ids[:, 0] = 0
 

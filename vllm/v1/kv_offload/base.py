@@ -126,9 +126,7 @@ class OffloadingManager(ABC):
 
     @abstractmethod
     def prepare_load(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         """
         Prepare the given blocks to be read.
@@ -169,9 +167,7 @@ class OffloadingManager(ABC):
 
     @abstractmethod
     def prepare_store(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """
         Prepare the given blocks to be offloaded.

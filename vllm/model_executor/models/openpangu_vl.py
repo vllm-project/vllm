@@ -67,10 +67,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     PromptReplacement,
@@ -153,11 +150,7 @@ class OpenPanguVisionAttention(nn.Module):
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(
             context_layer, "b s h d -> s (b h d)", b=1
@@ -400,13 +393,10 @@ class OpenPanguVisionTransformer(nn.Module):
 
         head_dim = self.hidden_size // self.num_heads
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
+            head_size=head_dim, dtype=torch.get_default_dtype()
         )
 
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-        }:
+        if self.attn_backend not in {AttentionBackendEnum.FLASH_ATTN}:
             raise RuntimeError(
                 f"Pangu-VL does not support {self.attn_backend} backend now."
             )
@@ -554,11 +544,7 @@ class OpenPanguVisionTransformer(nn.Module):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        grid_thw: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         # compute cu_seqlens
         cu_seqlens = (
             torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
@@ -634,10 +620,7 @@ class OpenPanguVisionTransformer(nn.Module):
         ]
         if self.hidden_act == "silu":
             stacked_params_mapping.extend(
-                [
-                    ("gate_up_proj", "gate_proj", 0),
-                    ("gate_up_proj", "up_proj", 1),
-                ]
+                [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
             )
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
@@ -690,61 +673,36 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
             kwargs["fps"] = fps
 
         return self.ctx.get_hf_processor(
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
 
 class OpenPanguVLImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", "cps"),
-    ]
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class OpenPanguVLImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
 
-    image_embeds: Annotated[
-        torch.Tensor,
-        TensorShape("nf", "hs"),
-    ]
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    image_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class OpenPanguVLVideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"]
 
-    pixel_values_videos: Annotated[
-        torch.Tensor,
-        TensorShape("np", "ctps"),
-    ]
-    video_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("nv", 3),
-    ]
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("np", "ctps")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
 class OpenPanguVLVideoEmbeddingInputs(TensorSchema):
     type: Literal["video_embeds"]
 
-    video_embeds: Annotated[
-        torch.Tensor,
-        TensorShape("nf", "hs"),
-    ]
-    video_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("nv", 3),
-    ]
+    video_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
 class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
@@ -766,10 +724,7 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         video_token_id = vocab[video_token]
         vision_start_token_id = vocab[vision_start_token]
         vision_end_token_id = vocab[vision_end_token]
-        placeholder = {
-            "image": image_token_id,
-            "video": video_token_id,
-        }
+        placeholder = {"image": image_token_id, "video": video_token_id}
 
         merge_length = image_processor.merge_size**2
 
@@ -795,8 +750,7 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
                 video_token_id_total = video_token_id_per_time * grid_t.item()
                 video_token_id_middle = video_token_id_total[1:-1]
                 return PromptUpdateDetails.select_token_id(
-                    video_token_id_middle,
-                    embed_token_id=video_token_id,
+                    video_token_id_middle, embed_token_id=video_token_id
                 )
 
         return [
@@ -1037,9 +991,7 @@ class OpenPanguVLForConditionalGeneration(
         return multimodal_embeddings
 
     def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings=None,
+        self, input_ids: torch.Tensor, multimodal_embeddings=None
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if multimodal_embeddings is not None:
@@ -1121,9 +1073,7 @@ class OpenPanguVLForConditionalGeneration(
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata=None,
+        self, hidden_states: torch.Tensor, sampling_metadata=None
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
@@ -1180,9 +1130,7 @@ class OpenPanguVLForConditionalGeneration(
                 raise ValueError(f"Unsupported modality: {modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0

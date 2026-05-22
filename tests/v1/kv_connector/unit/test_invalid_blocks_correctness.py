@@ -30,8 +30,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _make_get_num_new_matched_tokens(
-    req_num_new_matched_tokens: dict[str, int],
-    async_load: bool,
+    req_num_new_matched_tokens: dict[str, int], async_load: bool
 ) -> Callable[[Request, int], tuple[int, bool]]:
     def get_num_new_matched_tokens(request: Request, _: int) -> tuple[int, bool]:
         value = req_num_new_matched_tokens.get(request.request_id, 0)
@@ -80,9 +79,7 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     request = create_request(num_tokens=num_prompt_tokens)
     recompute_scheduler.add_request(request=request)
 
-    req_num_new_matched_tokens = {
-        request.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request.request_id: num_external_computed_tokens}
 
     # mock connector indicating sync load
     recompute_scheduler.connector = Mock()
@@ -204,9 +201,7 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     request = create_request(num_tokens=num_prompt_tokens)
     fail_scheduler.add_request(request=request)
 
-    req_num_new_matched_tokens = {
-        request.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request.request_id: num_external_computed_tokens}
 
     # mock connector indicating sync load
     fail_scheduler.connector = Mock()
@@ -233,9 +228,7 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
 
     # report invalid blocks - request should fail
     model_runner_output = create_model_runner_output(
-        [request],
-        invalid_block_ids=invalid_block_ids,
-        use_eos=True,
+        [request], invalid_block_ids=invalid_block_ids, use_eos=True
     )
 
     outputs = fail_scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -293,9 +286,7 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     assert conn_stats.hits == num_external_computed_tokens
 
 
-def test_async_recompute_blocks_not_cached_when_invalid(
-    recompute_scheduler: Scheduler,
-):
+def test_async_recompute_blocks_not_cached_when_invalid(recompute_scheduler: Scheduler):
     """
     Test async recompute case - invalid blocks not cached after transfer.
 
@@ -322,9 +313,7 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     request = create_request(num_tokens=num_prompt_tokens)
     recompute_scheduler.add_request(request=request)
 
-    req_num_new_matched_tokens = {
-        request.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request.request_id: num_external_computed_tokens}
 
     # mock connector indicating async load
     recompute_scheduler.connector = Mock()

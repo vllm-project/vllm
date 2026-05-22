@@ -14,9 +14,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     parse_expert_id,
     should_skip_weight,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    safetensors_weights_iterator,
-)
+from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id

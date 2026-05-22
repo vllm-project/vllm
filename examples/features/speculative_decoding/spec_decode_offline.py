@@ -164,10 +164,7 @@ def main(args):
     if args.backend == "openai-chat":
         outputs = llm.chat(llm_prompts, sampling_params=sampling_params)
     else:
-        outputs = llm.generate(
-            llm_prompts,
-            sampling_params=sampling_params,
-        )
+        outputs = llm.generate(llm_prompts, sampling_params=sampling_params)
 
     # print the generated text
     if args.print_output:

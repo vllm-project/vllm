@@ -31,11 +31,7 @@ COLBERT_MODELS = {
         "model": "lightonai/GTE-ModernColBERT-v1",
         "colbert_dim": 128,
         "max_model_len": 299,
-        "extra_kwargs": {
-            "hf_overrides": {
-                "architectures": ["ColBERTModernBertModel"],
-            },
-        },
+        "extra_kwargs": {"hf_overrides": {"architectures": ["ColBERTModernBertModel"]}},
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
@@ -48,9 +44,7 @@ COLBERT_MODELS = {
         "colbert_dim": 128,
         "max_model_len": 8192,
         "extra_kwargs": {
-            "hf_overrides": {
-                "architectures": ["ColBERTJinaRobertaModel"],
-            },
+            "hf_overrides": {"architectures": ["ColBERTJinaRobertaModel"]}
         },
         "hf_comparison": {
             "weights_file": "model.safetensors",
@@ -63,11 +57,7 @@ COLBERT_MODELS = {
         "model": "LiquidAI/LFM2-ColBERT-350M",
         "colbert_dim": 128,
         "max_model_len": 511,
-        "extra_kwargs": {
-            "hf_overrides": {
-                "architectures": ["ColBERTLfm2Model"],
-            },
-        },
+        "extra_kwargs": {"hf_overrides": {"architectures": ["ColBERTLfm2Model"]}},
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
@@ -78,15 +68,9 @@ COLBERT_MODELS = {
 }
 
 
-TEXTS_1 = [
-    "What is the capital of France?",
-    "What is the capital of Germany?",
-]
+TEXTS_1 = ["What is the capital of France?", "What is the capital of Germany?"]
 
-TEXTS_2 = [
-    "The capital of France is Paris.",
-    "The capital of Germany is Berlin.",
-]
+TEXTS_2 = ["The capital of France is Paris.", "The capital of Germany is Berlin."]
 
 DTYPE = "half"
 
@@ -103,11 +87,7 @@ def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
     if device.type == "cpu":
         extra["attn_implementation"] = "eager"
 
-    model = cls.from_pretrained(
-        model_name,
-        trust_remote_code=trust,
-        **extra,
-    ).to(device)
+    model = cls.from_pretrained(model_name, trust_remote_code=trust, **extra).to(device)
     model.eval()
 
     # Transformers 5.0 weight materialization can clear non-persistent
@@ -215,10 +195,7 @@ def test_colbert_token_embed(
 
 
 def test_colbert_late_interaction_1_to_1(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    vllm_runner, colbert_model_name, colbert_max_model_len, colbert_extra_kwargs
 ):
     """Test ColBERT late interaction scoring with 1:1 query-document pair."""
     with vllm_runner(
@@ -244,10 +221,7 @@ def test_colbert_late_interaction_1_to_1(
 
 
 def test_colbert_late_interaction_1_to_N(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    vllm_runner, colbert_model_name, colbert_max_model_len, colbert_extra_kwargs
 ):
     """Test ColBERT late interaction scoring with 1:N query-documents."""
     with vllm_runner(
@@ -276,10 +250,7 @@ def test_colbert_late_interaction_1_to_N(
 
 
 def test_colbert_late_interaction_N_to_N(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    vllm_runner, colbert_model_name, colbert_max_model_len, colbert_extra_kwargs
 ):
     """Test ColBERT late interaction scoring with N:N query-documents."""
     with vllm_runner(
@@ -307,10 +278,7 @@ def test_colbert_late_interaction_N_to_N(
 
 
 def test_colbert_relevance_ordering(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    vllm_runner, colbert_model_name, colbert_max_model_len, colbert_extra_kwargs
 ):
     """Test that ColBERT scores relevant documents higher than irrelevant."""
     query = "What is machine learning?"
@@ -336,10 +304,7 @@ def test_colbert_relevance_ordering(
 
 
 def test_colbert_embed_not_supported(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    vllm_runner, colbert_model_name, colbert_max_model_len, colbert_extra_kwargs
 ):
     """Test that ColBERT model does not support 'embed' task."""
     with (
@@ -381,18 +346,13 @@ def test_colbert_hf_comparison(vllm_runner, backend):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     hf_tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        trust_remote_code=hf_spec.get("trust_remote_code", False),
+        model_name, trust_remote_code=hf_spec.get("trust_remote_code", False)
     )
     hf_model = _load_hf_model(model_name, hf_spec, device)
     linear_weight = _load_projection_weight(model_name, hf_spec, device)
 
     hf_embeddings = _compute_hf_colbert_embeddings(
-        hf_model,
-        hf_tokenizer,
-        linear_weight,
-        test_texts,
-        device,
+        hf_model, hf_tokenizer, linear_weight, test_texts, device
     )
 
     _assert_embeddings_close(vllm_outputs, hf_embeddings)

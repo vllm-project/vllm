@@ -25,12 +25,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @torch.inference_mode()
-def run_intern_vit_test(
-    image_assets: ImageTestAssets,
-    model_id: str,
-    *,
-    dtype: str,
-):
+def run_intern_vit_test(image_assets: ImageTestAssets, model_id: str, *, dtype: str):
     model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -75,18 +70,10 @@ def run_intern_vit_test(
 
 
 @pytest.mark.parametrize(
-    "model_id",
-    [
-        "OpenGVLab/InternViT-300M-448px",
-        "OpenGVLab/InternViT-6B-448px-V1-5",
-    ],
+    "model_id", ["OpenGVLab/InternViT-300M-448px", "OpenGVLab/InternViT-6B-448px-V1-5"]
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     default_vllm_config, dist_init, image_assets, model_id, dtype: str
 ) -> None:
-    run_intern_vit_test(
-        image_assets,
-        model_id,
-        dtype=dtype,
-    )
+    run_intern_vit_test(image_assets, model_id, dtype=dtype)

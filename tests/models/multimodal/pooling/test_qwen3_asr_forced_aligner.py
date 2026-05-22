@@ -18,11 +18,7 @@ def build_prompt(words: list[str]) -> str:
 @pytest.mark.parametrize("model", [MODEL])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @torch.inference_mode()
-def test_qwen3_forced_aligner(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_qwen3_forced_aligner(vllm_runner, model: str, dtype: str) -> None:
     words = ["Hello", "world"]
     prompt = build_prompt(words)
 
@@ -35,11 +31,7 @@ def test_qwen3_forced_aligner(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=512,
-        hf_overrides={
-            "architectures": [
-                "Qwen3ASRForcedAlignerForTokenClassification",
-            ],
-        },
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     ) as vllm_model:
         outputs = vllm_model.llm.encode(
             [{"prompt": prompt, "multi_modal_data": {"audio": audio}}],

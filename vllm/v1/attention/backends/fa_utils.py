@@ -133,9 +133,7 @@ def get_flash_attn_version(
                 upgrade_reason = "Diff-KV with sinks"
             if upgrade_reason:
                 logger.info_once(
-                    "%s: upgrading FlashAttention 3 -> 4",
-                    upgrade_reason,
-                    scope="local",
+                    "%s: upgrading FlashAttention 3 -> 4", upgrade_reason, scope="local"
                 )
                 fa_version = 4
 
@@ -144,7 +142,7 @@ def get_flash_attn_version(
         if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
-                "defaulting to FA version 2.",
+                "defaulting to FA version 2."
             )
             fa_version = 2
 

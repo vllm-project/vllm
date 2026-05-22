@@ -113,12 +113,7 @@ def test_rocm_aiter_group_fp8_quant_different_shapes():
     """Test rocm_aiter_ops.group_fp8_quant with different input shapes."""
     group_size = 128
 
-    test_shapes = [
-        (64, 2048),
-        (256, 8192),
-        (32, 1024),
-        (512, 4096),
-    ]
+    test_shapes = [(64, 2048), (256, 8192), (32, 1024), (512, 4096)]
 
     for M, N in test_shapes:
         input_tensor = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")

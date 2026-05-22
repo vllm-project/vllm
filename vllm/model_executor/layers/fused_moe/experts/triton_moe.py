@@ -53,11 +53,7 @@ from vllm.triton_utils import tl
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         # Whether quantized MOE runs natively, or through
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
@@ -77,8 +73,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         # INT8 requires at least 7.5 (Turing).
         device_supports_int8 = (
@@ -394,8 +389,7 @@ class TritonWNA16Experts(TritonExperts):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         raise NotImplementedError(
             "TritonWNA16Experts is not yet used by an Oracle. "

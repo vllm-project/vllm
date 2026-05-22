@@ -83,7 +83,7 @@ class Mxfp4Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             logger.debug_once(
                 "MXFP4 linear layer is not implemented - falling back to "
-                "UnquantizedLinearMethod.",
+                "UnquantizedLinearMethod."
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
@@ -91,7 +91,7 @@ class Mxfp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
-                "Skipping quantization for this layer.",
+                "Skipping quantization for this layer."
             )
         return None
 
@@ -259,11 +259,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             set_weight_attrs(w13_bias, extra_weight_attrs)
 
             w2_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    dtype=torch.bfloat16,
-                ),
+                torch.zeros(num_experts, hidden_size, dtype=torch.bfloat16),
                 requires_grad=False,
             )
             layer.register_parameter("w2_bias", w2_bias)
@@ -412,9 +408,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        layer: RoutedExperts,
+        self, prepare_finalize: mk.FusedMoEPrepareAndFinalize, layer: RoutedExperts
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "
@@ -593,11 +587,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             set_weight_attrs(w13_bias, extra_weight_attrs)
 
             w2_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    dtype=torch.bfloat16,
-                ),
+                torch.zeros(num_experts, hidden_size, dtype=torch.bfloat16),
                 requires_grad=False,
             )
             layer.register_parameter("w2_bias", w2_bias)
@@ -720,8 +710,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
     def get_fused_moe_quant_config(
-        self,
-        layer: RoutedExperts,
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         w1_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
@@ -746,9 +735,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        layer: RoutedExperts,
+        self, prepare_finalize: mk.FusedMoEPrepareAndFinalize, layer: RoutedExperts
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "

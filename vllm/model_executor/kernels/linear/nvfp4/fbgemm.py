@@ -35,10 +35,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         import fbgemm_gpu  # noqa: F401 - registers torch.ops.fbgemm.*
 

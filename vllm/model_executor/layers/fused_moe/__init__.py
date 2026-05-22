@@ -28,13 +28,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -101,9 +97,7 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         BatchedTritonExperts,
     )
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
-    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
     from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
     )
@@ -120,9 +114,7 @@ if HAS_TRITON:
         fused_experts,
         get_config_file_name,
     )
-    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
-        fused_topk,
-    )
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
     from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
         GroupedTopk,
     )

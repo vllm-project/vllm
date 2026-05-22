@@ -63,10 +63,7 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
         "<|im_start|>assistant\n"
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # CohereASR
@@ -85,10 +82,7 @@ def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
         trust_remote_code=True,
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # MusicFlamingo
@@ -123,10 +117,7 @@ def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
         "<|im_start|>assistant\n"
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # Gemma3N
@@ -142,10 +133,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     )
     prompt = f"<start_of_turn>user\n<audio_soft_token>{question}"
     "<end_of_turn>\n<start_of_turn>model\n"
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # GLM-ASR
@@ -170,10 +158,7 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # FunAudioChat
@@ -195,10 +180,7 @@ def run_funaudiochat(question: str, audio_count: int) -> ModelRequestData:
     )
     prompt = f"{audio_in_prompt}{question}"
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # Granite Speech
@@ -254,9 +236,7 @@ def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
 
     # Stop at EOS token (151644) to prevent repetition
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=[151644],
+        engine_args=engine_args, prompt=prompt, stop_token_ids=[151644]
     )
 
 
@@ -284,10 +264,7 @@ def run_midashenglm(question: str, audio_count: int):
         f"{audio_in_prompt}{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # MiniCPM-O
@@ -316,9 +293,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     )
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompt=prompt, stop_token_ids=stop_token_ids
     )
 
 
@@ -378,10 +353,7 @@ def run_qwen2_audio(question: str, audio_count: int) -> ModelRequestData:
         "<|im_start|>assistant\n"
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # Qwen2.5-Omni
@@ -411,10 +383,7 @@ def run_qwen2_5_omni(question: str, audio_count: int):
         f"{audio_in_prompt}{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 def run_qwen3_asr(question: str, audio_count: int) -> ModelRequestData:
@@ -430,10 +399,7 @@ def run_qwen3_asr(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # Ultravox 0.5-1B
@@ -454,24 +420,15 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # Voxtral
 # Make sure to install mistral-common[audio].
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.chunk import (
-        AudioChunk,
-        RawAudio,
-        TextChunk,
-    )
-    from mistral_common.protocol.instruct.messages import (
-        UserMessage,
-    )
+    from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+    from mistral_common.protocol.instruct.messages import UserMessage
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
@@ -531,10 +488,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 # FireRedLID
@@ -551,10 +505,7 @@ def run_fireredlid(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
+    return ModelRequestData(engine_args=engine_args, prompt=prompt)
 
 
 model_example_map = {
@@ -609,10 +560,7 @@ def parse_args():
         help="Number of audio items per prompt.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     parser.add_argument(
         "--tensor-parallel-size",
@@ -703,9 +651,7 @@ def main(args):
     )
 
     outputs = llm.generate(
-        inputs,
-        sampling_params=sampling_params,
-        lora_request=lora_request,
+        inputs, sampling_params=sampling_params, lora_request=lora_request
     )
 
     for o in outputs:

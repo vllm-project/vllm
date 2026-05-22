@@ -47,11 +47,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
-class EngineCoreRequest(
-    msgspec.Struct,
-    array_like=True,
-    omit_defaults=True,
-):
+class EngineCoreRequest(msgspec.Struct, array_like=True, omit_defaults=True):
     request_id: str
     prompt_token_ids: list[int] | None
     mm_features: object | None
@@ -74,11 +70,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
 
 
-class EngineCoreOutput(
-    msgspec.Struct,
-    array_like=True,
-    omit_defaults=True,
-):
+class EngineCoreOutput(msgspec.Struct, array_like=True, omit_defaults=True):
     request_id: str
     new_token_ids: list[int]
     new_logprobs: object | None = None
@@ -94,11 +86,7 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
 
 
-class EngineCoreOutputs(
-    msgspec.Struct,
-    array_like=True,
-    omit_defaults=True,
-):
+class EngineCoreOutputs(msgspec.Struct, array_like=True, omit_defaults=True):
     engine_index: int = 0
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: object | None = None
@@ -146,21 +134,13 @@ multimodal_features = [
                 ],
                 "field": [
                     "flat",
-                    {
-                        "slices": [[0, 2, None]],
-                        "dim": 0,
-                        "keep_on_cpu": False,
-                    },
+                    {"slices": [[0, 2, None]], "dim": 0, "keep_on_cpu": False},
                 ],
             }
         },
         "modality": "image",
         "identifier": "mm-cache-key",
-        "mm_position": {
-            "offset": 1,
-            "length": 2,
-            "is_embed": None,
-        },
+        "mm_position": {"offset": 1, "length": 2, "is_embed": None},
         "mm_hash": "processor-hash",
     }
 ]
@@ -176,9 +156,7 @@ multimodal_request_wire = [
 outputs = EngineCoreOutputs(
     outputs=[
         EngineCoreOutput(
-            request_id="req-1",
-            new_token_ids=[7, 8],
-            finish_reason=FinishReason.LENGTH,
+            request_id="req-1", new_token_ids=[7, 8], finish_reason=FinishReason.LENGTH
         )
     ],
     finished_requests={"req-1"},
@@ -186,10 +164,7 @@ outputs = EngineCoreOutputs(
 
 
 def encode_ndarray(
-    array: np.ndarray,
-    buffers: list[bytes],
-    *,
-    size_threshold: int = 256,
+    array: np.ndarray, buffers: list[bytes], *, size_threshold: int = 256
 ):
     arr_data = array.data if array.flags.c_contiguous else array.tobytes()
     if not array.shape or array.nbytes < size_threshold:
@@ -229,11 +204,7 @@ def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
         ):
             dtype, shape, payload = value
             return encode_tensor_like(
-                dtype,
-                shape,
-                payload,
-                buffers,
-                size_threshold=size_threshold,
+                dtype, shape, payload, buffers, size_threshold=size_threshold
             )
         if type(value) is list:
             return [transform(v) for v in value]
@@ -248,10 +219,7 @@ def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
 
 
 def engine_output_wire(
-    request_id: str,
-    *,
-    new_logprobs=None,
-    new_prompt_logprobs_tensors=None,
+    request_id: str, *, new_logprobs=None, new_prompt_logprobs_tensors=None
 ):
     return [
         request_id,
@@ -303,10 +271,7 @@ inline_prompt_logprobs = engine_outputs_wire(
             (
                 "float32",
                 [2, 3],
-                np.array(
-                    [[10, 11, 12], [13, 14, 15]],
-                    dtype=np.float32,
-                ).tobytes(),
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             None,
@@ -326,10 +291,7 @@ multipart_prompt_logprobs = engine_outputs_wire(
             (
                 "float32",
                 [2, 3],
-                np.array(
-                    [[10, 11, 12], [13, 14, 15]],
-                    dtype=np.float32,
-                ).tobytes(),
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             None,

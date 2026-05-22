@@ -109,8 +109,7 @@ def create_scheduler(
         )
     elif isinstance(use_kv_connector, str):
         kv_transfer_config = KVTransferConfig(
-            kv_connector=use_kv_connector,
-            kv_role="kv_both",
+            kv_connector=use_kv_connector, kv_role="kv_both"
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(

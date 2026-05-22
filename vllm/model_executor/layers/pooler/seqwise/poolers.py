@@ -30,12 +30,10 @@ from .methods import (
 )
 
 SequencePoolingFn: TypeAlias = Callable[
-    [torch.Tensor, PoolingMetadata],
-    SequencePoolingMethodOutput,
+    [torch.Tensor, PoolingMetadata], SequencePoolingMethodOutput
 ]
 SequencePoolingHeadFn: TypeAlias = Callable[
-    [SequencePoolingMethodOutput, PoolingMetadata],
-    SequencePoolerHeadOutput,
+    [SequencePoolingMethodOutput, PoolingMetadata], SequencePoolerHeadOutput
 ]
 
 SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -80,9 +78,7 @@ class SequencePooler(Pooler):
         return updates
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)

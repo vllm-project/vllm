@@ -233,11 +233,7 @@ class ImagePatcher:
             if newlines and newlines[-1] == len(patches) - 1:
                 newlines.pop()
 
-            return (
-                img,
-                patches,
-                [i in newlines for i in range(len(patches))],
-            )
+            return (img, patches, [i in newlines for i in range(len(patches))])
 
 
 class Step3VLImageProcessor:
@@ -275,9 +271,7 @@ class Step3VLImageProcessor:
         return result
 
     def _convert_images_to_pixel_values(
-        self,
-        images: list[Image.Image],
-        is_patch: bool = False,
+        self, images: list[Image.Image], is_patch: bool = False
     ) -> list[torch.Tensor]:
         return [
             self.image_preprocessor(img, is_patch=is_patch)["pixel_values"]
@@ -326,9 +320,7 @@ class Step3VLProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
     def __init__(
-        self,
-        image_processor: Step3VLImageProcessor,
-        tokenizer: TokenizerLike,
+        self, image_processor: Step3VLImageProcessor, tokenizer: TokenizerLike
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer
@@ -361,9 +353,7 @@ class Step3VLProcessor(ProcessorMixin):
         ] * image_processor.num_patch_feature_size
 
     def _get_patch_repl_text(
-        self,
-        num_patches: int,
-        patch_newline_mask: list[bool],
+        self, num_patches: int, patch_newline_mask: list[bool]
     ) -> str:
         assert len(patch_newline_mask) == num_patches
 
@@ -382,9 +372,7 @@ class Step3VLProcessor(ProcessorMixin):
         return "".join(parts)
 
     def _get_patch_repl_ids(
-        self,
-        num_patches: int,
-        patch_newline_mask: list[bool],
+        self, num_patches: int, patch_newline_mask: list[bool]
     ) -> list[int]:
         assert len(patch_newline_mask) == num_patches
 
@@ -402,10 +390,7 @@ class Step3VLProcessor(ProcessorMixin):
 
         return parts
 
-    def _get_image_repl_text(
-        self,
-        num_images: int,
-    ) -> str:
+    def _get_image_repl_text(self, num_images: int) -> str:
         parts = [
             self.image_start_token,
             self.image_feature_tokens,
@@ -414,10 +399,7 @@ class Step3VLProcessor(ProcessorMixin):
 
         return "".join(parts)
 
-    def _get_image_repl_ids(
-        self,
-        num_images: int,
-    ) -> list[int]:
+    def _get_image_repl_ids(self, num_images: int) -> list[int]:
         part = [
             self.image_start_token_id,
             *self.image_feature_token_ids,
@@ -426,20 +408,14 @@ class Step3VLProcessor(ProcessorMixin):
         return part * num_images
 
     def get_image_repl_feature_text(
-        self,
-        num_images: int,
-        num_patches: int,
-        patch_new_line_idx: list[bool],
+        self, num_images: int, num_patches: int, patch_new_line_idx: list[bool]
     ) -> str:
         patch_repl = self._get_patch_repl_text(num_patches, patch_new_line_idx)
         image_repl = self._get_image_repl_text(num_images)
         return patch_repl + image_repl
 
     def get_image_repl_feature_ids(
-        self,
-        num_images: int,
-        num_patches: int,
-        patch_new_line_idx: list[bool],
+        self, num_images: int, num_patches: int, patch_new_line_idx: list[bool]
     ) -> list[int]:
         patch_repl = self._get_patch_repl_ids(num_patches, patch_new_line_idx)
         image_repl = self._get_image_repl_ids(num_images)
@@ -468,8 +444,7 @@ class Step3VLProcessor(ProcessorMixin):
     ) -> BatchFeature:
         if images is not None:
             image_inputs = self.image_processor(
-                images=images,
-                return_tensors=return_tensors,
+                images=images, return_tensors=return_tensors
             )
             num_patches = image_inputs["num_patches"]
             patch_newline_mask = image_inputs["patch_newline_mask"]
@@ -504,6 +479,5 @@ class Step3VLProcessor(ProcessorMixin):
             text_inputs = {}
 
         return BatchFeature(
-            data={**text_inputs, **image_inputs},
-            tensor_type=return_tensors,
+            data={**text_inputs, **image_inputs}, tensor_type=return_tensors
         )

@@ -70,14 +70,10 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
     else:  # Hopper (SM90) and older
-        return [
-            MLAPrefillBackendEnum.FLASH_ATTN,
-        ]
+        return [MLAPrefillBackendEnum.FLASH_ATTN]
 
 
-def get_mla_prefill_backend(
-    vllm_config: "VllmConfig",
-) -> "type[MLAPrefillBackend]":
+def get_mla_prefill_backend(vllm_config: "VllmConfig") -> "type[MLAPrefillBackend]":
     """Select the MLA prefill backend based on configuration and device.
 
     This function first checks for explicit user preferences via
@@ -126,16 +122,12 @@ def get_mla_prefill_backend(
         logger.info("Using %s MLA prefill backend.", selected_backend.name)
         return backend_cls
 
-    return _auto_select_mla_prefill_backend(
-        device_capability,
-        selector_config,
-    )
+    return _auto_select_mla_prefill_backend(device_capability, selector_config)
 
 
 @cache
 def _auto_select_mla_prefill_backend(
-    device_capability: DeviceCapability,
-    selector_config: MLAPrefillSelectorConfig,
+    device_capability: DeviceCapability, selector_config: MLAPrefillSelectorConfig
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
 

@@ -8,14 +8,10 @@ import numpy as np
 import torch
 
 from vllm.config import MultiModalConfig
-from vllm.kernels.triton.qkv_padded_fp8_quant import (
-    quantize_fp8_maybe_pad_head_dim,
-)
+from vllm.kernels.triton.qkv_padded_fp8_quant import quantize_fp8_maybe_pad_head_dim
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
-from vllm.model_executor.layers.quantization.input_quant_fp8 import (
-    QuantFP8,
-)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
@@ -24,9 +20,7 @@ from vllm.model_executor.models.vision import (
     get_multimodal_config,
     get_vit_attn_backend,
 )
-from vllm.utils.flashinfer import (
-    is_flashinfer_cudnn_fp8_prefill_attn_supported,
-)
+from vllm.utils.flashinfer import is_flashinfer_cudnn_fp8_prefill_attn_supported
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -127,11 +121,7 @@ def _maybe_save_fp8_scales(
     # makes this a one-shot across all layers.
     path, margin = _fp8_scale_save_path, _fp8_scale_save_margin
     scales = {
-        name: {
-            "q": q.item() * margin,
-            "k": k.item() * margin,
-            "v": v.item() * margin,
-        }
+        name: {"q": q.item() * margin, "k": k.item() * margin, "v": v.item() * margin}
         for name, (q, k, v) in _fp8_saved_scale_refs.items()
     }
     _fp8_scale_save_path = None
@@ -174,17 +164,13 @@ def _get_flashinfer_workspace_buffer() -> torch.Tensor:
     global _flashinfer_workspace_buffer
     if _flashinfer_workspace_buffer is None:
         _flashinfer_workspace_buffer = torch.zeros(
-            FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES,
-            dtype=torch.uint8,
-            device="cuda",
+            FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES, dtype=torch.uint8, device="cuda"
         )
     return _flashinfer_workspace_buffer
 
 
 def add_padding_to_seqlens(
-    seq: np.ndarray,
-    batch_size: int,
-    padding_value: int,
+    seq: np.ndarray, batch_size: int, padding_value: int
 ) -> np.ndarray:
     batch_size_padded = next(
         (b for b in FLASHINFER_BATCH_BUCKETS if b >= batch_size),
@@ -200,9 +186,7 @@ def add_padding_to_seqlens(
     )
 
 
-def bucket_flashinfer_max_seqlen(
-    real_max_seqlen: int,
-) -> int:
+def bucket_flashinfer_max_seqlen(real_max_seqlen: int) -> int:
     if real_max_seqlen <= 0:
         return FLASHINFER_MAX_SEQLEN_BUCKETS[0]
     return next(
@@ -219,9 +203,7 @@ class MMEncoderAttention(CustomOp):
     # --8<-- [end:mm_encoder_attn]
     @classmethod
     def compute_max_seqlen(
-        cls,
-        attn_backend: AttentionBackendEnum,
-        cu_seqlens: np.ndarray,
+        cls, attn_backend: AttentionBackendEnum, cu_seqlens: np.ndarray
     ) -> int:
         max_seqlen = 0
         if (
@@ -350,10 +332,7 @@ class MMEncoderAttention(CustomOp):
         self.dtype = dtype
 
         # Get device-specific vision attention backend.
-        self.attn_backend = get_vit_attn_backend(
-            head_size=head_size,
-            dtype=dtype,
-        )
+        self.attn_backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
 
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -604,10 +583,7 @@ class MMEncoderAttention(CustomOp):
 
     @torch.no_grad()
     def _record_amax_and_update_scales(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
     ) -> None:
         """Record Q/K/V amax into circular history and recompute scales.
 

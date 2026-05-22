@@ -34,11 +34,7 @@ class TestExtractHarmonyStreamingDelta:
     """Tests for extract_harmony_streaming_delta function."""
 
     @pytest.mark.parametrize(
-        "delta_text,expected_content",
-        [
-            ("Hello, world!", "Hello, world!"),
-            ("", ""),
-        ],
+        "delta_text,expected_content", [("Hello, world!", "Hello, world!"), ("", "")]
     )
     def test_final_channel_returns_content_delta(self, delta_text, expected_content):
         """Test that final channel returns a DeltaMessage with content."""
@@ -59,11 +55,7 @@ class TestExtractHarmonyStreamingDelta:
         assert tools_streamed is False
 
     @pytest.mark.parametrize(
-        "include_reasoning,expected_has_message",
-        [
-            (True, True),
-            (False, False),
-        ],
+        "include_reasoning,expected_has_message", [(True, True), (False, False)]
     )
     def test_analysis_channel_reasoning(self, include_reasoning, expected_has_message):
         """Test analysis channel respects include_reasoning flag."""
@@ -250,9 +242,7 @@ class TestExtractHarmonyStreamingDelta:
         assert tools_streamed is True
 
     def test_tool_call_index_from_previous_messages_without_functions_prefix(self):
-        messages = [
-            MockMessage(channel="commentary", recipient="tool1"),
-        ]
+        messages = [MockMessage(channel="commentary", recipient="tool1")]
         parser = MockStreamableParser(messages=messages)
 
         token_states = [
@@ -515,9 +505,7 @@ class TestToolCallsOnNonStandardChannels:
         assert tools_streamed is True
 
     def test_base_index_counts_tool_calls_on_comment_channel(self):
-        messages = [
-            MockMessage(channel="comment", recipient="functions.tool1"),
-        ]
+        messages = [MockMessage(channel="comment", recipient="functions.tool1")]
         parser = MockStreamableParser(messages=messages)
 
         token_states = [

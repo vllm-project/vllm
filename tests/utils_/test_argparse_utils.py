@@ -199,24 +199,15 @@ def test_dict_args(parser):
     assert parsed_args.model_name == "something.something"
     assert parsed_args.hf_overrides == {
         "key1": "val1",
-        "key2": {
-            "key3": "val2",
-            "key4": "val3",
-        },
+        "key2": {"key3": "val2", "key4": "val3"},
         "key5": "val4",
         "key_6": "val5",
-        "key-7": {
-            "key_8": "val6",
-        },
+        "key-7": {"key_8": "val6"},
         "key9": 100,
         "key10": 100.0,
         "key11": True,
-        "key12": {
-            "key13": None,
-        },
-        "key14": {
-            "key15": "-minus.and.dot",
-        },
+        "key12": {"key13": None},
+        "key14": {"key15": "-minus.and.dot"},
     }
     assert parsed_args.optimization_level == 1
     assert parsed_args.compilation_config == {
@@ -263,11 +254,7 @@ def test_model_specification(
 
     # Test model from config file works
     args = parser_with_config.parse_args(
-        [
-            "serve",
-            "--config",
-            cli_config_file_with_model,
-        ]
+        ["serve", "--config", cli_config_file_with_model]
     )
     assert args.model == "config-model"
     assert args.served_model_name == "mymodel"
@@ -321,12 +308,7 @@ def test_model_specification(
 
     # Test other config values are preserved
     args = parser_with_config.parse_args(
-        [
-            "serve",
-            "cli-model",
-            "--config",
-            cli_config_file_with_model,
-        ]
+        ["serve", "cli-model", "--config", cli_config_file_with_model]
     )
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
@@ -383,9 +365,7 @@ def test_load_config_file_nested(tmp_path):
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
         "port": 8000,
-        "compilation-config": {
-            "pass_config": {"fuse_allreduce_rms": True},
-        },
+        "compilation-config": {"pass_config": {"fuse_allreduce_rms": True}},
     }
     config_file_path = tmp_path / "nested_config.yaml"
     with open(config_file_path, "w") as f:
@@ -404,10 +384,7 @@ def test_load_config_file_nested(tmp_path):
 def test_nested_config_end_to_end(tmp_path):
     """Test end-to-end parsing of nested configs in YAML files."""
     config_data = {
-        "compilation-config": {
-            "mode": 3,
-            "pass_config": {"fuse_allreduce_rms": True},
-        },
+        "compilation-config": {"mode": 3, "pass_config": {"fuse_allreduce_rms": True}}
     }
     config_file_path = tmp_path / "nested_config.yaml"
     with open(config_file_path, "w") as f:
@@ -485,14 +462,7 @@ def test_compilation_config_mode_validator():
 def test_flat_product():
     # Check regular itertools.product behavior
     result1 = list(flat_product([1, 2, 3], ["a", "b"]))
-    assert result1 == [
-        (1, "a"),
-        (1, "b"),
-        (2, "a"),
-        (2, "b"),
-        (3, "a"),
-        (3, "b"),
-    ]
+    assert result1 == [(1, "a"), (1, "b"), (2, "a"), (2, "b"), (3, "a"), (3, "b")]
 
     # check that the tuples get flattened
     result2 = list(flat_product([(1, 2), (3, 4)], ["a", "b"], [(5, 6)]))

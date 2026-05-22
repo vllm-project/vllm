@@ -13,9 +13,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
     per_tensor_dequantize,
@@ -45,8 +43,7 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
 
 
 def _triton_per_token_group_quant_fp8_impl(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return per_token_group_quant_fp8(
         x, group_size, column_major_scales=False, use_ue8m0=False
@@ -54,18 +51,12 @@ def _triton_per_token_group_quant_fp8_impl(
 
 
 def _triton_per_token_group_quant_fp8_fake(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     x_fp8 = torch.empty((M, N), dtype=current_platform.fp8_dtype(), device=x.device)
     out_bs = torch.empty(
-        (
-            M,
-            (N + group_size - 1) // group_size,
-        ),
-        dtype=torch.float32,
-        device=x.device,
+        (M, (N + group_size - 1) // group_size), dtype=torch.float32, device=x.device
     )
     return x_fp8, out_bs
 
@@ -256,9 +247,7 @@ def silu_mul_quant_fp8_packed_triton(
         output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=input.device)
 
     output_scale_packed = torch.empty(
-        (num_packed_groups, tma_aligned_M),
-        dtype=torch.int32,
-        device=input.device,
+        (num_packed_groups, tma_aligned_M), dtype=torch.int32, device=input.device
     ).T[:M, :]
 
     BLOCK_M = 8
@@ -675,10 +664,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     tma_aligned_mn = ((mn + 3) // 4) * 4
 
     x_s_packed = torch.empty_strided(
-        (mn, k_num_packed_sf_k),
-        (1, tma_aligned_mn),
-        device=x.device,
-        dtype=torch.int32,
+        (mn, k_num_packed_sf_k), (1, tma_aligned_mn), device=x.device, dtype=torch.int32
     )
 
     # CUDA kernel path only (DeepGEMM + E8M0 is CUDA-specific).
@@ -694,13 +680,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         x_q_local = torch.empty_like(x_contiguous, device=x.device, dtype=dtype)
 
     torch.ops._C.per_token_group_fp8_quant_packed(
-        x_contiguous,
-        x_q_local,
-        x_s_packed,
-        group_size,
-        eps,
-        fp8_min,
-        fp8_max,
+        x_contiguous, x_q_local, x_s_packed, group_size, eps, fp8_min, fp8_max
     )
 
     # return a tensor with the original logical shape.
@@ -1267,9 +1247,7 @@ def process_fp8_weight_tensor_strategy(
 
     # Requantize with max scale
     weight_scale, weight = requantize_with_max_scale(
-        weight=weight,
-        weight_scale=weight_scale,
-        logical_widths=logical_widths,
+        weight=weight, weight_scale=weight_scale, logical_widths=logical_widths
     )
 
     weight = _maybe_pad_fp8_weight(weight)
@@ -1295,8 +1273,7 @@ def process_fp8_weight_channel_strategy(
 
 
 def process_fp8_weight_block_strategy(
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
+    weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process weights for block-wise quantization strategy."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -1346,8 +1323,7 @@ def process_fp8_weight_tensor_strategy_moe(
 
 
 def process_fp8_input_tensor_strategy_moe(
-    w13_input_scale: torch.Tensor,
-    w2_input_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor, w2_input_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
 

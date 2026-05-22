@@ -168,9 +168,7 @@ class LoRAKernelMeta:
         )
 
     def meta_args(
-        self,
-        token_nums: int,
-        specialize_active_lora: bool,
+        self, token_nums: int, specialize_active_lora: bool
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,

@@ -75,11 +75,7 @@ def test_get_num_unfinished_requests():
 
 
 @pytest.mark.parametrize(
-    "enable_prefix_caching, prompt_logprobs",
-    [
-        (False, None),
-        (True, 5),
-    ],
+    "enable_prefix_caching, prompt_logprobs", [(False, None), (True, 5)]
 )
 def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     """Test scheduling.
@@ -110,9 +106,7 @@ def test_schedule_multimodal_requests():
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
     requests = create_requests(
-        num_requests=10,
-        num_tokens=200,
-        mm_positions=mm_positions,
+        num_requests=10, num_tokens=200, mm_positions=mm_positions
     )
     for request in requests:
         scheduler.add_request(request)
@@ -153,14 +147,11 @@ def test_schedule_partial_requests():
        there is insufficient encoder budget.
     """
     scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        max_num_batched_tokens=1024,
+        model="llava-hf/llava-1.5-7b-hf", max_num_batched_tokens=1024
     )
     mm_positions = [[PlaceholderRange(offset=100, length=600)] for _ in range(3)]
     requests = create_requests(
-        num_requests=3,
-        num_tokens=800,
-        mm_positions=mm_positions,
+        num_requests=3, num_tokens=800, mm_positions=mm_positions
     )
     for request in requests:
         scheduler.add_request(request)
@@ -270,10 +261,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         long_prefill_token_threshold=400,
         enable_prefix_caching=enable_prefix_caching,
     )
-    requests = create_requests(
-        num_requests=3,
-        num_tokens=800,
-    )
+    requests = create_requests(num_requests=3, num_tokens=800)
     for request in requests:
         scheduler.add_request(request)
 
@@ -510,11 +498,7 @@ def test_check_stop_min_tokens():
 
     # Test case 1: num_output_tokens < min_tokens
     # Should return False (don't stop)
-    sampling_params = SamplingParams(
-        ignore_eos=False,
-        max_tokens=20,
-        min_tokens=5,
-    )
+    sampling_params = SamplingParams(ignore_eos=False, max_tokens=20, min_tokens=5)
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
         request_id="0",
@@ -531,14 +515,7 @@ def test_check_stop_min_tokens():
     # Test case 2: num_output_tokens >= min_tokens
     # Should follow normal stopping logic (stop on EOS)
     request.append_output_token_ids(
-        [
-            10,
-            11,
-            12,
-            13,
-            14,
-            EOS_TOKEN_ID,
-        ]
+        [10, 11, 12, 13, 14, EOS_TOKEN_ID]
     )  # 6 tokens > min_tokens
 
     result = check_stop(request, max_model_len=100)
@@ -547,9 +524,7 @@ def test_check_stop_min_tokens():
 
     # Test case 3: min_tokens = 0, should follow normal stopping logic
     sampling_params_no_min = SamplingParams(
-        ignore_eos=False,
-        max_tokens=20,
-        min_tokens=0,
+        ignore_eos=False, max_tokens=20, min_tokens=0
     )
     sampling_params_no_min.update_from_generation_config({}, EOS_TOKEN_ID)
     request_no_min = Request(
@@ -566,10 +541,7 @@ def test_check_stop_min_tokens():
 
     # Test case 4: min_tokens > 0 with stop token (not EOS)
     sampling_params_stop = SamplingParams(
-        ignore_eos=False,
-        max_tokens=20,
-        min_tokens=5,
-        stop_token_ids=[42],
+        ignore_eos=False, max_tokens=20, min_tokens=5, stop_token_ids=[42]
     )
     sampling_params_stop.update_from_generation_config({}, EOS_TOKEN_ID)
     request_stop = Request(
@@ -595,11 +567,7 @@ def test_check_stop_min_tokens():
 
 
 @pytest.mark.parametrize(
-    "enable_prefix_caching, prompt_logprobs",
-    [
-        (False, None),
-        (True, 5),
-    ],
+    "enable_prefix_caching, prompt_logprobs", [(False, None), (True, 5)]
 )
 def test_schedule_concurrent_batches(
     enable_prefix_caching: bool, prompt_logprobs: int | None
@@ -610,9 +578,7 @@ def test_schedule_concurrent_batches(
         enable_prefix_caching=enable_prefix_caching,
     )
     requests = create_requests(
-        num_requests=2,
-        num_tokens=512,
-        prompt_logprobs=prompt_logprobs,
+        num_requests=2, num_tokens=512, prompt_logprobs=prompt_logprobs
     )
 
     # Schedule the first request.
@@ -1088,9 +1054,7 @@ def test_scheduler_stats_waiting_queues():
 
 
 def _assert_right_scheduler_output(
-    output: SchedulerOutput,
-    num_requests: int,
-    expected_num_scheduled_tokens: int,
+    output: SchedulerOutput, num_requests: int, expected_num_scheduled_tokens: int
 ):
     """Check if SchedulerOutput is correct after remote KV cache hit."""
 
@@ -1812,10 +1776,7 @@ def create_scheduler_with_priority(
       {class}`Scheduler` instance with priority scheduling
     """
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        model=model, trust_remote_code=True, dtype="float16", seed=42
     )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
@@ -2249,7 +2210,7 @@ def test_priority_scheduling_preemption_victim_selection():
     # by checking the waiting queue order after adding requests with different
     # priorities
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1,  # Force sequential processing to test priority order
+        max_num_seqs=1  # Force sequential processing to test priority order
     )
 
     # Create requests with different priorities
@@ -2289,7 +2250,7 @@ def test_priority_scheduling_equal_priority_preemption():
     # This test verifies that arrival time is used as a tiebreaker for equal
     # priorities
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1,  # Force sequential processing
+        max_num_seqs=1  # Force sequential processing
     )
 
     # Create requests with same priority but different arrival times
@@ -2326,7 +2287,7 @@ def test_priority_scheduling_equal_priority_preemption():
 def test_priority_scheduling_waiting_queue_order():
     """Test that the waiting queue maintains priority order."""
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1,  # Only one request can run at a time
+        max_num_seqs=1  # Only one request can run at a time
     )
 
     # Create multiple requests with different priorities
@@ -2435,7 +2396,7 @@ def test_priority_scheduling_heap_property():
     """Test that the waiting queue maintains heap
     property for priority scheduling."""
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=1,  # Only one request can run at a time
+        max_num_seqs=1  # Only one request can run at a time
     )
 
     # Add requests in random priority order
@@ -2493,9 +2454,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     scheduler = create_scheduler(skip_tokenizer_init=True)
     structured_outputs_params = StructuredOutputsParams(regex="[0-9]+")
     sampling_params = SamplingParams(
-        ignore_eos=False,
-        max_tokens=16,
-        structured_outputs=structured_outputs_params,
+        ignore_eos=False, max_tokens=16, structured_outputs=structured_outputs_params
     )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     request = Request(
@@ -2820,8 +2779,7 @@ def _assert_right_encoder_cache_allocated(
 
 
 def _assert_right_ec_connector_metadata(
-    output: SchedulerOutput,
-    mm_features_list: list[MultiModalFeatureSpec],
+    output: SchedulerOutput, mm_features_list: list[MultiModalFeatureSpec]
 ):
     """Verify that ECConnector metadata EXACTLY matches the input MM data"""
     # Get the connector metadata
@@ -2900,10 +2858,7 @@ def test_ec_connector_text_only_request(use_kv_connector):
     NUM_PROMPT_TOKENS = 100
 
     # Create text-only request (no mm_positions)
-    requests = create_requests(
-        num_requests=1,
-        num_tokens=NUM_PROMPT_TOKENS,
-    )
+    requests = create_requests(num_requests=1, num_tokens=NUM_PROMPT_TOKENS)
     assert not requests[0].mm_features  # No MM data
 
     scheduler.add_request(requests[0])
@@ -3755,10 +3710,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
 
     # Should schedule no encoder input
-    _assert_right_encoder_inputs(
-        output,
-        expected_total_reqs=0,
-    )
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
 
 
 # ==============================================================================
@@ -3950,10 +3902,7 @@ def _create_encoder_decoder_scheduler(
     from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        model="facebook/opt-125m", trust_remote_code=True, dtype="float16", seed=42
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -4202,9 +4151,7 @@ def test_cross_attn_zero_blocks_without_encoder_inputs():
 
     # Create a text-only request (no mm_features).
     request = create_requests(
-        num_requests=1,
-        num_tokens=100,
-        req_ids=["req_text_only"],
+        num_requests=1, num_tokens=100, req_ids=["req_text_only"]
     )[0]
 
     # Text-only request has no encoder inputs.
@@ -4244,9 +4191,7 @@ def test_eagle3_mm_encoder_cache_with_shift():
     mm_start_pos = 100
     mm_length = 576
 
-    mm_positions = [
-        [PlaceholderRange(offset=mm_start_pos, length=mm_length)],
-    ]
+    mm_positions = [[PlaceholderRange(offset=mm_start_pos, length=mm_length)]]
 
     requests = create_requests(
         num_requests=1,

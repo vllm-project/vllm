@@ -329,9 +329,7 @@ class ElasticEPScalingState:
         elif state == ScaleUpNewEngineState.PREPARE:
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
-                tensor,
-                op=torch.distributed.ReduceOp.MAX,
-                group=self.new_dp_group,
+                tensor, op=torch.distributed.ReduceOp.MAX, group=self.new_dp_group
             )
             data = tensor.tolist()
             self.engine_core.engines_running = bool(data[0])
@@ -496,8 +494,7 @@ class ElasticEPScalingState:
         assert self.engine_core.available_gpu_memory_for_kv_cache > 0
         assert self.new_dp_group is not None and self.old_dp_group is not None
         ParallelConfig.sync_kv_cache_memory_size(
-            self.new_dp_group,
-            self.engine_core.available_gpu_memory_for_kv_cache,
+            self.new_dp_group, self.engine_core.available_gpu_memory_for_kv_cache
         )
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")

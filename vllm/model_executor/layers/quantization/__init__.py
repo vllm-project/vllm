@@ -46,11 +46,7 @@ QuantizationMethods = Literal[
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
-DEPRECATED_QUANTIZATION_METHODS = [
-    "tpu_int8",
-    "fbgemm_fp8",
-    "fp_quant",
-]
+DEPRECATED_QUANTIZATION_METHODS = ["tpu_int8", "fbgemm_fp8", "fp_quant"]
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
@@ -119,9 +115,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
     from .bitsandbytes import BitsAndBytesConfig
-    from .compressed_tensors.compressed_tensors import (
-        CompressedTensorsConfig,
-    )
+    from .compressed_tensors.compressed_tensors import CompressedTensorsConfig
     from .cpu_wna16 import CPUAWQConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config

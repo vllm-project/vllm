@@ -18,10 +18,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import (
-    Attention,
-    CrossAttention,
-)
+from vllm.model_executor.layers.attention import Attention, CrossAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -32,10 +29,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
@@ -55,15 +49,9 @@ from vllm.transformers_utils.processors.cohere_asr import (
     CohereASRFeatureExtractor,
     CohereASRProcessor,
 )
-from vllm.v1.attention.backend import (
-    AttentionType,
-)
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsTranscription,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 logger = init_logger(__name__)
@@ -180,10 +168,7 @@ class CohereASRAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -239,9 +224,7 @@ class CohereASRCrossAttention(CohereASRAttention):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
@@ -371,9 +354,7 @@ class CohereASRDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm_1(hidden_states)
@@ -383,8 +364,7 @@ class CohereASRDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.layer_norm_2(hidden_states)
         hidden_states = self.second_sub_layer(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+            hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states
         )
 
         hidden_states = residual + hidden_states
@@ -407,8 +387,7 @@ class TransformerEmbedding(nn.Module):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx)
         self.position_embedding = FixedPositionalEncoding(
-            hidden_size=hidden_size,
-            max_sequence_length=max_target_positions,
+            hidden_size=hidden_size, max_sequence_length=max_target_positions
         )
         self.layer_norm = nn.LayerNorm(hidden_size)
 
@@ -457,8 +436,7 @@ class CohereASRDecoder(nn.Module):
         hidden_states = self.get_input_embeddings(input_ids, positions)
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
+                hidden_states, encoder_hidden_states=encoder_hidden_states
             )
 
         hidden_states = self.final_layer_norm(hidden_states)
@@ -977,12 +955,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         use_bias (bool): whether to remove bias in linear and conv layers
     """
 
-    def __init__(
-        self,
-        n_head: int,
-        n_feat: int,
-        use_bias: bool = True,
-    ) -> None:
+    def __init__(self, n_head: int, n_feat: int, use_bias: bool = True) -> None:
         """Construct an MultiHeadedAttention object."""
         super().__init__()
 
@@ -996,10 +969,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         self.linear_out = nn.Linear(n_feat, n_feat, bias=use_bias)
 
     def forward_qkv(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Transforms query, key and value.
         Args:
@@ -1022,10 +992,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         return q, k, v
 
     def forward_attention(
-        self,
-        value: torch.Tensor,
-        scores: torch.Tensor,
-        mask: torch.Tensor | None,
+        self, value: torch.Tensor, scores: torch.Tensor, mask: torch.Tensor | None
     ) -> torch.Tensor:
         """Compute attention context vector.
         Args:
@@ -1100,11 +1067,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         use_bias: bool = True,
     ) -> None:
         """Construct an RelPositionMultiHeadedAttention object."""
-        super().__init__(
-            n_head=n_head,
-            n_feat=n_feat,
-            use_bias=use_bias,
-        )
+        super().__init__(n_head=n_head, n_feat=n_feat, use_bias=use_bias)
         # linear transformation for positional encoding
         self.linear_pos = nn.Linear(n_feat, n_feat, bias=False)
         # these two learnable biases are used in matrix c and matrix d
@@ -1286,20 +1249,10 @@ class ConformerLayer(torch.nn.Module):
 
         x = self.norm_self_att(residual)
         if self.self_attention_model == "rel_pos":
-            x = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                mask=att_mask,
-                pos_emb=pos_emb,
-            )
+            x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb)
         elif self.self_attention_model == "rel_pos_local_attn":
             x = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                pad_mask=pad_mask,
-                pos_emb=pos_emb,
+                query=x, key=x, value=x, pad_mask=pad_mask, pos_emb=pos_emb
             )
         elif self.self_attention_model == "abs_pos":
             x = self.self_attn(query=x, key=x, value=x, mask=att_mask)
@@ -1369,17 +1322,14 @@ class ConformerEncoder(nn.Module):
         self.self_attention_model = self_attention_model
 
         # Setting up the att_context_size
-        (
-            _,
-            self.att_context_size,
-            _,
-            self.conv_context_size,
-        ) = self._calc_context_sizes(
-            att_context_style=att_context_style,
-            att_context_size=att_context_size,
-            att_context_probs=att_context_probs,
-            conv_context_size=conv_context_size,
-            conv_kernel_size=conv_kernel_size,
+        (_, self.att_context_size, _, self.conv_context_size) = (
+            self._calc_context_sizes(
+                att_context_style=att_context_style,
+                att_context_size=att_context_size,
+                att_context_probs=att_context_probs,
+                conv_context_size=conv_context_size,
+                conv_kernel_size=conv_kernel_size,
+            )
         )
 
         if xscaling:
@@ -1426,9 +1376,7 @@ class ConformerEncoder(nn.Module):
         self.pos_emb_max_len = pos_emb_max_len
         assert self_attention_model == "rel_pos"
         self.pos_enc = RelPositionalEncoding(
-            d_model=d_model,
-            max_len=pos_emb_max_len,
-            xscale=self.xscale,
+            d_model=d_model, max_len=pos_emb_max_len, xscale=self.xscale
         )
 
         self.layers = nn.ModuleList()
@@ -1475,9 +1423,7 @@ class ConformerEncoder(nn.Module):
         self.pos_enc.extend_pe(max_audio_length, device, dtype)
 
     def forward(
-        self,
-        audio_signal: torch.Tensor,
-        length: torch.Tensor,
+        self, audio_signal: torch.Tensor, length: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if audio_signal.shape[-2] != self._feat_in:
             raise ValueError(
@@ -1487,15 +1433,10 @@ class ConformerEncoder(nn.Module):
                 f"{audio_signal.shape[-2]}."
             )
 
-        return self.forward_internal(
-            audio_signal,
-            length,
-        )
+        return self.forward_internal(audio_signal, length)
 
     def forward_internal(
-        self,
-        audio_signal: torch.Tensor,
-        length: torch.Tensor | None = None,
+        self, audio_signal: torch.Tensor, length: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if length is None:
             length = audio_signal.new_full(
@@ -1527,10 +1468,7 @@ class ConformerEncoder(nn.Module):
 
         for lth, layer in enumerate(self.layers):
             audio_signal = layer(
-                x=audio_signal,
-                att_mask=att_mask,
-                pos_emb=pos_emb,
-                pad_mask=pad_mask,
+                x=audio_signal, att_mask=att_mask, pos_emb=pos_emb, pad_mask=pad_mask
             )
 
         if self.out_proj is not None:
@@ -1717,8 +1655,7 @@ class CohereASRModel(nn.Module):
         self.encoder = ConformerEncoder(vllm_config=vllm_config)
 
         self.decoder = CohereASRDecoder(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "decoder"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "decoder")
         )
 
         if self.encoder.d_model != self.decoder.hidden_size:
@@ -1734,9 +1671,7 @@ class CohereASRModel(nn.Module):
     ) -> torch.Tensor:
         enc_states = torch.cat(encoder_outputs, dim=0) if len(encoder_outputs) else None
         decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_hidden_states=enc_states,
+            input_ids=input_ids, positions=positions, encoder_hidden_states=enc_states
         )
 
         return decoder_outputs
@@ -1867,8 +1802,7 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
 
             tokenizer = self.ctx.tokenizer
             self._cached_hf_processor = CohereASRProcessor(
-                feature_extractor=feature_extractor,
-                tokenizer=tokenizer,
+                feature_extractor=feature_extractor, tokenizer=tokenizer
             )
         return self._cached_hf_processor
 
@@ -1925,9 +1859,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
         return True
 
     def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
+        self, prompt: str | list[int], mm_items: MultiModalDataItems
     ) -> str | list[int]:
         return [0]
 
@@ -1941,24 +1873,16 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
+            mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
@@ -2047,9 +1971,7 @@ class CohereAsrForConditionalGeneration(
         # to get prompt_text but it wont have the first token "▁".
         prompt_text = None
         prompt_token_ids = cls._get_default_prompt_token_ids(
-            tokenizer,
-            model_config,
-            language,
+            tokenizer, model_config, language
         )
 
         return TokensPrompt(
@@ -2077,10 +1999,7 @@ class CohereAsrForConditionalGeneration(
 
     @classmethod
     def _get_default_prompt_token_ids(
-        cls,
-        tokenizer: Any,
-        model_config: ModelConfig,
-        language: str,
+        cls, tokenizer: Any, model_config: ModelConfig, language: str
     ) -> list[int]:
         cache_key = (
             getattr(model_config, "tokenizer", None),
@@ -2183,9 +2102,7 @@ class CohereAsrForConditionalGeneration(
         if encoder_outputs is None:
             encoder_outputs = []
         decoder_outputs = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_outputs=encoder_outputs,
+            input_ids=input_ids, positions=positions, encoder_outputs=encoder_outputs
         )
 
         return decoder_outputs

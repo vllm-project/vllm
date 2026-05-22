@@ -9,24 +9,16 @@ Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients.
 """
 
-from vllm.entrypoints.anthropic.protocol import (
-    AnthropicMessagesRequest,
-)
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
-def _make_request(
-    messages: list[dict],
-    **kwargs,
-) -> AnthropicMessagesRequest:
+def _make_request(messages: list[dict], **kwargs) -> AnthropicMessagesRequest:
     return AnthropicMessagesRequest(
-        model="test-model",
-        max_tokens=128,
-        messages=messages,
-        **kwargs,
+        model="test-model", max_tokens=128, messages=messages, **kwargs
     )
 
 
@@ -37,34 +29,20 @@ def _make_request(
 
 class TestConvertImageSourceToUrl:
     def test_base64_source(self):
-        source = {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": "iVBORw0KGgo=",
-        }
+        source = {"type": "base64", "media_type": "image/jpeg", "data": "iVBORw0KGgo="}
         assert _img_url(source) == "data:image/jpeg;base64,iVBORw0KGgo="
 
     def test_base64_png(self):
-        source = {
-            "type": "base64",
-            "media_type": "image/png",
-            "data": "AAAA",
-        }
+        source = {"type": "base64", "media_type": "image/png", "data": "AAAA"}
         assert _img_url(source) == "data:image/png;base64,AAAA"
 
     def test_url_source(self):
-        source = {
-            "type": "url",
-            "url": "https://example.com/image.jpg",
-        }
+        source = {"type": "url", "url": "https://example.com/image.jpg"}
         assert _img_url(source) == "https://example.com/image.jpg"
 
     def test_missing_type_defaults_to_base64(self):
         """When 'type' is absent, treat as base64."""
-        source = {
-            "media_type": "image/webp",
-            "data": "UklGR",
-        }
+        source = {"media_type": "image/webp", "data": "UklGR"}
         assert _img_url(source) == "data:image/webp;base64,UklGR"
 
     def test_missing_media_type_defaults_to_jpeg(self):
@@ -193,10 +171,7 @@ class TestToolResultContent:
 
     def test_tool_result_text_blocks(self):
         request = self._make_tool_result_request(
-            [
-                {"type": "text", "text": "line 1"},
-                {"type": "text", "text": "line 2"},
-            ]
+            [{"type": "text", "text": "line 1"}, {"type": "text", "text": "line 2"}]
         )
         result = _convert(request)
 
@@ -283,10 +258,7 @@ class TestToolResultContent:
                 },
                 {
                     "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": "https://example.com/img2.jpg",
-                    },
+                    "source": {"type": "url", "url": "https://example.com/img2.jpg"},
                 },
             ]
         )
@@ -299,10 +271,7 @@ class TestToolResultContent:
         ]
         assert len(follow_up) == 1
         urls = [p["image_url"]["url"] for p in follow_up[0]["content"]]
-        assert urls == [
-            "data:image/png;base64,IMG1",
-            "https://example.com/img2.jpg",
-        ]
+        assert urls == ["data:image/png;base64,IMG1", "https://example.com/img2.jpg"]
 
     def test_tool_result_none_content(self):
         request = self._make_tool_result_request(None)
@@ -315,9 +284,7 @@ class TestToolResultContent:
     def test_tool_result_no_follow_up_when_no_images(self):
         """Ensure no extra user message is added when there are no images."""
         request = self._make_tool_result_request(
-            [
-                {"type": "text", "text": "just text"},
-            ]
+            [{"type": "text", "text": "just text"}]
         )
         result = _convert(request)
 

@@ -100,10 +100,7 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
                 set_weight_attrs(param, {"is_sharded_weight": True})
 
     def reshape_fairseq2_weights(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
-        params: dict[str, Parameter],
+        self, name: str, loaded_weight: torch.Tensor, params: dict[str, Parameter]
     ) -> tuple[str, torch.Tensor]:
         """Reshape fairseq2's weights."""
 

@@ -47,10 +47,7 @@ COMMON_BROADCAST_SETTINGS = {
     "tensor_parallel_size": 2,
     "hf_model_kwargs": {"device_map": "auto"},
     "image_size_factors": [(0.25, 0.5, 1.0)],
-    "distributed_executor_backend": (
-        "ray",
-        "mp",
-    ),
+    "distributed_executor_backend": ("ray", "mp"),
 }
 
 ### Test configuration for specific models
@@ -137,10 +134,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         # Paligemma uses its own sample prompts because the default one fails
         single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "caption es",
-                "cherry_blossom": "What is in the picture?",
-            }
+            {"stop_sign": "caption es", "cherry_blossom": "What is in the picture?"}
         ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
@@ -176,11 +170,7 @@ VLM_TEST_SETTINGS = {
     ),
     "qwen3_vl": VLMTestInfo(
         models=["Qwen/Qwen3-VL-4B-Instruct"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
         enforce_eager=False,
         needs_video_metadata=True,
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
@@ -193,9 +183,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[
-            pytest.mark.core_model,
-        ],
+        marks=[pytest.mark.core_model],
         vllm_runner_kwargs={"attention_backend": "TRITON_ATTN"}
         if current_platform.is_rocm()
         else {},
@@ -247,9 +235,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.gemma3_vllm_to_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "transformers",
-        },
+        vllm_runner_kwargs={"model_impl": "transformers"},
         marks=[
             pytest.mark.core_model,
             *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
@@ -265,9 +251,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "transformers",
-        },
+        vllm_runner_kwargs={"model_impl": "transformers"},
         marks=[pytest.mark.core_model],
     ),
     # Pixel values from processor are not 4D or 5D arrays
@@ -289,7 +273,7 @@ VLM_TEST_SETTINGS = {
                     "mm_processor_kwargs": {
                         "min_pixels": 256 * 28 * 28,
                         "max_pixels": 1280 * 28 * 28,
-                    },
+                    }
                 }
                 if current_platform.is_rocm()
                 else {}
@@ -552,10 +536,7 @@ VLM_TEST_SETTINGS = {
         },
     ),
     "h2ovl": VLMTestInfo(
-        models=[
-            "h2oai/h2ovl-mississippi-800m",
-            "h2oai/h2ovl-mississippi-2b",
-        ],
+        models=["h2oai/h2ovl-mississippi-800m", "h2oai/h2ovl-mississippi-2b"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>",
         single_image_prompts=IMAGE_ASSETS.prompts(
@@ -607,9 +588,7 @@ VLM_TEST_SETTINGS = {
         ],
     ),
     "intern_vl-video": VLMTestInfo(
-        models=[
-            "OpenGVLab/InternVL3-1B",
-        ],
+        models=["OpenGVLab/InternVL3-1B"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
         video_idx_to_prompt=lambda idx: "<video>",
@@ -626,11 +605,7 @@ VLM_TEST_SETTINGS = {
     ),
     "intern_vl-hf": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
         video_idx_to_prompt=lambda idx: "<video>",
@@ -644,9 +619,7 @@ VLM_TEST_SETTINGS = {
         # shard files which no longer exist (consolidated into a single
         # model.safetensors on 2026-03-20). Re-add once upstream fixes
         # the index file.
-        models=[
-            "PerceptronAI/Isaac-0.2-2B-Preview",
-        ],
+        models=["PerceptronAI/Isaac-0.2-2B-Preview"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: (
             f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -729,7 +702,7 @@ VLM_TEST_SETTINGS = {
         custom_test_opts=[
             CustomTestOptions(
                 inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
-                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
                 ),
                 limit_mm_per_prompt={"video": 4},
             )
@@ -1023,11 +996,7 @@ VLM_TEST_SETTINGS = {
     ),
     "tarsier2": VLMTestInfo(
         models=["omni-research/Tarsier2-Recap-7b"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
         prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
@@ -1076,10 +1045,7 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
         custom_test_opts=[
-            CustomTestOptions(
-                inputs=inp,
-                limit_mm_per_prompt={"image": 2},
-            )
+            CustomTestOptions(inputs=inp, limit_mm_per_prompt={"image": 2})
             for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
         # TODO: Remove skip once model has been upstreamed to Transformers
@@ -1102,7 +1068,7 @@ VLM_TEST_SETTINGS = {
         custom_test_opts=[
             CustomTestOptions(
                 inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
-                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
             )
@@ -1127,9 +1093,7 @@ VLM_TEST_SETTINGS = {
 
 
 def _mark_splits(
-    test_settings: dict[str, VLMTestInfo],
-    *,
-    num_groups: int,
+    test_settings: dict[str, VLMTestInfo], *, num_groups: int
 ) -> dict[str, VLMTestInfo]:
     name_by_test_info_id = {id(v): k for k, v in test_settings.items()}
     test_infos_by_model = defaultdict[str, list[VLMTestInfo]](list)

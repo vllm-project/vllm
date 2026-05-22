@@ -60,10 +60,7 @@ def compute_retention_mask(
 
     # Use reshape instead of einops to avoid graph breaks
     video_embeds = video_embeds.reshape(
-        T,
-        H // spatial_merge_size,
-        W // spatial_merge_size,
-        video_embeds.size(-1),
+        T, H // spatial_merge_size, W // spatial_merge_size, video_embeds.size(-1)
     )
     tokens_per_frame = (H // spatial_merge_size) * (W // spatial_merge_size)
     # Core EVS

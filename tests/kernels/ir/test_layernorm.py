@@ -128,8 +128,7 @@ class TestRMSNorm:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="aiter is only supported on ROCm",
+    not current_platform.is_rocm(), reason="aiter is only supported on ROCm"
 )
 def test_aiter_rejects_unsupported_dtypes():
     torch.set_default_device(current_platform.device_type)

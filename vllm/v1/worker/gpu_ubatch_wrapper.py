@@ -250,11 +250,7 @@ class UBatchWrapper:
             ubatch_threads = []
             for metadata in ubatch_metadata:
                 thread = threading.Thread(
-                    target=_capture_ubatch_thread,
-                    args=(
-                        results,
-                        metadata,
-                    ),
+                    target=_capture_ubatch_thread, args=(results, metadata)
                 )
                 ubatch_threads.append(thread)
                 thread.start()
@@ -262,8 +258,7 @@ class UBatchWrapper:
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
-                cudagraph=torch.cuda.CUDAGraph(),
-                ubatch_metadata=ubatch_metadata,
+                cudagraph=torch.cuda.CUDAGraph(), ubatch_metadata=ubatch_metadata
             )
             if self.graph_pool is not None:
                 set_graph_pool_id(self.graph_pool)
@@ -313,12 +308,7 @@ class UBatchWrapper:
             ubatch_threads = []
             for metadata in ubatch_metadata:
                 thread = threading.Thread(
-                    target=_ubatch_thread,
-                    args=(
-                        results,
-                        model,
-                        metadata,
-                    ),
+                    target=_ubatch_thread, args=(results, model, metadata)
                 )
                 ubatch_threads.append(thread)
                 thread.start()

@@ -67,10 +67,7 @@ logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: "AutoGPTQConfig",
-    layer: RoutedExperts,
-    prefix: str,
-    moe_method_cls: type,
+    config: "AutoGPTQConfig", layer: RoutedExperts, prefix: str, moe_method_cls: type
 ):
     cloned_config = deepcopy(config)
 
@@ -96,10 +93,7 @@ class AutoGPTQConfig(QuantizationConfig):
     """Config class for AutoGPTQ quantization using Marlin kernels."""
 
     # (num_bits, is_sym) -> quant_type
-    TYPE_MAP = {
-        (4, True): scalar_types.uint4b8,
-        (8, True): scalar_types.uint8b128,
-    }
+    TYPE_MAP = {(4, True): scalar_types.uint4b8, (8, True): scalar_types.uint8b128}
 
     def __init__(
         self,
@@ -389,10 +383,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
         # Activation order
         g_idx = RowvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
+            data=torch.empty(input_size_per_partition, dtype=torch.int32),
             input_dim=0,
             weight_loader=weight_loader,
         )
@@ -407,9 +398,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         }
         weight_scale_args = {
             "data": torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
+                scales_and_zp_size, output_size_per_partition, dtype=params_dtype
             ),
             "weight_loader": weight_loader,
         }
@@ -452,10 +441,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
@@ -463,11 +449,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 class AutoGPTQMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
-    def __init__(
-        self,
-        quant_config: AutoGPTQConfig,
-        moe: FusedMoEConfig,
-    ) -> None:
+    def __init__(self, quant_config: AutoGPTQConfig, moe: FusedMoEConfig) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
@@ -599,40 +581,28 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         # don't shard the w2 scales when running act order
         set_weight_attrs(w2_qzeros, {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
+            torch.empty(num_experts, hidden_size, dtype=torch.int32),
             requires_grad=False,
         )
         layer.register_parameter("w13_g_idx", w13_g_idx)
         set_weight_attrs(w13_g_idx, extra_weight_attrs)
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
+                num_experts, intermediate_size_per_partition, dtype=torch.int32
             ),
             requires_grad=False,
         )
         layer.register_parameter("w2_g_idx", w2_g_idx)
         set_weight_attrs(w2_g_idx, extra_weight_attrs)
         w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
+            torch.empty(num_experts, hidden_size, dtype=torch.int32),
             requires_grad=False,
         )
         layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
+                num_experts, intermediate_size_per_partition, dtype=torch.int32
             ),
             requires_grad=False,
         )
@@ -759,11 +729,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
+    def select_gemm_impl(self, prepare_finalize, layer: RoutedExperts):
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "
             "initialization logic. This function should not be called."

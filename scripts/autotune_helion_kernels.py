@@ -102,11 +102,7 @@ def autotune_kernel(
         error_msg = f"Kernel '{kernel_name}' not found in registry"
         logger.error(error_msg)
         return AutotuneResult(
-            status="error",
-            message=error_msg,
-            successful=0,
-            failed=0,
-            configs={},
+            status="error", message=error_msg, successful=0, failed=0, configs={}
         )
 
     try:
@@ -116,11 +112,7 @@ def autotune_kernel(
         error_msg = f"Kernel '{kernel_name}' has no input generator registered"
         logger.error(error_msg)
         return AutotuneResult(
-            status="error",
-            message=error_msg,
-            successful=0,
-            failed=0,
-            configs={},
+            status="error", message=error_msg, successful=0, failed=0, configs={}
         )
 
     try:
@@ -196,11 +188,7 @@ def autotune_kernel(
                 )
 
             except (RuntimeError, ValueError, OSError) as e:
-                logger.exception(
-                    "Failed to autotune config '%s': %s",
-                    config_key,
-                    e,
-                )
+                logger.exception("Failed to autotune config '%s': %s", config_key, e)
                 failed_configs.append(config_key)
 
         total_duration = time.time() - total_start_time
@@ -227,11 +215,7 @@ def autotune_kernel(
         error_msg = f"Unexpected error: {e}"
         logger.exception("Failed to autotune kernel '%s': %s", kernel_name, e)
         return AutotuneResult(
-            status="error",
-            message=error_msg,
-            successful=0,
-            failed=0,
-            configs={},
+            status="error", message=error_msg, successful=0, failed=0, configs={}
         )
 
 
@@ -338,9 +322,7 @@ def main():
     )
 
     parser.add_argument(
-        "--kernels",
-        nargs="+",
-        help="Kernel(s) to autotune (default: all kernels)",
+        "--kernels", nargs="+", help="Kernel(s) to autotune (default: all kernels)"
     )
 
     parser.add_argument(
@@ -350,9 +332,7 @@ def main():
     )
 
     parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List available Helion kernels and exit",
+        "--list", action="store_true", help="List available Helion kernels and exit"
     )
 
     parser.add_argument(
@@ -374,11 +354,7 @@ def main():
         ),
     )
 
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
 

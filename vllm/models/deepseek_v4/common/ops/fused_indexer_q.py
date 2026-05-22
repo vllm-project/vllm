@@ -12,10 +12,7 @@ MXFP4_BLOCK_SIZE = 32
 
 @triton.jit
 def _get_cos_sin(
-    cos_sin_cache_ptr,
-    cos_sin_cache_stride,
-    pos,
-    HALF_ROT_DIM: tl.constexpr,
+    cos_sin_cache_ptr, cos_sin_cache_stride, pos, HALF_ROT_DIM: tl.constexpr
 ):
     block = tl.arange(0, HALF_ROT_DIM)
     cos = tl.load(cos_sin_cache_ptr + pos * cos_sin_cache_stride + block)
@@ -102,10 +99,7 @@ def _fused_indexer_q_rope_quant_kernel(
 
     pos = tl.load(pos_ptr + tok_idx)
     cos, sin = _get_cos_sin(
-        index_q_cos_sin_ptr,
-        index_q_cos_sin_stride,
-        pos,
-        INDEX_Q_HALF_ROT_DIM,
+        index_q_cos_sin_ptr, index_q_cos_sin_stride, pos, INDEX_Q_HALF_ROT_DIM
     )
     half_offset = tl.arange(0, INDEX_Q_HALF_ROT_DIM)
     base_ptr = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
@@ -290,10 +284,7 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
     use_fp4: bool = False,
-) -> tuple[
-    torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    torch.Tensor,
-]:
+) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
     """Fused RoPE + quantize Q for the sparse indexer.
 
     Weight-fold semantics (important — the two paths differ):

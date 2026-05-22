@@ -947,10 +947,7 @@ def pretty_str(envinfo):
         "libigdgmm_version",
         "vllm_xpu_kernels_version",
     ]
-    all_xpu_fields = dynamic_xpu_fields + [
-        "oneapi_compiler_version",
-        "sycl_version",
-    ]
+    all_xpu_fields = dynamic_xpu_fields + ["oneapi_compiler_version", "sycl_version"]
     all_dynamic_xpu_fields_missing = all(
         mutable_dict[field] is None for field in dynamic_xpu_fields
     )

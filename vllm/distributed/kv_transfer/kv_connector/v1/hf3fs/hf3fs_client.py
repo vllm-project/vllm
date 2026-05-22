@@ -107,16 +107,10 @@ class Hf3fsClient:
 
             numel = self.bs * self.entries
             self.r_pinned = torch.empty(
-                numel,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=True,
+                numel, dtype=torch.uint8, device="cpu", pin_memory=True
             )
             self.w_pinned = torch.empty(
-                numel,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=True,
+                numel, dtype=torch.uint8, device="cpu", pin_memory=True
             )
 
             self.numa = -1

@@ -28,9 +28,7 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsW4A8Fp8"]
-W4A8_SUPPORTED_TYPES_MAP = {
-    4: scalar_types.int4,
-}
+W4A8_SUPPORTED_TYPES_MAP = {4: scalar_types.int4}
 W4A8_SUPPORTED_BITS = list(W4A8_SUPPORTED_TYPES_MAP.keys())
 
 
@@ -134,9 +132,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         weight_scale_args = {
             "weight_loader": weight_loader,
             "data": torch.empty(
-                output_size_per_partition,
-                scales_and_zp_size,
-                dtype=params_dtype,
+                output_size_per_partition, scales_and_zp_size, dtype=params_dtype
             ),
         }
 

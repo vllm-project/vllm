@@ -16,9 +16,7 @@ PROMPT_TEMPLATE = "<｜begin▁of▁sentence｜>You are a helpful assistant.\n\n
 
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int):
-    prompts = [
-        PROMPT_TEMPLATE.format(context="Who are you?"),
-    ]
+    prompts = [PROMPT_TEMPLATE.format(context="Who are you?")]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
     outputs = llm.generate(
         prompts,
@@ -34,7 +32,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     # return generated_texts
     expected_lora_output = [
-        "I am \u5f20\u5b50\u8c6a, an AI assistant developed by \u9648\u58eb\u680b.",  # noqa: E501
+        "I am \u5f20\u5b50\u8c6a, an AI assistant developed by \u9648\u58eb\u680b."  # noqa: E501
     ]
     for i in range(len(expected_lora_output)):
         assert generated_texts[i].startswith(expected_lora_output[i])

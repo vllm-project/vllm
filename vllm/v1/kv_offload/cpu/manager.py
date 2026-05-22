@@ -86,9 +86,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._free_list.append(block.block_id)
 
     def _get_load_store_spec(
-        self,
-        keys: Iterable[OffloadKey],
-        blocks: Iterable[BlockStatus],
+        self, keys: Iterable[OffloadKey], blocks: Iterable[BlockStatus]
     ) -> CPULoadStoreSpec:
         return CPULoadStoreSpec([block.block_id for block in blocks])
 
@@ -111,9 +109,7 @@ class CPUOffloadingManager(OffloadingManager):
         return True
 
     def prepare_load(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
         blocks = []
         for key in keys:
@@ -137,9 +133,7 @@ class CPUOffloadingManager(OffloadingManager):
             block.ref_cnt -= 1
 
     def prepare_store(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         if self.counts is not None:
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
@@ -169,11 +163,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         if to_evict and self.events is not None:
             self.events.append(
-                OffloadingEvent(
-                    keys=to_evict,
-                    medium=self.medium,
-                    removed=True,
-                )
+                OffloadingEvent(keys=to_evict, medium=self.medium, removed=True)
             )
 
         blocks = self._allocate_blocks(keys_to_store)
@@ -188,9 +178,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_spec = self._get_load_store_spec(keys_to_store, blocks)
 
         return PrepareStoreOutput(
-            keys_to_store=keys_to_store,
-            store_spec=store_spec,
-            evicted_keys=to_evict,
+            keys_to_store=keys_to_store, store_spec=store_spec, evicted_keys=to_evict
         )
 
     def complete_store(
@@ -216,11 +204,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         if stored_keys and self.events is not None:
             self.events.append(
-                OffloadingEvent(
-                    keys=stored_keys,
-                    medium=self.medium,
-                    removed=False,
-                )
+                OffloadingEvent(keys=stored_keys, medium=self.medium, removed=False)
             )
 
     def reset_cache(self) -> None:

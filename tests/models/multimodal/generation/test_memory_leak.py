@@ -30,10 +30,7 @@ MEASURED_ROUNDS = 16
 GPU_GROWTH_THRESHOLD_MIB = 0
 CPU_PEAK_GROWTH_THRESHOLD_MIB = 0
 
-SAMPLING_PARAMS = SamplingParams(
-    temperature=0.0,
-    max_tokens=16,
-)
+SAMPLING_PARAMS = SamplingParams(temperature=0.0, max_tokens=16)
 
 
 def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
@@ -44,15 +41,9 @@ def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": f"Ignore this random string: {random_text}",
-                },
+                {"type": "text", "text": f"Ignore this random string: {random_text}"},
                 {"type": "image_url", "image_url": {"url": image_url}},
-                {
-                    "type": "text",
-                    "text": "Describe this image in one short sentence.",
-                },
+                {"type": "text", "text": "Describe this image in one short sentence."},
             ],
         }
     ]

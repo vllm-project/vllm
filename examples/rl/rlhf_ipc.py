@@ -58,9 +58,7 @@ MODEL_NAME = "facebook/opt-125m"
 @ray.remote
 class TrainModel:
     def __init__(self, llm_handle: ray.actor.ActorHandle):
-        self.train_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-        )
+        self.train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
         self.train_model.to("cuda:0")
         self.llm_handle = llm_handle
 
@@ -79,8 +77,7 @@ class TrainModel:
             send_mode="ray", llm_handle=llm_handle, packed=packed
         )
         IPCWeightTransferEngine.trainer_send_weights(
-            iterator=self.train_model.named_parameters(),
-            trainer_args=trainer_args,
+            iterator=self.train_model.named_parameters(), trainer_args=trainer_args
         )
 
 
@@ -94,8 +91,7 @@ llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
     scheduling_strategy=PlacementGroupSchedulingStrategy(
-        placement_group=pg_colocate,
-        placement_group_capture_child_tasks=True,
+        placement_group=pg_colocate, placement_group_capture_child_tasks=True
     ),
 )(MyLLM).remote(
     model=MODEL_NAME,

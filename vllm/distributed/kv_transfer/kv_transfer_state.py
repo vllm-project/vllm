@@ -51,9 +51,7 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
 def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
     """Broadcast engine_id from TP rank 0 so all workers in a
     multi-node TP group share the same value."""
-    from vllm.distributed.parallel_state import (
-        get_tp_group,
-    )
+    from vllm.distributed.parallel_state import get_tp_group
 
     assert vllm_config.kv_transfer_config is not None
     synced_id = get_tp_group().broadcast_object(

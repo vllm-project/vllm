@@ -72,10 +72,7 @@ if TYPE_CHECKING:
 
 
 def rms_norm_weight_loader(offset: float) -> LoaderFunction:
-    return composed_weight_loader(
-        default_weight_loader,
-        lambda x: x + offset,
-    )
+    return composed_weight_loader(default_weight_loader, lambda x: x + offset)
 
 
 class DenseMLP(nn.Module):
@@ -179,9 +176,7 @@ class Plamo3AttentionMixer(nn.Module):
             max_position = min(max_position, vllm_config.model_config.max_model_len)
 
         self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
+            self.head_dim, max_position=max_position, rope_parameters=rope_parameters
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         set_weight_attrs(
@@ -233,8 +228,7 @@ class Plamo3DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.mixer = Plamo3AttentionMixer(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mixer",
+            vllm_config=vllm_config, prefix=f"{prefix}.mixer"
         )
 
         self.mlp = DenseMLP(
@@ -304,9 +298,7 @@ class Plamo3Decoder(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
         return hidden_states, residual
 
@@ -333,8 +325,7 @@ class Plamo3Model(nn.Module):
         self.layers = Plamo3Decoder(vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         set_weight_attrs(
-            self.norm.weight,
-            {"weight_loader": rms_norm_weight_loader(offset=1.0)},
+            self.norm.weight, {"weight_loader": rms_norm_weight_loader(offset=1.0)}
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -422,10 +413,7 @@ class Plamo3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

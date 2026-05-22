@@ -140,10 +140,7 @@ class EagleSpeculator:
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = DecodeEagleCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            decode_query_len=1,
+            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
         )
         # Share a single pool between prefill and decode since they never
         # execute concurrently.
@@ -279,11 +276,7 @@ class EagleSpeculator:
         logits = self.model.compute_logits(sample_hidden_states)
 
         self.draft_tokens[:num_reqs, 0] = self._sample_draft(
-            logits,
-            idx_mapping,
-            pos,
-            self.current_draft_step,
-            self.draft_logits,
+            logits, idx_mapping, pos, self.current_draft_step, self.draft_logits
         )
         self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = pos
@@ -308,10 +301,7 @@ class EagleSpeculator:
                 # metadata even when replaying the FULL graph so that any
                 # attention metadata builder state is updated.
                 slot_mappings = self.block_tables.compute_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
-                    batch_desc.num_tokens,
+                    idx_mapping, query_start_loc, positions, batch_desc.num_tokens
                 )
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config
@@ -363,11 +353,7 @@ class EagleSpeculator:
         # Sample the draft tokens.
         logits = self.model.compute_logits(last_hidden_states)
         draft_tokens = self._sample_draft(
-            logits,
-            idx_mapping,
-            positions,
-            self.current_draft_step,
-            self.draft_logits,
+            logits, idx_mapping, positions, self.current_draft_step, self.draft_logits
         )
 
         # Update the inputs for the next step.
@@ -384,10 +370,7 @@ class EagleSpeculator:
         )
 
     def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
+        self, num_reqs: int, num_reqs_padded: int, num_tokens_padded: int
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -417,8 +400,7 @@ class EagleSpeculator:
         return attn_metadata
 
     def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        self, attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState]
     ) -> None:
         logger.info("Capturing model for Eagle speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -835,8 +817,7 @@ def _update_eagle_draft_inputs_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < hidden_size
         hidden_states = tl.load(
-            hidden_states_ptr + req_idx * hidden_states_stride + block,
-            mask=mask,
+            hidden_states_ptr + req_idx * hidden_states_stride + block, mask=mask
         )
         tl.store(
             next_input_hidden_states_ptr

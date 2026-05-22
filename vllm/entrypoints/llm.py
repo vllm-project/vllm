@@ -41,10 +41,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.utils import log_non_default_args
-from vllm.inputs import (
-    EngineInput,
-    PromptType,
-)
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -549,9 +546,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
 
     @overload
     def wait_for_completion(
-        self,
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
+        self, *, use_tqdm: bool | Callable[..., tqdm] = True
     ) -> list[RequestOutput | PoolingRequestOutput]: ...
 
     @overload
@@ -586,9 +581,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         return self._run_engine(output_type, use_tqdm=use_tqdm)
 
     def _resolve_mm_lora(
-        self,
-        prompt: EngineInput,
-        lora_request: LoRARequest | None,
+        self, prompt: EngineInput, lora_request: LoRARequest | None
     ) -> LoRARequest | None:
         if prompt["type"] != "multimodal":
             return lora_request
@@ -631,11 +624,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
                 )
             return lora_request
 
-        return LoRARequest(
-            modality_name,
-            modality_lora_id,
-            modality_lora_path,
-        )
+        return LoRARequest(modality_name, modality_lora_id, modality_lora_path)
 
     def collective_rpc(
         self,
@@ -713,9 +702,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         )
 
         return renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
-            prompt_extras=prompt_extras,
+            parsed_prompts, tok_params, prompt_extras=prompt_extras
         )
 
     def _preprocess_cmpl_one(
@@ -725,9 +712,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EngineInput:
         (engine_input,) = self._preprocess_cmpl(
-            [prompt],
-            tokenization_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs,
+            [prompt], tokenization_kwargs, mm_processor_kwargs=mm_processor_kwargs
         )
         return engine_input
 
@@ -781,10 +766,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         )
 
         _, engine_inputs = renderer.render_chat(
-            conversations,
-            chat_params,
-            tok_params,
-            prompt_extras=prompt_extras,
+            conversations, chat_params, tok_params, prompt_extras=prompt_extras
         )
 
         return engine_inputs
@@ -1059,9 +1041,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         return self.llm_engine.get_metrics()
 
     def _params_to_seq(
-        self,
-        params: _P | Sequence[_P],
-        num_requests: int,
+        self, params: _P | Sequence[_P], num_requests: int
     ) -> Sequence[_P]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
@@ -1091,9 +1071,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         return [lora_request] * num_requests
 
     def _priority_to_seq(
-        self,
-        priority: list[int] | None,
-        num_requests: int,
+        self, priority: list[int] | None, num_requests: int
     ) -> Sequence[int]:
         if priority is not None:
             if len(priority) != num_requests:
@@ -1127,14 +1105,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         return self._render_and_add_requests(
             prompts=(
                 self._preprocess_cmpl_one(
-                    prompt,
-                    tokenization_kwargs,
-                    mm_processor_kwargs=mm_processor_kwargs,
+                    prompt, tokenization_kwargs, mm_processor_kwargs=mm_processor_kwargs
                 )
                 for prompt in maybe_tqdm(
-                    seq_prompts,
-                    use_tqdm=use_tqdm,
-                    desc="Rendering prompts",
+                    seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
                 )
             ),
             params=seq_params,
@@ -1253,9 +1227,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
                 for conversation in maybe_tqdm(
-                    seq_convs,
-                    use_tqdm=use_tqdm,
-                    desc="Rendering conversations",
+                    seq_convs, use_tqdm=use_tqdm, desc="Rendering conversations"
                 )
             ),
             params=seq_params,
@@ -1355,8 +1327,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
                     prompt,
                     params[i],
                     lora_request=self._resolve_mm_lora(
-                        prompt,
-                        None if lora_requests is None else lora_requests[i],
+                        prompt, None if lora_requests is None else lora_requests[i]
                     ),
                     priority=0 if priorities is None else priorities[i],
                 )
@@ -1382,11 +1353,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         request_id = str(next(self.request_counter))
 
         return self.llm_engine.add_request(
-            request_id,
-            prompt,
-            params,
-            lora_request=lora_request,
-            priority=priority,
+            request_id, prompt, params, lora_request=lora_request, priority=priority
         )
 
     def _run_engine(
@@ -1471,8 +1438,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
                 copy).
         """
         self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
+            "start_weight_update", kwargs={"is_checkpoint_format": is_checkpoint_format}
         )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:

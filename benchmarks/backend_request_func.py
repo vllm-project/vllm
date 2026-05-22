@@ -50,8 +50,7 @@ class RequestFuncOutput:
 
 
 async def async_request_tgi(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -67,10 +66,7 @@ async def async_request_tgi(
             "truncate": request_func_input.prompt_len,
             "ignore_eos_token": request_func_input.ignore_eos,
         }
-        payload = {
-            "inputs": request_func_input.prompt,
-            "parameters": params,
-        }
+        payload = {"inputs": request_func_input.prompt, "parameters": params}
         headers = None
         if request_func_input.request_id:
             headers = {"x-request-id": request_func_input.request_id}
@@ -131,8 +127,7 @@ async def async_request_tgi(
 
 
 async def async_request_trt_llm(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -202,8 +197,7 @@ async def async_request_trt_llm(
 
 
 async def async_request_deepspeed_mii(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -265,8 +259,7 @@ async def async_request_deepspeed_mii(
 
 
 async def async_request_openai_completions(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -286,9 +279,7 @@ async def async_request_openai_completions(
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
-            "stream_options": {
-                "include_usage": True,
-            },
+            "stream_options": {"include_usage": True},
         }
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
@@ -365,8 +356,7 @@ async def async_request_openai_completions(
 
 
 async def async_request_openai_chat_completions(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("chat/completions", "profile")), (
@@ -391,15 +381,11 @@ async def async_request_openai_chat_completions(
             "model": request_func_input.model_name
             if request_func_input.model_name
             else request_func_input.model,
-            "messages": [
-                {"role": "user", "content": content},
-            ],
+            "messages": [{"role": "user", "content": content}],
             "temperature": 0.0,
             "max_completion_tokens": request_func_input.output_len,
             "stream": True,
-            "stream_options": {
-                "include_usage": True,
-            },
+            "stream_options": {"include_usage": True},
         }
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
@@ -474,8 +460,7 @@ async def async_request_openai_chat_completions(
 
 
 async def async_request_openai_audio(
-    request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    request_func_input: RequestFuncInput, pbar: tqdm | None = None
 ) -> RequestFuncOutput:
     # Lazy import without PlaceholderModule to avoid vllm dep.
     import soundfile
@@ -504,9 +489,7 @@ async def async_request_openai_audio(
         }
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        }
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
         if request_func_input.request_id:
             headers["x-request-id"] = request_func_input.request_id
 
@@ -630,9 +613,7 @@ def get_tokenizer(
         return MistralTokenizer.from_pretrained(str(pretrained_model_name_or_path))
     else:
         return AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path,
-            trust_remote_code=trust_remote_code,
-            **kwargs,
+            pretrained_model_name_or_path, trust_remote_code=trust_remote_code, **kwargs
         )
 
 

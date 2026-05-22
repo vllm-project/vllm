@@ -210,10 +210,7 @@ def _get_numactl_args(
 def _log_numactl_show(label: str) -> bool:
     try:
         result = subprocess.run(
-            ["numactl", "--show"],
-            check=True,
-            capture_output=True,
-            text=True,
+            ["numactl", "--show"], check=True, capture_output=True, text=True
         )
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
         logger.warning("Failed to run `numactl --show` for %s: %s", label, e)

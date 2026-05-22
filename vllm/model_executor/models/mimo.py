@@ -77,11 +77,7 @@ class MiMoModel(Qwen2Model):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -179,10 +175,7 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
             self.model.make_empty_intermediate_tensors
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         hidden_states = self.model.norm(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits

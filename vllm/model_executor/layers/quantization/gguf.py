@@ -231,9 +231,7 @@ def _fused_mul_mat_gguf(
 
 
 def _fused_mul_mat_gguf_fake(
-    x: torch.Tensor,
-    qweight: torch.Tensor,
-    qweight_type: int,
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
 
@@ -528,10 +526,7 @@ class GGUFLinearMethod(LinearMethodBase):
             layer.register_parameter("qweight", padded_param)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         shard_id = layer.qweight.shard_id
 
@@ -565,11 +560,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         quant_config: The GGUF quantization config.
     """
 
-    def __init__(
-        self,
-        quant_config: GGUFConfig,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, quant_config: GGUFConfig, moe: FusedMoEConfig):
         super().__init__(moe)
         self.quant_config = quant_config
 

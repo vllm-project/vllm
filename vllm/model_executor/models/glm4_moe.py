@@ -144,10 +144,7 @@ class Glm4MoE(nn.Module):
         # so we cannot use ReplicatedLinear here.
         # See: https://github.com/huggingface/transformers/blob/v4.55.1/src/transformers/models/glm4_moe/modeling_glm4_moe.py#L260
         self.gate = nn.Linear(
-            config.hidden_size,
-            config.n_routed_experts,
-            bias=False,
-            dtype=torch.float32,
+            config.hidden_size, config.n_routed_experts, bias=False, dtype=torch.float32
         )
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)
@@ -293,9 +290,7 @@ class Glm4MoeAttention(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -603,9 +598,7 @@ class Glm4MixtureOfExperts(MixtureOfExperts):
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -620,15 +613,8 @@ class Glm4MixtureOfExperts(MixtureOfExperts):
 
 class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExperts):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     fall_back_to_pt_during_load = False
@@ -693,10 +679,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExper
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

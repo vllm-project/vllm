@@ -54,15 +54,9 @@ class SkyworkR1VImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
 
-    pixel_values_flat: Annotated[
-        torch.Tensor,
-        TensorShape("bnp", 3, "h", "w"),
-    ]
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
 
-    num_patches: Annotated[
-        torch.Tensor,
-        TensorShape("bn"),
-    ]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 class SkyworkR1VImageEmbeddingInputs(TensorSchema):
@@ -76,10 +70,7 @@ class SkyworkR1VImageEmbeddingInputs(TensorSchema):
 
     type: Literal["image_embeds"] = "image_embeds"
 
-    data: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("ni", "ifs", "hs"),
-    ]
+    data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("ni", "ifs", "hs")]
 
 
 SkyworkR1VImageInputs: TypeAlias = (
@@ -313,8 +304,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         if image_embeds is not None:
             return SkyworkR1VImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         image_token_id = kwargs["image_token_id"]
@@ -338,8 +328,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-        self,
-        image_input: SkyworkR1VImageInputs,
+        self, image_input: SkyworkR1VImageInputs
     ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -424,10 +413,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

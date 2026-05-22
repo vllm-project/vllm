@@ -39,8 +39,7 @@ def test_split_coalescing(dtype):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            pass_config=PassConfig(),
+            mode=CompilationMode.VLLM_COMPILE, pass_config=PassConfig()
         )
     )
     with vllm.config.set_current_vllm_config(vllm_config):

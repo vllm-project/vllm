@@ -32,11 +32,7 @@ def bgmv_expand(
 
     if weight_out_dim == output_dim:
         torch.ops._xpu_C.bgmv_expand(
-            output_tensor,
-            inputs,
-            lora_b_weights,
-            lora_indices_tensor,
-            add_inputs,
+            output_tensor, inputs, lora_b_weights, lora_indices_tensor, add_inputs
         )
     elif weight_out_dim < output_dim:
         # LoRA weight output dim can be smaller than the output tensor

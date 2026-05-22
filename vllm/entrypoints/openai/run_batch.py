@@ -41,10 +41,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingRequest,
-    EmbeddingResponse,
-)
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
 from vllm.entrypoints.pooling.scoring.protocol import (
     RerankRequest,
     RerankResponse,
@@ -255,10 +252,7 @@ class BatchFrontendArgs(BaseFrontendArgs):
     (only needed if enable-metrics is set). Use --host instead."""
 
     @classmethod
-    def _customize_cli_kwargs(
-        cls,
-        frontend_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
+    def _customize_cli_kwargs(cls, frontend_kwargs: dict[str, Any]) -> dict[str, Any]:
         frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
 
         frontend_kwargs["input_file"]["flags"] = ["-i"]
@@ -450,8 +444,7 @@ async def write_file(
 
 
 async def download_bytes_from_url(
-    url: str,
-    allowed_media_domains: list[str] | None = None,
+    url: str, allowed_media_domains: list[str] | None = None
 ) -> bytes:
     """
     Download data from a URL or decode from a data URL.
@@ -496,8 +489,7 @@ async def download_bytes_from_url(
         async with (
             aiohttp.ClientSession() as session,
             session.get(
-                url,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                url, allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
             ) as resp,
         ):
             if resp.status != 200:
@@ -520,8 +512,7 @@ def make_error_request_output(
         id=f"vllm-{random_uuid()}",
         custom_id=request.custom_id,
         response=BatchResponseData(
-            status_code=HTTPStatus.BAD_REQUEST,
-            request_id=f"vllm-batch-{random_uuid()}",
+            status_code=HTTPStatus.BAD_REQUEST, request_id=f"vllm-batch-{random_uuid()}"
         ),
         error=error_msg,
     )
@@ -619,8 +610,7 @@ def handle_endpoint_request(
 
 
 def make_transcription_wrapper(
-    is_translation: bool,
-    allowed_media_domains: list[str] | None = None,
+    is_translation: bool, allowed_media_domains: list[str] | None = None
 ) -> WrapperFn:
     """
     Factory function to create a wrapper for transcription/translation handlers.
@@ -655,10 +645,7 @@ def make_transcription_wrapper(
                 )
 
                 # Create a mock file from the downloaded audio data
-                mock_file = UploadFile(
-                    file=BytesIO(audio_data),
-                    filename="audio.bin",
-                )
+                mock_file = UploadFile(file=BytesIO(audio_data), filename="audio.bin")
 
                 # Convert batch request to regular request
                 # by copying all fields except file_url and setting file to mock_file
@@ -693,8 +680,7 @@ def make_transcription_wrapper(
 
 
 async def build_endpoint_registry(
-    engine_client: EngineClient,
-    args: Namespace,
+    engine_client: EngineClient, args: Namespace
 ) -> dict[str, dict[str, Any]]:
     """
     Build the endpoint registry with all serving objects and handler configurations.
@@ -766,8 +752,7 @@ async def build_endpoint_registry(
                 else None
             ),
             "wrapper_fn": make_transcription_wrapper(
-                is_translation=False,
-                allowed_media_domains=allowed_media_domains,
+                is_translation=False, allowed_media_domains=allowed_media_domains
             ),
         },
         "translations": {
@@ -778,8 +763,7 @@ async def build_endpoint_registry(
                 else None
             ),
             "wrapper_fn": make_transcription_wrapper(
-                is_translation=True,
-                allowed_media_domains=allowed_media_domains,
+                is_translation=True, allowed_media_domains=allowed_media_domains
             ),
         },
     }
@@ -798,13 +782,9 @@ def validate_run_batch_args(args):
         )
 
 
-async def run_batch(
-    engine_client: EngineClient,
-    args: Namespace,
-) -> None:
+async def run_batch(engine_client: EngineClient, args: Namespace) -> None:
     endpoint_registry = await build_endpoint_registry(
-        engine_client=engine_client,
-        args=args,
+        engine_client=engine_client, args=args
     )
 
     tracker = BatchProgressTracker()
@@ -862,8 +842,7 @@ async def main(args: Namespace):
     validate_run_batch_args(args)
 
     async with build_async_engine_client(
-        args,
-        usage_context=UsageContext.OPENAI_BATCH_RUNNER,
+        args, usage_context=UsageContext.OPENAI_BATCH_RUNNER
     ) as engine_client:
         await run_batch(engine_client, args)
 

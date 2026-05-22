@@ -533,8 +533,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         raise NotImplementedError(
             "NaiveBatchedExperts is not yet used by an Oracle. "
@@ -705,11 +704,7 @@ def batched_moe_kernel_quantize_input(
                 else:
                     scales = None
                 A_q[e, :num_tokens], tmp_scale = moe_kernel_quantize_input(
-                    A[e, :num_tokens],
-                    scales,
-                    qtype,
-                    per_act_token_quant,
-                    block_shape,
+                    A[e, :num_tokens], scales, qtype, per_act_token_quant, block_shape
                 )
                 assert tmp_scale is not None
                 A_q_scale[e, : tmp_scale.shape[0]] = tmp_scale
@@ -756,8 +751,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         p = current_platform
         if p.is_rocm():

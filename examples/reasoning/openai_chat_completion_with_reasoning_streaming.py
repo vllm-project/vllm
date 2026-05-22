@@ -34,10 +34,7 @@ messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 
 
 def main():
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     models = client.models.list()
     model = models.data[0].id

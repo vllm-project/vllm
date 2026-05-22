@@ -14,9 +14,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
@@ -31,10 +29,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.utils import (
-    create_error_response,
-    get_max_tokens,
-)
+from vllm.entrypoints.utils import create_error_response, get_max_tokens
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
@@ -97,9 +92,7 @@ class OpenAIServingRender:
             model_name=model_config.model,
         )
         self.reasoning_parser: type[ReasoningParser] | None = (
-            ParserManager.get_reasoning_parser(
-                reasoning_parser_name=reasoning_parser,
-            )
+            ParserManager.get_reasoning_parser(reasoning_parser_name=reasoning_parser)
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
@@ -118,8 +111,7 @@ class OpenAIServingRender:
         )
 
     async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
+        self, request: ChatCompletionRequest
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -183,10 +175,7 @@ class OpenAIServingRender:
         )
 
     async def render_chat(
-        self,
-        request: ChatCompletionRequest,
-        *,
-        skip_mm_cache: bool = False,
+        self, request: ChatCompletionRequest, *, skip_mm_cache: bool = False
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -212,10 +201,7 @@ class OpenAIServingRender:
         )
 
         # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
-        ):
+        if tool_parsing_unavailable and request.tool_choice not in (None, "none"):
             if request.tool_choice == "auto" and not self.enable_auto_tools:
                 # for hf tokenizers, "auto" tools requires
                 # --enable-auto-tool-choice and --tool-call-parser
@@ -268,8 +254,7 @@ class OpenAIServingRender:
         return conversation, engine_inputs
 
     async def render_completion_request(
-        self,
-        request: CompletionRequest,
+        self, request: CompletionRequest
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -324,10 +309,7 @@ class OpenAIServingRender:
         return generate_requests
 
     async def render_completion(
-        self,
-        request: CompletionRequest,
-        *,
-        skip_mm_cache: bool = False,
+        self, request: CompletionRequest, *, skip_mm_cache: bool = False
     ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
@@ -356,9 +338,7 @@ class OpenAIServingRender:
         return engine_inputs
 
     @staticmethod
-    def _extract_mm_features(
-        engine_input: EngineInput,
-    ) -> MultiModalFeatures | None:
+    def _extract_mm_features(engine_input: EngineInput) -> MultiModalFeatures | None:
         """Extract multimodal metadata from a rendered engine prompt.
 
         Returns ``None`` for text-only prompts.
@@ -395,9 +375,7 @@ class OpenAIServingRender:
         )
 
     def _make_request_with_harmony(
-        self,
-        request: ChatCompletionRequest,
-        should_include_tools: bool = True,
+        self, request: ChatCompletionRequest, should_include_tools: bool = True
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
@@ -447,10 +425,7 @@ class OpenAIServingRender:
     ) -> ErrorResponse:
         return create_error_response(message, err_type, status_code, param)
 
-    async def _check_model(
-        self,
-        request: Any,
-    ) -> ErrorResponse | None:
+    async def _check_model(self, request: Any) -> ErrorResponse | None:
         return await self.model_registry.check_model(request.model)
 
     def validate_chat_template(

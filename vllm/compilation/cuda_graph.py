@@ -311,9 +311,7 @@ class CUDAGraphWrapper:
 
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(
-                    cudagraph,
-                    pool=self.graph_pool,
-                    stream=current_stream(),
+                    cudagraph, pool=self.graph_pool, stream=current_stream()
                 ):
                     # `output` is managed by pytorch's cudagraph pool
                     output = self.runnable(*args, **kwargs)

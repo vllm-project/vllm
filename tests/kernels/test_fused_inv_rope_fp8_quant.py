@@ -282,20 +282,12 @@ def test_correctness(num_tokens, num_heads, n_groups, seed):
 
     # Reference
     ref_fp8, ref_scale = reference_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # Fused kernel
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # Check shapes
@@ -322,9 +314,7 @@ def test_correctness(num_tokens, num_heads, n_groups, seed):
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 128])
 @pytest.mark.parametrize(
-    "num_heads,n_groups",
-    [(64, 8), (128, 8)],
-    ids=["H64_G8", "H128_G8"],
+    "num_heads,n_groups", [(64, 8), (128, 8)], ids=["H64_G8", "H128_G8"]
 )
 @torch.inference_mode()
 def test_output_strides(num_tokens, num_heads, n_groups):
@@ -346,11 +336,7 @@ def test_output_strides(num_tokens, num_heads, n_groups):
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # FP8: logical [T, G, D] backed by [G, T, D] row-major
@@ -390,11 +376,7 @@ def test_per_group_contiguity(num_tokens):
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     for g in range(n_groups):
@@ -422,11 +404,7 @@ def test_scales_are_power_of_two():
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     _, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # log2 of a power-of-two is an exact integer
@@ -458,11 +436,7 @@ def test_nope_dims_unchanged():
 
     # Fused kernel result
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # Reference: quantize without RoPE (identity rotation)
@@ -473,11 +447,7 @@ def test_nope_dims_unchanged():
     # sin = 0 (already zero)
 
     norope_fp8, norope_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        zero_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, zero_cache, n_groups, heads_per_group
     )
 
     # Extract nope quant blocks only (first 3 of every 4 blocks per head)
@@ -518,18 +488,10 @@ def test_single_token():
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     ref_fp8, ref_scale = reference_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale)
@@ -550,18 +512,10 @@ def test_zero_positions():
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     ref_fp8, ref_scale = reference_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale)
@@ -586,18 +540,10 @@ def test_large_values():
     cos_sin_cache = make_cos_sin_cache(max_pos, device=device)
 
     ref_fp8, ref_scale = reference_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale)
@@ -627,11 +573,7 @@ def test_dequant_numerical_accuracy():
 
     # Get fused quantized output
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # Dequantize: broadcast scale [T, G, S] to [T, G, D] via repeat
@@ -698,9 +640,7 @@ def _unfused_inv_rope_fp8_quant(
     o = o.view(T, n_groups, -1)
     o_flat = o.transpose(0, 1).contiguous().reshape(-1, d)
     o_fp8, o_scale = per_token_group_quant_fp8(
-        o_flat,
-        group_size=QUANT_GROUP_SIZE,
-        use_ue8m0=True,
+        o_flat, group_size=QUANT_GROUP_SIZE, use_ue8m0=True
     )
     o_fp8 = o_fp8.view(n_groups, T, d).transpose(0, 1)
     o_scale = o_scale.view(n_groups, T, -1).transpose(0, 1)
@@ -713,11 +653,7 @@ def _unfused_inv_rope_fp8_quant(
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 128, 1024])
-@pytest.mark.parametrize(
-    "num_heads,n_groups",
-    [(64, 8)],
-    ids=["H64_G8"],
-)
+@pytest.mark.parametrize("num_heads,n_groups", [(64, 8)], ids=["H64_G8"])
 @torch.inference_mode()
 def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     """End-to-end: fused inv_rope+quant → fp8_einsum must match
@@ -774,11 +710,7 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
 
     # -- UNFUSED path --
     ref_fp8, ref_scale = _unfused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
     z_ref = torch.empty(
         num_tokens, n_groups, o_lora_rank, device=device, dtype=torch.bfloat16
@@ -789,11 +721,7 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
 
     # -- FUSED path --
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
     z_fused = torch.empty(
         num_tokens, n_groups, o_lora_rank, device=device, dtype=torch.bfloat16
@@ -886,20 +814,14 @@ def test_with_real_deepseek_v4_rope(num_tokens, default_vllm_config):
     o_unfused = o_unfused.view(T, n_groups, d)
     o_flat = o_unfused.transpose(0, 1).contiguous().reshape(-1, d)
     ref_fp8, ref_scale = per_token_group_quant_fp8(
-        o_flat,
-        group_size=QUANT_GROUP_SIZE,
-        use_ue8m0=True,
+        o_flat, group_size=QUANT_GROUP_SIZE, use_ue8m0=True
     )
     ref_fp8 = ref_fp8.view(n_groups, T, d).transpose(0, 1)
     ref_scale = ref_scale.view(n_groups, T, -1).transpose(0, 1)
 
     # FUSED: use the real YaRN-scaled cos_sin_cache
     fused_fp8, fused_scale = fused_inv_rope_fp8_quant(
-        o.clone(),
-        positions,
-        cos_sin_cache,
-        n_groups,
-        heads_per_group,
+        o.clone(), positions, cos_sin_cache, n_groups, heads_per_group
     )
 
     # Scales must match exactly (same UE8M0 algorithm)

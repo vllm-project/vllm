@@ -19,8 +19,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="InstantTensor requires NVIDIA GPUs",
+    not current_platform.is_cuda(), reason="InstantTensor requires NVIDIA GPUs"
 )
 def test_model_loader_download_files(vllm_runner):
     with vllm_runner(test_model, load_format="instanttensor") as llm:

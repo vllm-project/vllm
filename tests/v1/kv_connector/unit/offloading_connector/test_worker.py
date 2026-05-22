@@ -35,12 +35,7 @@ DTYPE = torch.float16
 # Attention backends to test
 ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
-    ATTN_BACKENDS = [
-        "FLASH_ATTN",
-        "FLEX_ATTENTION",
-        "FLASHINFER",
-        "TRITON_ATTN",
-    ]
+    ATTN_BACKENDS = ["FLASH_ATTN", "FLEX_ATTENTION", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
 
@@ -50,9 +45,7 @@ elif current_platform.is_rocm():
 
 
 def _allocate_and_reshape_kv_caches(
-    kv_cache_config: KVCacheConfig,
-    attn_groups: list[list],
-    device: torch.device,
+    kv_cache_config: KVCacheConfig, attn_groups: list[list], device: torch.device
 ):
     """
     Use the real GPUModelRunner allocation and reshape methods to produce
@@ -141,9 +134,7 @@ def test_register_kv_caches(mock_get_layers, backend):
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
-    from vllm.v1.attention.backends.mla.indexer import (
-        DeepseekV32IndexerBackend,
-    )
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
     from vllm.v1.worker.utils import AttentionGroup
 
     MLA_HEAD_SIZE = NUM_KV_HEADS * HEAD_SIZE * 2
@@ -167,10 +158,7 @@ def test_register_kv_caches(mock_get_layers, backend):
         dtype=DTYPE,
     )
     mla_spec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=MLA_HEAD_SIZE,
-        dtype=DTYPE,
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=MLA_HEAD_SIZE, dtype=DTYPE
     )
     unaligned_mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -229,10 +217,7 @@ def test_register_kv_caches(mock_get_layers, backend):
             if len(group_layer_names) > i:
                 shared_by.append(group_layer_names[i])
         kv_cache_tensors.append(
-            KVCacheTensor(
-                size=PAGE_SIZE_BYTES * NUM_BLOCKS,
-                shared_by=shared_by,
-            )
+            KVCacheTensor(size=PAGE_SIZE_BYTES * NUM_BLOCKS, shared_by=shared_by)
         )
 
     kv_cache_groups = [
@@ -282,9 +267,7 @@ def test_register_kv_caches(mock_get_layers, backend):
     )
 
     kv_caches = _allocate_and_reshape_kv_caches(
-        kv_cache_config,
-        attn_groups,
-        device=torch.device("cuda:0"),
+        kv_cache_config, attn_groups, device=torch.device("cuda:0")
     )
 
     mock_layers: dict[str, MagicMock] = {}
@@ -394,27 +377,21 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     assert spec_a.page_size_bytes != spec_b.page_size_bytes
 
     uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=BLOCK_SIZE,
-        kv_cache_specs={layer_a: spec_a, layer_b: spec_b},
+        block_size=BLOCK_SIZE, kv_cache_specs={layer_a: spec_a, layer_b: spec_b}
     )
 
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=spec_a.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_a],
+                size=spec_a.page_size_bytes * NUM_BLOCKS, shared_by=[layer_a]
             ),
             KVCacheTensor(
-                size=spec_b.page_size_bytes * NUM_BLOCKS,
-                shared_by=[layer_b],
+                size=spec_b.page_size_bytes * NUM_BLOCKS, shared_by=[layer_b]
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=[layer_a, layer_b],
-                kv_cache_spec=uniform_spec,
-            )
+            KVCacheGroupSpec(layer_names=[layer_a, layer_b], kv_cache_spec=uniform_spec)
         ],
     )
 
@@ -436,9 +413,7 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     ]
 
     kv_caches = _allocate_and_reshape_kv_caches(
-        kv_cache_config,
-        attn_groups,
-        device=torch.device("cuda:0"),
+        kv_cache_config, attn_groups, device=torch.device("cuda:0")
     )
 
     mock_get_layers.return_value = {

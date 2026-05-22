@@ -6,20 +6,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    aux_stream,
-    current_stream,
-)
-from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id,
-)
+from vllm.utils.torch_utils import aux_stream, current_stream
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -90,8 +81,7 @@ class SharedExperts:
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
-        self,
-        hidden_states: torch.Tensor,
+        self, hidden_states: torch.Tensor
     ) -> SharedExpertsOrder:
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
@@ -111,10 +101,7 @@ class SharedExperts:
         else:
             return SharedExpertsOrder.NO_OVERLAP
 
-    def maybe_sync_shared_experts_stream(
-        self,
-        shared_experts_input: torch.Tensor,
-    ):
+    def maybe_sync_shared_experts_stream(self, shared_experts_input: torch.Tensor):
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
@@ -132,10 +119,7 @@ class SharedExperts:
             # run in parallel with router/gate.
             self._stream.wait_stream(current_stream())
 
-    def _run_in_aux_stream(
-        self,
-        shared_experts_input: torch.Tensor,
-    ) -> torch.Tensor:
+    def _run_in_aux_stream(self, shared_experts_input: torch.Tensor) -> torch.Tensor:
         # TODO: assert that maybe_sync_shared_experts_stream has been called.
 
         # Run shared experts in parallel on a separate stream.
@@ -156,11 +140,7 @@ class SharedExperts:
         self._output[self._output_idx] = None
         return output
 
-    def apply(
-        self,
-        shared_experts_input: torch.Tensor,
-        order: SharedExpertsOrder,
-    ):
+    def apply(self, shared_experts_input: torch.Tensor, order: SharedExpertsOrder):
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
         if order != experts_order:

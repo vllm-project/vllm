@@ -44,11 +44,7 @@ from .utils import is_pp_missing_parameter, maybe_prefix
 
 
 class ErnieMultiTokenPredictorLayer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
 
@@ -96,8 +92,7 @@ class ErnieMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): ErnieMultiTokenPredictorLayer(
-                    vllm_config,
-                    f"{prefix}.layers.{idx}",
+                    vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -106,8 +101,7 @@ class ErnieMultiTokenPredictor(nn.Module):
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -125,10 +119,7 @@ class ErnieMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
-            inputs_embeds,
-            positions,
-            previous_hidden_states,
-            spec_step_idx,
+            inputs_embeds, positions, previous_hidden_states, spec_step_idx
         )
 
     def compute_logits(
@@ -178,9 +169,7 @@ class ErnieMTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 

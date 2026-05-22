@@ -431,8 +431,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 
 
 def _init_lmcache_engine(
-    lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig",
+    lmcache_config: LMCacheEngineConfig, vllm_config: "VllmConfig"
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -613,10 +612,7 @@ class LMCacheConnectorV1Impl:
             self._lookup_requests_in_step: list[str] = []
             self.lmcache_engine = None
         else:
-            self.lmcache_engine = _init_lmcache_engine(
-                config,
-                vllm_config,
-            )
+            self.lmcache_engine = _init_lmcache_engine(config, vllm_config)
 
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
@@ -636,9 +632,7 @@ class LMCacheConnectorV1Impl:
             )
 
             self.offload_server = ZMQOffloadServer(
-                self.lmcache_engine,
-                vllm_config,
-                get_tensor_model_parallel_rank(),
+                self.lmcache_engine, vllm_config, get_tensor_model_parallel_rank()
             )
 
             # In case of MLA, the lookup server is only created on worker 0
@@ -1139,9 +1133,7 @@ class LMCacheConnectorV1Impl:
 
     @_lmcache_nvtx_annotate
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> int | None:
         """
         Check for external KV cache hit.
@@ -1185,9 +1177,7 @@ class LMCacheConnectorV1Impl:
         self._lookup_requests_in_step.append(lookup_id)
 
         num_external_hit_tokens = self.lookup_client.lookup(
-            token_ids,
-            lookup_id=lookup_id,
-            request_configs=request_configs,
+            token_ids, lookup_id=lookup_id, request_configs=request_configs
         )
 
         if num_external_hit_tokens is None:
@@ -1408,9 +1398,7 @@ class LMCacheConnectorV1Impl:
 
     @_lmcache_nvtx_annotate
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         params = (
             request.kv_transfer_params
@@ -1422,8 +1410,6 @@ class LMCacheConnectorV1Impl:
         # NOTE: Used to stream back the first token
         # for disagg prefill
         if params is not None and "ret_first_tok" in params:
-            return_params = {
-                "first_tok": request._output_token_ids[0],
-            }
+            return_params = {"first_tok": request._output_token_ids[0]}
 
         return False, return_params

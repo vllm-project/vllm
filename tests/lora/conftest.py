@@ -154,12 +154,7 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
         )
     )
     model.config = MagicMock()
-    model.packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
+    model.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model.embedding_modules = {"lm_head": "lm_head"}
     model.unpadded_vocab_size = 32064
 

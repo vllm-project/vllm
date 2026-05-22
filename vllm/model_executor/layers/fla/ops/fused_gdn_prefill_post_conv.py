@@ -92,19 +92,11 @@ def _fused_post_conv_kernel(
 
         # Store Q
         q_out = offs_t[:, None] * stride_q_tok + i_h * K + offs_k[None, :]
-        tl.store(
-            q_ptr + q_out,
-            q_f32.to(q_ptr.dtype.element_ty),
-            mask=mask_2d,
-        )
+        tl.store(q_ptr + q_out, q_f32.to(q_ptr.dtype.element_ty), mask=mask_2d)
 
         # Store K
         k_out = offs_t[:, None] * stride_k_tok + i_h * K + offs_k[None, :]
-        tl.store(
-            k_ptr + k_out,
-            k_f32.to(k_ptr.dtype.element_ty),
-            mask=mask_2d,
-        )
+        tl.store(k_ptr + k_out, k_f32.to(k_ptr.dtype.element_ty), mask=mask_2d)
     else:
         # ============ V head + gating processing ============
         i_hv = i_head - H

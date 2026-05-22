@@ -25,10 +25,7 @@ from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
                     PlaceholderRange(offset=3, length=2),
                 ]
             },
-            expected_modality_idxs=[
-                ("image", 0),
-                ("image", 1),
-            ],
+            expected_modality_idxs=[("image", 0), ("image", 1)],
         ),
         ## Internally unsorted
         dict(
@@ -38,10 +35,7 @@ from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
                     PlaceholderRange(offset=0, length=2),
                 ]
             },
-            expected_modality_idxs=[
-                ("image", 1),
-                ("image", 0),
-            ],
+            expected_modality_idxs=[("image", 1), ("image", 0)],
         ),
         # Two modalities
         ## Internally sorted
@@ -109,9 +103,7 @@ from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
                     PlaceholderRange(offset=15, length=7),
                     PlaceholderRange(offset=22, length=8),
                 ],
-                "audio": [
-                    PlaceholderRange(offset=0, length=2),
-                ],
+                "audio": [PlaceholderRange(offset=0, length=2)],
                 "video": [
                     PlaceholderRange(offset=3, length=4),
                     PlaceholderRange(offset=7, length=5),
@@ -135,12 +127,8 @@ from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
                     PlaceholderRange(offset=2, length=3),
                     PlaceholderRange(offset=20, length=4),
                 ],
-                "audio": [
-                    PlaceholderRange(offset=5, length=2),
-                ],
-                "video": [
-                    PlaceholderRange(offset=8, length=5),
-                ],
+                "audio": [PlaceholderRange(offset=5, length=2)],
+                "video": [PlaceholderRange(offset=8, length=5)],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -158,12 +146,8 @@ from vllm.multimodal.utils import argsort_mm_positions, group_and_batch_mm_items
                     PlaceholderRange(offset=20, length=4),
                     PlaceholderRange(offset=2, length=3),
                 ],
-                "audio": [
-                    PlaceholderRange(offset=5, length=2),
-                ],
-                "video": [
-                    PlaceholderRange(offset=8, length=5),
-                ],
+                "audio": [PlaceholderRange(offset=5, length=2)],
+                "video": [PlaceholderRange(offset=8, length=5)],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -186,8 +170,7 @@ def test_argsort_mm_positions(case):
 
 def test_group_and_batch_mm_items_split_by_fieldset():
     elem = MultiModalFieldElem(
-        data=torch.empty(1, dtype=torch.uint8),
-        field=MultiModalBatchedField(),
+        data=torch.empty(1, dtype=torch.uint8), field=MultiModalBatchedField()
     )
     item1 = MultiModalKwargsItem({"x": elem, "y": elem})
     item2 = MultiModalKwargsItem({"y": elem, "x": elem})

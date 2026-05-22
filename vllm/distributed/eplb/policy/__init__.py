@@ -12,8 +12,4 @@ EPLB_POLICIES = {"default": DefaultEplbPolicy}
 # Ensure that the EPLB_POLICIES keys match the EPLBPolicyOption values
 assert set(EPLB_POLICIES.keys()) == set(get_args(EPLBPolicyOption))
 
-__all__ = [
-    "AbstractEplbPolicy",
-    "DefaultEplbPolicy",
-    "EPLB_POLICIES",
-]
+__all__ = ["AbstractEplbPolicy", "DefaultEplbPolicy", "EPLB_POLICIES"]

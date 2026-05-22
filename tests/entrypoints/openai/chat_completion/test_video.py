@@ -66,8 +66,7 @@ def url_encoded_video() -> dict[str, str]:
 
 
 def dummy_messages_from_video_url(
-    video_urls: str | list[str],
-    content_text: str = "What's in this video?",
+    video_urls: str | list[str], content_text: str = "What's in this video?"
 ):
     if isinstance(video_urls, str):
         video_urls = [video_urls]
@@ -120,9 +119,7 @@ async def test_single_chat_session_video(
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
+        model=model_name, messages=messages, max_completion_tokens=10
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -137,23 +134,14 @@ async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
     messages = dummy_messages_from_video_url(video_url)
 
     default_resp = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=1,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=1, temperature=0.0
     )
     override_resp = await client.chat.completions.create(
         model=model_name,
         messages=messages,
         max_completion_tokens=1,
         temperature=0.0,
-        extra_body={
-            "media_io_kwargs": {
-                "video": {
-                    "num_frames": 4,
-                }
-            }
-        },
+        extra_body={"media_io_kwargs": {"video": {"num_frames": 4}}},
     )
 
     assert default_resp.usage is not None
@@ -175,21 +163,12 @@ async def test_invalid_num_frames_request_recoverable(
             messages=messages,
             max_completion_tokens=1,
             temperature=0.0,
-            extra_body={
-                "media_io_kwargs": {
-                    "video": {
-                        "num_frames": "invalid",
-                    }
-                }
-            },
+            extra_body={"media_io_kwargs": {"video": {"num_frames": "invalid"}}},
         )
 
     # Server should still handle subsequent requests after the failed one.
     recovery_resp = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=1,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=1, temperature=0.0
     )
     recovery_msg = recovery_resp.choices[0].message
     assert recovery_msg.content is not None and len(recovery_msg.content) >= 0
@@ -282,10 +261,7 @@ async def test_single_chat_session_video_base64encoded(
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=10, temperature=0.0
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -326,10 +302,7 @@ async def test_chat_streaming_video(
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=10, temperature=0.0
     )
     output = chat_completion.choices[0].message.content
     stop_reason = chat_completion.choices[0].finish_reason
@@ -364,11 +337,7 @@ async def test_chat_streaming_video(
 @pytest.mark.parametrize(
     "video_urls", [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))]
 )
-@pytest.mark.flaky(
-    reruns=2,
-    reruns_delay=5,
-    condition=current_platform.is_rocm(),
-)
+@pytest.mark.flaky(reruns=2, reruns_delay=5, condition=current_platform.is_rocm())
 async def test_multi_video_input(
     client: openai.AsyncOpenAI, model_name: str, video_urls: list[str]
 ):
@@ -385,10 +354,7 @@ async def test_multi_video_input(
 
         # the server should still work afterwards
         completion = await client.completions.create(
-            model=model_name,
-            prompt=[0, 0, 0, 0, 0],
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
         )
         completion = completion.choices[0].text
         assert completion is not None and len(completion) >= 0

@@ -78,10 +78,7 @@ class Mamba2DecoderLayer(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -110,10 +107,7 @@ class Mamba2Model(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        self.embeddings = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embeddings = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -192,8 +186,7 @@ class Mamba2ForCausalLM(
 ):
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -203,8 +196,7 @@ class Mamba2ForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 

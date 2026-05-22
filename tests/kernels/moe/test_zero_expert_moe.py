@@ -34,9 +34,7 @@ def zero_expert_moe(dist_init, default_vllm_config):
     zero_expert_num = 1
 
     e_score_correction_bias = torch.zeros(
-        num_experts + zero_expert_num,
-        dtype=torch.float32,
-        device="cuda",
+        num_experts + zero_expert_num, dtype=torch.float32, device="cuda"
     )
 
     vllm_config = VllmConfig()

@@ -176,10 +176,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 and at_target
                 == torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
             ):
-                mutated_args = {
-                    1: "query",
-                    2: "key",
-                }
+                mutated_args = {1: "query", 2: "key"}
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
             elif (
                 hasattr(torch.ops.vllm, "fused_rope_unified_mla_kv_cache_update")

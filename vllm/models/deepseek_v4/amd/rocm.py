@@ -13,9 +13,7 @@ from vllm.models.deepseek_v4.nvidia.flashmla import (
     DeepseekV4SparseMLAAttentionImpl,
 )
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backend import (
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
@@ -32,9 +30,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.nvidia.ops.attention import (
-        DeepseekV4MLAAttention,
-    )
+    from vllm.models.deepseek_v4.nvidia.ops.attention import DeepseekV4MLAAttention
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -96,9 +92,7 @@ def _pack_global_topk_ragged_kernel(
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
     mask = (offset < out_len) & (offset < topk)
     local_idx = tl.load(
-        topk_indices_ptr + token_idx * topk_indices_stride + offset,
-        mask=mask,
-        other=-1,
+        topk_indices_ptr + token_idx * topk_indices_stride + offset, mask=mask, other=-1
     )
     valid = mask & (local_idx >= 0)
     block_indices = local_idx // block_size
@@ -135,9 +129,7 @@ def compute_global_topk_ragged_indices_and_indptr(
 
     topk_indptr = _build_indptr_from_lengths(topk_lens)
     global_topk_ragged = torch.empty(
-        num_tokens * topk,
-        dtype=torch.int32,
-        device=topk_indices.device,
+        num_tokens * topk, dtype=torch.int32, device=topk_indices.device
     )
     if global_topk_ragged.numel() > 0:
         block = 128
@@ -276,9 +268,7 @@ def combine_topk_swa_indices_ragged(
 
     combined_indptr = _build_indptr_from_lengths(combined_lens)
     combined_ragged = torch.empty(
-        num_tokens * (topk + window_size),
-        dtype=torch.int32,
-        device=topk_indices.device,
+        num_tokens * (topk + window_size), dtype=torch.int32, device=topk_indices.device
     )
     if combined_ragged.numel() > 0:
         block = 128
@@ -354,9 +344,7 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder)
                 device=self.device,
             )
             self.c128a_decode_topk_ragged_indptr_buffer = torch.empty(
-                max_tokens + 1,
-                dtype=torch.int32,
-                device=self.device,
+                max_tokens + 1, dtype=torch.int32, device=self.device
             )
 
     def build(
@@ -377,8 +365,7 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder)
         decode_lens = base.c128a_decode_topk_lens
         if dense_decode is not None and decode_lens is not None:
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-                dense_decode.reshape(dense_decode.shape[0], -1),
-                decode_lens,
+                dense_decode.reshape(dense_decode.shape[0], -1), decode_lens
             )
             assert self.c128a_decode_topk_ragged_indices_buffer is not None
             assert self.c128a_decode_topk_ragged_indptr_buffer is not None
@@ -403,14 +390,10 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.decode_swa_ragged_indices_buffer = torch.empty(
-            max_tokens * self.window_size,
-            dtype=torch.int32,
-            device=self.device,
+            max_tokens * self.window_size, dtype=torch.int32, device=self.device
         )
         self.decode_swa_ragged_indptr_buffer = torch.empty(
-            max_tokens + 1,
-            dtype=torch.int32,
-            device=self.device,
+            max_tokens + 1, dtype=torch.int32, device=self.device
         )
 
     def build(
@@ -503,15 +486,14 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             )
             M = N + layer.window_size + layer.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
-                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
             )
             output.zero_()
             return
 
         assert isinstance(attn_metadata, dict)
         rocm_metadata = cast(
-            DeepseekV4ROCMAiterMLASparseMetadata | None,
-            attn_metadata.get(layer.prefix),
+            DeepseekV4ROCMAiterMLASparseMetadata | None, attn_metadata.get(layer.prefix)
         )
         swa_metadata = cast(
             DeepseekV4ROCMAiterSparseSWAMetadata | None,
@@ -574,16 +556,14 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             if layer.compress_ratio == 4:
                 assert layer.topk_indices_buffer is not None
-                (
-                    topk_ragged_indices,
-                    topk_ragged_indptr,
-                    topk_lens,
-                ) = compute_global_topk_ragged_indices_and_indptr(
-                    layer.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
+                (topk_ragged_indices, topk_ragged_indptr, topk_lens) = (
+                    compute_global_topk_ragged_indices_and_indptr(
+                        layer.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
                 )
             else:
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -666,7 +646,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
         )[0]
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE

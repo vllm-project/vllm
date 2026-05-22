@@ -18,15 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.simple_kv_offload.manager import (
-    SimpleCPUOffloadScheduler,
-)
-from vllm.v1.simple_kv_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-)
-from vllm.v1.simple_kv_offload.worker import (
-    SimpleCPUOffloadWorker,
-)
+from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
+from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -113,10 +107,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
 
-    def bind_connector_metadata(
-        self,
-        connector_metadata: KVConnectorMetadata,
-    ) -> None:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
         if self.worker_handler is not None:
             assert isinstance(connector_metadata, SimpleCPUOffloadMetadata)
@@ -151,8 +142,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         pass  # All stores are driven by get_finished() and no wait needed
 
     def get_finished(
-        self,
-        finished_req_ids: set[str],
+        self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         if self.worker_handler is not None:
             return self.worker_handler.get_finished(finished_req_ids)
@@ -170,9 +160,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.get_num_new_matched_tokens(
@@ -181,10 +169,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         return 0, False
 
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.update_state_after_alloc(
@@ -192,33 +177,25 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.build_connector_meta(scheduler_output)
         return SimpleCPUOffloadMetadata()
 
-    def update_connector_output(
-        self,
-        connector_output: KVConnectorOutput,
-    ) -> None:
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.update_connector_output(connector_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.request_finished(request, block_ids)
         return False, None
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.request_finished_all_groups(

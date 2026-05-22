@@ -94,8 +94,7 @@ def test_tp2_async_tp_fp8_fusions(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4],
+    "model_name, matches_fn, model_kwargs, hf_overrides", [llama3_8b_fp4]
 )
 @pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -157,8 +156,7 @@ def test_tp2_async_tp_nvfp4_fusions(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    "model_name, matches_fn, model_kwargs, hf_overrides", [llama3_8b, qwen3_a3b]
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -196,11 +194,7 @@ def test_tp2_async_tp_fusions(
         ),
     )
 
-    matches_check = [
-        "norm_rope_fusion",
-        "sequence_parallel",
-        "async_tp",
-    ]
+    matches_check = ["norm_rope_fusion", "sequence_parallel", "async_tp"]
 
     run_e2e_fusion_test(
         model_name,
@@ -279,8 +273,7 @@ def test_tp2_sp_ar_rms_fp8_fusions(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    "model_name, matches_fn, model_kwargs, hf_overrides", [llama3_8b, qwen3_a3b]
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])

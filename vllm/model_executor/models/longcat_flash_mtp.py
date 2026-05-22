@@ -99,8 +99,7 @@ class LongCatMultiTokenPredictor(nn.Module):
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
 
     def forward(
@@ -163,9 +162,7 @@ class LongCatFlashMTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits

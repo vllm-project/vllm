@@ -32,14 +32,8 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
     correct data."""
     serialized_data = {
-        "CPU_to_GPU": [
-            {"op_size": 16, "op_time": 1.0},
-            {"op_size": 8, "op_time": 0.5},
-        ],
-        "GPU_to_CPU": [
-            {"op_size": 1, "op_time": 0.1},
-            {"op_size": 2, "op_time": 0.2},
-        ],
+        "CPU_to_GPU": [{"op_size": 16, "op_time": 1.0}, {"op_size": 8, "op_time": 0.5}],
+        "GPU_to_CPU": [{"op_size": 1, "op_time": 0.1}, {"op_size": 2, "op_time": 0.2}],
     }
 
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)

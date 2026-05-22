@@ -132,9 +132,7 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -175,9 +173,7 @@ class ReasoningParser:
         return request
 
     def prepare_structured_tag(
-        self,
-        original_tag: str | None,
-        tool_server: ToolServer | None,
+        self, original_tag: str | None, tool_server: ToolServer | None
     ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag

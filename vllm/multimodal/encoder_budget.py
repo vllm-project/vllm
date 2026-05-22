@@ -23,16 +23,13 @@ def get_mm_max_toks_per_item(
     on underlying model configuration.
     """
     max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
-        seq_len=model_config.max_model_len,
-        mm_counts=mm_counts,
+        seq_len=model_config.max_model_len, mm_counts=mm_counts
     )
     if max_tokens_per_item is not None:
         return max_tokens_per_item
 
     mm_inputs = mm_registry.get_dummy_mm_inputs(
-        model_config,
-        mm_counts=mm_counts,
-        processor=processor,
+        model_config, mm_counts=mm_counts, processor=processor
     )
 
     return {
@@ -45,9 +42,7 @@ class MultiModalBudget:
     """Helper class to calculate budget information for multi-modal models."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        mm_registry: MultiModalRegistry,
+        self, vllm_config: VllmConfig, mm_registry: MultiModalRegistry
     ) -> None:
         super().__init__()
 
@@ -115,8 +110,7 @@ class MultiModalBudget:
         # Encoder budget is computed from all active modalities (including
         # embedding-only ones that need encoder cache space).
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
-            scheduler_config,
-            active_mm_max_toks_per_item,
+            scheduler_config, active_mm_max_toks_per_item
         )
 
         self.encoder_compute_budget = encoder_compute_budget
@@ -128,19 +122,16 @@ class MultiModalBudget:
         # Per-prompt/per-batch limits are only relevant for tower modalities
         # (embedding-only modalities don't go through the encoder tower).
         for modality, max_toks_per_item in tower_mm_max_toks_per_item.items():
-            (
-                mm_max_items_per_prompt[modality],
-                mm_max_items_per_batch[modality],
-            ) = self._get_max_items(modality, max_toks_per_item)
+            (mm_max_items_per_prompt[modality], mm_max_items_per_batch[modality]) = (
+                self._get_max_items(modality, max_toks_per_item)
+            )
 
         self.mm_max_toks_per_item = tower_mm_max_toks_per_item
         self.mm_max_items_per_prompt: Mapping[str, int] = mm_max_items_per_prompt
         self.mm_max_items_per_batch: Mapping[str, int] = mm_max_items_per_batch
 
     def _get_max_items(
-        self,
-        modality: str,
-        max_tokens_per_item: int,
+        self, modality: str, max_tokens_per_item: int
     ) -> tuple[int, int]:
         if max_tokens_per_item == 0:
             return 0, 0
@@ -157,8 +148,7 @@ class MultiModalBudget:
         mm_limit = self.mm_limits[modality]
 
         max_items_per_prompt = max(
-            1,
-            min(mm_limit, self.max_model_len // max_tokens_per_item),
+            1, min(mm_limit, self.max_model_len // max_tokens_per_item)
         )
 
         scheduler_config = self.scheduler_config
@@ -173,8 +163,7 @@ class MultiModalBudget:
         max_decoder_items_per_batch = max_num_reqs * max_items_per_prompt
 
         max_items_per_batch = max(
-            1,
-            min(max_encoder_items_per_batch, max_decoder_items_per_batch),
+            1, min(max_encoder_items_per_batch, max_decoder_items_per_batch)
         )
 
         return max_items_per_prompt, max_items_per_batch

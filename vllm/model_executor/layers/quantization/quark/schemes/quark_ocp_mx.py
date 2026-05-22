@@ -358,10 +358,7 @@ class QuarkOCP_MX(QuarkScheme):
             layer.register_parameter("weight_scale", weight_scale)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)

@@ -7,12 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.inputs import (
-    EngineInput,
-    PromptType,
-    SingletonInput,
-    split_enc_dec_input,
-)
+from vllm.inputs import EngineInput, PromptType, SingletonInput, split_enc_dec_input
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -66,9 +61,7 @@ class InputProcessor:
             mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
-            vllm_config,
-            renderer=renderer,
-            mm_registry=mm_registry,
+            vllm_config, renderer=renderer, mm_registry=mm_registry
         )
 
     @property
@@ -154,11 +147,7 @@ class InputProcessor:
                 "[lora_path]` to use the LoRA tokenizer."
             )
 
-    def _get_mm_identifier(
-        self,
-        mm_hash: str,
-        lora_request: LoRARequest | None,
-    ) -> str:
+    def _get_mm_identifier(self, mm_hash: str, lora_request: LoRARequest | None) -> str:
         """
         When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
@@ -173,9 +162,7 @@ class InputProcessor:
         return f"{lora_request.lora_name}:{mm_hash}"
 
     def inject_into_mm_cache(
-        self,
-        mm_hashes: dict[str, list[str]],
-        mm_kwargs: dict[str, list],
+        self, mm_hashes: dict[str, list[str]], mm_kwargs: dict[str, list]
     ) -> None:
         """Inject pre-processed mm_kwargs into the processor cache.
 
@@ -199,16 +186,12 @@ class InputProcessor:
                         # Insert into cache via get_and_update_item.
                         # Use the returned item (may be an address for SHM
                         # cache or the original item for LRU cache).
-                        items[i], _ = cache.get_and_update_item(
-                            (items[i], []),
-                            mm_hash,
-                        )
+                        items[i], _ = cache.get_and_update_item((items[i], []), mm_hash)
             # Update cache stats to reflect the externally processed items
             self.renderer.update_mm_cache_stats()
         except Exception:
             logger.warning(
-                "Failed to inject mm_kwargs into processor cache",
-                exc_info=True,
+                "Failed to inject mm_kwargs into processor cache", exc_info=True
             )
 
     @staticmethod
@@ -281,8 +264,7 @@ class InputProcessor:
                 arrival_time = time.time()
 
             processed_inputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
+                prompt, tokenization_kwargs=tokenization_kwargs
             )
 
         current_platform.validate_request(processed_inputs, params)
@@ -313,8 +295,7 @@ class InputProcessor:
                 sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
-                self.generation_config_fields,
-                self.renderer.get_eos_token_id(),
+                self.generation_config_fields, self.renderer.get_eos_token_id()
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
@@ -350,10 +331,7 @@ class InputProcessor:
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=self._get_mm_identifier(
-                            base_mm_hash,
-                            lora_request,
-                        ),
+                        identifier=self._get_mm_identifier(base_mm_hash, lora_request),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
                     )
@@ -377,9 +355,7 @@ class InputProcessor:
         )
 
     def _validate_prompt_len(
-        self,
-        prompt_len: int,
-        prompt_type: Literal["encoder", "decoder"],
+        self, prompt_len: int, prompt_type: Literal["encoder", "decoder"]
     ):
         if self.skip_prompt_length_check:
             return
@@ -424,9 +400,7 @@ class InputProcessor:
             )
 
     def _validate_model_input(
-        self,
-        prompt_input: SingletonInput,
-        prompt_type: Literal["encoder", "decoder"],
+        self, prompt_input: SingletonInput, prompt_type: Literal["encoder", "decoder"]
     ) -> None:
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -476,9 +450,7 @@ class InputProcessor:
                 raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
     def _validate_model_inputs(
-        self,
-        encoder_input: SingletonInput | None,
-        decoder_input: SingletonInput,
+        self, encoder_input: SingletonInput | None, decoder_input: SingletonInput
     ):
         if encoder_input is not None:
             self._validate_model_input(encoder_input, prompt_type="encoder")

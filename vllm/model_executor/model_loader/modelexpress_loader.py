@@ -57,14 +57,9 @@ class ModelExpressModelLoader(BaseModelLoader):
 
     @instrument(span_name="Load model")
     def load_model(
-        self,
-        vllm_config: VllmConfig,
-        model_config: ModelConfig,
-        prefix: str = "",
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         model = self._loader.load_model(
-            vllm_config=vllm_config,
-            model_config=model_config,
-            prefix=prefix,
+            vllm_config=vllm_config, model_config=model_config, prefix=prefix
         )
         return model.eval()

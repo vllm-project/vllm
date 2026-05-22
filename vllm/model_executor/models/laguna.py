@@ -203,8 +203,7 @@ class LagunaMoE(nn.Module):
         # add it during top-k selection. The fused top-k bias router requires
         # float32 regardless of model dtype.
         e_score_correction_bias = torch.nn.Parameter(
-            torch.zeros(config.num_experts, dtype=torch.float32),
-            requires_grad=False,
+            torch.zeros(config.num_experts, dtype=torch.float32), requires_grad=False
         )
 
         # FusedMoE with SIGMOID routing. Passing `shared_experts=` lets the
@@ -424,9 +423,7 @@ class LagunaAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -549,10 +546,7 @@ class LagunaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -843,9 +837,7 @@ class LagunaModel(nn.Module, EagleModelMixin):
 class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     fall_back_to_pt_during_load = False
 
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

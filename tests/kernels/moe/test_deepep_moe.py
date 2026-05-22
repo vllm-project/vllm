@@ -16,9 +16,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
@@ -44,8 +42,7 @@ if has_deep_ep():
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deep_ep(),
-    reason="Requires deep_ep kernels",
+    not has_deep_ep(), reason="Requires deep_ep kernels"
 )
 
 MAX_TOKENS_PER_RANK = 64
@@ -177,15 +174,10 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
+        fused_experts = TritonExperts(moe_config=moe_config, quant_config=quant_config)
 
     mk = FusedMoEKernel(
-        prepare_finalize=a2a,
-        fused_experts=fused_experts,
-        inplace=False,
+        prepare_finalize=a2a, fused_experts=fused_experts, inplace=False
     )
     return mk
 
@@ -417,12 +409,7 @@ def _deep_ep_moe(
             per_act_token_quant,
         )
 
-    torch.testing.assert_close(
-        torch_combined,
-        deepep_combined,
-        atol=6e-2,
-        rtol=6e-2,
-    )
+    torch.testing.assert_close(torch_combined, deepep_combined, atol=6e-2, rtol=6e-2)
 
 
 MNKs = [

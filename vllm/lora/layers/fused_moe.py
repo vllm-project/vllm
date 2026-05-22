@@ -83,11 +83,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
         )
 
-    def _create_lora_a_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-    ):
+    def _create_lora_a_weights(self, max_loras: int, lora_config: LoRAConfig):
         self.w13_lora_a_stacked: tuple[torch.Tensor, ...] = tuple(
             torch.zeros(
                 (

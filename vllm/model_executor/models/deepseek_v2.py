@@ -71,9 +71,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_dequantize,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import (
-    SparseAttnIndexer,
-)
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -91,9 +89,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerBackend,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
@@ -183,9 +179,7 @@ class DeepseekAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -271,9 +265,7 @@ class DeepseekV2MoE(nn.Module):
             )
 
         self.gate = GateLinear(
-            config.hidden_size,
-            config.n_routed_experts,
-            prefix=f"{prefix}.gate",
+            config.hidden_size, config.n_routed_experts, prefix=f"{prefix}.gate"
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
@@ -778,8 +770,7 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
 
 
 def _min_latency_fused_qkv_a_proj_impl(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
+    input_: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
     """
     Dynamically run min-latency gemm if num_tokens <= 16.
@@ -789,10 +780,7 @@ def _min_latency_fused_qkv_a_proj_impl(
     num_tokens = input_.shape[0]
     if 0 < num_tokens <= 16:
         output = torch.empty(
-            num_tokens,
-            weight.shape[0],
-            dtype=torch.bfloat16,
-            device=input_.device,
+            num_tokens, weight.shape[0], dtype=torch.bfloat16, device=input_.device
         )
         ops.dsv3_fused_a_gemm(output, input_, weight.T)
         return output
@@ -801,8 +789,7 @@ def _min_latency_fused_qkv_a_proj_impl(
 
 
 def _min_latency_fused_qkv_a_proj_fake(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
+    input_: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
     return input_.new_empty(input_.shape[0], weight.shape[0])
 
@@ -847,8 +834,7 @@ class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
         )
 
     def forward(
-        self,
-        input_,
+        self, input_
     ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
         if self._use_min_latency_gemm:
             output = torch.ops.vllm.min_latency_fused_qkv_a_proj(input_, self.weight)
@@ -1165,10 +1151,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        attn_kwargs = {
-            "positions": positions,
-            "hidden_states": hidden_states,
-        }
+        attn_kwargs = {"positions": positions, "hidden_states": hidden_states}
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
         hidden_states = self.self_attn(**attn_kwargs)
@@ -1238,9 +1221,7 @@ class DeepseekV2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV2DecoderLayer(
-                vllm_config,
-                prefix,
-                topk_indices_buffer=topk_indices_buffer,
+                vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1572,9 +1553,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -1595,9 +1574,7 @@ class DeepseekV2ForCausalLM(
     SupportsEagle,
     SupportsEagle3,
 ):
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model_cls = DeepseekV2Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1694,10 +1671,7 @@ class DeepseekV2ForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

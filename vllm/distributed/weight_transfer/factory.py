@@ -72,9 +72,7 @@ class WeightTransferEngineFactory:
 
     @classmethod
     def create_engine(
-        cls,
-        config: "WeightTransferConfig",
-        parallel_config: "ParallelConfig",
+        cls, config: "WeightTransferConfig", parallel_config: "ParallelConfig"
     ) -> WeightTransferEngine:
         """Create a weight transfer engine instance.
 
@@ -97,10 +95,7 @@ class WeightTransferEngineFactory:
             )
         engine_cls = cls._registry[backend]()
 
-        logger.info(
-            "Creating weight transfer engine: %s",
-            engine_cls.__name__,
-        )
+        logger.info("Creating weight transfer engine: %s", engine_cls.__name__)
 
         return engine_cls(config, parallel_config)
 
@@ -110,13 +105,9 @@ class WeightTransferEngineFactory:
 # engine modules are only imported when actually used.
 
 WeightTransferEngineFactory.register_engine(
-    "nccl",
-    "vllm.distributed.weight_transfer.nccl_engine",
-    "NCCLWeightTransferEngine",
+    "nccl", "vllm.distributed.weight_transfer.nccl_engine", "NCCLWeightTransferEngine"
 )
 
 WeightTransferEngineFactory.register_engine(
-    "ipc",
-    "vllm.distributed.weight_transfer.ipc_engine",
-    "IPCWeightTransferEngine",
+    "ipc", "vllm.distributed.weight_transfer.ipc_engine", "IPCWeightTransferEngine"
 )

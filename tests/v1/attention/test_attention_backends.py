@@ -26,9 +26,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import (
-    set_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
@@ -257,8 +255,7 @@ def run_attention_backend(
         ):
             builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             attn_metadata = builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
             )
     else:
         # Build metadata
@@ -266,8 +263,7 @@ def run_attention_backend(
         if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
     # Instantiate implementation
@@ -353,7 +349,7 @@ def _test_backend_correctness(
             temp_config.hf_text_config, "num_key_value_heads", None
         )
         hf_config_override = {
-            "num_attention_heads": original_num_heads // tensor_parallel_size,
+            "num_attention_heads": original_num_heads // tensor_parallel_size
         }
         if original_num_kv_heads is not None:
             hf_config_override["num_key_value_heads"] = max(
@@ -698,11 +694,7 @@ def test_sliding_window_backend_correctness(
 
 
 @pytest.mark.parametrize(
-    "batch_spec_name",
-    [
-        "small_encoder_prefill",
-        "medium_encoder_prefill",
-    ],
+    "batch_spec_name", ["small_encoder_prefill", "medium_encoder_prefill"]
 )
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
@@ -755,12 +747,7 @@ if current_platform.is_rocm():
 
 
 @pytest.mark.parametrize(
-    "batch_spec_name",
-    [
-        "small_decode",
-        "small_prefill",
-        "mixed_small",
-    ],
+    "batch_spec_name", ["small_decode", "small_prefill", "mixed_small"]
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 def test_non_causal_backend_correctness(
@@ -791,11 +778,7 @@ def test_non_causal_backend_correctness(
     ]
 
     _test_backend_correctness(
-        batch_spec,
-        model,
-        SMALL_BLOCK_BACKENDS,
-        bidirectional_mask_mod,
-        causal=False,
+        batch_spec, model, SMALL_BLOCK_BACKENDS, bidirectional_mask_mod, causal=False
     )
 
     if LARGE_BLOCK_BACKENDS:

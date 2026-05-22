@@ -45,35 +45,15 @@ def mock_on_mi3xx():
     "env_vars, selected_backend, expected_backend_path",
     [
         # Test Case: Explicit FLEX_ATTENTION backend
-        (
-            {},
-            "FLEX_ATTENTION",
-            AttentionBackendEnum.FLEX_ATTENTION.get_path(),
-        ),
+        ({}, "FLEX_ATTENTION", AttentionBackendEnum.FLEX_ATTENTION.get_path()),
         # Test Case 1: Default (no env vars, no explicit backend)
-        (
-            {},
-            None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
-        ),
+        ({}, None, AttentionBackendEnum.ROCM_ATTN.get_path()),
         # Test Case 2: Explicit TRITON_ATTN backend
-        (
-            {},
-            "TRITON_ATTN",
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
-        ),
+        ({}, "TRITON_ATTN", AttentionBackendEnum.TRITON_ATTN.get_path()),
         # Test Case 3: Explicit ROCM_ATTN backend
-        (
-            {},
-            "ROCM_ATTN",
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
-        ),
+        ({}, "ROCM_ATTN", AttentionBackendEnum.ROCM_ATTN.get_path()),
         # Test Case 4: Explicit ROCM_AITER_FA backend
-        (
-            {},
-            "ROCM_AITER_FA",
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
-        ),
+        ({}, "ROCM_AITER_FA", AttentionBackendEnum.ROCM_AITER_FA.get_path()),
         # Test Case 5: Explicit ROCM_AITER_UNIFIED_ATTN backend
         (
             {},
@@ -81,11 +61,7 @@ def mock_on_mi3xx():
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
-        (
-            {"VLLM_ROCM_USE_AITER": "1"},
-            None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
-        ),
+        ({"VLLM_ROCM_USE_AITER": "1"}, None, AttentionBackendEnum.ROCM_ATTN.get_path()),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
@@ -157,21 +133,9 @@ def test_standard_attention_backend_selection(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [
         # Test Case 1: TRITON_MLA with block_size != 1
-        (
-            {},
-            "TRITON_MLA",
-            16,
-            AttentionBackendEnum.TRITON_MLA.get_path(),
-            False,
-        ),
+        ({}, "TRITON_MLA", 16, AttentionBackendEnum.TRITON_MLA.get_path(), False),
         # Test Case 2: TRITON_MLA with block_size == 1 (should raise)
-        (
-            {},
-            "TRITON_MLA",
-            1,
-            None,
-            True,
-        ),
+        ({}, "TRITON_MLA", 1, None, True),
         # Test Case 3: ROCM_AITER_MLA with block_size == 1
         (
             {},
@@ -311,10 +275,7 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
     # Mock on_mi3xx to return False (used by supports_compute_capability)
     with (
         patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
-        pytest.raises(
-            ValueError,
-            match="compute capability not supported",
-        ),
+        pytest.raises(ValueError, match="compute capability not supported"),
     ):
         attn_selector_config = AttentionSelectorConfig(
             head_size=128,
@@ -336,10 +297,7 @@ def test_sparse_not_supported(mock_vllm_config):
     """Test that sparse MLA without use_mla flag raises an error."""
     from vllm.platforms.rocm import RocmPlatform
 
-    with pytest.raises(
-        ValueError,
-        match="No valid attention backend found",
-    ):
+    with pytest.raises(ValueError, match="No valid attention backend found"):
         attn_selector_config = AttentionSelectorConfig(
             head_size=128,
             dtype=torch.float16,

@@ -14,16 +14,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
-from vllm.tool_parsers.qwen3coder_tool_parser import (
-    Qwen3CoderToolParser,
-)
+from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
@@ -382,10 +376,7 @@ circle
     ],
 )
 def test_extract_tool_calls(
-    qwen3_tool_parser_parametrized,
-    model_output,
-    expected_tool_calls,
-    expected_content,
+    qwen3_tool_parser_parametrized, model_output, expected_tool_calls, expected_content
 ):
     request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
@@ -398,9 +389,7 @@ def test_extract_tool_calls(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_fallback_no_tags(
-    qwen3_tool_parser_parametrized,
-):
+def test_extract_tool_calls_fallback_no_tags(qwen3_tool_parser_parametrized):
     """Test fallback parsing when XML tags are missing"""
     model_output = """<function=get_current_weather>
 <parameter=city>
@@ -491,39 +480,24 @@ def test_extract_tool_calls_anyof_type_conversion(qwen3_tokenizer):
                     "type": "object",
                     "properties": {
                         "anyof_int": {
-                            "anyOf": [
-                                {"type": "integer"},
-                                {"type": "null"},
-                            ],
+                            "anyOf": [{"type": "integer"}, {"type": "null"}],
                             "default": 5,
                         },
-                        "anyof_str": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "null"},
-                            ],
-                        },
+                        "anyof_str": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                         "anyof_array": {
                             "anyOf": [
                                 {"type": "array", "items": {"type": "string"}},
                                 {"type": "null"},
-                            ],
+                            ]
                         },
-                        "anyof_obj": {
-                            "anyOf": [
-                                {"type": "object"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "type_as_array": {
-                            "type": ["integer", "null"],
-                        },
+                        "anyof_obj": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+                        "type_as_array": {"type": ["integer", "null"]},
                         "multi_non_null": {
                             "anyOf": [
                                 {"type": "string"},
                                 {"type": "integer"},
                                 {"type": "null"},
-                            ],
+                            ]
                         },
                     },
                 },
@@ -589,25 +563,12 @@ def test_extract_tool_calls_anyof_type_conversion_streaming(qwen3_tokenizer):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "null"},
-                            ],
-                        },
+                        "query": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                         "count": {
-                            "anyOf": [
-                                {"type": "integer"},
-                                {"type": "null"},
-                            ],
+                            "anyOf": [{"type": "integer"}, {"type": "null"}],
                             "default": 5,
                         },
-                        "verbose": {
-                            "anyOf": [
-                                {"type": "boolean"},
-                                {"type": "null"},
-                            ],
-                        },
+                        "verbose": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
                     },
                 },
             },
@@ -1085,9 +1046,7 @@ TX
     assert parsed_args["state"] == "TX"
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tokenizer,
-):
+def test_extract_tool_calls_complex_type_with_single_quote(qwen3_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -1257,9 +1216,7 @@ def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "data": {
-                            "anyOf": [{"type": "object"}, {"type": "null"}],
-                        },
+                        "data": {"anyOf": [{"type": "object"}, {"type": "null"}]}
                     },
                 },
             },
@@ -1302,15 +1259,10 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
         "\n</tool_call>",
     ]
 
-    from tests.tool_parsers.utils import (
-        run_tool_extraction_streaming,
-    )
+    from tests.tool_parsers.utils import run_tool_extraction_streaming
 
     reconstructor = run_tool_extraction_streaming(
-        qwen3_tool_parser,
-        deltas,
-        request,
-        assert_one_tool_per_delta=False,
+        qwen3_tool_parser, deltas, request, assert_one_tool_per_delta=False
     )
 
     assert len(reconstructor.tool_calls) == 1
@@ -1329,9 +1281,7 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
                 "name": "greet",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "message": {"type": "string"},
-                    },
+                    "properties": {"message": {"type": "string"}},
                 },
             },
         )
@@ -1362,30 +1312,20 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
 ) -> None:
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=request_tools,
-        tool_choice="auto",
+        messages=[], model="m", tools=request_tools, tool_choice="auto"
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
     req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=request_tools,
-        tool_choice="required",
+        messages=[], model="m", tools=request_tools, tool_choice="required"
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
     if request_tools:
         tool = request_tools[0]
-        req = ChatCompletionRequest(
-            messages=[],
-            model="m",
-            tools=request_tools,
-        )
+        req = ChatCompletionRequest(messages=[], model="m", tools=request_tools)
         req.tool_choice = ChatCompletionNamedToolChoiceParam(
             function=ChatCompletionNamedFunction(name=tool.function.name)
         )
@@ -1401,8 +1341,7 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
     include_reasoning: bool,
 ) -> None:
     monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING", True
     )
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
@@ -1426,15 +1365,11 @@ def test_adjust_request_required_prefers_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING", True
     )
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=request_tools,
-        tool_choice="required",
+        messages=[], model="m", tools=request_tools, tool_choice="required"
     )
     out = qwen3_tool_parser.adjust_request(req)
     assert out.structured_outputs is not None

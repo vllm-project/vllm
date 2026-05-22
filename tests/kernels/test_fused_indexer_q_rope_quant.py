@@ -32,9 +32,7 @@ N_HEAD = 64
 MAX_POS = 4096
 
 
-def quantize_to_mxfp4(
-    x: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize_to_mxfp4(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference MXFP4 quantization.
 
     Args:
@@ -113,9 +111,7 @@ def _reference(
 
     else:
         q_fp8, q_scale = per_token_group_quant_fp8(
-            q_rot.view(-1, HEAD_DIM).contiguous(),
-            HEAD_DIM,
-            use_ue8m0=True,
+            q_rot.view(-1, HEAD_DIM).contiguous(), HEAD_DIM, use_ue8m0=True
         )
         q_fp8 = q_fp8.view(-1, N_HEAD, HEAD_DIM)
         q_scale = q_scale.view(-1, N_HEAD)

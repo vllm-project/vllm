@@ -44,14 +44,7 @@ def test_default_no_space_languages_includes_zh_and_ja():
 
 @pytest.mark.parametrize(
     ("language", "expected_sep"),
-    [
-        ("en", " "),
-        ("EN", " "),
-        ("zh", ""),
-        ("ZH", ""),
-        ("ja", ""),
-        (None, " "),
-    ],
+    [("en", " "), ("EN", " "), ("zh", ""), ("ZH", ""), ("ja", ""), (None, " ")],
 )
 def test_asr_inter_chunk_separator_matches_protocol(language, expected_sep):
     sep = asr_inter_chunk_separator(language, SupportsTranscription.no_space_languages)
@@ -81,10 +74,7 @@ class _StubTranscriptionModel:
     def get_speech_to_text_config(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
-        return SpeechToTextConfig(
-            sample_rate=16000.0,
-            max_audio_clip_s=5.0,
-        )
+        return SpeechToTextConfig(sample_rate=16000.0, max_audio_clip_s=5.0)
 
     @classmethod
     def post_process_output(cls, text: str) -> str:

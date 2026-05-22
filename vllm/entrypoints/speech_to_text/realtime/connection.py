@@ -144,10 +144,7 @@ class RealtimeConnection:
                     "Model not validated. Make sure to validate the"
                     " model by sending a session.update event."
                 )
-                await self.send_error(
-                    err_msg,
-                    "model_not_validated",
-                )
+                await self.send_error(err_msg, "model_not_validated")
                 return
 
             commit_event = InputAudioBufferCommit(**event)

@@ -67,8 +67,7 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
 
 
 def apply_chat_template_and_add_eos(
-    messages: list[dict],
-    apply_chat_template_fn: Callable,
+    messages: list[dict], apply_chat_template_fn: Callable
 ):
     prompt = (
         apply_chat_template_fn(messages, tokenize=False, add_generation_prompt=True)
@@ -126,10 +125,7 @@ def _run_test(
 
             prompts.append(prompt)
 
-        all_inputs = hf_model.get_inputs(
-            prompts=prompts,
-            images=input_images,
-        )
+        all_inputs = hf_model.get_inputs(prompts=prompts, images=input_images)
 
         with torch.no_grad():
             all_outputs = []
@@ -163,11 +159,7 @@ def _run_test(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_models_text(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, image_assets, model: str, dtype: str
 ) -> None:
     input_texts_images = [
         (text, image_placeholder) for text, image_placeholder in HF_TEXT_PROMPTS
@@ -191,11 +183,7 @@ def test_models_text(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_models_image(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, image_assets, model: str, dtype: str
 ) -> None:
     input_texts_images = [
         (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)

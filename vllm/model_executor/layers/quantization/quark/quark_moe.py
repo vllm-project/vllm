@@ -595,13 +595,11 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         else:
             # per-tensor: one scalar per expert
             w13_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, 2, dtype=torch.float32),
-                requires_grad=False,
+                torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)
             w2_weight_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32),
-                requires_grad=False,
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
             extra_weight_attrs.update(
@@ -613,15 +611,13 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         # INPUT_SCALES
         if self.static_input_scales:
             w13_input_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32),
-                requires_grad=False,
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w13_input_scale", w13_input_scale)
             set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
             w2_input_scale = torch.nn.Parameter(
-                torch.ones(num_experts, dtype=torch.float32),
-                requires_grad=False,
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w2_input_scale", w2_input_scale)
             set_weight_attrs(w2_input_scale, extra_weight_attrs)
@@ -631,15 +627,13 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
         # ZERO POINTS (loaded but discarded after loading; kernel uses symmetric)
         w13_input_zero_point = torch.nn.Parameter(
-            torch.zeros(num_experts, 2, dtype=torch.int8),
-            requires_grad=False,
+            torch.zeros(num_experts, 2, dtype=torch.int8), requires_grad=False
         )
         layer.register_parameter("w13_input_zero_point", w13_input_zero_point)
         set_weight_attrs(w13_input_zero_point, extra_weight_attrs)
 
         w2_input_zero_point = torch.nn.Parameter(
-            torch.zeros(num_experts, dtype=torch.int8),
-            requires_grad=False,
+            torch.zeros(num_experts, dtype=torch.int8), requires_grad=False
         )
         layer.register_parameter("w2_input_zero_point", w2_input_zero_point)
         set_weight_attrs(w2_input_zero_point, extra_weight_attrs)
@@ -647,9 +641,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         if self.weight_qscheme == "per_channel":
             w13_weight_zero_point = torch.nn.Parameter(
                 torch.zeros(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    dtype=torch.int8,
+                    num_experts, 2 * intermediate_size_per_partition, dtype=torch.int8
                 ),
                 requires_grad=False,
             )
@@ -659,12 +651,10 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             )
         else:
             w13_weight_zero_point = torch.nn.Parameter(
-                torch.zeros(num_experts, 2, dtype=torch.int8),
-                requires_grad=False,
+                torch.zeros(num_experts, 2, dtype=torch.int8), requires_grad=False
             )
             w2_weight_zero_point = torch.nn.Parameter(
-                torch.zeros(num_experts, dtype=torch.int8),
-                requires_grad=False,
+                torch.zeros(num_experts, dtype=torch.int8), requires_grad=False
             )
         layer.register_parameter("w13_weight_zero_point", w13_weight_zero_point)
         set_weight_attrs(w13_weight_zero_point, extra_weight_attrs)
@@ -734,8 +724,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                         layer,
                         attr,
                         torch.nn.Parameter(
-                            param.data.unsqueeze(-1).contiguous(),
-                            requires_grad=False,
+                            param.data.unsqueeze(-1).contiguous(), requires_grad=False
                         ),
                     )
 
@@ -754,8 +743,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                     )
                     layer.w13_weight[expert_id][start : start + shard_size, :], _, _ = (
                         ops.scaled_int8_quant(
-                            dq_weight,
-                            scale=max_w13_scales[expert_id],
+                            dq_weight, scale=max_w13_scales[expert_id]
                         )
                     )
                     start += shard_size
@@ -884,9 +872,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         # Per-channel int4 weight scales
         w13_weight_scale_2 = torch.nn.Parameter(
             torch.ones(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                dtype=torch.float32,
+                num_experts, 2 * intermediate_size_per_partition, dtype=torch.float32
             ),
             requires_grad=False,
         )
@@ -1410,9 +1396,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
-            config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            config=self.moe, weight_key=kNvfp4Static, activation_key=kNvfp4Dynamic
         )
 
     def create_weights(
@@ -1500,8 +1484,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
 
         w2_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
@@ -1515,8 +1498,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w13_input_scale_2, extra_weight_attrs)
 
         w2_input_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
         )
         layer.register_parameter("w2_input_scale_2", w2_input_scale_2)
         set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
@@ -1538,27 +1520,20 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            a13_scale,
-            w2,
-            w2_scale,
-            w2_scale_2,
-            a2_scale,
-        ) = convert_to_nvfp4_moe_kernel_format(
-            nvfp4_backend=self.nvfp4_backend,
-            layer=layer,
-            w13=layer.w13_weight,
-            w13_scale=layer.w13_weight_scale,
-            w13_scale_2=w13_weight_scale_2,
-            a13_scale=layer.w13_input_scale_2,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
-            w2_scale_2=w2_weight_scale_2,
-            a2_scale=layer.w2_input_scale_2,
-            is_act_and_mul=self.moe.is_act_and_mul,
+        (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale) = (
+            convert_to_nvfp4_moe_kernel_format(
+                nvfp4_backend=self.nvfp4_backend,
+                layer=layer,
+                w13=layer.w13_weight,
+                w13_scale=layer.w13_weight_scale,
+                w13_scale_2=w13_weight_scale_2,
+                a13_scale=layer.w13_input_scale_2,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                w2_scale_2=w2_weight_scale_2,
+                a2_scale=layer.w2_input_scale_2,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            )
         )
 
         replace_parameter(layer, "w13_weight", w13)

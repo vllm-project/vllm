@@ -22,11 +22,7 @@ class ScatterSplitReplacementModel(nn.Module):
     """Model with a rope+getitem+slice_scatter+split_with_sizes sequence."""
 
     def __init__(
-        self,
-        num_heads: int,
-        num_kv_heads: int,
-        head_size: int,
-        dtype: torch.dtype,
+        self, num_heads: int, num_kv_heads: int, head_size: int, dtype: torch.dtype
     ):
         super().__init__()
         self.q_size = num_heads * head_size
@@ -74,9 +70,8 @@ def test_scatter_split_replace(dtype):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rotary_embedding"],
-        ),
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["+rotary_embedding"]
+        )
     )
     with vllm.config.set_current_vllm_config(vllm_config):
         # ScatterSplitReplacementPass requires SplitCoalescingPass to be run before it

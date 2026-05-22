@@ -143,9 +143,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
     def get_quant_method(
-        self,
-        layer: torch.nn.Module,
-        prefix: str,
+        self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             # collect schemes
@@ -834,10 +832,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         )
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme

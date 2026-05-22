@@ -31,10 +31,7 @@ def server(default_server_args):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batched_chat_completions(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
@@ -46,10 +43,7 @@ async def test_batched_chat_completions(
     async with httpx.AsyncClient() as http_client:
         response = await http_client.post(
             f"{server.url_for('v1/chat/completions/batch')}",
-            json={
-                "model": model_name,
-                "messages": conversations,
-            },
+            json={"model": model_name, "messages": conversations},
             timeout=60,
         )
 
@@ -68,18 +62,13 @@ async def test_batched_chat_completions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batched_chat_completions_with_json_schema(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
     schema = {
         "type": "object",
-        "properties": {
-            "answer": {"type": "string", "enum": ["yes", "no"]},
-        },
+        "properties": {"answer": {"type": "string", "enum": ["yes", "no"]}},
         "required": ["answer"],
     }
     conversations = [

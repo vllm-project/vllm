@@ -14,11 +14,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -130,15 +126,6 @@ def test_triton_basic_call():
     D = torch.randn(dim, device=device)
 
     selective_state_update(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        D=D,
-        dt_bias=dt_bias,
-        dt_softplus=True,
-        out=out,
+        state, x, dt, A, B, C, D=D, dt_bias=dt_bias, dt_softplus=True, out=out
     )
     assert not torch.isnan(out).any()

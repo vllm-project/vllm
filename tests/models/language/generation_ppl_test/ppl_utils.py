@@ -93,8 +93,7 @@ def wikitext_ppl_test(
     # Accelerate ppl test by setting Transformers ppl score to a constant
     if model_info.hf_ppl is None:
         with hf_runner(
-            model_info.name,
-            dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            model_info.name, dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype
         ) as hf_model:
             nll_sum = torch.tensor(0.0, dtype=torch.float32, device="cpu")
             n_tokens = 0

@@ -117,11 +117,7 @@ class MultiModalHasher:
 
             return cls.iter_item_to_bytes(
                 "ndarray",
-                {
-                    "dtype": obj.dtype.str,
-                    "shape": obj.shape,
-                    "data": arr_data,
-                },
+                {"dtype": obj.dtype.str, "shape": obj.shape, "data": arr_data},
             )
 
         logger.warning(
@@ -131,11 +127,7 @@ class MultiModalHasher:
         return (pickle.dumps(obj),)
 
     @classmethod
-    def iter_item_to_bytes(
-        cls,
-        key: str,
-        obj: object,
-    ) -> Iterable[bytes | memoryview]:
+    def iter_item_to_bytes(cls, key: str, obj: object) -> Iterable[bytes | memoryview]:
         if obj is None:
             yield key.encode("utf-8")
             return

@@ -20,8 +20,7 @@ if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx9
 
     pytestmark = pytest.mark.skipif(
-        on_gfx9(),
-        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+        on_gfx9(), reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)"
     )
 
 models_4bit_to_test = [
@@ -33,11 +32,11 @@ models_4bit_to_test = [
 ]
 
 models_4bit_to_embedding_test = [
-    ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
+    ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight")
 ]
 
 models_4bit_to_moe_test = [
-    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight"),
+    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight")
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -132,11 +131,7 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "--gpu-memory-utilization",
         "0.7",
     ]
-    pp_args = [
-        *common_args,
-        "--pipeline-parallel-size",
-        "2",
-    ]
+    pp_args = [*common_args, "--pipeline-parallel-size", "2"]
     compare_two_settings(model_name, common_args, pp_args)
 
 
@@ -156,9 +151,7 @@ def test_4bit_bnb_moe_model(
 ) -> None:
     hf_model_kwargs = dict(
         quantization_config=BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
+            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True
         )
     )
     with vllm_runner(
@@ -192,12 +185,7 @@ def test_4bit_bnb_moe_model(
 @pytest.mark.parametrize("model_name, description", models_4bit_to_embedding_test)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_4bit_bnb_embedding_model(
-    model_name,
-    description,
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    dtype: str,
+    model_name, description, hf_runner, vllm_runner, example_prompts, dtype: str
 ) -> None:
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"

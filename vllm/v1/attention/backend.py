@@ -107,11 +107,7 @@ class AttentionBackend(ABC):
         backends lay out dims differently."""
         _S = 1234567
         shape = cls.get_kv_cache_shape(
-            _S,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str=cache_dtype_str,
+            _S, block_size, num_kv_heads, head_size, cache_dtype_str=cache_dtype_str
         )
         return shape.index(_S)
 
@@ -569,8 +565,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                     * speculative_config.num_speculative_tokens
                 )
                 self.reorder_batch_threshold = max(
-                    self.reorder_batch_threshold,
-                    max_num_queries_for_spec,
+                    self.reorder_batch_threshold, max_num_queries_for_spec
                 )
 
         if (
@@ -600,10 +595,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         raise NotImplementedError
 
     def update_block_table(
-        self,
-        metadata: M,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        self, metadata: M, blk_table: torch.Tensor, slot_mapping: torch.Tensor
     ) -> M:
         """
         Update the block table for the attention metadata.
@@ -627,9 +619,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         )
 
     def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
+        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
     ) -> M:
         """
         Build attention metadata for draft model. Uses build by default.

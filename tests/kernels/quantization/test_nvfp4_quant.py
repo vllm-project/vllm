@@ -141,10 +141,7 @@ def round_up(x: int, y: int) -> int:
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_quantize_to_fp4(
-    dtype: torch.dtype,
-    shape: tuple[int, int],
-    seed: int,
-    device: str,
+    dtype: torch.dtype, shape: tuple[int, int], seed: int, device: str
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -165,14 +162,12 @@ def test_quantize_to_fp4(
 
 
 @pytest.mark.parametrize(
-    "shape",
-    [(32, 4096), (128, 4096), (1, 64), (127, 1024), (256, 16384)],
+    "shape", [(32, 4096), (128, 4096), (1, 64), (127, 1024), (256, 16384)]
 )
 @pytest.mark.parametrize("is_sf_swizzled_layout", [True, False])
 @torch.inference_mode()
 def test_python_util_matches_cpp_allocation(
-    shape: tuple[int, int],
-    is_sf_swizzled_layout: bool,
+    shape: tuple[int, int], is_sf_swizzled_layout: bool
 ) -> None:
     """
     Verify that the Python utility (create_fp4_output_tensors) allocates
@@ -214,8 +209,7 @@ def test_python_util_matches_cpp_allocation(
 @pytest.mark.parametrize("is_sf_swizzled_layout", [True, False])
 @torch.inference_mode()
 def test_quantize_to_fp4_with_padded_output(
-    shape: tuple[int, int],
-    is_sf_swizzled_layout: bool,
+    shape: tuple[int, int], is_sf_swizzled_layout: bool
 ) -> None:
     from vllm._custom_ops import create_fp4_output_tensors
 
@@ -233,17 +227,10 @@ def test_quantize_to_fp4_with_padded_output(
     out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
 
     out, out_scale = ops.scaled_fp4_quant(
-        x,
-        global_scale,
-        is_sf_swizzled_layout=is_sf_swizzled_layout,
-        padded_n=padded_n,
+        x, global_scale, is_sf_swizzled_layout=is_sf_swizzled_layout, padded_n=padded_n
     )
     py_out, py_scale = create_fp4_output_tensors(
-        m,
-        n,
-        torch.device("cuda:0"),
-        is_sf_swizzled_layout,
-        padded_n=padded_n,
+        m, n, torch.device("cuda:0"), is_sf_swizzled_layout, padded_n=padded_n
     )
 
     assert out.shape == (m, padded_n // 2)

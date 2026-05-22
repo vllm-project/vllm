@@ -5,6 +5,4 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 
-__all__ = [
-    "CompressedTensorsMoEMethod",
-]
+__all__ = ["CompressedTensorsMoEMethod"]

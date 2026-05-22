@@ -230,8 +230,7 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
 
 
 def is_supported_lora_module(
-    module_name: str,
-    supported_lora_modules: list[str],
+    module_name: str, supported_lora_modules: list[str]
 ) -> bool:
     """Check if a module is in the model's supported LoRA modules.
 
@@ -249,8 +248,7 @@ def is_supported_lora_module(
     """
     return any(
         re.match(
-            r".*\.{target_module}$".format(target_module=target_module),
-            module_name,
+            r".*\.{target_module}$".format(target_module=target_module), module_name
         )
         or target_module == module_name
         for target_module in supported_lora_modules

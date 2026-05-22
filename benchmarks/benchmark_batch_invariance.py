@@ -120,10 +120,7 @@ def run_benchmark_with_batch_invariant(
     print(f"{'=' * 80}\n")
 
     sampling = SamplingParams(
-        temperature=temperature,
-        top_p=0.95,
-        max_tokens=max_tokens,
-        seed=20240919,
+        temperature=temperature, top_p=0.95, max_tokens=max_tokens, seed=20240919
     )
 
     needle_prompt = "There once was a "

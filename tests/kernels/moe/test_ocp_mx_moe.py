@@ -360,9 +360,7 @@ def tg_mxfp4_moe(
         for i in range(num_experts):
             # w13 weight shuffling
             permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_weight[i].view(torch.uint8),
-                epilogue_tile_m,
+                _cache_permute_indices, w13_weight[i].view(torch.uint8), epilogue_tile_m
             )
             gemm1_weights_shuffled.append(
                 w13_weight[i]
@@ -397,9 +395,7 @@ def tg_mxfp4_moe(
             )
             # w2 weight shuffling
             permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_weight[i].view(torch.uint8),
-                epilogue_tile_m,
+                _cache_permute_indices, w2_weight[i].view(torch.uint8), epilogue_tile_m
             )
             gemm2_weights_shuffled.append(
                 w2_weight[i]
@@ -1067,11 +1063,7 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     )
     w13 = (
         torch.randn(
-            num_experts,
-            inter_size,
-            hidden_size,
-            device=device,
-            dtype=torch.bfloat16,
+            num_experts, inter_size, hidden_size, device=device, dtype=torch.bfloat16
         )
         / 20
     )
@@ -1094,11 +1086,7 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     w13_q, w13_scale = mxfp8_quantize(w13, is_sf_swizzled_layout=False)
     w2_q, w2_scale = mxfp8_quantize(w2, is_sf_swizzled_layout=False)
     if w13_scale.ndim == 1:
-        w13_scale = w13_scale.view(
-            num_experts,
-            inter_size,
-            hidden_size // 32,
-        )
+        w13_scale = w13_scale.view(num_experts, inter_size, hidden_size // 32)
     if w2_scale.ndim == 1:
         w2_scale = w2_scale.view(num_experts, hidden_size, intermediate_size // 32)
 
@@ -1116,9 +1104,7 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
         torch.float32
     )
     bias13 = torch.zeros(
-        num_experts,
-        intermediate_size * (2 if is_gated else 1),
-        device=device,
+        num_experts, intermediate_size * (2 if is_gated else 1), device=device
     )
     bias2 = torch.zeros(num_experts, hidden_size, device=device)
     ref = reference_moe(
@@ -1249,10 +1235,7 @@ ROCM_BACKEND_CONFIGS = {
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("num_tokens,hidden_size,intermediate_size", [(16, 256, 256)])
-@pytest.mark.skipif(
-    not ROCM_AVAILABLE,
-    reason="ROCm is required for this test",
-)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
 @torch.inference_mode()
 def test_rocm_mxfp4_moe_oracle(
     backend_name: str,

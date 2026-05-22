@@ -10,24 +10,17 @@ import partial_json_parser
 import pytest
 from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
-from mistral_common.protocol.instruct.tool_calls import (
-    FunctionCall,
-    ToolCall,
-)
+from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from mistral_common.protocol.instruct.tool_calls import (
     NamedToolChoice as MistralNamedToolChoice,
 )
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoice as MistralToolChoice,
-)
+from mistral_common.protocol.instruct.tool_calls import ToolChoice as MistralToolChoice
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoiceEnum as MistralToolChoiceEnum,
 )
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -117,8 +110,7 @@ def fix_tool_call_tokenization(
     with its single special token ID.
     """
     textual_tool_call_token_ids = mistral_tokenizer.encode(
-        text=mistral_tool_parser.bot_token,
-        add_special_tokens=False,
+        text=mistral_tool_parser.bot_token, add_special_tokens=False
     )
     # textual_tool_call_token_ids must not contain special tokens like bos, eos etc
     special_tool_call_token_ids = [mistral_tool_parser.bot_token_id]
@@ -161,18 +153,11 @@ def stream_delta_message_generator(
         assert tools is not None
         assistant_msg = AssistantMessage(
             tool_calls=[
-                ToolCall(
-                    function=FunctionCall(
-                        name=name,
-                        arguments=arg,
-                    )
-                )
+                ToolCall(function=FunctionCall(name=name, arguments=arg))
                 for (name, arg) in tools
-            ],
+            ]
         )
-        request = InstructRequest(
-            messages=[assistant_msg],
-        )
+        request = InstructRequest(messages=[assistant_msg])
         all_token_ids = mistral_tokenizer.instruct.encode_instruct(request).tokens
     else:
         # Older versions of the tokenizer are
@@ -297,12 +282,7 @@ def test_extract_tool_calls_no_tools(parser_fixture, request):
             [
                 ToolCall(
                     function=FunctionCall(
-                        name="get_age",
-                        arguments=json.dumps(
-                            {
-                                "name": "John Doe",
-                            }
-                        ),
+                        name="get_age", arguments=json.dumps({"name": "John Doe"})
                     )
                 )
             ],
@@ -345,11 +325,7 @@ def test_extract_tool_calls_no_tools(parser_fixture, request):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -384,9 +360,7 @@ def test_extract_tool_calls_pre_v11_multiple_bot_tokens_raises(
         )
 
 
-def test_extract_tool_calls_pre_v11_regex_fallback(
-    mistral_pre_v11_tool_parser,
-):
+def test_extract_tool_calls_pre_v11_regex_fallback(mistral_pre_v11_tool_parser):
     """The regex fallback path finds valid JSON via regex when the primary
     raw_decode fails on leading junk. It should re-serialize arguments
     and return a valid tool call."""
@@ -402,9 +376,7 @@ def test_extract_tool_calls_pre_v11_regex_fallback(
     assert result.tool_calls[0].function.arguments == json.dumps({"a": 1, "b": 2})
 
 
-def test_extract_tool_calls_pre_v11_regex_fallback_fails(
-    mistral_pre_v11_tool_parser,
-):
+def test_extract_tool_calls_pre_v11_regex_fallback_fails(mistral_pre_v11_tool_parser):
     model_output = "[TOOL_CALLS] not json at all"
     result = mistral_pre_v11_tool_parser.extract_tool_calls(
         model_output, request=_DUMMY_REQUEST
@@ -687,12 +659,7 @@ def _test_extract_tool_calls_streaming(
             [
                 ToolCall(
                     function=FunctionCall(
-                        name="get_age",
-                        arguments=json.dumps(
-                            {
-                                "name": "John Doe",
-                            }
-                        ),
+                        name="get_age", arguments=json.dumps({"name": "John Doe"})
                     )
                 )
             ],
@@ -724,11 +691,7 @@ def _test_extract_tool_calls_streaming(
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -755,11 +718,7 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer(
 
 
 @pytest.mark.parametrize(
-    ids=[
-        "single_tool_add",
-        "single_tool_add_strings",
-        "multiple_tools",
-    ],
+    ids=["single_tool_add", "single_tool_add_strings", "multiple_tools"],
     argnames=["tools", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
@@ -816,11 +775,7 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer(
     ],
 )
 def test_extract_tool_calls_streaming(
-    mistral_tool_parser,
-    mistral_tokenizer,
-    tools,
-    expected_tool_calls,
-    expected_content,
+    mistral_tool_parser, mistral_tokenizer, tools, expected_tool_calls, expected_content
 ):
     _test_extract_tool_calls_streaming(
         mistral_tool_parser,
@@ -1050,12 +1005,7 @@ def test_extract_tool_calls_streaming_v11_no_tools(
             [
                 ToolCall(
                     function=FunctionCall(
-                        name="get_age",
-                        arguments=json.dumps(
-                            {
-                                "name": "John Doe",
-                            }
-                        ),
+                        name="get_age", arguments=json.dumps({"name": "John Doe"})
                     )
                 )
             ],
@@ -1141,11 +1091,7 @@ def test_extract_tool_calls_streaming_one_chunk(
     "parser_fixture, model_output, fake_count, two_phase",
     [
         pytest.param(
-            "mistral_tool_parser",
-            '[TOOL_CALLS]add{"a": 1, "b": 2}',
-            20,
-            True,
-            id="v11",
+            "mistral_tool_parser", '[TOOL_CALLS]add{"a": 1, "b": 2}', 20, True, id="v11"
         ),
         pytest.param(
             "mistral_pre_v11_tool_parser",
@@ -1208,11 +1154,7 @@ def test_fast_detokenization_text_detection(
 @pytest.mark.parametrize(
     "parser_fixture, patched_method, current_text",
     [
-        (
-            "mistral_tool_parser",
-            "_extract_tool_calls_streaming",
-            "[TOOL_CALLS]add{}",
-        ),
+        ("mistral_tool_parser", "_extract_tool_calls_streaming", "[TOOL_CALLS]add{}"),
         (
             "mistral_pre_v11_tool_parser",
             "_extract_tool_calls_streaming_pre_v11_tokenizer",
@@ -1258,10 +1200,7 @@ SAMPLE_TOOLS_DICTS = [
             "description": "Add two numbers",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                },
+                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
                 "required": ["a", "b"],
             },
         },
@@ -1288,12 +1227,7 @@ def _make_request(**kwargs) -> ChatCompletionRequest:
         ({"tool_choice": "required"}, MistralToolChoiceEnum.required, True),
         ({"tool_choice": None, "tools": None}, MistralToolChoiceEnum.auto, True),
         (
-            {
-                "tool_choice": {
-                    "type": "function",
-                    "function": {"name": "get_weather"},
-                }
-            },
+            {"tool_choice": {"type": "function", "function": {"name": "get_weather"}}},
             MistralNamedToolChoice.model_validate(
                 {"type": "function", "function": {"name": "get_weather"}}
             ),
@@ -1330,9 +1264,7 @@ def test_adjust_request_grammar_factory(
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
     with patch.object(
-        factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
+        factory, "get_lark_from_jinja", wraps=factory.get_lark_from_jinja
     ) as mock_get_lark:
         result = mistral_tool_parser.adjust_request(request)
 
@@ -1367,9 +1299,7 @@ def test_adjust_request_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> 
     ids=["auto_skip_false", "none_skip_true"],
 )
 def test_adjust_request_non_mistral_tokenizer(
-    non_mistral_parser: MistralToolParser,
-    tool_choice: str,
-    expected_skip: bool,
+    non_mistral_parser: MistralToolParser, tool_choice: str, expected_skip: bool
 ) -> None:
     request = _make_request(tool_choice=tool_choice)
     result = non_mistral_parser.adjust_request(request)
@@ -1388,12 +1318,9 @@ def test_adjust_request_non_mistral_tokenizer(
     ids=["regex", "choice", "structural_tag", "grammar"],
 )
 def test_adjust_request_unsupported_structured_outputs(
-    mistral_tool_parser: MistralToolParser,
-    so_kwargs: dict,
+    mistral_tool_parser: MistralToolParser, so_kwargs: dict
 ) -> None:
-    request = _make_request(
-        structured_outputs=StructuredOutputsParams(**so_kwargs),
-    )
+    request = _make_request(structured_outputs=StructuredOutputsParams(**so_kwargs))
     result = mistral_tool_parser.adjust_request(request)
 
     assert result.structured_outputs == request.structured_outputs
@@ -1405,7 +1332,7 @@ def test_adjust_request_unsupported_response_format(
     request = _make_request(
         response_format=StructuralTagResponseFormat(
             type="structural_tag", format={"some": "config"}
-        ),
+        )
     )
     result = mistral_tool_parser.adjust_request(request)
     assert result.structured_outputs is None
@@ -1425,19 +1352,13 @@ def test_adjust_request_unsupported_response_format(
     ids=["json_object", "json_str", "json_dict"],
 )
 def test_adjust_request_structured_outputs_generates_grammar(
-    mistral_tool_parser: MistralToolParser,
-    so_kwargs: dict,
-    expected_json_schema: str,
+    mistral_tool_parser: MistralToolParser, so_kwargs: dict, expected_json_schema: str
 ) -> None:
-    request = _make_request(
-        structured_outputs=StructuredOutputsParams(**so_kwargs),
-    )
+    request = _make_request(structured_outputs=StructuredOutputsParams(**so_kwargs))
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
     with patch.object(
-        factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
+        factory, "get_lark_from_jinja", wraps=factory.get_lark_from_jinja
     ) as mock_get_lark:
         result = mistral_tool_parser.adjust_request(request)
 
@@ -1478,9 +1399,7 @@ def test_adjust_request_response_format_generates_grammar(
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
     with patch.object(
-        factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
+        factory, "get_lark_from_jinja", wraps=factory.get_lark_from_jinja
     ) as mock_get_lark:
         result = mistral_tool_parser.adjust_request(request)
 
@@ -1514,16 +1433,12 @@ def test_adjust_request_tool_choice_with_json_schema_factory_routing(
 
     patches = {
         expected_method: patch.object(
-            factory,
-            expected_method,
-            wraps=getattr(factory, expected_method),
-        ),
+            factory, expected_method, wraps=getattr(factory, expected_method)
+        )
     }
     if not_called_method:
         patches[not_called_method] = patch.object(
-            factory,
-            not_called_method,
-            wraps=getattr(factory, not_called_method),
+            factory, not_called_method, wraps=getattr(factory, not_called_method)
         )
 
     with patches[expected_method] as mock_expected:
@@ -1574,8 +1489,7 @@ def test_grammar_from_tool_parser_set_by_adjust_request(
     ids=["none", "empty", "with_id", "without_id", "mixed"],
 )
 def test_build_non_streaming_tool_calls(
-    tool_calls: list[VllmFunctionCall] | None,
-    expected_len: int,
+    tool_calls: list[VllmFunctionCall] | None, expected_len: int
 ) -> None:
     result = MistralToolParser.build_non_streaming_tool_calls(tool_calls)
     assert len(result) == expected_len
@@ -1645,8 +1559,7 @@ class TestExtractMaybeReasoningAndToolStreaming:
         tool_delta = DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
-                    index=0,
-                    function=DeltaFunctionCall(name="f", arguments="{}"),
+                    index=0, function=DeltaFunctionCall(name="f", arguments="{}")
                 )
             ]
         )

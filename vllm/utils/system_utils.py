@@ -182,9 +182,7 @@ def get_mp_context():
 
 
 def set_process_title(
-    name: str,
-    suffix: str = "",
-    prefix: str = envs.VLLM_PROCESS_NAME_PREFIX,
+    name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
 ) -> None:
     """Set the current process title with optional suffix."""
     try:

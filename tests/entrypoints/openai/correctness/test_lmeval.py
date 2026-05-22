@@ -30,7 +30,7 @@ MAX_WAIT_SECONDS = None
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
-        [],  # Default
+        []  # Default
     ]
     MAX_WAIT_SECONDS = 600
 
@@ -54,9 +54,7 @@ def run_test(more_args):
         )
 
         results = lm_eval.simple_evaluate(
-            model="local-completions",
-            model_args=model_args,
-            tasks=TASK,
+            model="local-completions", model_args=model_args, tasks=TASK
         )
 
         measured_value = results["results"][TASK][FILTER]

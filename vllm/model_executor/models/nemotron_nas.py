@@ -103,11 +103,7 @@ class DeciLMAttention(LlamaAttention):
             attn_type,
         )
 
-    def _init_rotary_emb(
-        self,
-        config,
-        quant_config: QuantizationConfig | None,
-    ) -> None:
+    def _init_rotary_emb(self, config, quant_config: QuantizationConfig | None) -> None:
         # Enables YARN for Mistral and LLaMA4 derivatives.
         is_neox_style = True
         if hasattr(config, "position_embedding_type"):
@@ -211,8 +207,7 @@ class DeciLMDecoderLayer(nn.Module):
             else:
                 hidden_states, residual = self.input_layernorm(hidden_states, residual)
             hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
+                positions=positions, hidden_states=hidden_states
             )
 
         # Fully Connected
@@ -248,9 +243,7 @@ class DeciModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -266,9 +259,7 @@ class DeciModel(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            get_layer,
-            prefix=f"{prefix}.layers",
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -463,10 +454,7 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

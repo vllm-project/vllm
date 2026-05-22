@@ -22,7 +22,7 @@ class PoolingParamsUpdate:
 
     def __or__(self, other: "PoolingParamsUpdate") -> "PoolingParamsUpdate":
         return PoolingParamsUpdate(
-            requires_token_ids=self.requires_token_ids or other.requires_token_ids,
+            requires_token_ids=self.requires_token_ids or other.requires_token_ids
         )
 
     def apply(self, params: PoolingParams) -> None:

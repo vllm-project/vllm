@@ -100,6 +100,5 @@ class KimiAudioProcessor(ProcessorMixin):
             audio_inputs = {}
 
         return BatchFeature(
-            data={**text_inputs, **audio_inputs},
-            tensor_type=return_tensors,
+            data={**text_inputs, **audio_inputs}, tensor_type=return_tensors
         )

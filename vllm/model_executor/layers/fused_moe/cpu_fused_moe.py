@@ -22,9 +22,7 @@ _CPU_MOE_LAYER_CACHE = {}
 
 
 def _swigluoai_forward_native(
-    x: torch.Tensor,
-    alpha: float = 1.702,
-    limit: float = 7.0,
+    x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0
 ) -> torch.Tensor:
     """PyTorch-native implementation of SwigluOAIAndMul.forward_native.
 
@@ -39,9 +37,7 @@ def _swigluoai_forward_native(
     return gated_output
 
 
-def _gelu_and_mul(
-    x: torch.Tensor,
-) -> torch.Tensor:
+def _gelu_and_mul(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
     return F.gelu(x[..., :d], approximate="none") * x[..., d:]
 
@@ -279,10 +275,7 @@ class CPUFusedMOE:
             apply_router_weight_on_input,
         )
 
-    def check_grouped_gemm(
-        self,
-        layer: torch.nn.Module,
-    ) -> tuple[bool, str]:
+    def check_grouped_gemm(self, layer: torch.nn.Module) -> tuple[bool, str]:
         if not hasattr(torch.ops._C, "prepack_moe_weight"):
             return False, "none"
 
@@ -310,19 +303,13 @@ class CPUFusedMOE:
 
         return True, "vec"
 
-    def init_moe_grouped_gemm(
-        self,
-        layer: torch.nn.Module,
-    ) -> None:
+    def init_moe_grouped_gemm(self, layer: torch.nn.Module) -> None:
         new_w13 = cpu_prepack_moe_weight(layer.w13_weight, self.isa)
         replace_parameter(layer, "w13_weight", new_w13)
         new_w2 = cpu_prepack_moe_weight(layer.w2_weight, self.isa)
         replace_parameter(layer, "w2_weight", new_w2)
 
-    def init_moe_torch(
-        self,
-        layer: torch.nn.Module,
-    ) -> None:
+    def init_moe_torch(self, layer: torch.nn.Module) -> None:
         use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
         num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
@@ -482,7 +469,5 @@ def cpu_fused_moe_torch(
 
 
 direct_register_custom_op(
-    op_name="cpu_fused_moe_torch",
-    op_func=cpu_fused_moe_torch,
-    mutates_args=["output"],
+    op_name="cpu_fused_moe_torch", op_func=cpu_fused_moe_torch, mutates_args=["output"]
 )

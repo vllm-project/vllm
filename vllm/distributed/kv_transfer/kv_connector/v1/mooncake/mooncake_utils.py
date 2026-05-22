@@ -91,8 +91,7 @@ class MooncakeBootstrapServer:
         """Handles registration of a prefiller worker."""
         if payload.dp_rank not in self.workers:
             self.workers[payload.dp_rank] = EngineEntry(
-                engine_id=payload.engine_id,
-                worker_addr={},
+                engine_id=payload.engine_id, worker_addr={}
             )
 
         dp_entry = self.workers[payload.dp_rank]

@@ -11,12 +11,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
-    CompilationConfig,
-    CompilationMode,
-    CUDAGraphMode,
-    VllmConfig,
-)
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -144,16 +139,12 @@ class NgramGPUKernel(nn.Module):
         valid_positions = position_indices < tokens_available.unsqueeze(1)
 
         draft_tokens = torch.where(
-            valid_positions,
-            draft_tokens,
-            torch.full_like(draft_tokens, -1),
+            valid_positions, draft_tokens, torch.full_like(draft_tokens, -1)
         )
 
         # If no match, mask all positions.
         draft_tokens = torch.where(
-            has_any_match.unsqueeze(1),
-            draft_tokens,
-            torch.full_like(draft_tokens, -1),
+            has_any_match.unsqueeze(1), draft_tokens, torch.full_like(draft_tokens, -1)
         )
 
         return draft_tokens
@@ -275,11 +266,7 @@ class NgramProposerGPU:
                 _, _ = self.kernel(num_tokens, token_ids, combined_mask)
 
     def _generate_dummy_data(
-        self,
-        batch_size: int,
-        max_seq_len: int,
-        pattern_len: int,
-        device: str = "cuda",
+        self, batch_size: int, max_seq_len: int, pattern_len: int, device: str = "cuda"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Generate random test data with n-gram repetitions.
@@ -297,10 +284,7 @@ class NgramProposerGPU:
             valid_mask: [batch_size] bool tensor
         """
         token_ids = torch.zeros(
-            batch_size,
-            max_seq_len,
-            dtype=torch.int32,
-            device=device,
+            batch_size, max_seq_len, dtype=torch.int32, device=device
         )
 
         num_tokens = torch.randint(
@@ -358,11 +342,7 @@ class NgramProposerGPU:
         existing_values = token_ids_gpu.gather(1, write_positions_long)
 
         tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
-        tokens_to_scatter = torch.where(
-            scatter_mask,
-            tokens_cast,
-            existing_values,
-        )
+        tokens_to_scatter = torch.where(scatter_mask, tokens_cast, existing_values)
         token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
         num_tokens_tmp = (num_tokens_no_spec + valid_sampled_tokens_count).to(
@@ -378,9 +358,7 @@ class NgramProposerGPU:
 
             with record_function_or_nullcontext("ngram_proposer_gpu: kernel"):
                 draft_tokens, num_valid_draft_tokens = self.kernel(
-                    num_tokens_tmp,
-                    token_ids_gpu,
-                    combined_mask,
+                    num_tokens_tmp, token_ids_gpu, combined_mask
                 )
 
             return draft_tokens, num_valid_draft_tokens
@@ -406,10 +384,7 @@ class NgramProposerGPU:
             # lengths (including empty lists for discarded requests).
             # Pad all sublists to the same length with -1 before converting
             # to tensor.
-            max_len = max(
-                (len(sublist) for sublist in sampled_token_ids),
-                default=0,
-            )
+            max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
             # Ensure at least length 1 for tensor creation
             max_len = max(max_len, 1)
             padded_list = [
@@ -453,9 +428,7 @@ class NgramProposerGPU:
 
         # Use last token if valid; otherwise fallback to backup.
         next_token_ids = torch.where(
-            last_valid_indices != -1,
-            selected_tokens,
-            backup_next_token_ids,
+            last_valid_indices != -1, selected_tokens, backup_next_token_ids
         )
 
         return next_token_ids, valid_sampled_tokens_count, valid_sampled_token_ids_gpu
@@ -631,9 +604,7 @@ def _sync_num_tokens(
     vals.copy_(src_cpu.index_select(0, active_idx_cpu))
 
     num_tokens_no_spec_gpu.index_copy_(
-        0,
-        active_idx_gpu,
-        vals.to(device=device, non_blocking=True),
+        0, active_idx_gpu, vals.to(device=device, non_blocking=True)
     )
 
 

@@ -17,10 +17,7 @@ For thinking/reasoning output parsing, see
 Usage with vLLM offline inference::
 
     from vllm import LLM, SamplingParams
-    from vllm.tool_parsers.gemma4_utils import (
-        parse_tool_calls,
-        has_tool_response_tag,
-    )
+    from vllm.tool_parsers.gemma4_utils import parse_tool_calls, has_tool_response_tag
 
     llm = LLM(model="google/gemma-4-it")
     outputs = llm.generate(prompt, SamplingParams(...))
@@ -132,12 +129,7 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     standard_pattern = r"<\|tool_call\>call:(\w+)\{(.*?)\}(?:<tool_call\|>|<turn\|>)"
     for match in re.finditer(standard_pattern, text, re.DOTALL):
         name, args_str = match.group(1), match.group(2)
-        results.append(
-            {
-                "name": name,
-                "arguments": _parse_tool_arguments(args_str),
-            }
-        )
+        results.append({"name": name, "arguments": _parse_tool_arguments(args_str)})
 
     if results or strict:
         return results
@@ -147,12 +139,7 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     fallback_pattern = r"(?:<call>|(?:^|\s)call:)(\w+)\{(.*?)\}"
     for match in re.finditer(fallback_pattern, text, re.DOTALL):
         name, args_str = match.group(1), match.group(2)
-        results.append(
-            {
-                "name": name,
-                "arguments": _parse_tool_arguments(args_str),
-            }
-        )
+        results.append({"name": name, "arguments": _parse_tool_arguments(args_str)})
 
     return results
 

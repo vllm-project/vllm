@@ -8,10 +8,7 @@ from typing import Annotated, cast
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import (
-    BatchFeature,
-    Qwen3Config,
-)
+from transformers import BatchFeature, Qwen3Config
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -20,9 +17,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -32,14 +27,9 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.whisper_utils import (
-    ISO639_1_SUPPORTED_LANGS,
-)
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -157,14 +147,10 @@ class MultiHeadedAttentionSANM(nn.Module):
         self.d_k = n_feat // n_head
         self.h = n_head
         self.out_proj = ReplicatedLinear(
-            input_size=n_feat,
-            output_size=n_feat,
-            bias=True,
+            input_size=n_feat, output_size=n_feat, bias=True
         )
         self.linear_q_k_v = ReplicatedLinear(
-            input_size=in_feat,
-            output_size=n_feat * 3,
-            bias=True,
+            input_size=in_feat, output_size=n_feat * 3, bias=True
         )
         self.attn = None
 
@@ -312,10 +298,7 @@ class SenseVoiceEncoderSmall(nn.Module):
         self.normalize_before = normalize_before
 
         positionwise_layer = PositionwiseFeedForward
-        positionwise_layer_args = (
-            output_size,
-            linear_units,
-        )
+        positionwise_layer_args = (output_size, linear_units)
 
         encoder_selfattn_layer = MultiHeadedAttentionSANM
         encoder_selfattn_layer_args0 = (
@@ -375,11 +358,7 @@ class SenseVoiceEncoderSmall(nn.Module):
     def output_size(self) -> int:
         return self._output_size
 
-    def forward(
-        self,
-        xs_pad: torch.Tensor,
-        ilens: torch.Tensor,
-    ):
+    def forward(self, xs_pad: torch.Tensor, ilens: torch.Tensor):
         maxlen = xs_pad.shape[1]
         masks = sequence_mask(
             ilens, maxlen=maxlen, dtype=ilens.dtype, device=ilens.device
@@ -413,14 +392,10 @@ class PositionwiseFeedForward(nn.Module):
     def __init__(self, idim: int, hidden_units: int):
         super().__init__()
         self.w_1 = ColumnParallelLinear(
-            input_size=idim,
-            output_size=hidden_units,
-            bias=True,
+            input_size=idim, output_size=hidden_units, bias=True
         )
         self.w_2 = RowParallelLinear(
-            input_size=hidden_units,
-            output_size=idim,
-            bias=True,
+            input_size=hidden_units, output_size=idim, bias=True
         )
         self.activation = _ACTIVATION_REGISTRY["relu"]
 
@@ -432,12 +407,7 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(
-        self,
-        size: int,
-        self_attn: nn.Module,
-        feed_forward: nn.Module,
-    ):
+    def __init__(self, size: int, self_attn: nn.Module, feed_forward: nn.Module):
         super().__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -456,12 +426,7 @@ class EncoderLayer(nn.Module):
 
 
 class FunASRAudioAttention(nn.Module):
-    def __init__(
-        self,
-        num_heads: int,
-        embed_dim: int,
-        prefix: str = "",
-    ):
+    def __init__(self, num_heads: int, embed_dim: int, prefix: str = ""):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -494,9 +459,7 @@ class FunASRAudioAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            num_heads=self.num_local_heads,
-            head_size=self.head_dim,
-            scale=self.scaling,
+            num_heads=self.num_local_heads, head_size=self.head_dim, scale=self.scaling
         )
 
     def forward(
@@ -513,11 +476,7 @@ class FunASRAudioAttention(nn.Module):
         v = v.view(bs, seq_length, -1, self.head_dim)
 
         attn_output = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
 
         attn_output = attn_output.view(bs, seq_length, -1)
@@ -540,15 +499,11 @@ class Transformer(nn.Module):
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.linear1 = ColumnParallelLinear(
-            input_size=self.encoder_dim * self.k,
-            output_size=ffn_dim,
-            bias=True,
+            input_size=self.encoder_dim * self.k, output_size=ffn_dim, bias=True
         )
         self.relu = nn.ReLU()
         self.linear2 = RowParallelLinear(
-            input_size=ffn_dim,
-            output_size=self.llm_dim,
-            bias=True,
+            input_size=ffn_dim, output_size=self.llm_dim, bias=True
         )
 
         self.blocks = None
@@ -562,10 +517,7 @@ class Transformer(nn.Module):
                             llm_dim,
                             prefix=f"{prefix}.self_attn",
                         ),
-                        PositionwiseFeedForward(
-                            llm_dim,
-                            llm_dim // 4,
-                        ),
+                        PositionwiseFeedForward(llm_dim, llm_dim // 4),
                     )
                     for _ in range(kwargs.get("n_layer", 2))
                 ]
@@ -603,18 +555,9 @@ class FunASRAudioInputs(TensorSchema):
         - t: Time frames (M)
     """
 
-    input_features: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b", "nmb", "t"),
-    ]
-    speech_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
-    fake_token_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
+    input_features: Annotated[list[torch.Tensor] | None, TensorShape("b", "nmb", "t")]
+    speech_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
+    fake_token_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
 
 
 class FunASREncoder(nn.Module):
@@ -685,9 +628,7 @@ class FunASRModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, positions=positions, inputs_embeds=inputs_embeds
         )
         return decoder_outputs
 
@@ -759,10 +700,8 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
-            ),
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+            )
         }
 
 
@@ -777,24 +716,16 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
+            mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
@@ -874,10 +805,7 @@ class FunASRForConditionalGeneration(
         return super().validate_language(language)
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
@@ -897,9 +825,7 @@ class FunASRForConditionalGeneration(
 
         prompt = {
             "prompt": funasr_prompt,
-            "multi_modal_data": {
-                "audio": (audio, stt_config.sample_rate),
-            },
+            "multi_modal_data": {"audio": (audio, stt_config.sample_rate)},
         }
         return cast(PromptType, prompt)
 
@@ -934,8 +860,7 @@ class FunASRForConditionalGeneration(
         self.dtype = vllm_config.model_config.dtype
 
         self.model = FunASRModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
 
@@ -958,9 +883,7 @@ class FunASRForConditionalGeneration(
         **kwargs,
     ) -> torch.Tensor:
         decoder_outputs = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, positions=positions, inputs_embeds=inputs_embeds
         )
         return decoder_outputs
 
@@ -1006,8 +929,6 @@ class FunASRForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-        )
+        loader = AutoWeightsLoader(self)
 
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

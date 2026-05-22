@@ -74,10 +74,7 @@ def main() -> None:
     chat_template = (template_home / template_path).read_text()
 
     # Sample queries for testing the reranker
-    queries = [
-        "What is the capital of China?",
-        "Explain gravity",
-    ]
+    queries = ["What is the capital of China?", "Explain gravity"]
 
     # Corresponding documents to be scored against each query
     documents = [

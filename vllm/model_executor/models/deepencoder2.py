@@ -151,12 +151,7 @@ class CustomQwen2Decoder(PluggableLayer):
                 return causal_mask
 
             def _create_custom_4d_mask(
-                self,
-                sequence_length,
-                dtype,
-                device,
-                batch_size,
-                token_type_ids,
+                self, sequence_length, dtype, device, batch_size, token_type_ids
             ):
                 min_dtype = torch.finfo(dtype).min
 

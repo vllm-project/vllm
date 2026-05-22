@@ -133,9 +133,7 @@ class PoolingParams(
         self._verify_step_pooling(pooler_config, valid_parameters)
 
     def _verify_step_pooling(
-        self,
-        pooler_config: PoolerConfig,
-        valid_parameters: list[str],
+        self, pooler_config: PoolerConfig, valid_parameters: list[str]
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
         if pooler_config.tok_pooling_type != "STEP":

@@ -29,8 +29,7 @@ class PredictableLlamaModel(nn.Module, EagleModelMixin):
         )
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
+            self.config.vocab_size, self.config.hidden_size
         )
 
         # Required for pipeline parallelism

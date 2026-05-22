@@ -116,10 +116,7 @@ class ECConnectorBase(ABC):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_caches(
-        self,
-        ec_caches: dict[str, torch.Tensor],
-    ):
+    def register_caches(self, ec_caches: dict[str, torch.Tensor]):
         """
         Initialize with the EC caches.
         Args:
@@ -187,10 +184,7 @@ class ECConnectorBase(ABC):
     # ==============================
 
     @abstractmethod
-    def has_cache_item(
-        self,
-        identifier: str,
-    ) -> bool:
+    def has_cache_item(self, identifier: str) -> bool:
         """
         Check if a single encoder cache exists
 

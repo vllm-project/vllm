@@ -207,9 +207,7 @@ class FalconAttention(nn.Module):
             )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, bias = self.query_key_value(hidden_states)
         if bias is not None:
@@ -308,9 +306,7 @@ class FalconDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -322,8 +318,7 @@ class FalconDecoderLayer(nn.Module):
 
         # Self attention.
         attention_output, attention_bias = self.self_attention(
-            positions=positions,
-            hidden_states=attention_layernorm_out,
+            positions=positions, hidden_states=attention_layernorm_out
         )
         if self.reduce_row_parallel_results and attention_bias is not None:
             attention_output += attention_bias
@@ -377,10 +372,7 @@ class FalconModel(nn.Module):
         self.use_alibi = config.alibi
 
         # Embedding + LN Embedding
-        self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size,
-            self.embed_dim,
-        )
+        self.word_embeddings = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
 
         # Transformer blocks
         self.start_layer, self.end_layer, self.h = make_layers(
@@ -478,9 +470,7 @@ class FalconModel(nn.Module):
 
 
 class FalconForCausalLM(nn.Module, SupportsPP):
-    packed_modules_mapping = {
-        "query_key_value": ["query_key_value"],
-    }
+    packed_modules_mapping = {"query_key_value": ["query_key_value"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -528,10 +518,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

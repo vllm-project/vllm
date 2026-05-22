@@ -17,17 +17,12 @@ from tests.kernels.quant_utils import (
 )
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import (
-    fused_experts,
-    fused_topk,
-)
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    fp8_w8a8_moe_quant_config,
-)
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     _valid_deep_gemm_shape,
 )
@@ -252,9 +247,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
     quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        block_shape=block_size,
+        w1_scale=w1_s, w2_scale=w2_s, block_shape=block_size
     )
     moe_config = make_dummy_moe_config()
 
@@ -266,8 +259,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             use_monolithic=False,
         ),
         fused_experts=TritonOrDeepGemmExperts(
-            moe_config=moe_config,
-            quant_config=quant_config,
+            moe_config=moe_config, quant_config=quant_config
         ),
         inplace=False,
     )

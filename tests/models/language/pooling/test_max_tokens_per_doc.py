@@ -37,12 +37,7 @@ RERANK_CONFIGS = [
     # 1. cross-encoder
     TestConfig(
         model="jinaai/jina-reranker-v2-base-multilingual",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "1024",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "1024", "--trust-remote-code"],
         without_truncated_prompt_tokens=284,
         with_max_tokens_per_query_prompt_tokens=154,
         with_max_tokens_per_doc_prompt_tokens=154,
@@ -74,12 +69,7 @@ RERANK_CONFIGS = [
     # 3. bi-encoder
     TestConfig(
         model="intfloat/multilingual-e5-small",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "512", "--trust-remote-code"],
         # This model has produced both prompt-token totals in CI/local cache;
         # keep truncation checks exact while tolerating the boundary delta.
         without_truncated_prompt_tokens=(285, 286),
@@ -90,12 +80,7 @@ RERANK_CONFIGS = [
     # 4. late-interaction
     TestConfig(
         model="answerdotai/answerai-colbert-small-v1",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "512", "--trust-remote-code"],
         without_truncated_prompt_tokens=285,
         with_max_tokens_per_query_prompt_tokens=155,
         with_max_tokens_per_doc_prompt_tokens=155,
@@ -104,12 +89,7 @@ RERANK_CONFIGS = [
     # 5. jinaai/jina-reranker-v3
     TestConfig(
         model="jinaai/jina-reranker-v3",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "1024",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "1024", "--trust-remote-code"],
         without_truncated_prompt_tokens=567,
         with_max_tokens_per_query_prompt_tokens=308,
         with_max_tokens_per_doc_prompt_tokens=436,
@@ -147,8 +127,7 @@ def test_without_truncated(server):
     assert rerank.results is not None
     assert len(rerank.results) == 1
     assert_prompt_tokens(
-        rerank.usage.prompt_tokens,
-        config.without_truncated_prompt_tokens,
+        rerank.usage.prompt_tokens, config.without_truncated_prompt_tokens
     )
 
 
@@ -172,8 +151,7 @@ def test_max_tokens_per_query(server):
     assert rerank.results is not None
     assert len(rerank.results) == 1
     assert_prompt_tokens(
-        rerank.usage.prompt_tokens,
-        config.with_max_tokens_per_query_prompt_tokens,
+        rerank.usage.prompt_tokens, config.with_max_tokens_per_query_prompt_tokens
     )
 
 
@@ -197,8 +175,7 @@ def test_max_tokens_per_doc(server):
     assert rerank.results is not None
     assert len(rerank.results) == 1
     assert_prompt_tokens(
-        rerank.usage.prompt_tokens,
-        config.with_max_tokens_per_doc_prompt_tokens,
+        rerank.usage.prompt_tokens, config.with_max_tokens_per_doc_prompt_tokens
     )
 
 

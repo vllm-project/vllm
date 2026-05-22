@@ -16,9 +16,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
-    linear_batch_invariant,
-)
+from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -65,10 +63,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
@@ -544,11 +539,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                 torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)
             )
             set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
+                self.bias, {"output_dim": 0, "weight_loader": self.weight_loader}
             )
         else:
             self.register_parameter("bias", None)

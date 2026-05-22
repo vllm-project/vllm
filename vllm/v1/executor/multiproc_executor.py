@@ -395,9 +395,7 @@ class MultiprocExecutor(Executor):
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
-            self.futures_queue,
-            get_response=get_response,
-            aggregate=aggregate,
+            self.futures_queue, get_response=get_response, aggregate=aggregate
         )
 
         return future if non_block else future.result()

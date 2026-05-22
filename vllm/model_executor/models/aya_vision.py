@@ -19,10 +19,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -59,15 +56,9 @@ class AyaVisionImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", 3, "h", "w"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", 3, "h", "w")]
 
-    num_patches: Annotated[
-        torch.Tensor,
-        TensorShape("bn"),
-    ]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -217,10 +208,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
@@ -248,9 +236,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
@@ -286,9 +272,7 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
 
         return [
             PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_replacement,
+                modality="image", target=image_token, replacement=get_replacement
             )
         ]
 
@@ -371,9 +355,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _image_pixels_to_features(
-        self,
-        vision_tower: SiglipVisionModel,
-        pixel_values: torch.Tensor,
+        self, vision_tower: SiglipVisionModel, pixel_values: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         return vision_tower(
             pixel_values.to(dtype=vision_tower.dtype),
@@ -438,8 +420,5 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)

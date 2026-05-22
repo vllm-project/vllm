@@ -174,10 +174,7 @@ class TurboQuantConfig:
         return s + (s % 2)  # round up to even
 
     @staticmethod
-    def get_boundary_skip_layers(
-        model_config: ModelConfig,
-        n: int = 2,
-    ) -> list[str]:
+    def get_boundary_skip_layers(model_config: ModelConfig, n: int = 2) -> list[str]:
         """Layer indices to skip TQ compression (boundary protection).
 
         For hybrid models (attention + Mamba/linear-attention), boundary

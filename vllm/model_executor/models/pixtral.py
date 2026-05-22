@@ -38,15 +38,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    NestedTensors,
-)
-from vllm.multimodal.parse import (
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -137,8 +130,7 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs) -> MistralCommonPixtralProcessor:
         return MistralCommonPixtralProcessor(
-            tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(),
+            tokenizer=self.get_tokenizer(), image_processor=self.get_image_processor()
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -203,7 +195,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
                         TextChunk(text=dummy_text),
                         *(ImageChunk(image=image) for image in dummy_images),
                     ]
-                ),
+                )
             ]
         )
         res = tokenizer.mistral.encode_chat_completion(request)
@@ -258,8 +250,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
             image_size = images.get_image_size(item_idx)
 
             _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
-                image_size.height,
-                image_size.width,
+                image_size.height, image_size.width
             )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
@@ -272,13 +263,11 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
                 modality="image",
                 target="",  # Never match the prompt (see below note)
                 replacement=get_replacement,
-            ),
+            )
         ]
 
     def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
@@ -300,10 +289,7 @@ class PixtralForConditionalGeneration(
             "model.vision_tower.": "vision_encoder.",
             "model.multi_modal_projector.": "vision_language_adapter.",
         },
-        orig_to_new_substr={
-            ".linear_1.": ".w_in.",
-            ".linear_2.": ".w_out.",
-        },
+        orig_to_new_substr={".linear_1.": ".w_in.", ".linear_2.": ".w_out."},
     )
 
     packed_modules_mapping = {
@@ -344,8 +330,7 @@ class PixtralForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(
-                self.vision_args,
-                prefix=maybe_prefix(prefix, "vision_encoder"),
+                self.vision_args, prefix=maybe_prefix(prefix, "vision_encoder")
             )
             self.pre_mm_projector_norm = (
                 RMSNorm(self.vision_args.hidden_size, eps=1e-5)
@@ -376,14 +361,10 @@ class PixtralForConditionalGeneration(
         if images is None:
             return None
 
-        return PixtralImagePixelInputs(
-            type="pixel_values",
-            images=images,
-        )
+        return PixtralImagePixelInputs(type="pixel_values", images=images)
 
     def _process_image_input(
-        self,
-        image_input: PixtralImagePixelInputs,
+        self, image_input: PixtralImagePixelInputs
     ) -> tuple[torch.Tensor, ...]:
         images = image_input["images"]
         image_features = self.vision_encoder(images)
@@ -434,10 +415,7 @@ class PixtralForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def _require_language_model_eagle3(self) -> None:
@@ -474,10 +452,7 @@ class PixtralForConditionalGeneration(
 
         # Remap Mistral native names to HF-style names
         # used by the vLLM vision encoder modules.
-        _vision_encoder_name_remap = {
-            ".wo.": ".o_proj.",
-            ".w2.": ".down_proj.",
-        }
+        _vision_encoder_name_remap = {".wo.": ".o_proj.", ".w2.": ".down_proj."}
 
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith(("vision_encoder", "vision_tower"))
@@ -629,10 +604,7 @@ def _reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Te
 
 
 def precompute_freqs_cis_2d(
-    dim: int,
-    height: int,
-    width: int,
-    theta: float,
+    dim: int, height: int, width: int, theta: float
 ) -> torch.Tensor:
     """
     freqs_cis: 2D complex tensor of shape (height, width, dim // 2)
@@ -657,9 +629,7 @@ def precompute_freqs_cis_2d(
 
 
 def apply_rotary_emb_vit(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
+    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
@@ -745,10 +715,7 @@ class Attention(nn.Module):
         self.n_heads = divide(args.num_attention_heads, tp_size)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
+        self, x: torch.Tensor, mask: torch.Tensor, freqs_cis: torch.Tensor
     ) -> torch.Tensor:
         batch, patches, _ = x.shape
 
@@ -800,10 +767,7 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.hidden_size, eps=1e-5)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
+        self, x: torch.Tensor, mask: torch.Tensor, freqs_cis: torch.Tensor
     ) -> torch.Tensor:
         r = self.attention.forward(
             self.attention_norm(x), mask=mask, freqs_cis=freqs_cis
@@ -835,26 +799,19 @@ class Transformer(nn.Module):
             )
 
     def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        freqs_cis: torch.Tensor | None,
+        self, x: torch.Tensor, mask: torch.Tensor, freqs_cis: torch.Tensor | None
     ) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x, mask=mask, freqs_cis=freqs_cis)
         return x
 
 
-def position_meshgrid(
-    patch_embeds_list: list[torch.Tensor],
-) -> torch.Tensor:
+def position_meshgrid(patch_embeds_list: list[torch.Tensor]) -> torch.Tensor:
     positions = torch.cat(
         [
             torch.stack(
                 torch.meshgrid(
-                    torch.arange(p.shape[-2]),
-                    torch.arange(p.shape[-1]),
-                    indexing="ij",
+                    torch.arange(p.shape[-2]), torch.arange(p.shape[-1]), indexing="ij"
                 ),
                 dim=-1,
             ).reshape(-1, 2)
@@ -920,10 +877,7 @@ class VisionTransformer(nn.Module):
 
         return self._freqs_cis
 
-    def forward(
-        self,
-        images: list[torch.Tensor],
-    ) -> torch.Tensor:
+    def forward(self, images: list[torch.Tensor]) -> torch.Tensor:
         """
         Args:
             images: list of N_img images of variable sizes,
@@ -951,7 +905,7 @@ class VisionTransformer(nn.Module):
         # pass through Transformer with a block diagonal mask delimiting images
         if USE_XFORMERS_OPS:
             mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
+                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list]
             )
         else:
             from transformers.models.pixtral.modeling_pixtral import (
@@ -972,10 +926,7 @@ class VisionLanguageAdapter(nn.Module):
         super().__init__()
         assert isinstance(args, VisionEncoderArgs)
         self.w_in = ReplicatedLinear(
-            args.hidden_size,
-            dim,
-            bias=args.adapter_bias,
-            return_bias=False,
+            args.hidden_size, dim, bias=args.adapter_bias, return_bias=False
         )
         self.gelu = nn.GELU()
         self.w_out = ReplicatedLinear(
@@ -1025,9 +976,7 @@ class PatchMerger(nn.Module):
         return x
 
     def permute(
-        self,
-        x: torch.Tensor,
-        image_sizes: list[tuple[int, int]],
+        self, x: torch.Tensor, image_sizes: list[tuple[int, int]]
     ) -> torch.Tensor:
         """
         Args:
@@ -1056,9 +1005,7 @@ class PatchMerger(nn.Module):
 
 
 def get_sub_grids(
-    x: torch.Tensor,
-    image_sizes: list[tuple[int, int]],
-    spatial_merge_size: int,
+    x: torch.Tensor, image_sizes: list[tuple[int, int]], spatial_merge_size: int
 ) -> list[torch.Tensor]:
     # image_sizes specified in tokens
     tokens_per_image = [h * w for h, w in image_sizes]
@@ -1093,15 +1040,9 @@ def get_sub_grids(
 
 
 class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         ncols, nrows = self.get_patch_grid_size(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
         return ncols * nrows
 
@@ -1122,10 +1063,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
 
     # Adapted from: https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/pixtral/image_processing_pixtral.py#L99
     def get_patch_grid_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
+        self, *, image_width: int, image_height: int
     ) -> tuple[int, int]:
         max_width = max_height = self.get_image_size()
         patch_width = patch_height = self.get_patch_size()
@@ -1137,8 +1075,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
             image_height = int(math.floor(image_height / ratio))
 
         nrows, ncols = _get_pixtral_hf_num_image_tokens(
-            (image_height, image_width),
-            (patch_height, patch_width),
+            (image_height, image_width), (patch_height, patch_width)
         )  # type: ignore
 
         return ncols, nrows
@@ -1270,14 +1207,10 @@ class PixtralHFTransformerBlock(nn.Module):
 
         self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.attention = PixtralHFAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attention",
+            config, quant_config=quant_config, prefix=f"{prefix}.attention"
         )
         self.feed_forward = PixtralHFMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.feed_forward",
+            config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
         )
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -1432,7 +1365,7 @@ class PixtralHFVisionModel(nn.Module):
 
         if USE_XFORMERS_OPS:
             attention_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
+                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list]
             )
         else:
             from transformers.models.pixtral.modeling_pixtral import (

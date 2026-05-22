@@ -163,10 +163,7 @@ def run_with_expert_maps(
     **cutlass_moe_kwargs,
 ):
     def slice_experts():
-        slice_params = [
-            "w1",
-            "w2",
-        ]
+        slice_params = ["w1", "w2"]
         full_tensors = {
             k: v
             for k, v in cutlass_moe_kwargs.items()
@@ -210,10 +207,7 @@ def run_with_expert_maps(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp8(
-                moe_config=moe_config,
-                quant_config=new_quant_config,
-            ),
+            CutlassExpertsFp8(moe_config=moe_config, quant_config=new_quant_config),
             inplace=False,
         )
         out_tensor = out_tensor + kernel.apply(**kwargs)
@@ -280,10 +274,7 @@ def run_8_bit(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp8(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            CutlassExpertsFp8(moe_config=moe_config, quant_config=quant_config),
             inplace=False,
         )
         return kernel.apply(**kwargs)

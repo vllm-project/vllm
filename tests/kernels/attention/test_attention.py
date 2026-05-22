@@ -252,12 +252,10 @@ def test_paged_attention(
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
-            size=(num_seqs, num_heads, num_partitions, head_size),
-            dtype=output.dtype,
+            size=(num_seqs, num_heads, num_partitions, head_size), dtype=output.dtype
         )
         exp_sums = torch.empty(
-            size=(num_seqs, num_heads, num_partitions),
-            dtype=torch.float32,
+            size=(num_seqs, num_heads, num_partitions), dtype=torch.float32
         )
         max_logits = torch.empty_like(exp_sums)
         if version == "v2":

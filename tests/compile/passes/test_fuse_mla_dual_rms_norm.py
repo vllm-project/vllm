@@ -91,9 +91,7 @@ class MLADualRMSNormTestModel(torch.nn.Module):
     reason="Only test on ROCm with AITER installed and supported",
 )
 def test_fuse_mla_dual_rms_norm(
-    dtype: torch.dtype,
-    hidden_size: int,
-    monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype, hidden_size: int, monkeypatch: pytest.MonkeyPatch
 ):
     torch._dynamo.reset()
 
@@ -102,10 +100,7 @@ def test_fuse_mla_dual_rms_norm(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm"],
-            pass_config=PassConfig(
-                fuse_mla_dual_rms_norm=True,
-                eliminate_noops=True,
-            ),
+            pass_config=PassConfig(fuse_mla_dual_rms_norm=True, eliminate_noops=True),
         ),
     )
 

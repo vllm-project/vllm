@@ -41,9 +41,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -54,16 +52,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .interfaces import MixtureOfExperts
-from .qwen3_moe import (
-    Qwen3MoeForCausalLM,
-)
+from .qwen3_moe import Qwen3MoeForCausalLM
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
@@ -72,12 +66,7 @@ from .qwen3_vl import (
     Qwen3VLProcessingInfo,
 )
 from .qwen3_vl_moe import Qwen3MoeLLMModel
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    extract_layer_index,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, WeightsMapper, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -130,11 +119,7 @@ class InternS1ProMoeMLP(nn.Module):
 
 
 class InternS1ProMoeSparseMoeBlock(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -188,10 +173,7 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
         )
 
         self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            prefix=f"{prefix}.gate",
+            config.hidden_size, config.num_experts, bias=False, prefix=f"{prefix}.gate"
         )
 
     @staticmethod
@@ -347,9 +329,7 @@ class InternS1ProMoeAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -446,10 +426,7 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -496,9 +473,7 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -547,13 +522,7 @@ class InternS1ProForConditionalGeneration(
     Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -561,7 +530,7 @@ class InternS1ProForConditionalGeneration(
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
-        },
+        }
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -586,8 +555,7 @@ class InternS1ProForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = InternS1ProMoeLLMForCausalLM(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
         # Whether to include the gate_up_proj mapping is determined by

@@ -31,7 +31,7 @@ FP4_DTYPE = torch.uint8
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
 FUSED_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.silu_and_mul_quant.default,  # noqa: E501
+    kFp8StaticTensorSym: torch.ops._C.silu_and_mul_quant.default  # noqa: E501
 }
 silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
     torch.ops._C, "silu_and_mul_nvfp4_quant"
@@ -50,10 +50,7 @@ class ActivationQuantPattern(VllmPatternReplacement):
     Should not be used directly.
     """
 
-    def __init__(
-        self,
-        quant_key: QuantKey,
-    ) -> None:
+    def __init__(self, quant_key: QuantKey) -> None:
         self.quant_key = quant_key
         self.quant_dtype = quant_key.dtype
 
@@ -92,10 +89,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
     @property
     def pattern(self):
-        def _pattern(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
+        def _pattern(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
             result_silu_mul = self.silu_and_mul_matcher(input)
             result_quant = self.quant_matcher(result_silu_mul, scale)
             return result_quant[0]
@@ -104,10 +98,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
     @property
     def replacement(self):
-        def _replacement(
-            input: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> torch.Tensor:
+        def _replacement(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
             d = input.shape[-1] // 2
             output_shape = input.shape[:-1] + (d,)
             result = torch.empty(
@@ -211,14 +202,11 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
     @property
     def pattern(self):
         def _pattern(
-            input: torch.Tensor,
-            scale: torch.Tensor,
+            input: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             silu_out = self.silu_and_mul_matcher(input)
             result = torch.empty(
-                silu_out.shape,
-                device=silu_out.device,
-                dtype=self.quant_dtype,
+                silu_out.shape, device=silu_out.device, dtype=self.quant_dtype
             )
             assert scale is not None
             finfo = torch.finfo(self.quant_dtype)
@@ -242,8 +230,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
     @property
     def replacement(self):
         def _replacement(
-            input: torch.Tensor,
-            scale: torch.Tensor,
+            input: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             d = input.shape[-1] // 2
             output_shape = input.shape[:-1] + (d,)

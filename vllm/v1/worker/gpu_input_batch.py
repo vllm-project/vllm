@@ -108,11 +108,7 @@ class InputBatch:
         reasoning_config: ReasoningConfig | None = None,
     ):
         self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
-            reasoning_config,
-            max_num_reqs,
-            num_spec_tokens,
-            device,
-            pin_memory,
+            reasoning_config, max_num_reqs, num_spec_tokens, device, pin_memory
         )
         self.thinking_token_budget_reqs: set[str] = set()
         self.is_pooling_model = is_pooling_model
@@ -146,24 +142,15 @@ class InputBatch:
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens_no_spec_cpu_tensor = torch.zeros(
-            (max_num_reqs,),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
+            (max_num_reqs,), device="cpu", dtype=torch.int32, pin_memory=pin_memory
         )
         self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
         self.num_prompt_tokens_cpu_tensor = torch.zeros(
-            (max_num_reqs,),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
+            (max_num_reqs,), device="cpu", dtype=torch.int32, pin_memory=pin_memory
         )
         self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
         self.num_computed_tokens_cpu_tensor = torch.zeros(
-            (max_num_reqs,),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
+            (max_num_reqs,), device="cpu", dtype=torch.int32, pin_memory=pin_memory
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
 
@@ -332,10 +319,7 @@ class InputBatch:
 
         return new_req_index
 
-    def add_request(
-        self,
-        request: "CachedRequestState",
-    ) -> int:
+    def add_request(self, request: "CachedRequestState") -> int:
         req_index = self._register_add_request(request)
 
         req_id = request.req_id
@@ -999,9 +983,7 @@ class InputBatch:
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
     def set_async_sampled_token_ids(
-        self,
-        sampled_token_ids_cpu: torch.Tensor,
-        async_copy_ready_event: torch.Event,
+        self, sampled_token_ids_cpu: torch.Tensor, async_copy_ready_event: torch.Event
     ) -> None:
         """
         In async scheduling case, store ref to sampled_token_ids_cpu

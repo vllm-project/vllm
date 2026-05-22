@@ -70,11 +70,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        gathered_tensors = dist_group.all_gatherv(tensors_to_gather, dim=0, sizes=sizes)
 
         if extra_tensors is not None:
             return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
@@ -105,11 +101,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        gathered_tensors = dist_group.all_gatherv(tensors_to_gather, dim=0, sizes=sizes)
 
         hidden_states = gathered_tensors[0]
         topk_weights = gathered_tensors[1]
@@ -358,10 +350,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
-        buffer = Buffer(
-            rank=self.rank,
-            tcp_store_group=self.tcp_store_group.store,
-        )
+        buffer = Buffer(rank=self.rank, tcp_store_group=self.tcp_store_group.store)
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
@@ -463,24 +452,14 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         self.initialized = False
         self.alltoall_info = None
 
-    def initialize(
-        self,
-        world_size: int,
-        rank: int,
-        gpus_per_node: int,
-    ):
+    def initialize(self, world_size: int, rank: int, gpus_per_node: int):
         """Initialize workspace"""
         if self.initialized:
             return
 
         self.cleanup()
         logger.debug("making map: rank=%d, world size=%d", rank, world_size)
-        self.mapping = Mapping(
-            world_size,
-            rank,
-            gpus_per_node,
-            tp_size=world_size,
-        )
+        self.mapping = Mapping(world_size, rank, gpus_per_node, tp_size=world_size)
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
             CustomCommunicator,
@@ -656,9 +635,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         # MNNVL workspace is allocated per rank in the comm_backend's group; the
         # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
         # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(self.cpu_group),
-        )
+        ep_config = MnnvlConfig(comm_backend=CustomCommunicator(self.cpu_group))
 
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,

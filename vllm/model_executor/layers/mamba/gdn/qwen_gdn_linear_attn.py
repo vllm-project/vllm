@@ -10,13 +10,8 @@ from torch import nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import (
-    VllmConfig,
-    get_current_vllm_config,
-)
-from vllm.distributed import (
-    divide,
-)
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import divide
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
@@ -50,9 +45,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.model_loader.weight_utils import (
-    sharded_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -201,7 +194,7 @@ def _log_gdn_backend_decision(
     if use_flashinfer and current_platform.is_device_capability(90):
         logger.warning_once(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
-            "while. Set --gdn-prefill-backend triton to skip JIT.",
+            "while. Set --gdn-prefill-backend triton to skip JIT."
         )
 
 
@@ -423,11 +416,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         value_settings = (self.value_dim, 0, False)
 
         self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
-            [
-                query_key_settings,
-                query_key_settings,
-                value_settings,
-            ],
+            [query_key_settings, query_key_settings, value_settings],
             self.tp_size,
             self.tp_rank,
         )
@@ -436,14 +425,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
-        self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
-        )
+        self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads // self.tp_size))
         self.A_log = nn.Parameter(
-            torch.empty(
-                divide(self.num_v_heads, self.tp_size),
-                dtype=torch.float32,
-            )
+            torch.empty(divide(self.num_v_heads, self.tp_size), dtype=torch.float32)
         )
 
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
@@ -564,9 +548,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return b, a
 
     def fix_query_key_value_ordering(
-        self,
-        mixed_qkvz: torch.Tensor,
-        mixed_ba: torch.Tensor,
+        self, mixed_qkvz: torch.Tensor, mixed_ba: torch.Tensor
     ):
         """
         Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
@@ -616,10 +598,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     @torch.compile(fullgraph=True)
     def prepare_gdn_attention_core_inputs(
-        self,
-        mixed_qkvz: torch.Tensor,
-        mixed_ba: torch.Tensor,
-        num_tokens: int,
+        self, mixed_qkvz: torch.Tensor, mixed_ba: torch.Tensor, num_tokens: int
     ):
         """
         Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
@@ -763,11 +742,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         self._forward_method(hidden_states, output)
 
     def _output_projection(
@@ -790,11 +765,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
-    def forward_hip(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_hip(self, hidden_states: torch.Tensor, output: torch.Tensor):
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
@@ -827,11 +798,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             self.forward_cuda(hidden_states, output)
 
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_cuda(self, hidden_states: torch.Tensor, output: torch.Tensor):
         """
         Forward pass with three parts:
         1. Input projection
@@ -889,11 +856,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         self._output_projection(core_attn_out, z, output, num_tokens)
 
-    def forward_xpu(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_xpu(self, hidden_states: torch.Tensor, output: torch.Tensor):
         """
         Forward pass with three parts:
         1. Input projection
@@ -919,11 +882,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z = torch.empty_like(core_attn_out)
 
         torch.ops.vllm.gdn_attention_core_xpu(
-            core_attn_out,
-            z,
-            projected_states_qkvz,
-            projected_states_ba,
-            self.prefix,
+            core_attn_out, z, projected_states_qkvz, projected_states_ba, self.prefix
         )
 
         # ============================================================
@@ -938,11 +897,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
-    def forward_cpu(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_cpu(self, hidden_states: torch.Tensor, output: torch.Tensor):
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -973,11 +928,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         torch.ops.vllm.cpu_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            _encode_layer_name(self.prefix),
+            mixed_qkv, b, a, core_attn_out, _encode_layer_name(self.prefix)
         )
 
         z_shape_og = z.shape
@@ -1148,12 +1099,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             qkvz, ba, num_tokens_all
         )
         z_out[:] = z
-        self._forward_core(
-            mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
-            core_attn_out=core_attn_out,
-        )
+        self._forward_core(mixed_qkv=mixed_qkv, b=b, a=a, core_attn_out=core_attn_out)
 
     def _forward_core(
         self,
@@ -1362,21 +1308,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
             assert has_initial_state is not None
             initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
+            (core_attn_out_non_spec, last_recurrent_state) = (
+                self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
@@ -1567,17 +1512,11 @@ def qwen_gdn_attention_core(
     self = forward_context.no_compile_layers[layer_name]
     if fast_kernel:
         self._forward_core_rocm(
-            qkvz=qkv_or_qkvz,
-            ba=b_or_ba,
-            z_out=a_or_z_out,
-            core_attn_out=core_attn_out,
+            qkvz=qkv_or_qkvz, ba=b_or_ba, z_out=a_or_z_out, core_attn_out=core_attn_out
         )
     else:
         self._forward_core(
-            mixed_qkv=qkv_or_qkvz,
-            b=b_or_ba,
-            a=a_or_z_out,
-            core_attn_out=core_attn_out,
+            mixed_qkv=qkv_or_qkvz, b=b_or_ba, a=a_or_z_out, core_attn_out=core_attn_out
         )
 
 

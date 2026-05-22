@@ -42,23 +42,14 @@ def test_worker_apply_lora(qwen3_lora_files):
         )
 
     model_config = ModelConfig(
-        MODEL_PATH,
-        seed=0,
-        dtype="float16",
-        max_model_len=127,
-        enforce_eager=True,
+        MODEL_PATH, seed=0, dtype="float16", max_model_len=127, enforce_eager=True
     )
 
     vllm_config = VllmConfig(
         model_config=model_config,
-        load_config=LoadConfig(
-            download_dir=None,
-            load_format="dummy",
-        ),
+        load_config=LoadConfig(download_dir=None, load_format="dummy"),
         parallel_config=ParallelConfig(
-            pipeline_parallel_size=1,
-            tensor_parallel_size=1,
-            data_parallel_size=1,
+            pipeline_parallel_size=1, tensor_parallel_size=1, data_parallel_size=1
         ),
         scheduler_config=SchedulerConfig(
             max_model_len=model_config.max_model_len,
@@ -69,10 +60,7 @@ def test_worker_apply_lora(qwen3_lora_files):
             max_num_partial_prefills=32,
         ),
         device_config=DeviceConfig(DEVICE_TYPE),
-        cache_config=CacheConfig(
-            block_size=16,
-            cache_dtype="auto",
-        ),
+        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
         lora_config=LoRAConfig(
             max_lora_rank=8, max_cpu_loras=NUM_LORAS, max_loras=NUM_LORAS
         ),

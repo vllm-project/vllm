@@ -36,10 +36,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
-from vllm.model_executor.layers.attention import (
-    Attention,
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -209,9 +206,7 @@ class ApertusAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -223,9 +218,7 @@ class ApertusAttention(nn.Module):
         return output
 
     def _init_rotary_emb(
-        self,
-        config: ApertusConfig,
-        quant_config: QuantizationConfig | None,
+        self, config: ApertusConfig, quant_config: QuantizationConfig | None
     ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
@@ -342,9 +335,7 @@ class ApertusModel(nn.Module, EagleModelMixin):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -552,10 +543,7 @@ class ApertusForCausalLM(
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -15,15 +15,9 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_DEVICE = {
-    "cuda": (
-        "cuda",
-        "cpu",
-    ),
+    "cuda": ("cuda", "cpu"),
     "tpu": ("cpu",),
-    "xpu": (
-        "cpu",
-        "xpu",
-    ),
+    "xpu": ("cpu", "xpu"),
     "cpu": ("cpu",),
 }
 # support for oot platform by providing mapping in current_platform

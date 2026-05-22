@@ -61,8 +61,7 @@ def compute_ref_output(
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="cutlass_mxfp4_group_mm requires CUDA SM100",
+    not is_sm100_supported(), reason="cutlass_mxfp4_group_mm requires CUDA SM100"
 )
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
@@ -115,11 +114,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     _inp_bs_offsets = torch.tensor(input_bs_offsets, device=device, dtype=torch.int32)
 
     input_quant, input_sf = ops.mxfp4_experts_quant(
-        input_tensor,
-        _inp_expert_offsets,
-        _inp_bs_offsets,
-        num_experts,
-        topk=1,
+        input_tensor, _inp_expert_offsets, _inp_bs_offsets, num_experts, topk=1
     )
 
     # --- Quantize WEIGHTS via mxfp4_experts_quant ---
@@ -135,11 +130,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     _wt_bs_offsets = torch.tensor(weight_bs_offsets, device=device, dtype=torch.int32)
 
     weight_quant, weight_sf = ops.mxfp4_experts_quant(
-        weight_tensor,
-        _wt_expert_offsets,
-        _wt_bs_offsets,
-        num_experts,
-        topk=1,
+        weight_tensor, _wt_expert_offsets, _wt_bs_offsets, num_experts, topk=1
     )
 
     # Reshape weight quantized data to [E, N, K//2]
@@ -201,8 +192,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="mxfp4_experts_quant requires CUDA SM100",
+    not is_sm100_supported(), reason="mxfp4_experts_quant requires CUDA SM100"
 )
 def test_mxfp4_experts_quant_basic():
     """
@@ -227,11 +217,7 @@ def test_mxfp4_experts_quant_basic():
     )
 
     output, output_sf = ops.mxfp4_experts_quant(
-        input_tensor,
-        _expert_offsets,
-        _blockscale_offsets,
-        num_experts,
-        topk=1,
+        input_tensor, _expert_offsets, _blockscale_offsets, num_experts, topk=1
     )
 
     assert output.shape == (total_tokens, k // 2)

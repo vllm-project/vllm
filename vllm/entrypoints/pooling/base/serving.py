@@ -70,9 +70,7 @@ class PoolingServingBase(ABC):
         )
 
     async def __call__(
-        self,
-        request: AnyPoolingRequest,
-        raw_request: Request | None = None,
+        self, request: AnyPoolingRequest, raw_request: Request | None = None
     ) -> Response:
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
@@ -121,10 +119,7 @@ class PoolingServingBase(ABC):
         self._maybe_get_adapters(ctx)
         return ctx
 
-    async def _prepare_generators(
-        self,
-        ctx: PoolingServeContext,
-    ):
+    async def _prepare_generators(self, ctx: PoolingServeContext):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
@@ -178,10 +173,7 @@ class PoolingServingBase(ABC):
 
         ctx.result_generator = merge_async_iterators(*generators)
 
-    async def _collect_batch(
-        self,
-        ctx: PoolingServeContext,
-    ):
+    async def _collect_batch(self, ctx: PoolingServeContext):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
@@ -201,10 +193,7 @@ class PoolingServingBase(ABC):
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
     @abstractmethod
-    def _build_response(
-        self,
-        ctx: PoolingServeContext,
-    ) -> Response:
+    def _build_response(self, ctx: PoolingServeContext) -> Response:
         raise NotImplementedError
 
     @staticmethod
@@ -224,10 +213,7 @@ class PoolingServingBase(ABC):
             return True
         return self.models.is_base_model(model_name)
 
-    async def _check_model(
-        self,
-        request: AnyPoolingRequest,
-    ) -> ErrorResponse | None:
+    async def _check_model(self, request: AnyPoolingRequest) -> ErrorResponse | None:
         if self._is_model_supported(request.model):
             return None
         if request.model in self.models.lora_requests:
@@ -261,10 +247,7 @@ class PoolingServingBase(ABC):
 
         return None
 
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
+    async def _get_trace_headers(self, headers: Headers) -> Mapping[str, str] | None:
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
@@ -276,9 +259,7 @@ class PoolingServingBase(ABC):
         return None
 
     def _maybe_get_adapters(
-        self,
-        ctx: PoolingServeContext,
-        supports_default_mm_loras: bool = False,
+        self, ctx: PoolingServeContext, supports_default_mm_loras: bool = False
     ):
         request = ctx.request
         if request.model in self.models.lora_requests:

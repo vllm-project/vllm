@@ -60,11 +60,7 @@ _EVENT_DRAIN_TIMEOUT = 60
 class MockSubscriber:
     """Helper class to receive and verify published events"""
 
-    def __init__(
-        self,
-        endpoint: str,
-        topic: str,
-    ):
+    def __init__(self, endpoint: str, topic: str):
         self.ctx = zmq.Context.instance()
         self.topic_bytes = topic.encode("utf-8")
 
@@ -127,9 +123,7 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
         # Force an engine step so the scheduler polls get_finished()
         # and releases GPU blocks held by in-flight async stores.
         llm.generate(
-            [TokensPrompt(prompt_token_ids=[0])],
-            _dummy_params,
-            use_tqdm=False,
+            [TokensPrompt(prompt_token_ids=[0])], _dummy_params, use_tqdm=False
         )
 
 
@@ -225,10 +219,7 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
 
 @pytest.mark.parametrize("model, attn_backend, cpu_block_size, uses_hma", MODEL_PARAMS)
 def test_cpu_offloading(
-    model: str,
-    attn_backend: str | None,
-    cpu_block_size: int | None,
-    uses_hma: bool,
+    model: str, attn_backend: str | None, cpu_block_size: int | None, uses_hma: bool
 ) -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
@@ -328,8 +319,7 @@ def test_tiering_offloading() -> None:
         kv_transfer_config=kv_transfer_config,
     )
     subscriber = MockSubscriber(
-        events_endpoint.replace("*", "127.0.0.1"),
-        topic=kv_events_config.topic,
+        events_endpoint.replace("*", "127.0.0.1"), topic=kv_events_config.topic
     )
     try:
         _latency_test(llm, subscriber)

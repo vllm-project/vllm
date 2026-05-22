@@ -120,11 +120,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     )
     score = tl.softmax(score, dim=0)
 
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
-        other=0.0,
-    )
+    kv = tl.load(row_base[:, None] + block[None, :], mask=combined_mask, other=0.0)
 
     compressed_kv = tl.sum(kv * score, axis=0)  # [TRITON_BLOCK_SIZE] fp32
 
@@ -180,9 +176,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     encoded = exponents + 127.0
     encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
     tl.store(
-        scale_ptr + scale_idx,
-        encoded.to(tl.uint8),
-        mask=scale_idx < N_NOPE_BLOCKS,
+        scale_ptr + scale_idx, encoded.to(tl.uint8), mask=scale_idx < N_NOPE_BLOCKS
     )
     tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
 
@@ -312,11 +306,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     score = tl.softmax(score, dim=0)
 
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
-        other=0.0,
-    )
+    kv = tl.load(row_base[:, None] + block[None, :], mask=combined_mask, other=0.0)
 
     compressed_kv = tl.sum(kv * score, axis=0)  # [TRITON_BLOCK_SIZE] fp32
 
@@ -491,11 +481,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     )
     score = tl.softmax(score, dim=0)
 
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
-        other=0.0,
-    )
+    kv = tl.load(row_base[:, None] + block[None, :], mask=combined_mask, other=0.0)
 
     compressed_kv = tl.sum(kv * score, axis=0)  # [TRITON_BLOCK_SIZE] fp32
 
@@ -562,10 +548,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     even_2d = tl.reshape(new_even, (N_QUANT_BLOCKS, HALF_BLOCK))
     odd_2d = tl.reshape(new_odd, (N_QUANT_BLOCKS, HALF_BLOCK))
 
-    amax = tl.maximum(
-        tl.max(tl.abs(even_2d), axis=1),
-        tl.max(tl.abs(odd_2d), axis=1),
-    )
+    amax = tl.maximum(tl.max(tl.abs(even_2d), axis=1), tl.max(tl.abs(odd_2d), axis=1))
     amax = tl.maximum(amax, 6.0 * (2**-126))
 
     # ue8m0 block scale: 2^ceil(log2(amax / 6.0)), stored as (exp + 127) byte.

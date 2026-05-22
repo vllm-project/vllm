@@ -437,8 +437,7 @@ def main():
 
     # Config file
     parser.add_argument(
-        "--config",
-        help="Path to YAML config file (overrides other args)",
+        "--config", help="Path to YAML config file (overrides other args)"
     )
 
     # Backend selection
@@ -449,10 +448,7 @@ def main():
         help="Decode backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
         "flashinfer_mla, flashattn_mla, flashmla)",
     )
-    parser.add_argument(
-        "--backend",
-        help="Single backend (alternative to --backends)",
-    )
+    parser.add_argument("--backend", help="Single backend (alternative to --backends)")
     parser.add_argument(
         "--prefill-backends",
         nargs="+",
@@ -502,10 +498,7 @@ def main():
         help="Parameter name to sweep (e.g., num_kv_splits, reorder_batch_threshold)",
     )
     parser.add_argument(
-        "--sweep-values",
-        type=int,
-        nargs="+",
-        help="Values to sweep for the parameter",
+        "--sweep-values", type=int, nargs="+", help="Values to sweep for the parameter"
     )
 
     # Output

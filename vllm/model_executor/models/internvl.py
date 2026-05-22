@@ -133,15 +133,10 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: InternVLProcessor,
+        self, *, image_width: int, image_height: int, processor: InternVLProcessor
     ) -> int:
         return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -156,9 +151,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             width, height = base_size * wr, base_size * hr
 
             feat_size = self.get_num_image_tokens(
-                image_width=width,
-                image_height=height,
-                processor=processor,
+                image_width=width, image_height=height, processor=processor
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -174,9 +167,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=processor,
+            image_width=target_width, image_height=target_height, processor=processor
         )
 
 
@@ -223,10 +214,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -255,9 +243,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return self._get_image_fields_config(hf_inputs)
 
@@ -300,9 +286,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             return hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
         return PromptReplacement(
-            modality="image",
-            target="<image>",
-            replacement=get_replacement_internvl,
+            modality="image", target="<image>", replacement=get_replacement_internvl
         )
 
     def _get_prompt_updates(
@@ -314,9 +298,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         out_mm_data = out_mm_kwargs.get_data()
 
-        return [
-            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data),
-        ]
+        return [self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data)]
 
 
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
@@ -391,9 +373,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         return {**super().get_supported_mm_limits(), **video_limit}
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -482,9 +462,7 @@ class InternVLMultiModalProcessor(
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = self._get_image_fields_config(hf_inputs)
         if self.info.ctx_video_token:
@@ -528,7 +506,7 @@ class InternVLMultiModalProcessor(
         out_mm_data = out_mm_kwargs.get_data()
 
         prompt_repls = [
-            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data),
+            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data)
         ]
         if self.info.ctx_video_token is not None:
             prompt_repls.append(
@@ -694,10 +672,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             return None
 
         if image_embeds is not None:
-            return InternVLImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return InternVLImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         image_token_id = kwargs["image_token_id"]
         if isinstance(image_token_id, torch.Tensor):
@@ -730,10 +705,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             return None
 
         if video_embeds is not None:
-            return InternVLVideoEmbeddingInputs(
-                type="video_embeds",
-                data=video_embeds,
-            )
+            return InternVLVideoEmbeddingInputs(type="video_embeds", data=video_embeds)
 
         video_token_id = kwargs["video_token_id"]
         if isinstance(video_token_id, torch.Tensor):
@@ -756,8 +728,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         raise AssertionError("This line should be unreachable.")
 
     def _process_vision_input(
-        self,
-        image_input: InternVLImageInputs | InternVLVideoInputs,
+        self, image_input: InternVLImageInputs | InternVLVideoInputs
     ) -> tuple[torch.Tensor, ...]:
         if (
             image_input["type"] == "image_embeds"
@@ -876,10 +847,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

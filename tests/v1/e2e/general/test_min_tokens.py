@@ -82,19 +82,7 @@ MIN_TOKENS_TEST_CASES = [
             name="min_tokens_with_comprehensive_stops",
             min_tokens=5,
             max_tokens=20,
-            stop=[
-                "a",
-                "e",
-                "i",
-                "o",
-                "u",
-                "t",
-                "n",
-                "s",
-                "r",
-                "l",
-                " ",
-            ],
+            stop=["a", "e", "i", "o", "u", "t", "n", "s", "r", "l", " "],
             expected_min_len=5,
         ),
         marks=pytest.mark.xfail(
@@ -197,11 +185,7 @@ def assert_min_tokens_satisfied(
         )
 
 
-@pytest.mark.parametrize(
-    "test_case",
-    MIN_TOKENS_TEST_CASES,
-    ids=lambda tc: tc.name,
-)
+@pytest.mark.parametrize("test_case", MIN_TOKENS_TEST_CASES, ids=lambda tc: tc.name)
 def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
     """
     Comprehensive test for min_tokens functionality in V1 engine.
@@ -400,10 +384,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
     max_toks = 32
 
     # Case 1: WITHOUT min_tokens
-    sp_no_min = SamplingParams(
-        max_tokens=max_toks,
-        temperature=GREEDY,
-    )
+    sp_no_min = SamplingParams(max_tokens=max_toks, temperature=GREEDY)
     out_no_min = llm_v1.generate([prompt], sp_no_min)
     assert len(out_no_min) == 1
     choice_no_min = out_no_min[0].outputs[0]
@@ -433,9 +414,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
 
     # Case 2: WITH min_tokens
     sp_with_min = SamplingParams(
-        min_tokens=max_toks,
-        max_tokens=max_toks,
-        temperature=GREEDY,
+        min_tokens=max_toks, max_tokens=max_toks, temperature=GREEDY
     )
     out_with_min = llm_v1.generate([prompt], sp_with_min)
     assert len(out_with_min) == 1
@@ -479,14 +458,12 @@ def test_min_tokens_validation():
 
     # Invalid cases
     with pytest.raises(
-        ValueError,
-        match="min_tokens must be greater than or equal to 0",
+        ValueError, match="min_tokens must be greater than or equal to 0"
     ):
         SamplingParams(min_tokens=-1, max_tokens=10)
 
     with pytest.raises(
-        ValueError,
-        match="min_tokens must be less than or equal to max_tokens",
+        ValueError, match="min_tokens must be less than or equal to max_tokens"
     ):
         SamplingParams(min_tokens=15, max_tokens=10)
 

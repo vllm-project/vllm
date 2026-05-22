@@ -125,9 +125,7 @@ class PhiAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -188,15 +186,12 @@ class PhiLayer(nn.Module):
         self.mlp = PhiMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         attn_outputs = self.self_attn(
-            position_ids=position_ids,
-            hidden_states=hidden_states,
+            position_ids=position_ids, hidden_states=hidden_states
         )
         feed_forward_hidden_states = self.mlp(hidden_states)
         hidden_states = attn_outputs + feed_forward_hidden_states + residual
@@ -300,13 +295,7 @@ class PhiModel(nn.Module):
 
 
 class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ]
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -351,10 +340,7 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
 

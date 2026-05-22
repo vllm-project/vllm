@@ -3,18 +3,14 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import (
-    VllmConfig,
-)
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
-)
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
@@ -23,10 +19,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     """Base class for GatedDeltaNet attention layer."""
 
     def __init__(
-        self,
-        config: PretrainedConfig,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, config: PretrainedConfig, vllm_config: VllmConfig, prefix: str = ""
     ) -> None:
         super().__init__()
         self.prefix = prefix

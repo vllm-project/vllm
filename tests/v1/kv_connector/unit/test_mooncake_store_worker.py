@@ -13,12 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
-    rdma_utils,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
-    worker,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
@@ -72,9 +68,7 @@ def _make_store_sending_thread(
 
 
 def _make_store_recving_thread(
-    store: MagicMock,
-    *,
-    disk_offload_buffer_budget_bytes: int | None = None,
+    store: MagicMock, *, disk_offload_buffer_budget_bytes: int | None = None
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -147,10 +141,7 @@ _DISK_OFFLOAD_BUDGET_TOO_SMALL = (
 
 class _FakeKVTransferConfig:
     def __init__(
-        self,
-        *,
-        kv_role: str = "kv_both",
-        extra_config: dict[str, object] | None = None,
+        self, *, kv_role: str = "kv_both", extra_config: dict[str, object] | None = None
     ) -> None:
         self.kv_role = kv_role
         self.kv_connector_extra_config = extra_config or {}
@@ -291,19 +282,14 @@ def test_get_configured_worker_rnic_prefers_explicit_device_name(monkeypatch):
 
     assert (
         rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
+            protocol=store_config.protocol, configured_device=store_config.device_name
         )
         == "rocep139s0"
     )
 
 
 def test_get_configured_worker_rnic_selects_device_from_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 1,
-    )
+    monkeypatch.setattr(rdma_utils, "get_current_physical_gpu_index", lambda: 1)
     store_config = worker.MooncakeStoreConfig(
         metadata_server="",
         local_buffer_size=1,
@@ -314,8 +300,7 @@ def test_get_configured_worker_rnic_selects_device_from_explicit_csv(monkeypatch
 
     assert (
         rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
+            protocol=store_config.protocol, configured_device=store_config.device_name
         )
         == "rocep140s0"
     )
@@ -329,8 +314,7 @@ def test_get_configured_worker_rnic_warns_and_returns_empty_for_rdma_with_no_dev
     monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
     with caplog.at_level(logging.WARNING):
         result = rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="",
+            protocol="rdma", configured_device=""
         )
     assert result == ""
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -344,8 +328,7 @@ def test_get_configured_worker_rnic_silent_for_tcp_with_no_device(caplog, monkey
     monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
     with caplog.at_level(logging.WARNING):
         result = rdma_utils.get_configured_worker_rnic(
-            protocol="tcp",
-            configured_device="",
+            protocol="tcp", configured_device=""
         )
     assert result == ""
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -356,15 +339,10 @@ def test_get_configured_worker_rnic_silent_for_tcp_with_no_device(caplog, monkey
 
 
 def test_get_configured_worker_rnic_rejects_short_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 2,
-    )
+    monkeypatch.setattr(rdma_utils, "get_current_physical_gpu_index", lambda: 2)
     with pytest.raises(ValueError, match="does not cover local GPU 2"):
         rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="rocep139s0,rocep140s0",
+            protocol="rdma", configured_device="rocep139s0,rocep140s0"
         )
 
 
@@ -420,10 +398,7 @@ def test_store_sending_thread_skips_request_during_cpu_pressure():
 def test_store_sending_thread_only_skips_on_no_available_handle():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = [
-        [-500, -500],
-        [256, 256],
-    ]
+    store.batch_put_from_multi_buffers.side_effect = [[-500, -500], [256, 256]]
     thread = _make_store_sending_thread(store)
 
     thread.add_stored_request("req-a")
@@ -484,11 +459,7 @@ def test_recv_thread_uses_single_batch_when_no_disk_offload_budget(monkeypatch):
     store.batch_get_into_multi_buffers.return_value = [256, 256, 256]
     thread = _make_store_recving_thread(store, disk_offload_buffer_budget_bytes=None)
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1", b"a2"],
-        token_len=48,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
 
     thread._handle_request(req)
 
@@ -511,11 +482,7 @@ def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
     store.batch_get_into_multi_buffers.return_value = [256, 256, -10]
     thread = _make_store_recving_thread(store, disk_offload_buffer_budget_bytes=None)
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1", b"a2"],
-        token_len=48,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
     expected_keys = [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
@@ -550,50 +517,30 @@ def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
 
 def test_recv_thread_uses_ratio_scaled_budget_for_first_pass_split():
     store = MagicMock()
-    store.batch_get_into_multi_buffers.side_effect = [
-        [256],
-        [256],
-    ]
+    store.batch_get_into_multi_buffers.side_effect = [[256], [256]]
     thread = _make_store_recving_thread(
-        store,
-        disk_offload_buffer_budget_bytes=2 * _DISK_OFFLOAD_SINGLE_KEY_BYTES,
+        store, disk_offload_buffer_budget_bytes=2 * _DISK_OFFLOAD_SINGLE_KEY_BYTES
     )
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1"],
-        token_len=32,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1"], token_len=32)
 
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 2
     first_keys = store.batch_get_into_multi_buffers.call_args_list[0].args[0]
     second_keys = store.batch_get_into_multi_buffers.call_args_list[1].args[0]
-    assert first_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
-    ]
-    assert second_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
-    ]
+    assert first_keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130"]
+    assert second_keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131"]
 
 
 def test_recv_thread_splits_disk_offload_loads_by_budget():
     store = MagicMock()
-    store.batch_get_into_multi_buffers.side_effect = [
-        [256, 256],
-        [256],
-    ]
+    store.batch_get_into_multi_buffers.side_effect = [[256, 256], [256]]
     thread = _make_store_recving_thread(
-        store,
-        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+        store, disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT
     )
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1", b"a2"],
-        token_len=48,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
 
     thread._handle_request(req)
 
@@ -609,9 +556,7 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
-    assert second_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
-    ]
+    assert second_keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132"]
     base_addr = thread.token_databases[0].kv_caches_base_addr[0]
     block_len = thread.token_databases[0].block_len[0]
     assert first_addrs == [[base_addr], [base_addr + block_len]]
@@ -625,15 +570,10 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [-10, -10]
     thread = _make_store_recving_thread(
-        store,
-        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+        store, disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT
     )
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1", b"a2"],
-        token_len=48,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
 
     thread._handle_request(req)
 
@@ -646,15 +586,10 @@ def test_recv_thread_skips_split_when_budget_holds_all_keys():
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [256, 256, 256]
     thread = _make_store_recving_thread(
-        store,
-        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_THREE_KEYS,
+        store, disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_THREE_KEYS
     )
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0", b"a1", b"a2"],
-        token_len=48,
-    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
 
     thread._handle_request(req)
 
@@ -669,15 +604,10 @@ def test_recv_thread_skips_split_when_budget_holds_all_keys():
 def test_recv_thread_reports_unsplittable_key_larger_than_budget():
     store = MagicMock()
     thread = _make_store_recving_thread(
-        store,
-        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_TOO_SMALL,
+        store, disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_TOO_SMALL
     )
 
-    req = _make_load_req(
-        "req-a",
-        [b"a0"],
-        token_len=16,
-    )
+    req = _make_load_req("req-a", [b"a0"], token_len=16)
 
     thread._handle_request(req)
 
@@ -718,10 +648,7 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
     )
 
 
-def test_requester_worker_init_prefers_local_hostname_override(
-    tmp_path,
-    monkeypatch,
-):
+def test_requester_worker_init_prefers_local_hostname_override(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -746,8 +673,7 @@ def test_requester_worker_init_prefers_local_hostname_override(
 
 
 def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
-    tmp_path,
-    monkeypatch,
+    tmp_path, monkeypatch
 ):
     """enable_offload=False zeroes out the disk budget so we don't generate
     redundant owner GET-RPCs."""
@@ -774,8 +700,7 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
 
 
 def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
-    tmp_path,
-    monkeypatch,
+    tmp_path, monkeypatch
 ):
     store = MagicMock()
     store.setup.return_value = 0
@@ -794,11 +719,7 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
         ),
     )
     w = worker.MooncakeStoreWorker(
-        _make_vllm_config(
-            extra_config={
-                "preferred_segment": "10.0.0.7:50053",
-            }
-        ),
+        _make_vllm_config(extra_config={"preferred_segment": "10.0.0.7:50053"}),
         _make_kv_cache_config(),
     )
 
@@ -846,9 +767,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
     # lcm=64 via single full-attn block_size=64.
     spec = FullAttentionSpec(block_size=64, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["L"], spec)],
-        scheduler_block_size=64,
-        hash_block_size=64,
+        [KVCacheGroupSpec(["L"], spec)], scheduler_block_size=64, hash_block_size=64
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
@@ -904,11 +823,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         block_size=32, num_kv_heads=8, head_size=64, dtype=None
     )
     swa_spec = SlidingWindowSpec(
-        block_size=8,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=8,
+        block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
     )
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
@@ -932,10 +847,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     db_swa.set_block_len([128])
 
     thread = _make_store_sending_thread(
-        store,
-        coord=coord,
-        token_databases=[db_full, db_swa],
-        block_size=32,
+        store, coord=coord, token_databases=[db_full, db_swa], block_size=32
     )
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
@@ -988,10 +900,7 @@ def _register_with_mocked_threads(
 
 
 def _make_bare_worker(
-    *,
-    num_gpu_blocks: int = 10,
-    block_size: int = 16,
-    kv_role: str = "kv_both",
+    *, num_gpu_blocks: int = 10, block_size: int = 16, kv_role: str = "kv_both"
 ) -> mooncake_store_worker.MooncakeStoreWorker:
     """Construct a MooncakeStoreWorker via __new__, bypassing __init__.
 
@@ -1018,10 +927,7 @@ def _make_bare_worker(
     # Minimal single-full-attention-group config so the coordinator-based
     # lookup path works (the connector no longer carries a legacy single-group
     # path; everything flows through the coordinator).
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     worker.disk_offload_buffer_budget_bytes = None
     worker.store_replicate_config = SimpleNamespace()
@@ -1097,8 +1003,7 @@ def test_register_kv_caches_blocks_first_single_segment():
     assert db.kv_caches_base_addr == [tensor.untyped_storage().data_ptr()]
     assert db.block_len == [tensor.untyped_storage().nbytes() // num_blocks]
     worker.store.register_buffer.assert_called_once_with(
-        tensor.untyped_storage().data_ptr(),
-        tensor.untyped_storage().nbytes(),
+        tensor.untyped_storage().data_ptr(), tensor.untyped_storage().nbytes()
     )
 
 
@@ -1112,12 +1017,7 @@ def test_register_kv_caches_kv_first_two_segments():
 
     # Shape: (2, num_blocks, block_size, num_kv_heads, head_size) — K/V outermost
     tensor = torch.zeros(
-        2,
-        num_blocks,
-        block_size_tokens,
-        num_kv_heads,
-        head_size,
-        dtype=torch.float16,
+        2, num_blocks, block_size_tokens, num_kv_heads, head_size, dtype=torch.float16
     )
     _register_with_mocked_threads(worker, {"layer0": tensor})
 
@@ -1251,8 +1151,7 @@ def test_config_embedded_rejects_zero_segment():
 
 def test_config_standalone_store_rejects_nonzero_segment():
     with pytest.raises(
-        ValueError,
-        match=r"standalone-store mode requires global_segment_size == 0",
+        ValueError, match=r"standalone-store mode requires global_segment_size == 0"
     ):
         _make_config(mode="standalone-store", global_segment_size=4 * 1024**3)
 

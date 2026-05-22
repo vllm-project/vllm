@@ -21,10 +21,7 @@ class ReasoningCase(TypedDict):
 
 class FakeNemotronTokenizer:
     def __init__(self):
-        self._vocab = {
-            "<think>": 1,
-            "</think>": 2,
-        }
+        self._vocab = {"<think>": 1, "</think>": 2}
         self._pattern = re.compile(r"(<think>|</think>)")
 
     def get_vocab(self) -> dict[str, int]:
@@ -88,9 +85,7 @@ def tokenizer():
     ],
 )
 def test_nemotron_v3_reasoning(
-    tokenizer: FakeNemotronTokenizer,
-    streaming: bool,
-    param_dict: ReasoningCase,
+    tokenizer: FakeNemotronTokenizer, streaming: bool, param_dict: ReasoningCase
 ):
     output = tokenizer.tokenize(param_dict["output"])
     model_output = [tokenizer.convert_tokens_to_string([token]) for token in output]
@@ -106,22 +101,15 @@ def test_nemotron_v3_reasoning(
     assert content == param_dict["content"]
 
 
-def test_nemotron_v3_without_thinking_returns_content(
-    tokenizer: FakeNemotronTokenizer,
-):
+def test_nemotron_v3_without_thinking_returns_content(tokenizer: FakeNemotronTokenizer):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template_kwargs={"enable_thinking": False},
+        model="test-model", messages=[], chat_template_kwargs={"enable_thinking": False}
     )
 
     reasoning, content = run_reasoning_extraction(
-        parser,
-        ["This is plain content"],
-        request=request,
-        streaming=False,
+        parser, ["This is plain content"], request=request, streaming=False
     )
 
     assert reasoning is None
@@ -140,10 +128,7 @@ def test_nemotron_v3_force_nonempty_content_returns_content(
     )
 
     reasoning, content = run_reasoning_extraction(
-        parser,
-        ["<think>This is plain content"],
-        request=request,
-        streaming=False,
+        parser, ["<think>This is plain content"], request=request, streaming=False
     )
 
     assert reasoning is None
@@ -156,16 +141,11 @@ def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
     request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template_kwargs={"enable_thinking": True},
+        model="test-model", messages=[], chat_template_kwargs={"enable_thinking": True}
     )
 
     reasoning, content = run_reasoning_extraction(
-        parser,
-        ["This is truncated reasoning"],
-        request=request,
-        streaming=False,
+        parser, ["This is truncated reasoning"], request=request, streaming=False
     )
 
     assert reasoning == "This is truncated reasoning"

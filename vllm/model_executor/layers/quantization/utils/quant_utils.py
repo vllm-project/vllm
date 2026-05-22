@@ -231,9 +231,7 @@ def group_broadcast(t, shape):
 
 
 def prep_scale_for_group_broadcast(
-    scale: torch.Tensor,
-    x: torch.Tensor,
-    group_shape: GroupShape | None,
+    scale: torch.Tensor, x: torch.Tensor, group_shape: GroupShape | None
 ) -> torch.Tensor:
     """
     Prepare the input quantization scale for group broadcasting.
@@ -410,9 +408,7 @@ def get_and_maybe_dequant_weights(
     # - Should only be used offline, since it's O(N^3)
     assert hasattr(layer, "input_size_per_partition")
     eye = torch.eye(
-        layer.input_size_per_partition,
-        dtype=out_dtype,
-        device=weight.device,
+        layer.input_size_per_partition, dtype=out_dtype, device=weight.device
     )
     dequant_weights = layer.quant_method.apply(layer, eye, bias=None).to(out_dtype)
     return dequant_weights.T
@@ -701,12 +697,7 @@ def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
     )
 
 
-def pack_rows(
-    q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
+def pack_rows(q_w: torch.Tensor, num_bits: int, size_k: int, size_n: int):
     assert q_w.shape == (size_k, size_n)
 
     pack_factor = get_pack_factor(num_bits)
@@ -725,12 +716,7 @@ def pack_rows(
     return q_res
 
 
-def pack_cols(
-    q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
+def pack_cols(q_w: torch.Tensor, num_bits: int, size_k: int, size_n: int):
     assert q_w.shape == (size_k, size_n)
 
     pack_factor = get_pack_factor(num_bits)
@@ -751,12 +737,7 @@ def pack_cols(
     return q_res
 
 
-def unpack_cols(
-    packed_q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
+def unpack_cols(packed_q_w: torch.Tensor, num_bits: int, size_k: int, size_n: int):
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (size_k, size_n // pack_factor), (
@@ -782,21 +763,11 @@ def unpack_cols(
     return q_res
 
 
-def gptq_pack(
-    q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
+def gptq_pack(q_w: torch.Tensor, num_bits: int, size_k: int, size_n: int):
     return pack_rows(q_w, num_bits, size_k, size_n)
 
 
-def awq_pack(
-    q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
+def awq_pack(q_w: torch.Tensor, num_bits: int, size_k: int, size_n: int):
     assert q_w.shape == (size_k, size_n)
 
     # Interleave column dim (for the dequantize code) and pack it to int32

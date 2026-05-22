@@ -112,9 +112,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return {"audio": 5}  # Performance tends to degrade after 5
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         return {"audio": self.get_max_audio_tokens()}
 
@@ -147,9 +145,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=target_length,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=target_length, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -186,9 +182,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
             audio_chunks.append(chunk)
 
         request = ChatCompletionRequest(
-            messages=[
-                UserMessage(content=[TextChunk(text=dummy_text), *audio_chunks]),
-            ]
+            messages=[UserMessage(content=[TextChunk(text=dummy_text), *audio_chunks])]
         )
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
@@ -196,7 +190,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         dummy_mm_items = self.info.parse_mm_data(
             # whixtral tokenizer adds padding to the audio
             # so we need to update the audio arrays
-            {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
+            {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]}
         )
 
         return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
@@ -285,13 +279,11 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
                 modality="audio",
                 target="",  # Never match the prompt (see below note)
                 replacement=get_replacement,
-            ),
+            )
         ]
 
     def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
@@ -394,8 +386,7 @@ class VoxtralForConditionalGeneration(
                 seq_len / self.downsample_factor
             )
             audio_embedding = torch.nn.functional.pad(
-                audio_embedding,
-                (0, 0, 0, target_seq_len - seq_len),
+                audio_embedding, (0, 0, 0, target_seq_len - seq_len)
             )
             audio_embeddings[i] = audio_embedding.reshape(
                 target_seq_len // self.downsample_factor, dim * self.downsample_factor
@@ -426,10 +417,7 @@ class VoxtralForConditionalGeneration(
             audio_arrays = list(audio_arrays.unbind(0))
         return audio_arrays
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     @classmethod
@@ -449,10 +437,7 @@ class VoxtralForConditionalGeneration(
 
     @classmethod
     # for speech-to-text transcription
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         audio = stt_params.audio
         model_config = stt_params.model_config
         stt_config = stt_params.stt_config
@@ -474,7 +459,7 @@ class VoxtralForConditionalGeneration(
                 "audio": [
                     (audio.audio_array, stt_config.sample_rate)
                     for audio in tokenized.audios
-                ],
+                ]
             },
         )
 
@@ -515,9 +500,7 @@ class VoxtralForConditionalGeneration(
 
         audio_params = dict(
             nn.ModuleDict(
-                {
-                    "audio_language_adapter": self.audio_language_adapter,
-                }
+                {"audio_language_adapter": self.audio_language_adapter}
             ).named_parameters()
         )
         weights = _create_fake_bias_for_k_proj(weights, ".wk.weight")
@@ -722,12 +705,7 @@ class VoxtralEncoderModel(nn.Module):
         ),
     ]
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        *,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, *, prefix: str = "") -> None:
         super().__init__()
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
@@ -738,8 +716,7 @@ class VoxtralEncoderModel(nn.Module):
             WhisperEncoderCls = partial(WhisperEncoder, init_in_fp32=True)
 
         self.whisper_encoder = WhisperEncoderCls(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "whisper_encoder"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "whisper_encoder")
         )
         mel_filters = mel_filter_bank(
             num_frequency_bins=1 + self.config.window_size // 2,
@@ -750,10 +727,7 @@ class VoxtralEncoderModel(nn.Module):
         )
         self.mel_filters = torch.tensor(mel_filters, dtype=torch.float32)
 
-    def compute_whisper_melspec(
-        self,
-        audio_waveforms: torch.Tensor,
-    ) -> torch.Tensor:
+    def compute_whisper_melspec(self, audio_waveforms: torch.Tensor) -> torch.Tensor:
         input_dtype = audio_waveforms.dtype
         window = torch.hann_window(
             self.config.window_size, device=audio_waveforms.device
@@ -773,9 +747,7 @@ class VoxtralEncoderModel(nn.Module):
             if not isinstance(global_log_mel_max, float):
                 raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
             log_spec_max = torch.tensor(
-                global_log_mel_max,
-                device=log_spec.device,
-                dtype=log_spec.dtype,
+                global_log_mel_max, device=log_spec.device, dtype=log_spec.dtype
             )
         else:
             log_spec_max = log_spec.max()
@@ -795,8 +767,7 @@ class VoxtralEncoderModel(nn.Module):
         return self.config.max_source_positions * self.downsample_factor
 
     def prepare_inputs_for_conv(
-        self,
-        audio_waveforms: list[torch.Tensor],
+        self, audio_waveforms: list[torch.Tensor]
     ) -> tuple[torch.Tensor, list[int]]:
         assert isinstance(audio_waveforms, list)
         # list[num_mel_bins, seq_len]
@@ -855,11 +826,7 @@ class VoxtralEncoderModel(nn.Module):
                     (".mlp.gate_up_proj", ".mlp.fc3", 1),
                 ]
             )
-            params_mapping.extend(
-                [
-                    (".mlp.down_proj", ".mlp.fc2"),
-                ]
-            )
+            params_mapping.extend([(".mlp.down_proj", ".mlp.fc2")])
         params_dict = dict(self.named_parameters())
 
         name, loaded_weight = weight

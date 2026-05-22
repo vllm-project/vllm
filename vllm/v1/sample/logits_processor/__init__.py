@@ -133,10 +133,7 @@ def _load_logitsprocs_by_fqcns(
                 module = importlib.import_module(module_path)
         except Exception as e:
             logger.error(
-                "Failed to load %sth LogitsProcessor plugin %s: %s",
-                ldx,
-                logitproc,
-                e,
+                "Failed to load %sth LogitsProcessor plugin %s: %s", ldx, logitproc, e
             )
             raise RuntimeError(
                 f"Failed to load {ldx}th LogitsProcessor plugin {logitproc}"
@@ -272,8 +269,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
     @abstractmethod
     def new_req_logits_processor(
-        self,
-        params: SamplingParams,
+        self, params: SamplingParams
     ) -> RequestLogitsProcessor | None:
         """Consume request info; return a per-request logits processor.
 
@@ -322,11 +318,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
         return None
 
     def update_state(self, batch_update: BatchUpdate | None):
-        process_dict_updates(
-            self.req_info,
-            batch_update,
-            self._new_state,
-        )
+        process_dict_updates(self.req_info, batch_update, self._new_state)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.req_info:

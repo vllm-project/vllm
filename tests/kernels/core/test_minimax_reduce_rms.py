@@ -98,38 +98,20 @@ def _worker_forward_qk(
     _, _, fused_v = qkv.split([hq, hk, hk], dim=-1)
     torch.accelerator.synchronize()
 
-    torch.testing.assert_close(
-        fused_q,
-        ref_q,
-        atol=3e-2,
-        rtol=3e-2,
-    )
+    torch.testing.assert_close(fused_q, ref_q, atol=3e-2, rtol=3e-2)
     torch.testing.assert_close(fused_k, ref_k, atol=3e-2, rtol=3e-2)
 
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUDA required",
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 @pytest.mark.parametrize("num_tokens", [1, 128, 333])
-@pytest.mark.parametrize(
-    "hidden_dims",
-    [(6144, 1024)],
-)
+@pytest.mark.parametrize("hidden_dims", [(6144, 1024)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("eps", [1e-6])
 @pytest.mark.parametrize("seed", [42])
-def test_minimax_reduce_rms_qk(
-    world_size,
-    num_tokens,
-    hidden_dims,
-    dtype,
-    eps,
-    seed,
-):
+def test_minimax_reduce_rms_qk(world_size, num_tokens, hidden_dims, dtype, eps, seed):
     num_gpus = current_platform.device_count()
     if num_gpus < world_size:
         pytest.skip(f"Need >= {world_size} GPUs, have {num_gpus}")

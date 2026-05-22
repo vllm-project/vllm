@@ -109,10 +109,7 @@ class EVA2CLIPPatchEmbedding(nn.Module):
 
 class EVA2CLIPAttention(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -136,10 +133,7 @@ class EVA2CLIPAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_rank,
-            self.head_dim,
-            self.scale,
-            prefix=f"{prefix}.attn",
+            self.num_heads_per_rank, self.head_dim, self.scale, prefix=f"{prefix}.attn"
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
@@ -155,10 +149,7 @@ class EVA2CLIPAttention(nn.Module):
 
 class EVA2CLIPMLP(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.config = config
@@ -185,10 +176,7 @@ class EVA2CLIPMLP(nn.Module):
 
 class EVA2CLIPTransformerLayer(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.input_layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -214,10 +202,7 @@ class EVA2CLIPTransformerLayer(nn.Module):
 
 class EVA2CLIPTransformer(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -320,10 +305,7 @@ class EVA2CLIPGLU(nn.Module):
 
 class EVA2CLIPModel(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         vision_config = Namespace(**config.vision_config)
@@ -466,9 +448,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -495,7 +475,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
                 modality="image",
                 target=[boi_token_id, image_token_id, eoi_token_id],
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -586,18 +566,13 @@ class GLM4VForCausalLM(
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-        ) in self.iter_mm_grid_thw(mm_features):
+        for offset, llm_grid_t, llm_grid_h, llm_grid_w in self.iter_mm_grid_thw(
+            mm_features
+        ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(

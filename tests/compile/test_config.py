@@ -22,10 +22,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    _is_torch_equal_or_newer,
-    is_torch_equal,
-)
+from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 # This import automatically registers `torch.ops.silly.attention`
@@ -100,7 +97,7 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", val)
 
     compilation_config = {
-        "cudagraph_mode": CUDAGraphMode.NONE,  # speed things up a bit
+        "cudagraph_mode": CUDAGraphMode.NONE  # speed things up a bit
     }
     with (
         compilation_counter.expect(
@@ -213,10 +210,7 @@ def test_torch_compile_disable(vllm_runner, monkeypatch):
 
     with (
         compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
-        vllm_runner(
-            "facebook/opt-125m",
-            gpu_memory_utilization=0.4,
-        ) as _,
+        vllm_runner("facebook/opt-125m", gpu_memory_utilization=0.4) as _,
     ):
         pass
 
@@ -294,8 +288,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # preserved and MoE ops should be appended for DeepEP HT with dp>1.
     config = VllmConfig(
         parallel_config=ParallelConfig(
-            all2all_backend="deepep_high_throughput",
-            data_parallel_size=8,
+            all2all_backend="deepep_high_throughput", data_parallel_size=8
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -433,10 +426,7 @@ def test_cudagraph_sizes_post_init(
     if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
 
-    with (
-        ctx,
-        patch.object(current_platform, "device_count", return_value=tp_size),
-    ):
+    with ctx, patch.object(current_platform, "device_count", return_value=tp_size):
         kwargs = {}
         if cudagraph_capture_sizes is not None:
             kwargs["cudagraph_capture_sizes"] = cudagraph_capture_sizes
@@ -605,8 +595,7 @@ def test_cached_compilation_config(default_vllm_config):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+quant_fp8"],
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["+quant_fp8"]
         )
     )
 
@@ -782,9 +771,7 @@ def test_inductor_asserts_user_override(monkeypatch):
 
     importlib.reload(vllm.envs)
 
-    config = CompilationConfig(
-        inductor_compile_config={"size_asserts": True},
-    )
+    config = CompilationConfig(inductor_compile_config={"size_asserts": True})
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False

@@ -17,19 +17,14 @@ from vllm.v1.metrics.ray_wrappers import (
     RayPrometheusStatLogger,
 )
 
-MODELS = [
-    "distilbert/distilgpt2",
-]
+MODELS = ["distilbert/distilgpt2"]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [16])
 def test_engine_log_metrics_ray(
-    example_prompts,
-    model: str,
-    dtype: ModelDType,
-    max_tokens: int,
+    example_prompts, model: str, dtype: ModelDType, max_tokens: int
 ) -> None:
     """Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
@@ -119,9 +114,7 @@ def test_ray_counter_labels_returns_independent_children():
     """RayCounterWrapper.labels() must return distinct labeled children that
     each carry their own tag set."""
     base = RayCounterWrapper(
-        name="vllm_test_finish_reason",
-        documentation="",
-        labelnames=["reason"],
+        name="vllm_test_finish_reason", documentation="", labelnames=["reason"]
     )
 
     stop_child = base.labels("stop")
@@ -139,9 +132,7 @@ def test_ray_counter_inc_forwards_per_child_tags():
     """.inc() on a labeled counter must forward that child's tags to the
     underlying Ray metric (not rely on a shared set_default_tags)."""
     wrapper = RayCounterWrapper(
-        name="vllm_test_counter_tag_forward",
-        documentation="",
-        labelnames=["reason"],
+        name="vllm_test_counter_tag_forward", documentation="", labelnames=["reason"]
     )
     mock = _install_mock_metric(wrapper)
 
@@ -160,9 +151,7 @@ def test_ray_counter_inc_forwards_per_child_tags():
 
 def test_ray_gauge_labels_returns_independent_children_and_forwards_tags():
     wrapper = RayGaugeWrapper(
-        name="vllm_test_gauge_tag_forward",
-        documentation="",
-        labelnames=["kind"],
+        name="vllm_test_gauge_tag_forward", documentation="", labelnames=["kind"]
     )
     mock = _install_mock_metric(wrapper)
 
@@ -204,9 +193,7 @@ def test_ray_counter_labels_accepts_non_string_label_values():
     covers the coercion path for any caller that passes a non-string label
     value positionally."""
     wrapper = RayCounterWrapper(
-        name="vllm_test_nonstr_label",
-        documentation="",
-        labelnames=["engine", "reason"],
+        name="vllm_test_nonstr_label", documentation="", labelnames=["engine", "reason"]
     )
     child = wrapper.labels(0, "stop")
     assert child._tags["engine"] == "0"
@@ -215,9 +202,7 @@ def test_ray_counter_labels_accepts_non_string_label_values():
 
 def test_ray_counter_labels_arity_validation():
     wrapper = RayCounterWrapper(
-        name="vllm_test_arity",
-        documentation="",
-        labelnames=["a", "b"],
+        name="vllm_test_arity", documentation="", labelnames=["a", "b"]
     )
     with pytest.raises(ValueError, match="Number of labels must match"):
         wrapper.labels("only-one")
@@ -227,9 +212,7 @@ def test_unlabeled_inc_carries_replica_id():
     """Recording on an unlabeled metric must still pass ReplicaId — it's a
     declared tag_key and Ray rejects updates that omit any declared key."""
     wrapper = RayCounterWrapper(
-        name="vllm_test_unlabeled_replica_id",
-        documentation="",
-        labelnames=None,
+        name="vllm_test_unlabeled_replica_id", documentation="", labelnames=None
     )
     mock = _install_mock_metric(wrapper)
     wrapper.inc()
@@ -240,9 +223,7 @@ def test_double_labels_raises():
     """labels() on an already-labeled child should raise, mirroring the
     prometheus_client contract."""
     wrapper = RayCounterWrapper(
-        name="vllm_test_double_labels",
-        documentation="",
-        labelnames=["reason"],
+        name="vllm_test_double_labels", documentation="", labelnames=["reason"]
     )
     child = wrapper.labels("stop")
     with pytest.raises(ValueError, match="already-labeled"):

@@ -43,12 +43,7 @@ MODELS = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    vllm_runner,
-    example_prompts,
-    model,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
+    vllm_runner, example_prompts, model, dtype: str, max_tokens: int, num_logprobs: int
 ) -> None:
     model_name, revision = model
 

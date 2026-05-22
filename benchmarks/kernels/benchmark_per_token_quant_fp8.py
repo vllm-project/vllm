@@ -46,10 +46,7 @@ torch._dynamo.config.recompile_limit = 8888
 
 
 def calculate_diff(
-    batch_size: int,
-    hidden_size: int,
-    group_shape: GroupShape,
-    dtype: torch.dtype,
+    batch_size: int, hidden_size: int, group_shape: GroupShape, dtype: torch.dtype
 ):
     """Calculate the difference between Inductor and CUDA implementations."""
     device = torch.device("cuda")
@@ -220,10 +217,7 @@ if __name__ == "__main__":
     column_major_scales = [False] if args.no_column_major else [True, False]
 
     config_gen = itertools.product(
-        group_shapes,
-        column_major_scales,
-        batch_sizes,
-        hidden_sizes,
+        group_shapes, column_major_scales, batch_sizes, hidden_sizes
     )
 
     # filter out column-major scales for non-group, reverse order

@@ -38,21 +38,14 @@ url = "http://127.0.0.1:8000/score"
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
 # Example queries & documents
-queries = [
-    "What is the capital of China?",
-    "Explain gravity",
-]
+queries = ["What is the capital of China?", "Explain gravity"]
 documents = [
     "The capital of China is Beijing.",
     "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
 ]
 
 # Request payload for the score API
-data = {
-    "model": "Qwen/Qwen3-Reranker-0.6B",
-    "queries": queries,
-    "documents": documents,
-}
+data = {"model": "Qwen/Qwen3-Reranker-0.6B", "queries": queries, "documents": documents}
 
 
 def main():

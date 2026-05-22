@@ -39,8 +39,7 @@ def tokenizer():
 @pytest.fixture
 def request_obj():
     return ChatCompletionRequest(
-        model="test-model",
-        messages=[{"role": "user", "content": "hi"}],
+        model="test-model", messages=[{"role": "user", "content": "hi"}]
     )
 
 
@@ -151,11 +150,7 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
 
     content_text = "Hello! How can I assist you today?"
     results = stream_text(
-        parser,
-        tokenizer,
-        content_text,
-        request_obj,
-        prompt_token_ids=prompt_token_ids,
+        parser, tokenizer, content_text, request_obj, prompt_token_ids=prompt_token_ids
     )
     reasoning, content, tool_calls = collect_fields(results)
 

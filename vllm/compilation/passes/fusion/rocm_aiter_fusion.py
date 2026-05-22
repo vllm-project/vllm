@@ -31,14 +31,8 @@ from ..vllm_inductor_pass import (
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
 )
-from .matcher_utils import (
-    MatcherQuantFP8,
-    MatcherRMSNormGated,
-    MatcherSiluAndMul,
-)
-from .rms_quant_fusion import (
-    FusedRMSQuantKey,
-)
+from .matcher_utils import MatcherQuantFP8, MatcherRMSNormGated, MatcherSiluAndMul
+from .rms_quant_fusion import FusedRMSQuantKey
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -53,8 +47,7 @@ class AiterRMSNormQuantPattern:
         self.device = torch.device("cuda")
 
         self.quant_matcher = MatcherQuantFP8(
-            key.quant,
-            match_rocm_aiter=match_aiter_quant,
+            key.quant, match_rocm_aiter=match_aiter_quant
         )
 
     def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -87,16 +80,14 @@ class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
             result, scale = self.quant_matcher(result_rms)
             return result, scale
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result = self.FUSED_OP(
                 x=input,
@@ -140,9 +131,7 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
                 input, residual, weight, self.epsilon
@@ -170,13 +159,7 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             self.empty(5, 16),  # residual
         ]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            pm.fwd_only,
-            pm_pass,
-        )
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
 
 class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
@@ -205,22 +188,17 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
             result, scale = self.quant_matcher(result_rms)
             return result, scale
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at = self.FUSED_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
+                x=input, weight=weight, variance_epsilon=self.epsilon, group_size=128
             )
 
             return at[0], at[1]
@@ -261,9 +239,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
                 input, residual, weight, self.epsilon
@@ -273,9 +249,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return result, residual_out, scale
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             at = self.FUSED_OP(
                 x=input,
@@ -329,8 +303,7 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
             result1, scale1 = self.quant_matcher(result_rms)
@@ -338,20 +311,13 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return result1, scale1, result2, scale2
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             at1 = self.FUSED_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
+                x=input, weight=weight, variance_epsilon=self.epsilon, group_size=128
             )
             at2 = self.FUSED_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
+                x=input, weight=weight, variance_epsilon=self.epsilon, group_size=128
             )
 
             return at1[0], at1[1], at2[0], at2[1]
@@ -409,8 +375,7 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
             view_rms = result_rms.view(-1, result_rms.shape[-1])
@@ -419,20 +384,13 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
             return result1, scale1, result2, scale2
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             at1 = self.FUSED_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
+                x=input, weight=weight, variance_epsilon=self.epsilon, group_size=128
             )
             at2 = self.FUSED_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
+                x=input, weight=weight, variance_epsilon=self.epsilon, group_size=128
             )
 
             return at1[0], at1[1], at2[0], at2[1]
@@ -493,9 +451,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         quant_matcher = self.quant_matcher
 
         def pattern(
-            x: torch.Tensor,
-            z: torch.Tensor,
-            weight: torch.Tensor,
+            x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             normed = self.rmsnorm_gated_matcher(x, z, weight)
             merged = normed.reshape(-1, hidden_dim)
@@ -503,9 +459,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return quant_out, scales_out
 
         def replacement(
-            x: torch.Tensor,
-            z: torch.Tensor,
-            weight: torch.Tensor,
+            x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             fused = self.FUSED_OP(
                 x=x,
@@ -534,13 +488,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             fold_consecutive_reshapes(gm)
             return gm
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            [x, z, w],
-            trace_fn,
-            pm_pass,
-        )
+        pm.register_replacement(pattern, replacement, [x, z, w], trace_fn, pm_pass)
 
 
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
@@ -676,15 +624,11 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
-        return [
-            self.silu_and_mul_matcher.inputs()[0],
-        ]
+        return [self.silu_and_mul_matcher.inputs()[0]]
 
     @property
     def pattern(self):
-        def _pattern(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        def _pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = self.silu_and_mul_matcher(input)
             at2 = self.quant_matcher(at1)
             return at2[0], at2[1]
@@ -693,9 +637,7 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
 
     @property
     def replacement(self):
-        def _replacement(
-            input: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        def _replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
             return at[0], at[1]
 
@@ -728,12 +670,7 @@ class AddAiterRMSNormPadPattern:
 
     AITER_TRITON_ADD_RMSNORM_PAD_OP = rocm_aiter_ops.get_triton_add_rmsnorm_pad_op()
 
-    def __init__(
-        self,
-        epsilon: float,
-        hidden_size: int,
-        x_pad_to_multiple: int,
-    ):
+    def __init__(self, epsilon: float, hidden_size: int, x_pad_to_multiple: int):
         self.epsilon = epsilon
         self.hidden_size = hidden_size
         self.x_pad_to_multiple = x_pad_to_multiple
@@ -860,15 +797,11 @@ class MLADualRMSNormPattern(
         ]
 
     @property
-    def pattern(
-        self,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         eps = self._epsilon
 
         def _pattern(
-            projected: torch.Tensor,
-            q_weight: torch.Tensor,
-            kv_weight: torch.Tensor,
+            projected: torch.Tensor, q_weight: torch.Tensor, kv_weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             q_dim = q_weight.shape[0]
             kv_dim = projected.shape[-1] - q_dim
@@ -889,9 +822,7 @@ class MLADualRMSNormPattern(
         eps = self._epsilon
 
         def _replacement(
-            projected: torch.Tensor,
-            q_weight: torch.Tensor,
-            kv_weight: torch.Tensor,
+            projected: torch.Tensor, q_weight: torch.Tensor, kv_weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             q_dim = q_weight.shape[0]
             kv_dim = projected.shape[-1] - q_dim
@@ -900,12 +831,7 @@ class MLADualRMSNormPattern(
             q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
             kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
             q_normed, kv_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
-                q_c,
-                q_weight,
-                kv_c,
-                kv_weight,
-                eps,
-                eps,
+                q_c, q_weight, kv_c, kv_weight, eps, eps
             )
             return q_normed, kv_normed, k_pe
 

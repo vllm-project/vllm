@@ -10,11 +10,7 @@ from torch import nn
 import tests.compile.silly_attention  # noqa
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import (
-    CompilationConfig,
-    CompilationMode,
-    CUDAGraphMode,
-)
+from vllm.config.compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
@@ -47,12 +43,7 @@ class TraceStructuredCapture:
     def __call__(self, event_type: str, metadata_fn=None, payload_fn=None, **kwargs):
         """Capture a trace_structured call."""
         metadata = metadata_fn() if metadata_fn else {}
-        self.calls.append(
-            {
-                "event_type": event_type,
-                "metadata": metadata,
-            }
-        )
+        self.calls.append({"event_type": event_type, "metadata": metadata})
 
     def get(self, event_type: str, name_pattern: str) -> list[dict]:
         """Get all calls with the given event type and name matching pattern.
@@ -85,9 +76,7 @@ def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
             splitting_ops=["silly::attention"],
         ),
         scheduler_config=SchedulerConfig(
-            max_num_seqs=8,
-            max_model_len=8192,
-            is_encoder_decoder=False,
+            max_num_seqs=8, max_model_len=8192, is_encoder_decoder=False
         ),
     )
 

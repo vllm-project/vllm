@@ -6,11 +6,7 @@ import random
 
 import pytest
 import torch
-from utils import (
-    _extract_step_logprobs,
-    _random_prompt,
-    skip_unsupported,
-)
+from utils import _extract_step_logprobs, _random_prompt, skip_unsupported
 
 from vllm import LLM, SamplingParams
 

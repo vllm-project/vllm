@@ -31,10 +31,7 @@ from vllm.model_executor.models.gemma3n_audio_utils import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
@@ -126,11 +123,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
 
     def get_image_repl(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: Gemma3nProcessor,
+        self, *, image_width: int, image_height: int, processor: Gemma3nProcessor
     ) -> str:
         """
         Get the replacement text for image tokens.
@@ -142,11 +135,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
             processor.full_image_sequence, processor.image_token_id
         )
 
-    def get_audio_repl(
-        self,
-        *,
-        processor: Gemma3nProcessor,
-    ) -> str:
+    def get_audio_repl(self, *, processor: Gemma3nProcessor) -> str:
         """
         Get the replacement text for audio tokens.
 
@@ -198,9 +187,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
                 overrides=image_overrides,
             ),
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             ),
         }
 
@@ -219,10 +206,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
         if "input_features" in processed_outputs:
@@ -244,9 +228,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -290,9 +272,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             audio_token = hf_processor.audio_token
 
             def get_replacement_audio(item_idx: int):
-                return self.info.get_audio_repl(
-                    processor=hf_processor,
-                )
+                return self.info.get_audio_repl(processor=hf_processor)
 
             prompt_updates.append(
                 PromptReplacement(
@@ -305,9 +285,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         return prompt_updates
 
     def _apply_token_matches(
-        self,
-        prompt: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
+        self, prompt: list[int], mm_prompt_updates: MultiModalPromptUpdates
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
         token_ids, res = super()._apply_token_matches(prompt, mm_prompt_updates)
 
@@ -323,27 +301,19 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         newline_4 = vocab["\n\n\n\n"]
 
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_1, newline_2],
-            [newline_3],
+            token_ids, [newline_1, newline_2], [newline_3]
         )
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_1],
-            [newline_3],
+            token_ids, [newline_2, newline_1], [newline_3]
         )
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_2],
-            [newline_4],
+            token_ids, [newline_2, newline_2], [newline_4]
         )
 
         return token_ids, res
 
     def _find_mm_placeholders(
-        self,
-        new_token_ids: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
+        self, new_token_ids: list[int], mm_prompt_updates: MultiModalPromptUpdates
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
         tokenizer = self.info.get_tokenizer()
@@ -403,19 +373,12 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         self.text_hidden_size = text_config.hidden_size
 
         self.embedding = VocabParallelEmbedding(
-            self.vocab_size,
-            self.multimodal_hidden_size,
+            self.vocab_size, self.multimodal_hidden_size
         )
 
-        self.hard_embedding_norm = RMSNorm(
-            self.multimodal_hidden_size,
-            eps=self.eps,
-        )
+        self.hard_embedding_norm = RMSNorm(self.multimodal_hidden_size, eps=self.eps)
 
-        self.soft_embedding_norm = RMSNorm(
-            self.multimodal_hidden_size,
-            eps=self.eps,
-        )
+        self.soft_embedding_norm = RMSNorm(self.multimodal_hidden_size, eps=self.eps)
 
         self.embedding_projection = RowParallelLinear(
             self.multimodal_hidden_size,
@@ -425,9 +388,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         )
 
         self.embedding_post_projection_norm = RMSNorm(
-            self.text_hidden_size,
-            eps=self.eps,
-            has_weight=False,
+            self.text_hidden_size, eps=self.eps, has_weight=False
         )
 
     def forward(
@@ -471,15 +432,8 @@ class Gemma3nForConditionalGeneration(
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -587,8 +541,7 @@ class Gemma3nForConditionalGeneration(
         return mm_input_by_modality
 
     def _process_image_input(
-        self,
-        image_input: Gemma3nImageInputs,
+        self, image_input: Gemma3nImageInputs
     ) -> list[torch.Tensor]:
         pixel_values = image_input["pixel_values"]
         vision_outputs = self.vision_tower(
@@ -611,8 +564,7 @@ class Gemma3nForConditionalGeneration(
         return self.embed_vision(inputs_embeds=vision_outputs).unbind(0)
 
     def _process_audio_input(
-        self,
-        audio_input: Gemma3nAudioInputs,
+        self, audio_input: Gemma3nAudioInputs
     ) -> list[torch.Tensor]:
         # Run on padded features to enable batching
         input_features = audio_input["input_features_padded"].squeeze(1)
@@ -740,10 +692,7 @@ class Gemma3nForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -803,8 +752,7 @@ class Gemma3nForConditionalGeneration(
         prompt += ": <audio_soft_token><end_of_turn>\n<start_of_turn>model\n"
 
         return TextPrompt(
-            prompt=prompt,
-            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+            prompt=prompt, multi_modal_data={"audio": (audio, stt_config.sample_rate)}
         )
 
     @classmethod

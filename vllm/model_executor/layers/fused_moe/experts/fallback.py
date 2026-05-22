@@ -27,8 +27,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEExpertsModular],
-        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular], type[mk.FusedMoEExpertsModular]
     ]:
         """
         Get the cls for the experts and fallback experts.
@@ -42,9 +41,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         )
 
     @classmethod
-    def activation_format(
-        cls: type["FallbackExperts"],
-    ) -> mk.FusedMoEActivationFormat:
+    def activation_format(cls: type["FallbackExperts"]) -> mk.FusedMoEActivationFormat:
         experts_cls, fallback_cls = cls.get_clses()
         assert experts_cls.activation_format() == fallback_cls.activation_format()
         return experts_cls.activation_format()
@@ -67,9 +64,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
 
     @classmethod
     def _supports_quant_scheme(
-        cls,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         experts_cls, fallback_cls = cls.get_clses()
         return experts_cls._supports_quant_scheme(
@@ -135,10 +130,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
 
     @abstractmethod
     def _select_experts_impl(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
+        self, hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
     ) -> mk.FusedMoEExpertsModular:
         raise NotImplementedError
 

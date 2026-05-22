@@ -209,8 +209,7 @@ class TestGetActFn:
 
     def test_rejects_non_torch_activation(self):
         cfg = self._make_config(
-            problem_type="",
-            sentence_transformers={"activation_fn": "os.system"},
+            problem_type="", sentence_transformers={"activation_fn": "os.system"}
         )
         with pytest.raises(ValueError, match="restricted"):
             get_act_fn(cfg)

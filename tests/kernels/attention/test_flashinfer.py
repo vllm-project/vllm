@@ -85,9 +85,7 @@ def ref_paged_attn(
 
 
 def _make_paged_kv_metadata(
-    kv_lens: list[int],
-    block_size: int,
-    num_blocks: int,
+    kv_lens: list[int], block_size: int, num_blocks: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build paged-KV metadata tensors for fast_plan_decode tests.
 
@@ -465,10 +463,7 @@ def test_flashinfer_prefill_with_paged_kv(
         logits_soft_cap=soft_cap,
     )
 
-    output = wrapper.run(
-        query,
-        key_value_cache,
-    )
+    output = wrapper.run(query, key_value_cache)
 
     ref_output = ref_paged_attn(
         query=query,

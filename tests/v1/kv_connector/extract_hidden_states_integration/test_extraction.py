@@ -141,19 +141,13 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     for output in outputs:
         # hidden_states shape is [prompt_len, num_hidden_layers, hidden_size]
-        expected_shape = (
-            len(output.prompt_token_ids),
-            num_layers,
-            hidden_size,
-        )
+        expected_shape = (len(output.prompt_token_ids), num_layers, hidden_size)
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
 
         for idx, layer_id in enumerate(layer_ids):
             layer_hidden = hidden_states[:, idx, :]
             assert torch.allclose(
-                layer_hidden,
-                torch.full_like(layer_hidden, layer_id),
-                atol=1e-5,
+                layer_hidden, torch.full_like(layer_hidden, layer_id), atol=1e-5
             ), (
                 f"Layer {layer_id} at position {idx} should output {float(layer_id)}, "
                 f"but got mean={layer_hidden.mean():.3f}, "

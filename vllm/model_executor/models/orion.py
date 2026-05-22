@@ -149,9 +149,7 @@ class OrionAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -196,17 +194,12 @@ class OrionDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -230,8 +223,7 @@ class OrionModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -242,10 +234,7 @@ class OrionModel(nn.Module):
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            [
-                "hidden_states",
-            ],
-            config.hidden_size,
+            ["hidden_states"], config.hidden_size
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -269,11 +258,7 @@ class OrionModel(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -353,10 +338,7 @@ class OrionForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

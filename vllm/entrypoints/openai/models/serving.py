@@ -36,9 +36,7 @@ class OpenAIModelRegistry:
     """
 
     def __init__(
-        self,
-        model_config: ModelConfig,
-        base_model_paths: list[BaseModelPath],
+        self, model_config: ModelConfig, base_model_paths: list[BaseModelPath]
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
@@ -92,8 +90,7 @@ class OpenAIServingModels:
         super().__init__()
 
         self.registry = OpenAIModelRegistry(
-            model_config=engine_client.model_config,
-            base_model_paths=base_model_paths,
+            model_config=engine_client.model_config, base_model_paths=base_model_paths
         )
 
         self.engine_client = engine_client

@@ -50,10 +50,7 @@ def config(
 
 @dataclass_transform(field_specifiers=(PydanticField,))
 def config(
-    cls: type[ConfigT] | None = None,
-    *,
-    config: ConfigDict | None = None,
-    **kwargs: Any,
+    cls: type[ConfigT] | None = None, *, config: ConfigDict | None = None, **kwargs: Any
 ) -> type[ConfigT] | Callable[[type[ConfigT]], type[ConfigT]]:
     """Decorator to create a pydantic dataclass with default config. The default config
     for the dataclass forbids extra fields.
@@ -405,9 +402,7 @@ def handle_deprecated(
 
 
 def get_from_deprecated_env_if_set(
-    env_name: str,
-    removal_version: str,
-    field_name: str | None = None,
+    env_name: str, removal_version: str, field_name: str | None = None
 ) -> str | None:
     """
     Get value from deprecated environment variable with warning.

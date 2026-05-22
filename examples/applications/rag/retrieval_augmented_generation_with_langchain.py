@@ -60,8 +60,7 @@ def load_and_split_documents(config: dict[str, Any]):
         docs = loader.load()
 
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config["chunk_size"],
-            chunk_overlap=config["chunk_overlap"],
+            chunk_size=config["chunk_size"], chunk_overlap=config["chunk_overlap"]
         )
         return text_splitter.split_documents(docs)
     except Exception as e:
@@ -123,10 +122,7 @@ def create_qa_chain(retriever: Any, llm: ChatOpenAI, prompt: PromptTemplate):
     Set up question answering chain
     """
     return (
-        {
-            "context": retriever | format_docs,
-            "question": RunnablePassthrough(),
-        }
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt
         | llm
         | StrOutputParser()

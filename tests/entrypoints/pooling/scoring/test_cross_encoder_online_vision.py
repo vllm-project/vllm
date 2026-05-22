@@ -18,12 +18,7 @@ HF_OVERRIDES = {
     "is_original_qwen3_reranker": True,
 }
 
-ROCM_ATTN_BACKENDS = [
-    "ROCM_ATTN",
-    "ROCM_AITER_FA",
-    "TRITON_ATTN",
-    "FLEX_ATTENTION",
-]
+ROCM_ATTN_BACKENDS = ["ROCM_ATTN", "ROCM_AITER_FA", "TRITON_ATTN", "FLEX_ATTENTION"]
 
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
@@ -90,14 +85,8 @@ query = "A cat standing in the snow."
 document = "This product was excellent and exceeded my expectations."
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 documents = [
-    {
-        "type": "text",
-        "text": document,
-    },
-    {
-        "type": "image_url",
-        "image_url": {"url": image_url},
-    },
+    {"type": "text", "text": document},
+    {"type": "image_url", "image_url": {"url": image_url}},
     {
         "type": "image_url",
         "image_url": {"url": encode_image_url(fetch_image(image_url))},
@@ -144,11 +133,7 @@ async def test_score_api_queries_str_documents_str(
     remote_server, backend = server
     score_response = requests.post(
         remote_server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": query,
-            "documents": document,
-        },
+        json={"model": MODEL_NAME, "queries": query, "documents": document},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -386,18 +371,12 @@ INSTRUCTION = (
 
 
 @pytest.mark.asyncio
-async def test_score_api_instruction_field(
-    server: tuple[RemoteOpenAIServer, str],
-):
+async def test_score_api_instruction_field(server: tuple[RemoteOpenAIServer, str]):
     remote_server, _ = server
 
     default_response = requests.post(
         remote_server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": query,
-            "documents": document,
-        },
+        json={"model": MODEL_NAME, "queries": query, "documents": document},
     )
     default_response.raise_for_status()
     default_score = ScoreResponse.model_validate(default_response.json())
@@ -421,9 +400,7 @@ async def test_score_api_instruction_field(
 
 
 @pytest.mark.asyncio
-async def test_rerank_api_instruction_field(
-    server: tuple[RemoteOpenAIServer, str],
-):
+async def test_rerank_api_instruction_field(server: tuple[RemoteOpenAIServer, str]):
     remote_server, _ = server
 
     doc_list = [
@@ -435,11 +412,7 @@ async def test_rerank_api_instruction_field(
 
     default_response = requests.post(
         remote_server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": doc_list,
-        },
+        json={"model": MODEL_NAME, "query": query, "documents": doc_list},
     )
     default_response.raise_for_status()
     default_rerank = RerankResponse.model_validate(default_response.json())

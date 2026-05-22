@@ -7,9 +7,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.api_router import models
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.utils import validate_json_request
@@ -38,7 +36,7 @@ def attach_router(app: FastAPI):
             "lora_path": "body.src",
             "load_inplace": "body.load_inplace || `false`",
             "is_3d_lora_weight": "body.is_3d_lora_weight || `false`",
-        },
+        }
     )
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
@@ -52,9 +50,7 @@ def attach_router(app: FastAPI):
         return Response(status_code=200, content=response)
 
     @sagemaker_standards.register_unload_adapter_handler(
-        request_shape={
-            "lora_name": "path_params.adapter_name",
-        }
+        request_shape={"lora_name": "path_params.adapter_name"}
     )
     @router.post(
         "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]

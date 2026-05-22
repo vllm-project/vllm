@@ -53,11 +53,7 @@ class SimpleSharedExperts(nn.Module):
 
 
 def _assert_close(
-    actual: torch.Tensor,
-    expected: torch.Tensor,
-    atol: float,
-    rtol: float,
-    label: str,
+    actual: torch.Tensor, expected: torch.Tensor, atol: float, rtol: float, label: str
 ) -> None:
     """assert_close that prints diff diagnostics on both success and failure."""
     actual_nans = int(actual.isnan().sum().item())

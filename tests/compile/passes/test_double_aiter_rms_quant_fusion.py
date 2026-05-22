@@ -88,8 +88,7 @@ class _ViewDoubleQuantModel(torch.nn.Module):
     reason="Only test on ROCm with AITER installed and supported",
 )
 def test_double_aiter_rms_fp8_group_quant_fusion(
-    model_cls: type[torch.nn.Module],
-    monkeypatch: pytest.MonkeyPatch,
+    model_cls: type[torch.nn.Module], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     Both fan-out shapes (with and without an intermediate view) must fuse
@@ -108,10 +107,7 @@ def test_double_aiter_rms_fp8_group_quant_fusion(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm", "+quant_fp8"],
-            pass_config=PassConfig(
-                fuse_norm_quant=True,
-                eliminate_noops=True,
-            ),
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
 

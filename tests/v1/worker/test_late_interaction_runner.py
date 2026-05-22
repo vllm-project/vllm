@@ -18,8 +18,7 @@ def _make_pooling_params(
     late_interaction_params: LateInteractionParams,
 ) -> PoolingParams:
     return PoolingParams(
-        task="token_embed",
-        late_interaction_params=late_interaction_params,
+        task="token_embed", late_interaction_params=late_interaction_params
     )
 
 
@@ -139,8 +138,7 @@ def test_finished_request_releases_unscored_doc_use():
 def test_invalid_query_uses_raises():
     runner = LateInteractionRunner()
     bad_meta = LateInteractionParams(
-        mode=LATE_INTERACTION_MODE_CACHE_QUERY,
-        query_key="query-bad",
+        mode=LATE_INTERACTION_MODE_CACHE_QUERY, query_key="query-bad"
     )
     bad_meta.query_uses = "bad-int"  # type: ignore[assignment]
     bad_query_params = _make_pooling_params(bad_meta)

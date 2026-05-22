@@ -125,9 +125,7 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up done.")
 
     def initialize_kv_cache(
-        self,
-        kv_cache_config: KVCacheConfig,
-        is_profiling: bool = False,
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
     ) -> None:
         super().initialize_kv_cache(kv_cache_config, is_profiling)
 

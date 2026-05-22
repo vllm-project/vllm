@@ -253,9 +253,7 @@ async def test_long_text_embedding_1500_chars(
 
     # Send embedding request
     embedding_response = await client_with_chunked_processing.embeddings.create(
-        model=model_name,
-        input=[LONG_TEXT_1500_WORDS],
-        encoding_format="float",
+        model=model_name, input=[LONG_TEXT_1500_WORDS], encoding_format="float"
     )
 
     # Verify response structure
@@ -302,9 +300,7 @@ async def test_long_text_embedding_2500_chars(
 
     # Send embedding request
     embedding_response = await client_with_chunked_processing.embeddings.create(
-        model=model_name,
-        input=[LONG_TEXT_2500_WORDS],
-        encoding_format="float",
+        model=model_name, input=[LONG_TEXT_2500_WORDS], encoding_format="float"
     )
 
     # Verify response structure
@@ -351,9 +347,7 @@ async def test_batch_long_text_embedding(
 
     # Send batch embedding request
     embedding_response = await client_with_chunked_processing.embeddings.create(
-        model=model_name,
-        input=input_texts,
-        encoding_format="float",
+        model=model_name, input=input_texts, encoding_format="float"
     )
 
     # Verify response structure
@@ -397,9 +391,7 @@ async def test_chunked_vs_normal_consistency(
 
     # Send embedding request
     embedding_response = await client_with_chunked_processing.embeddings.create(
-        model=model_name,
-        input=[short_text],
-        encoding_format="float",
+        model=model_name, input=[short_text], encoding_format="float"
     )
 
     # Verify response structure
@@ -430,9 +422,7 @@ async def test_chunked_processing_response_format(
 
     # Test with long text to trigger chunking
     embedding_response = await client_with_chunked_processing.embeddings.create(
-        model=model_name,
-        input=[LONG_TEXT_1500_WORDS],
-        encoding_format="float",
+        model=model_name, input=[LONG_TEXT_1500_WORDS], encoding_format="float"
     )
 
     # Verify response structure

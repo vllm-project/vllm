@@ -53,13 +53,7 @@ class TestLogprobsLists(TestCase):
         """Test slicing from the start position"""
         sliced = self.logprobsLists.slice_request(0, num_positions=5)
         assert len(sliced.logprob_token_ids) == 5
-        assert sliced.logprob_token_ids == [
-            [1, 2],
-            [3, 4],
-            [5, 6],
-            [7, 8],
-            [9, 10],
-        ]
+        assert sliced.logprob_token_ids == [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_from_middle(self):

@@ -129,10 +129,7 @@ def dynamic_preprocess_nemotron_vl(
     return processed_images
 
 
-def get_nemotron_vl_target_ratios(
-    min_num: int,
-    max_num: int,
-) -> list[tuple[int, int]]:
+def get_nemotron_vl_target_ratios(min_num: int, max_num: int) -> list[tuple[int, int]]:
     target_ratios = {
         (i, j)
         for n in range(min_num, max_num + 1)
@@ -224,15 +221,10 @@ class LlamaNemotronNanoVLProcessor(InternVLProcessor):
             ctx_image_token=ctx_image_token,
         )
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         image_processor = self.image_processor
         target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,  # Applied in calculate_targets
+            use_thumbnail=False  # Applied in calculate_targets
         )
 
         num_patches, _, _ = calculate_nemotron_vl_targets(
@@ -322,15 +314,10 @@ class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
 
         self.image_processor: LlamaNemotronVLEmbedImageProcessor
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         image_processor = self.image_processor
         target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,  # Applied in calculate_targets
+            use_thumbnail=False  # Applied in calculate_targets
         )
 
         num_patches, _, _ = calculate_nemotron_vl_targets(

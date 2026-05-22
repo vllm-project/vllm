@@ -96,13 +96,7 @@ class BlockRemoved(KVCacheEvent):
     group_idx: int | None = None
 
     def __hash__(self) -> int:
-        return hash(
-            (
-                tuple(self.block_hashes),
-                self.medium,
-                self.group_idx,
-            )
-        )
+        return hash((tuple(self.block_hashes), self.medium, self.group_idx))
 
 
 class AllBlocksCleared(KVCacheEvent):

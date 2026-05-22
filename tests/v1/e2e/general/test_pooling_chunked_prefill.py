@@ -46,11 +46,7 @@ class WrapperPooler(nn.Module):
     def get_pooling_updates(self, task):
         return self.pooler.get_pooling_updates(task)
 
-    def forward(
-        self,
-        hidden_states,
-        pooling_metadata,
-    ):
+    def forward(self, hidden_states, pooling_metadata):
         self.chunks.append(hidden_states.shape[0])
         return self.pooler(hidden_states, pooling_metadata)
 
@@ -107,10 +103,7 @@ def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
 
         # Disable chunked prefill
         with vllm_runner(
-            model_id,
-            runner="pooling",
-            tensor_parallel_size=1,
-            enforce_eager=True,
+            model_id, runner="pooling", tensor_parallel_size=1, enforce_eager=True
         ) as llm:
             llm.get_llm().llm_engine.collective_rpc(inject_pooler)
             llm.embed([prompt])

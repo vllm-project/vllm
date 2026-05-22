@@ -10,10 +10,7 @@ import torch
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
-def set_weight_attrs(
-    weight: torch.Tensor,
-    weight_attrs: dict[str, Any] | None,
-):
+def set_weight_attrs(weight: torch.Tensor, weight_attrs: dict[str, Any] | None):
     """Set attributes on a weight tensor.
 
     This method is used to set attributes on a weight tensor. This method
@@ -121,9 +118,7 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
     return parent_map
 
 
-def get_moe_expert_mapping(
-    model: torch.nn.Module,
-) -> list[tuple[str, str, int, str]]:
+def get_moe_expert_mapping(model: torch.nn.Module) -> list[tuple[str, str, int, str]]:
     if parent_map := getattr(model, "get_expert_mapping", None):
         return parent_map()
     else:

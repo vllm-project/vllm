@@ -155,8 +155,7 @@ class RoutedExpertsTensors(NamedTuple):
         synchronously block, which is only reached in tests.
         """
         return RoutedExpertsLists(
-            self.routing_data.cpu().numpy(),
-            self.slot_mapping.cpu().numpy(),
+            self.routing_data.cpu().numpy(), self.slot_mapping.cpu().numpy()
         )
 
 

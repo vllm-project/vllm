@@ -94,11 +94,7 @@ async def test_check_health(server: RemoteOpenAIServer):
 
 
 @pytest.mark.parametrize(
-    "server_args",
-    [
-        pytest.param(["--max-model-len", "10100"]),
-    ],
-    indirect=True,
+    "server_args", [pytest.param(["--max-model-len", "10100"])], indirect=True
 )
 @pytest.mark.asyncio
 async def test_request_cancellation(server: RemoteOpenAIServer):

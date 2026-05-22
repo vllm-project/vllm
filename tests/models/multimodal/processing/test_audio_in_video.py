@@ -28,10 +28,7 @@ from vllm.multimodal.cache import MultiModalProcessorSenderCache
 from ....multimodal.utils import random_audio, random_video
 from ...utils import build_model_context
 
-MODELS = [
-    "Qwen/Qwen2.5-Omni-3B",
-    "Qwen/Qwen3-Omni-30B-A3B-Instruct",
-]
+MODELS = ["Qwen/Qwen2.5-Omni-3B", "Qwen/Qwen3-Omni-30B-A3B-Instruct"]
 
 
 def create_mm_data(num_videos: int) -> dict[str, list]:

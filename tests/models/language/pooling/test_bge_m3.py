@@ -53,23 +53,11 @@ async def test_bge_m3_api_server_embedding(server, pooling_task):
 
     if pooling_task != "embed":
         with pytest.raises(openai.InternalServerError):
-            await run_client_embeddings(
-                client,
-                MODEL_NAME,
-                sentences_1,
-            )
+            await run_client_embeddings(client, MODEL_NAME, sentences_1)
         return
 
-    embeddings_list_1 = await run_client_embeddings(
-        client,
-        MODEL_NAME,
-        sentences_1,
-    )
-    embeddings_list_2 = await run_client_embeddings(
-        client,
-        MODEL_NAME,
-        sentences_2,
-    )
+    embeddings_list_1 = await run_client_embeddings(client, MODEL_NAME, sentences_1)
+    embeddings_list_2 = await run_client_embeddings(client, MODEL_NAME, sentences_2)
 
     embeddings_1 = torch.tensor(embeddings_list_1)
     embeddings_2 = torch.tensor(embeddings_list_2)

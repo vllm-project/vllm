@@ -146,9 +146,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         weight_scale_args = {
             "weight_loader": weight_loader,
             "data": torch.empty(
-                output_size_per_partition,
-                scales_and_zp_size,
-                dtype=params_dtype,
+                output_size_per_partition, scales_and_zp_size, dtype=params_dtype
             ),
         }
 
@@ -200,10 +198,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         # group index (for activation reordering)
         if self.has_g_idx:
             weight_g_idx = RowvLLMParameter(
-                data=torch.empty(
-                    input_size_per_partition,
-                    dtype=torch.int32,
-                ),
+                data=torch.empty(input_size_per_partition, dtype=torch.int32),
                 input_dim=0,
                 weight_loader=weight_loader,
             )

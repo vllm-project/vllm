@@ -189,9 +189,7 @@ def test_load_weights_kv_scale_handling():
     kv_scale_param = Mock()
     kv_scale_param.weight_loader = Mock()
 
-    params_dict = {
-        "layers.0.self_attn.kv_scale": kv_scale_param,
-    }
+    params_dict = {"layers.0.self_attn.kv_scale": kv_scale_param}
 
     mock_quant_config = Mock()
     mock_quant_config.get_cache_scale = Mock(return_value="layers.0.self_attn.kv_scale")

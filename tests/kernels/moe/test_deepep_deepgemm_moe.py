@@ -56,13 +56,11 @@ if has_deep_gemm():
     )
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deep_ep(),
-    reason="Requires deep_ep kernels",
+    not has_deep_ep(), reason="Requires deep_ep kernels"
 )
 
 requires_deep_gemm = pytest.mark.skipif(
-    not is_deep_gemm_supported(),
-    reason="Requires deep_gemm kernels",
+    not is_deep_gemm_supported(), reason="Requires deep_gemm kernels"
 )
 
 P = ParamSpec("P")
@@ -77,19 +75,13 @@ def with_dp_metadata(M: int, world_size: int):
     vllm_config.parallel_config.enable_expert_parallel = True
 
     with set_forward_context(
-        None,
-        vllm_config,
-        num_tokens=M,
-        num_tokens_across_dp=num_tokens_across_dp,
+        None, vllm_config, num_tokens=M, num_tokens_across_dp=num_tokens_across_dp
     ):
         yield
 
 
 def make_block_quant_fp8_weights(
-    e: int,
-    n: int,
-    k: int,
-    block_size: list[int],
+    e: int, n: int, k: int, block_size: list[int]
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Return weights w1q, w2q, w1_scale, w2_scale
@@ -135,17 +127,10 @@ class TestTensors:
         rank_token_scales = None
 
         topk_ids = torch.randint(
-            low=0,
-            high=config.num_experts,
-            size=(m, topk),
-            device=device,
+            low=0, high=config.num_experts, size=(m, topk), device=device
         ).to(dtype=torch.int64)
 
-        topk_weights = torch.randn(
-            topk_ids.shape,
-            dtype=torch.float32,
-            device=device,
-        )
+        topk_weights = torch.randn(topk_ids.shape, dtype=torch.float32, device=device)
 
         return TestTensors(
             rank_tokens=rank_tokens,
@@ -191,9 +176,7 @@ def make_ll_modular_kernel(
         moe_config=make_dummy_moe_config(),
     )
     return FusedMoEKernel(
-        prepare_finalize=a2a,
-        fused_experts=fused_experts,
-        inplace=False,
+        prepare_finalize=a2a, fused_experts=fused_experts, inplace=False
     )
 
 
@@ -220,13 +203,10 @@ def make_ht_modular_kernel(
     )
 
     fused_experts = DeepGemmExperts(
-        moe_config=make_dummy_moe_config(),
-        quant_config=quant_config,
+        moe_config=make_dummy_moe_config(), quant_config=quant_config
     )
     return FusedMoEKernel(
-        prepare_finalize=a2a,
-        fused_experts=fused_experts,
-        inplace=False,
+        prepare_finalize=a2a, fused_experts=fused_experts, inplace=False
     )
 
 
@@ -341,10 +321,7 @@ def triton_impl(
     block_shape: list[int],
 ):
     quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        block_shape=block_shape,
+        w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a1_scale, block_shape=block_shape
     )
 
     return fused_experts(
@@ -406,22 +383,10 @@ def _test_deepep_deepgemm_moe(
         w2_scale_ep = w2_scale[e_start:e_end]
 
         deepep_moe = deepep_deepgemm_moe_impl(
-            pg,
-            pgi,
-            dp_size,
-            test_tensors,
-            w1_ep,
-            w2_ep,
-            w1_scale_ep,
-            w2_scale_ep,
+            pg, pgi, dp_size, test_tensors, w1_ep, w2_ep, w1_scale_ep, w2_scale_ep
         )
 
-    torch.testing.assert_close(
-        triton_moe,
-        deepep_moe,
-        atol=6e-2,
-        rtol=6e-2,
-    )
+    torch.testing.assert_close(triton_moe, deepep_moe, atol=6e-2, rtol=6e-2)
 
 
 MNKs = [

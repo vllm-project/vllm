@@ -39,9 +39,7 @@ def _create_penalty_tensor(
 
 
 def _create_prompt_tokens_tensor(
-    prompt_token_ids: list[list[int]],
-    vocab_size: int,
-    device: torch.device,
+    prompt_token_ids: list[list[int]], vocab_size: int, device: torch.device
 ) -> torch.Tensor:
     return make_tensor_with_pad(
         prompt_token_ids,
@@ -53,9 +51,7 @@ def _create_prompt_tokens_tensor(
 
 
 def _create_bad_words_token_ids(
-    batch_size: int,
-    vocab_size: int,
-    bad_words_lengths: tuple[int, ...],
+    batch_size: int, vocab_size: int, bad_words_lengths: tuple[int, ...]
 ) -> dict[int, list[list[int]]]:
     bad_words_token_ids = {}
     for batch_idx in range(batch_size):
@@ -126,10 +122,7 @@ def _update_output_token_ids_for_bad_words(
 
 
 def _create_default_sampling_metadata(
-    num_output_tokens: int,
-    batch_size: int,
-    vocab_size: int,
-    device: torch.device,
+    num_output_tokens: int, batch_size: int, vocab_size: int, device: torch.device
 ) -> SamplingMetadata:
     output_token_ids: list[list[int]] = []
     prompt_token_ids: list[list[int]] = []
@@ -271,8 +264,7 @@ def test_sampler_frequency_penalty(
         batch_size, frequency_penalty, torch.device(device)
     )
     output_token_ids, sorted_token_ids_in_output = _create_weighted_output_token_list(
-        batch_size,
-        VOCAB_SIZE,
+        batch_size, VOCAB_SIZE
     )
     sampling_metadata.output_token_ids = output_token_ids
     sampling_metadata.no_penalties = False

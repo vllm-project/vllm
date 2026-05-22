@@ -11,9 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -170,9 +168,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -230,9 +226,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 

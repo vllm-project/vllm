@@ -180,9 +180,7 @@ class InternLM2Attention(nn.Module):
         return q, k, v
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.wqkv(hidden_states)
         q, k, v = self.split_qkv(qkv)
@@ -235,10 +233,7 @@ class InternLMDecoderLayer(nn.Module):
             hidden_states = self.attention_norm(hidden_states)
         else:
             hidden_states, residual = self.attention_norm(hidden_states, residual)
-        hidden_states = self.attention(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.attention(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
@@ -264,8 +259,7 @@ class InternLM2Model(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.tok_embeddings = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -310,10 +304,7 @@ class InternLM2Model(nn.Module):
 
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    packed_modules_mapping = {
-        "wqkv": ["wqkv"],
-        "gate_up_proj": ["w1", "w3"],
-    }
+    packed_modules_mapping = {"wqkv": ["wqkv"], "gate_up_proj": ["w1", "w3"]}
 
     def __init__(
         self,
@@ -360,10 +351,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.output, hidden_states)
         return logits
 
@@ -421,9 +409,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
             targets=(LogitsProcessor, ParallelLMHead),
         ):
             super().__init__(
-                vllm_config=vllm_config,
-                prefix=prefix,
-                model_type=model_type,
+                vllm_config=vllm_config, prefix=prefix, model_type=model_type
             )
 
         config = vllm_config.model_config.hf_config

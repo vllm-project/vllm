@@ -76,12 +76,10 @@ _IGNORE_MM_KEYS = {
     # In Ultravox, the audio_features can be different depending on padding
     # The slight difference should not be a problem though, since
     # attention_mask lets us ignore the difference.
-    "ultravox": {"audio_features"},
+    "ultravox": {"audio_features"}
 }
 
-MM_DATA_PATCHES = {
-    "glmasr": glmasr_patch_mm_data,
-}
+MM_DATA_PATCHES = {"glmasr": glmasr_patch_mm_data}
 
 
 def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
@@ -119,8 +117,7 @@ def get_model_ids_to_test():
 
 
 def get_text_token_prompts(
-    processor: BaseMultiModalProcessor,
-    mm_data: MultiModalDataDict,
+    processor: BaseMultiModalProcessor, mm_data: MultiModalDataDict
 ):
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
@@ -146,9 +143,7 @@ def get_text_token_prompts(
         )
     else:
         inputs = dummy_inputs.get_dummy_processor_inputs(
-            model_config.max_model_len,
-            mm_counts,
-            mm_options={},
+            model_config.max_model_len, mm_counts, mm_options={}
         )
 
     text_prompt: str | None
@@ -159,8 +154,7 @@ def get_text_token_prompts(
     elif isinstance(inputs.prompt, str):
         text_prompt = inputs.prompt
         token_prompt = tokenizer.encode(
-            text_prompt,
-            **processor.info.get_default_tok_params().get_encode_kwargs(),
+            text_prompt, **processor.info.get_default_tok_params().get_encode_kwargs()
         )
     else:
         raise TypeError(type(inputs.prompt))
@@ -191,10 +185,7 @@ def random_vision_chunk(
 
 
 def _test_processing_correctness(
-    model_id_or_arch: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
+    model_id_or_arch: str, hit_rate: float, num_batches: int, simplify_rate: float
 ):
     if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
         # Use model architecture to get the default model id
@@ -205,9 +196,7 @@ def _test_processing_correctness(
         model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
+        on_fail="skip", check_max_version=False, check_version_reason="vllm"
     )
 
     model_config = ModelConfig(
@@ -230,8 +219,7 @@ def _test_processing_correctness(
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = model_cls._processor_factory
     ctx = InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
+        model_config, tokenizer=cached_tokenizer_from_config(model_config)
     )
     cache = MultiModalProcessorOnlyCache(model_config)
 
@@ -334,15 +322,11 @@ def _test_processing_correctness_one(
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
     baseline_tokenized_result = baseline_processor(
-        token_prompt,
-        mm_items=mm_items,
-        hf_processor_mm_kwargs={},
+        token_prompt, mm_items=mm_items, hf_processor_mm_kwargs={}
     )
 
     cached_tokenized_result = cached_processor(
-        token_prompt,
-        mm_items=mm_items,
-        hf_processor_mm_kwargs={},
+        token_prompt, mm_items=mm_items, hf_processor_mm_kwargs={}
     )
 
     _assert_inputs_equal(
@@ -358,14 +342,10 @@ def _test_processing_correctness_one(
 
     if text_prompt is not None:
         baseline_text_result = baseline_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
+            text_prompt, mm_items=mm_items, hf_processor_mm_kwargs={}
         )
         cached_text_result = cached_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
+            text_prompt, mm_items=mm_items, hf_processor_mm_kwargs={}
         )
 
         _assert_inputs_equal(
@@ -407,10 +387,7 @@ def _test_processing_correctness_one(
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 def test_processing_correctness(
-    model_id: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
+    model_id: str, hit_rate: float, num_batches: int, simplify_rate: float
 ):
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")

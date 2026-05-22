@@ -198,10 +198,7 @@ def _get_fp8_gemm_nt_m_values(w: torch.Tensor, max_tokens: int) -> list[int]:
 
 
 def _deepgemm_fp8_gemm_nt_warmup(
-    w: torch.Tensor,
-    ws: torch.Tensor,
-    max_tokens: int,
-    pbar: tqdm | None = None,
+    w: torch.Tensor, ws: torch.Tensor, max_tokens: int, pbar: tqdm | None = None
 ):
     if w.size() in FP8_GEMM_NT_WARMUP_CACHE:
         return
@@ -232,10 +229,7 @@ GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
 
 
 def _get_grouped_gemm_params(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    num_topk: int,
-    max_tokens: int,
+    w1: torch.Tensor, w2: torch.Tensor, num_topk: int, max_tokens: int
 ) -> tuple[int, int, torch.Tensor]:
     assert w1.size(0) == w2.size(0), "w1 and w2 must have the same number of experts"
 

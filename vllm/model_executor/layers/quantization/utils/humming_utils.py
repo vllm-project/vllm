@@ -185,8 +185,7 @@ def get_humming_moe_quant_config(
     weight_group_shape: tuple[int, ...] = ()
     if weight_scale_group_size_n > 1:
         weight_group_shape = GroupShape(
-            row=weight_scale_group_size,
-            col=weight_scale_group_size_n,
+            row=weight_scale_group_size, col=weight_scale_group_size_n
         )
     elif weight_scale_group_size == 0:
         weight_group_shape = GroupShape(row=-1, col=1)

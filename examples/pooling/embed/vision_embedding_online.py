@@ -66,9 +66,7 @@ def run_clip(client: OpenAI, model: str):
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
+                "content": [{"type": "image_url", "image_url": {"url": image_url}}],
             }
         ],
         model=model,
@@ -80,12 +78,7 @@ def run_clip(client: OpenAI, model: str):
     response = create_chat_embeddings(
         client,
         messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "a photo of a cat"},
-                ],
-            }
+            {"role": "user", "content": [{"type": "text", "text": "a photo of a cat"}]}
         ],
         model=model,
         encoding_format="float",
@@ -110,12 +103,7 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_url,
-                        },
-                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
                     {"type": "text", "text": "What is shown in this image?"},
                 ],
             }
@@ -142,7 +130,7 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_placeholder}",
+                            "url": f"data:image/jpeg;base64,{image_placeholder}"
                         },
                     },
                     {"type": "text", "text": "Query: What is the weather like today?"},
@@ -173,22 +161,10 @@ def run_qwen3_vl(client: OpenAI, model: str):
         messages=[
             {
                 "role": "system",
-                "content": [
-                    {"type": "text", "text": default_instruction},
-                ],
+                "content": [{"type": "text", "text": default_instruction}],
             },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": text},
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": ""},
-                ],
-            },
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},
         ],
         model=model,
         encoding_format="float",
@@ -203,9 +179,7 @@ def run_qwen3_vl(client: OpenAI, model: str):
         messages=[
             {
                 "role": "system",
-                "content": [
-                    {"type": "text", "text": default_instruction},
-                ],
+                "content": [{"type": "text", "text": default_instruction}],
             },
             {
                 "role": "user",
@@ -214,12 +188,7 @@ def run_qwen3_vl(client: OpenAI, model: str):
                     {"type": "text", "text": ""},
                 ],
             },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": ""},
-                ],
-            },
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},
         ],
         model=model,
         encoding_format="float",
@@ -234,26 +203,16 @@ def run_qwen3_vl(client: OpenAI, model: str):
         messages=[
             {
                 "role": "system",
-                "content": [
-                    {"type": "text", "text": default_instruction},
-                ],
+                "content": [{"type": "text", "text": default_instruction}],
             },
             {
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_url}},
-                    {
-                        "type": "text",
-                        "text": f"{text}",
-                    },
+                    {"type": "text", "text": f"{text}"},
                 ],
             },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": ""},
-                ],
-            },
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},
         ],
         model=model,
         encoding_format="float",
@@ -277,9 +236,7 @@ def run_siglip(client: OpenAI, model: str):
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
+                "content": [{"type": "image_url", "image_url": {"url": image_url}}],
             }
         ],
         model=model,
@@ -291,12 +248,7 @@ def run_siglip(client: OpenAI, model: str):
     response = create_chat_embeddings(
         client,
         messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "a photo of a cat"},
-                ],
-            }
+            {"role": "user", "content": [{"type": "text", "text": "a photo of a cat"}]}
         ],
         model=model,
         encoding_format="float",
@@ -358,12 +310,7 @@ def run_vlm2vec(client: OpenAI, model: str):
     response = create_chat_embeddings(
         client,
         messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "A cat and a dog"},
-                ],
-            }
+            {"role": "user", "content": [{"type": "text", "text": "A cat and a dog"}]}
         ],
         model=model,
         encoding_format="float",

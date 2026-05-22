@@ -108,10 +108,7 @@ class MockReasoningConfig:
 
 
 def _generate_fake_sampling_metadata(
-    num_output_tokens: int,
-    batch_size: int,
-    vocab_size: int,
-    device: torch.device,
+    num_output_tokens: int, batch_size: int, vocab_size: int, device: torch.device
 ) -> SamplingMetadata:
     """Generate fake sampling metadata with fake logitsprocs"""
     output_token_ids: list[list[int]] = []
@@ -181,10 +178,7 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
     sampling_metadata = _generate_fake_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
     )
-    return LogitsprocsTestFakes(
-        logits=fake_logits,
-        sampling_metadata=sampling_metadata,
-    )
+    return LogitsprocsTestFakes(logits=fake_logits, sampling_metadata=sampling_metadata)
 
 
 def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingParams:
@@ -197,8 +191,7 @@ def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingPa
 
 
 def _generate_mixed_logitsprocs_batch_params(
-    reqs_per_logitproc: int,
-    logitsprocs_types: list[LogitprocType],
+    reqs_per_logitproc: int, logitsprocs_types: list[LogitprocType]
 ) -> list[LogitsProcsRequestParams]:
     """Define key params for a batch of requests with a different
     logitproc enabled per request.
@@ -832,11 +825,7 @@ def test_logitsprocs(
         if not (workload_reqs_remaining or batch_size):
             break
 
-        (
-            batch_update,
-            wdx,
-            workload_reqs_remaining,
-        ) = _generate_fake_step_update(
+        (batch_update, wdx, workload_reqs_remaining) = _generate_fake_step_update(
             persistent_batch=persistent_batch,
             workload_params=workload_params,
             wdx=wdx,
@@ -876,11 +865,7 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
     assert cfg.reasoning_config is None
     assert (
         maybe_create_thinking_budget_state_holder(
-            None,
-            cfg.scheduler_config.max_num_seqs,
-            0,
-            torch.device("cpu"),
-            False,
+            None, cfg.scheduler_config.max_num_seqs, 0, torch.device("cpu"), False
         )
         is None
     )
@@ -930,14 +915,7 @@ def test_thinking_budget_holder_sync_remove_clears_state():
         BatchUpdate(
             batch_size=1,
             removed=(),
-            added=[
-                (
-                    0,
-                    SamplingParams(thinking_token_budget=3),
-                    None,
-                    [],
-                )
-            ],
+            added=[(0, SamplingParams(thinking_token_budget=3), None, [])],
             moved=(),
         )
     )
@@ -958,10 +936,7 @@ def test_thinking_budget_holder_sync_add_without_budget_drops_row():
     )
     h.sync_batch(
         BatchUpdate(
-            batch_size=1,
-            removed=(),
-            added=[(0, SamplingParams(), None, [])],
-            moved=(),
+            batch_size=1, removed=(), added=[(0, SamplingParams(), None, [])], moved=()
         )
     )
     assert not h.has_tracked_requests()
@@ -982,18 +957,8 @@ def test_thinking_budget_holder_swap_exchanges_state():
             batch_size=2,
             removed=(),
             added=[
-                (
-                    0,
-                    SamplingParams(thinking_token_budget=3),
-                    None,
-                    [],
-                ),
-                (
-                    1,
-                    SamplingParams(thinking_token_budget=7),
-                    None,
-                    [],
-                ),
+                (0, SamplingParams(thinking_token_budget=3), None, []),
+                (1, SamplingParams(thinking_token_budget=7), None, []),
             ],
             moved=(),
         )
@@ -1001,10 +966,7 @@ def test_thinking_budget_holder_swap_exchanges_state():
     b0, b1 = h._state[0]["thinking_token_budget"], h._state[1]["thinking_token_budget"]
     h.sync_batch(
         BatchUpdate(
-            batch_size=2,
-            removed=(),
-            added=(),
-            moved=[(0, 1, MoveDirectionality.SWAP)],
+            batch_size=2, removed=(), added=(), moved=[(0, 1, MoveDirectionality.SWAP)]
         )
     )
     assert h._state[0]["thinking_token_budget"] == b1
@@ -1025,14 +987,7 @@ def test_thinking_budget_holder_unidirectional_move():
         BatchUpdate(
             batch_size=2,
             removed=(),
-            added=[
-                (
-                    1,
-                    SamplingParams(thinking_token_budget=4),
-                    None,
-                    [],
-                ),
-            ],
+            added=[(1, SamplingParams(thinking_token_budget=4), None, [])],
             moved=(),
         )
     )
@@ -1075,21 +1030,13 @@ def test_thinking_budget_holder_update_state_repeat_indices_last_row_wins():
         )
     )
     out_lists = [[THINK_START_TOKEN_ID], [THINK_START_TOKEN_ID, 10, 11, 12, 13, 14]]
-    h.update_state(
-        out_lists,
-        None,
-        torch.tensor([0, 0], dtype=torch.long),
-    )
+    h.update_state(out_lists, None, torch.tensor([0, 0], dtype=torch.long))
     assert h._state[0]["output_tok_ids"] == out_lists[1]
 
 
 def test_thinking_budget_holder_spec_mode_tensor_layout():
     h = ThinkingBudgetStateHolder(
-        MockReasoningConfig(),
-        8,
-        2,
-        torch.device("cpu"),
-        False,
+        MockReasoningConfig(), 8, 2, torch.device("cpu"), False
     )
     assert h.in_spec_mode
     assert h._mask_capacity == 8 * (2 + 1)

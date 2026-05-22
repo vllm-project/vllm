@@ -26,9 +26,7 @@ def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
     sf = x_amax / 448.0
     x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
     x_fp8 = torch.empty(
-        (num_blocks, block_size * (head_dim + 4)),
-        device=x.device,
-        dtype=torch.uint8,
+        (num_blocks, block_size * (head_dim + 4)), device=x.device, dtype=torch.uint8
     )
     x_fp8[:, : block_size * head_dim] = x_scaled.view(
         num_blocks, block_size * head_dim
@@ -104,11 +102,7 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
         for seq_len_kv in (1024,):
             for disable_cp in (False, True):
                 q = torch.randn(
-                    seq_len,
-                    num_heads,
-                    head_dim,
-                    device="cuda",
-                    dtype=torch.bfloat16,
+                    seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
                 )
                 kv = torch.randn(
                     seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16
@@ -132,11 +126,7 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 )
 
                 ref_logits = _ref_fp8_mqa_logits(
-                    q=q,
-                    kv=kv,
-                    weights=weights,
-                    cu_seqlen_ks=ks,
-                    cu_seqlen_ke=ke,
+                    q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke
                 )
                 ref_neginf_mask = ref_logits == float("-inf")
 
@@ -177,9 +167,7 @@ def _ref_fp8_fp4_paged_mqa_logits(
             block_idx = block_tables[i][block_rk]
             qx, kx = q[i], kv_cache[block_idx]
             k_offsets = torch.arange(
-                block_rk * block_size,
-                (block_rk + 1) * block_size,
-                device="cuda",
+                block_rk * block_size, (block_rk + 1) * block_size, device="cuda"
             )
             mask = (k_offsets[None, :] < context_len) & (
                 k_offsets[None, :] <= q_offsets[:, None]
@@ -229,9 +217,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                     dtype=torch.bfloat16,
                 )
                 weights = torch.randn(
-                    (batch_size * next_n, heads),
-                    device="cuda",
-                    dtype=torch.float32,
+                    (batch_size * next_n, heads), device="cuda", dtype=torch.float32
                 )
 
                 context_lens = (
@@ -243,9 +229,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                     (context_lens.max().item() + blocksize - 1) // blocksize * blocksize
                 )
                 block_tables = torch.zeros(
-                    (batch_size, max_block_len),
-                    device="cuda",
-                    dtype=torch.int32,
+                    (batch_size, max_block_len), device="cuda", dtype=torch.int32
                 )
 
                 counter = 0
@@ -283,12 +267,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                 )
 
                 ref_logits = _ref_fp8_fp4_paged_mqa_logits(
-                    q,
-                    kv_cache,
-                    weights,
-                    context_lens,
-                    block_tables,
-                    max_model_len,
+                    q, kv_cache, weights, context_lens, block_tables, max_model_len
                 )
 
                 positions = (

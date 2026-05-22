@@ -189,8 +189,7 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-    baseline_snapshot: MemorySnapshot,
-    weights_memory: int = 0,
+    baseline_snapshot: MemorySnapshot, weights_memory: int = 0
 ) -> Generator[MemoryProfilingResult, None, None]:
     """
     Memory profiling context manager.

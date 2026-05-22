@@ -136,9 +136,7 @@ class QWenAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -190,10 +188,7 @@ class QWenBlock(nn.Module):
             hidden_states = self.ln_1(hidden_states)
         else:
             hidden_states, residual = self.ln_1(hidden_states, residual)
-        hidden_states = self.attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.ln_2(hidden_states, residual)
@@ -213,10 +208,7 @@ class QWenModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
 
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        self.wte = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
             lambda prefix: QWenBlock(config, cache_config, quant_config, prefix=prefix),
@@ -249,11 +241,7 @@ class QWenModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.h, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -296,10 +284,7 @@ class QWenBaseModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.wte(input_ids)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -343,13 +328,7 @@ class QWenBaseModel(nn.Module):
 
 
 class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
-    packed_modules_mapping = {
-        "c_attn": ["c_attn"],
-        "gate_up_proj": [
-            "w2",
-            "w1",
-        ],
-    }
+    packed_modules_mapping = {"c_attn": ["c_attn"], "gate_up_proj": ["w2", "w1"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

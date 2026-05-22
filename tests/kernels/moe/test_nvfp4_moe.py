@@ -19,9 +19,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    CutlassExpertsFp4,
-)
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp4
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -101,10 +99,7 @@ def test_cutlass_fp4_moe_no_graph(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp4(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            CutlassExpertsFp4(moe_config=moe_config, quant_config=quant_config),
             inplace=False,
         )
 
@@ -165,11 +160,7 @@ def test_cutlass_fp4_moe_no_graph(
 # for MoE layers 43-44. This tests the non-fused activation fallback path
 # in run_cutlass_moe_fp4 (apply_moe_activation + separate fp4 quantization).
 # Model dims: e=288, topk=8, n=1280 (moe_intermediate_size), k=4096 (hidden)
-SWIGLUSTEP_MNK_FACTORS = [
-    (2, 1280, 4096),
-    (64, 1280, 4096),
-    (224, 1280, 4096),
-]
+SWIGLUSTEP_MNK_FACTORS = [(2, 1280, 4096), (64, 1280, 4096), (224, 1280, 4096)]
 
 
 @pytest.mark.parametrize("m,n,k", SWIGLUSTEP_MNK_FACTORS)
@@ -223,8 +214,7 @@ def test_cutlass_fp4_moe_swiglustep(
         kernel = mk.FusedMoEKernel(
             make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=False),
             CutlassExpertsFp4(
-                moe_config=make_dummy_moe_config(),
-                quant_config=quant_config,
+                moe_config=make_dummy_moe_config(), quant_config=quant_config
             ),
             inplace=False,
         )
@@ -278,12 +268,7 @@ def test_cutlass_fp4_moe_swiglustep(
             )
 
         torch_output = torch_moe(
-            a_in_dtype,
-            w1_d,
-            w2_d,
-            score,
-            topk,
-            activation=MoEActivation.SWIGLUSTEP,
+            a_in_dtype, w1_d, w2_d, score, topk, activation=MoEActivation.SWIGLUSTEP
         )
 
         torch.testing.assert_close(torch_output, cutlass_output, atol=1e-1, rtol=1e-1)

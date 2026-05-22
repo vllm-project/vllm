@@ -100,7 +100,7 @@ TEST_TYPES = [
         for w_type in [scalar_types.int4]
         # TODO(czhu): fp16 out type
         for o_type in [torch.bfloat16]
-    ),
+    )
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel

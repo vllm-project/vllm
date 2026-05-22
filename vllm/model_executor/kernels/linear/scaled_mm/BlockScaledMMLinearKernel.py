@@ -14,10 +14,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 
-from ..base import (
-    FP8Params,
-    MMLinearKernel,
-)
+from ..base import FP8Params, MMLinearKernel
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
 
@@ -87,8 +84,7 @@ class Fp8BlockScaledMMLinearKernel(
             else params.WEIGHT_SCALE_INV
         )
         new_weight, new_weight_scale = process_fp8_weight_block_strategy(
-            params.weight,
-            weight_scale,
+            params.weight, weight_scale
         )
 
         replace_parameter(layer, params.WEIGHT, new_weight.data)
@@ -130,10 +126,7 @@ class Fp8BlockScaledMMLinearKernel(
             )
 
         output = self.apply_block_scaled_mm(
-            A=q_input,
-            B=weight,
-            As=input_scale,
-            Bs=weight_scale,
+            A=q_input, B=weight, As=input_scale, Bs=weight_scale
         )
 
         if bias is not None:
@@ -142,11 +135,7 @@ class Fp8BlockScaledMMLinearKernel(
 
     @abstractmethod
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         raise NotImplementedError
 

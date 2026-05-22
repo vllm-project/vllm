@@ -63,16 +63,7 @@ def old_default_config(M, E, N, K, topk, dtype=None, block_shape=None):
 
 
 def benchmark_config(
-    config,
-    M,
-    E,
-    N,
-    K,
-    topk,
-    dtype,
-    use_fp8=False,
-    block_shape=None,
-    num_iters=100,
+    config, M, E, N, K, topk, dtype, use_fp8=False, block_shape=None, num_iters=100
 ):
     """Time a single kernel config. Returns kernel time in microseconds."""
     init_dtype = torch.float16 if use_fp8 else dtype
@@ -123,14 +114,7 @@ def benchmark_config(
     for _ in range(20):
         with override_config(config):
             topk_weights, topk_ids, _ = fused_topk(a, gating, topk, renormalize=True)
-            fused_experts(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
-            )
+            fused_experts(a, w1, w2, topk_weights, topk_ids, quant_config=quant_config)
     torch.accelerator.synchronize()
 
     # Benchmark
@@ -140,14 +124,7 @@ def benchmark_config(
     for _ in range(num_iters):
         with override_config(config):
             topk_weights, topk_ids, _ = fused_topk(a, gating, topk, renormalize=True)
-            fused_experts(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
-            )
+            fused_experts(a, w1, w2, topk_weights, topk_ids, quant_config=quant_config)
     end.record()
     torch.accelerator.synchronize()
     return start.elapsed_time(end) / num_iters * 1000  # ms -> us

@@ -15,9 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
@@ -51,11 +49,7 @@ class DbrxRouter(nn.Module):
     per token.
     """
 
-    def __init__(
-        self,
-        config: DbrxConfig,
-        params_dtype: torch.dtype | None = None,
-    ):
+    def __init__(self, config: DbrxConfig, params_dtype: torch.dtype | None = None):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.ffn_config.moe_num_experts
@@ -255,9 +249,7 @@ class DbrxAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
@@ -286,16 +278,11 @@ class DbrxFusedNormAttention(nn.Module):
         self.norm_2 = nn.LayerNorm(self.d_model)
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm_1(hidden_states)
-        x = self.attn(
-            position_ids=position_ids,
-            hidden_states=hidden_states,
-        )
+        x = self.attn(position_ids=position_ids, hidden_states=hidden_states)
         hidden_states = residual + x
         residual = hidden_states
         hidden_states = self.norm_2(hidden_states)
@@ -317,13 +304,10 @@ class DbrxBlock(nn.Module):
         self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         hidden_states, residual = self.norm_attn_norm(
-            position_ids=position_ids,
-            hidden_states=hidden_states,
+            position_ids=position_ids, hidden_states=hidden_states
         )
         hidden_states = self.ffn(hidden_states)
         hidden_states = hidden_states + residual
@@ -339,10 +323,7 @@ class DbrxModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.quant_config = quant_config
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            config.d_model,
-        )
+        self.wte = VocabParallelEmbedding(config.vocab_size, config.d_model)
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
             lambda prefix: DbrxBlock(config, cache_config, quant_config, prefix=prefix),
@@ -384,10 +365,7 @@ class DbrxModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         expert_params_mapping = [
-            (
-                "w13" if weight_name in ["w1", "v1"] else "w2",
-                f"mlp.{weight_name}",
-            )
+            ("w13" if weight_name in ["w1", "v1"] else "w2", f"mlp.{weight_name}")
             for weight_name in ["w1", "v1", "w2"]
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
@@ -473,10 +451,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

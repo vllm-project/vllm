@@ -38,14 +38,9 @@ def run_reasoning_extraction(
 ) -> tuple[str | None, str | None]:
     if streaming:
         reconstructor = run_reasoning_extraction_streaming(
-            reasoning_parser,
-            model_output,
-            request,
+            reasoning_parser, model_output, request
         )
-        return (
-            reconstructor.reasoning,
-            reconstructor.other_content or None,
-        )
+        return (reconstructor.reasoning, reconstructor.other_content or None)
     else:
         reasoning, content = run_reasoning_extraction_nonstreaming(
             reasoning_parser, model_output, request
@@ -64,14 +59,9 @@ def run_reasoning_extraction_mistral(
     )
     if streaming:
         reconstructor = run_reasoning_extraction_streaming_mistral(
-            reasoning_parser,
-            model_output,
-            request,
+            reasoning_parser, model_output, request
         )
-        return (
-            reconstructor.reasoning,
-            reconstructor.other_content or None,
-        )
+        return (reconstructor.reasoning, reconstructor.other_content or None)
     else:
         str_output = reasoning_parser.model_tokenizer.convert_ids_to_tokens(
             model_output

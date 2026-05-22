@@ -18,10 +18,7 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
-    load_aware_call,
-    with_cancellation,
-)
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -35,10 +32,7 @@ def messages(request: Request) -> AnthropicServingMessages:
 
 def translate_error_response(response: ErrorResponse) -> JSONResponse:
     anthropic_error = AnthropicErrorResponse(
-        error=AnthropicError(
-            type=response.error.type,
-            message=response.error.message,
-        )
+        error=AnthropicError(type=response.error.type, message=response.error.message)
     )
     return JSONResponse(
         status_code=response.error.code, content=anthropic_error.model_dump()
@@ -73,10 +67,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             content=AnthropicErrorResponse(
-                error=AnthropicError(
-                    type="internal_error",
-                    message=str(e),
-                )
+                error=AnthropicError(type="internal_error", message=str(e))
             ).model_dump(),
         )
 
@@ -119,10 +110,7 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             content=AnthropicErrorResponse(
-                error=AnthropicError(
-                    type="internal_error",
-                    message=str(e),
-                )
+                error=AnthropicError(type="internal_error", message=str(e))
             ).model_dump(),
         )
 

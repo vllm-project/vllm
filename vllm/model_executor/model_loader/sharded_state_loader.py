@@ -54,9 +54,7 @@ class ShardedStateLoader(BaseModelLoader):
             )
 
     @staticmethod
-    def _filter_subtensors(
-        tensors: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
+    def _filter_subtensors(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
@@ -117,8 +115,7 @@ class ShardedStateLoader(BaseModelLoader):
 
         rank = get_tensor_model_parallel_rank()
         pattern = os.path.join(
-            local_model_path,
-            self.pattern.format(rank=rank, part="*"),
+            local_model_path, self.pattern.format(rank=rank, part="*")
         )
 
         filepaths = []
@@ -197,10 +194,7 @@ class ShardedStateLoader(BaseModelLoader):
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
                 filename = pattern.format(rank=rank, part=part_idx)
-                save_file(
-                    state_dict_part,
-                    os.path.join(path, filename),
-                )
+                save_file(state_dict_part, os.path.join(path, filename))
                 part_idx += 1
                 total_size = 0
                 state_dict_part = {}
@@ -208,7 +202,4 @@ class ShardedStateLoader(BaseModelLoader):
             total_size += param_size
         if len(state_dict_part) > 0:
             filename = pattern.format(rank=rank, part=part_idx)
-            save_file(
-                state_dict_part,
-                os.path.join(path, filename),
-            )
+            save_file(state_dict_part, os.path.join(path, filename))

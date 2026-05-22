@@ -4,9 +4,7 @@
 import pytest
 
 from vllm.tokenizers import get_tokenizer
-from vllm.tool_parsers.deepseekv31_tool_parser import (
-    DeepSeekV31ToolParser,
-)
+from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
 
 MODEL = "deepseek-ai/DeepSeek-V3.1"
 

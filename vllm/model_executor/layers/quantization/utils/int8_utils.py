@@ -54,9 +54,7 @@ def input_to_int8(
 
 
 def block_dequant(
-    x_q_block: torch.Tensor,
-    x_s: torch.Tensor,
-    block_size: list[int],
+    x_q_block: torch.Tensor, x_s: torch.Tensor, block_size: list[int]
 ) -> torch.Tensor:
     """This function conducts block-wise dequantization.
     The inputs are block-wise quantization tensor `x_q_block`,
@@ -104,13 +102,7 @@ else:
 
 @triton.jit
 def _per_token_quant_int8(
-    x_ptr,
-    xq_ptr,
-    scale_ptr,
-    stride_x,
-    stride_xq,
-    N,
-    BLOCK: tl.constexpr,
+    x_ptr, xq_ptr, scale_ptr, stride_x, stride_xq, N, BLOCK: tl.constexpr
 ):
     # Adapted from https://github.com/InternLM/lmdeploy/blob/086481ed84b59bee3b8e4274e5fc69620040c048/lmdeploy/pytorch/kernels/cuda/w8a8_triton_kernels.py#L282
     row_id = tl.program_id(0)

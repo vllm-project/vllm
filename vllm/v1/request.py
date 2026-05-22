@@ -213,10 +213,7 @@ class Request:
             abort_immediately=request.abort_immediately,
         )
 
-    def append_output_token_ids(
-        self,
-        token_ids: int | list[int],
-    ) -> None:
+    def append_output_token_ids(self, token_ids: int | list[int]) -> None:
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
             self._all_token_ids.append(token_ids)
@@ -279,9 +276,7 @@ class Request:
         return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
-        self,
-        event_type: EngineCoreEventType,
-        timestamp: float | None = None,
+        self, event_type: EngineCoreEventType, timestamp: float | None = None
     ) -> None:
         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
 

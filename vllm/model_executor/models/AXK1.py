@@ -557,10 +557,7 @@ class AXK1MLAAttention(nn.Module):
 
 class AXK1DecoderLayer(nn.Module):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str,
-        config: AXK1Config | None = None,
+        self, vllm_config: VllmConfig, prefix: str, config: AXK1Config | None = None
     ) -> None:
         super().__init__()
 
@@ -654,10 +651,7 @@ class AXK1DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        attn_kwargs = {
-            "positions": positions,
-            "hidden_states": hidden_states,
-        }
+        attn_kwargs = {"positions": positions, "hidden_states": hidden_states}
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
         hidden_states = self.self_attn(**attn_kwargs)
@@ -1017,9 +1011,7 @@ class AXK1MixtureOfExperts(MixtureOfExperts):
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -1035,9 +1027,7 @@ class AXK1MixtureOfExperts(MixtureOfExperts):
 class AXK1ForCausalLM(
     nn.Module, SupportsPP, AXK1MixtureOfExperts, SupportsLoRA, SupportsEagle
 ):
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model_cls = AXK1Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1123,10 +1113,7 @@ class AXK1ForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

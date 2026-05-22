@@ -53,10 +53,7 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
     results = []
     for prompt in prompts:
         response = client.completions.create(
-            model=model,
-            prompt=prompt,
-            max_tokens=32,
-            temperature=0,
+            model=model, prompt=prompt, max_tokens=32, temperature=0
         )
         results.append(response.choices[0].text)
     return results
@@ -83,10 +80,7 @@ def init_weight_transfer_engine(
     response.raise_for_status()
 
 
-def start_weight_update(
-    base_url: str,
-    is_checkpoint_format: bool = True,
-) -> None:
+def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
     """Start a weight update via HTTP endpoint."""
     url = f"{base_url}/start_weight_update"
     payload = {"is_checkpoint_format": is_checkpoint_format}
@@ -105,10 +99,7 @@ def update_weights(
     url = f"{base_url}/update_weights"
     payload = {
         "update_info": dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=packed,
+            names=names, dtype_names=dtype_names, shapes=shapes, packed=packed
         )
     }
     response = requests.post(url, json=payload, timeout=300)
@@ -204,7 +195,7 @@ def main():
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
-        ),
+        )
     )
 
     # Wait for init_weight_transfer_engine to complete
@@ -236,13 +227,9 @@ def main():
 
     # Broadcast all weights from trainer to vLLM workers
     print("Broadcasting weights via NCCL...")
-    trainer_args = NCCLTrainerSendWeightsArgs(
-        group=model_update_group,
-        packed=True,
-    )
+    trainer_args = NCCLTrainerSendWeightsArgs(group=model_update_group, packed=True)
     NCCLWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
+        iterator=train_model.named_parameters(), trainer_args=trainer_args
     )
 
     # Wait for update_weights to complete

@@ -29,10 +29,7 @@ def embedding(request: Request) -> ServingEmbedding | None:
 )
 @with_cancellation
 @load_aware_call
-async def create_embedding(
-    request: EmbeddingRequest,
-    raw_request: Request,
-):
+async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Embeddings API")
@@ -50,10 +47,7 @@ async def create_embedding(
 )
 @with_cancellation
 @load_aware_call
-async def create_cohere_embedding(
-    request: CohereEmbedRequest,
-    raw_request: Request,
-):
+async def create_cohere_embedding(request: CohereEmbedRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Embeddings API")

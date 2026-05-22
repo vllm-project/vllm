@@ -84,10 +84,7 @@ def _load_mrcr_samples(
             continue
 
         ds = load_dataset(
-            DATASET_REPO,
-            data_files=NEEDLE_SHARDS[n],
-            split="train",
-            streaming=True,
+            DATASET_REPO, data_files=NEEDLE_SHARDS[n], split="train", streaming=True
         ).shuffle(seed=seed + n, buffer_size=16)
 
         taken = 0

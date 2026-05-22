@@ -62,10 +62,7 @@ vllm_processor = build_llm_processor(
             {"role": "system", "content": "You are a bot that responds with haikus."},
             {"role": "user", "content": row["text"]},
         ],
-        sampling_params=dict(
-            temperature=0.3,
-            max_tokens=250,
-        ),
+        sampling_params=dict(temperature=0.3, max_tokens=250),
     ),
     postprocess=lambda row: dict(
         answer=row["generated_text"],

@@ -15,23 +15,14 @@ COLBERT_DIM = 96
 MAX_MODEL_LEN = 512
 LINEAR_WEIGHTS_KEY = "linear.weight"
 
-TEXTS_1 = [
-    "What is the capital of France?",
-    "What is the capital of Germany?",
-]
+TEXTS_1 = ["What is the capital of France?", "What is the capital of Germany?"]
 
-TEXTS_2 = [
-    "The capital of France is Paris.",
-    "The capital of Germany is Berlin.",
-]
+TEXTS_2 = ["The capital of France is Paris.", "The capital of Germany is Berlin."]
 
 
 @pytest.fixture(scope="module", params=[True, False])
 def server(request):
-    args = [
-        "--max-model-len",
-        str(MAX_MODEL_LEN),
-    ]
+    args = ["--max-model-len", str(MAX_MODEL_LEN)]
 
     # Test run pooling score MaxSim on worker side (GPU)
     # aka flash-late-interaction
@@ -55,11 +46,7 @@ async def test_score_api_queries_str_1_documents_str_1(
 ):
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1[0],
-            "documents": TEXTS_2[0],
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1[0], "documents": TEXTS_2[0]},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -79,18 +66,11 @@ async def test_score_api_queries_str_1_documents_str_1(
 async def test_score_api_queries_str_1_documents_str_n(
     hf_model, server: RemoteOpenAIServer
 ):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[0], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[0], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1[0],
-            "documents": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1[0], "documents": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -110,18 +90,11 @@ async def test_score_api_queries_str_1_documents_str_n(
 async def test_score_api_queries_str_n_documents_str_n(
     hf_model, server: RemoteOpenAIServer
 ):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "documents": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1, "documents": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -148,11 +121,7 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
 
     rerank_response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "query": query, "documents": documents},
     )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
@@ -179,12 +148,7 @@ async def test_rerank_api_top_n(server: RemoteOpenAIServer):
 
     rerank_response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": documents,
-            "top_n": 2,
-        },
+        json={"model": MODEL_NAME, "query": query, "documents": documents, "top_n": 2},
     )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
@@ -200,11 +164,7 @@ async def test_token_embed(server: RemoteOpenAIServer):
 
     pooling_response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": MODEL_NAME,
-            "input": text,
-            "task": "token_embed",
-        },
+        json={"model": MODEL_NAME, "input": text, "task": "token_embed"},
     )
     pooling_response.raise_for_status()
     pooling = pooling_response.json()
@@ -226,11 +186,7 @@ async def test_embed_not_supported(server: RemoteOpenAIServer):
 
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": MODEL_NAME,
-            "input": text,
-            "task": task,
-        },
+        json={"model": MODEL_NAME, "input": text, "task": task},
     )
 
     assert response.json()["error"]["type"] == "BadRequestError"

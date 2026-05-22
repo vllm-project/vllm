@@ -109,8 +109,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
     structured_outputs: StructuredOutputsParams | None = Field(
-        default=None,
-        description="Additional kwargs for structured outputs",
+        default=None, description="Additional kwargs for structured outputs"
     )
     priority: int = Field(
         default=0,
@@ -217,9 +216,7 @@ class CompletionRequest(OpenAIBaseModel):
     }
 
     def to_beam_search_params(
-        self,
-        max_tokens: int,
-        default_sampling_params: dict | None = None,
+        self, max_tokens: int, default_sampling_params: dict | None = None
     ) -> BeamSearchParams:
         if default_sampling_params is None:
             default_sampling_params = {}
@@ -238,9 +235,7 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
     def to_sampling_params(
-        self,
-        max_tokens: int,
-        default_sampling_params: dict | None = None,
+        self, max_tokens: int, default_sampling_params: dict | None = None
     ) -> SamplingParams:
         if default_sampling_params is None:
             default_sampling_params = {}
@@ -289,10 +284,7 @@ class CompletionRequest(OpenAIBaseModel):
                 structural_tag = response_format
                 assert isinstance(
                     structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
+                    (LegacyStructuralTagResponseFormat, StructuralTagResponseFormat),
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)

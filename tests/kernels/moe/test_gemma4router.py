@@ -21,10 +21,7 @@ def sort_by_id(w, ids):
 @pytest.mark.parametrize("topk", [8])  # gemma4 topk
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
 def test_gemma4_routing_kernel_triton(
-    num_tokens: int,
-    num_experts: int,
-    topk: int,
-    dtype: torch.dtype,
+    num_tokens: int, num_experts: int, topk: int, dtype: torch.dtype
 ):
     torch.manual_seed(0)
 

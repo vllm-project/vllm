@@ -16,8 +16,7 @@ __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 
 
 def is_qutlass_fp4_scheme(
-    quant_scheme: CompressedTensorsScheme | None,
-    input_tfms: dict[int, TransformTuple],
+    quant_scheme: CompressedTensorsScheme | None, input_tfms: dict[int, TransformTuple]
 ) -> bool:
     return (
         isinstance(quant_scheme, (CompressedTensorsW4A4Fp4,))
@@ -56,9 +55,6 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         return ret
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         raise NotImplementedError()

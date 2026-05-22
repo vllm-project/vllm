@@ -93,6 +93,10 @@ ignore = [
 
 [tool.ruff.format]
 docstring-code-format = true
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
 
 [tool.mypy]
 plugins = ['pydantic.mypy']

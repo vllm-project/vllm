@@ -80,9 +80,7 @@ class DummyLogitsProcessor(LogitsProcessor):
             return params.extra_args and params.extra_args.get("target_token")
 
         process_dict_updates(
-            self.req_info,
-            batch_update,
-            lambda params, _, __: extract_extra_arg(params),
+            self.req_info, batch_update, lambda params, _, __: extract_extra_arg(params)
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -135,11 +133,7 @@ class DummyPerReqLogitsProcessor:
         """Specify `target_token`"""
         self.target_token = target_token
 
-    def __call__(
-        self,
-        output_ids: list[int],
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
+    def __call__(self, output_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
         val_to_keep = logits[self.target_token].item()
         logits[:] = float("-inf")
         logits[self.target_token] = val_to_keep
@@ -154,8 +148,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         return False
 
     def new_req_logits_processor(
-        self,
-        params: SamplingParams,
+        self, params: SamplingParams
     ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
@@ -201,8 +194,7 @@ def register_fake_entrypoint(monkeypatch) -> str:
 
     # Write METADATA file (required by importlib.metadata)
     (dist_info / "METADATA").write_text(
-        "Metadata-Version: 2.1\nName: dummy-logitproc\nVersion: 0.1\n",
-        encoding="utf-8",
+        "Metadata-Version: 2.1\nName: dummy-logitproc\nVersion: 0.1\n", encoding="utf-8"
     )
 
     # Write entry_points.txt

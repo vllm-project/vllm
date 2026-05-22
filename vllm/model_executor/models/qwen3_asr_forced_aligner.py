@@ -27,9 +27,7 @@ from vllm.sequence import IntermediateTensors
     info=Qwen3ASRProcessingInfo,
     dummy_inputs=Qwen3ASRDummyInputsBuilder,
 )
-class Qwen3ASRForcedAlignerForTokenClassification(
-    Qwen3ASRForConditionalGeneration,
-):
+class Qwen3ASRForcedAlignerForTokenClassification(Qwen3ASRForConditionalGeneration):
     """Qwen3-ASR Forced Aligner model for per-token timestamp classification.
 
     This model shares the audio tower and language model backbone with
@@ -103,18 +101,12 @@ class Qwen3ASRForcedAlignerForTokenClassification(
 
         # Run through language model backbone (transformer layers only)
         hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
         # Apply classification head -> [num_tokens, classify_num]
         return self.classifier(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["talker.", "code2wav."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

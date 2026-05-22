@@ -43,8 +43,7 @@ def envs_cache_disabled():
 
 
 def _make_quick_allreduce_for_test(
-    min_size_mb: int | None = None,
-    quantization_min_size: int | None = None,
+    min_size_mb: int | None = None, quantization_min_size: int | None = None
 ) -> QuickAllReduce:
     quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
     quick_reduce.disabled = False
@@ -76,8 +75,7 @@ def test_should_quick_allreduce_uses_min_size_override():
 
 
 def test_quick_allreduce_min_size_env_unset(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.delenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", raising=False)
 
@@ -85,8 +83,7 @@ def test_quick_allreduce_min_size_env_unset(
 
 
 def test_quick_allreduce_min_size_env_converts_mb_to_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "4")
 
@@ -94,8 +91,7 @@ def test_quick_allreduce_min_size_env_converts_mb_to_bytes(
 
 
 def test_quick_allreduce_min_size_env_rejects_negative(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "-1")
 
@@ -104,8 +100,7 @@ def test_quick_allreduce_min_size_env_rejects_negative(
 
 
 def test_quick_allreduce_min_size_env_allows_equal_to_max(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "16")
 
@@ -113,8 +108,7 @@ def test_quick_allreduce_min_size_env_allows_equal_to_max(
 
 
 def test_quick_allreduce_min_size_env_rejects_larger_than_max(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "17")
 
@@ -123,8 +117,7 @@ def test_quick_allreduce_min_size_env_rejects_larger_than_max(
 
 
 def test_quick_allreduce_quantization_min_size_env_unset(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.delenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", raising=False)
 
@@ -132,8 +125,7 @@ def test_quick_allreduce_quantization_min_size_env_unset(
 
 
 def test_quick_allreduce_quantization_min_size_env_converts_kb_to_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", "2048")
 
@@ -141,8 +133,7 @@ def test_quick_allreduce_quantization_min_size_env_converts_kb_to_bytes(
 
 
 def test_quick_allreduce_quantization_min_size_env_rejects_negative(
-    monkeypatch: pytest.MonkeyPatch,
-    envs_cache_disabled,
+    monkeypatch: pytest.MonkeyPatch, envs_cache_disabled
 ):
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", "-1")
 
@@ -181,21 +172,13 @@ def test_quick_allreduce_quantization_min_size_does_not_change_eligibility():
     assert quick_reduce.should_quick_allreduce(at_builtin_min)
 
 
-def test_quick_allreduce_passes_dynamic_quant_level(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_quick_allreduce_passes_dynamic_quant_level(monkeypatch: pytest.MonkeyPatch):
     quick_reduce = _make_quick_allreduce_for_test(quantization_min_size=2 * KB)
     quick_reduce._ptr = object()
     inp = torch.empty(KB // 2, dtype=torch.float16)
     called_quant_level = None
 
-    def fake_qr_all_reduce(
-        fa,
-        inp,
-        out,
-        quant_level,
-        cast_bf2half,
-    ):
+    def fake_qr_all_reduce(fa, inp, out, quant_level, cast_bf2half):
         nonlocal called_quant_level
         called_quant_level = quant_level
 
@@ -208,11 +191,7 @@ def test_quick_allreduce_passes_dynamic_quant_level(
 
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_quickreduce(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size,
-    pp_size,
-    rank,
-    distributed_init_port,
+    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -262,11 +241,7 @@ def graph_quickreduce(
 
 @ray.remote(num_gpus=1, max_calls=1)
 def eager_quickreduce(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size,
-    pp_size,
-    rank,
-    distributed_init_port,
+    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)

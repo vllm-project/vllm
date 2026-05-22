@@ -96,9 +96,7 @@ def create_batched_mm_kwargs(
         for modality, limit in supported_mm_limits.items()
     }
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
-        seq_len=model_config.max_model_len,
-        mm_counts=mm_counts,
-        mm_options={},
+        seq_len=model_config.max_model_len, mm_counts=mm_counts, mm_options={}
     )
     mm_items = processor_inputs.mm_data_items
     resized_mm_data = {
@@ -126,10 +124,7 @@ def create_batched_mm_kwargs(
 
 # TODO(Isotr0py): Don't initialize model during test
 @contextmanager
-def initialize_dummy_model(
-    model_cls: type[nn.Module],
-    model_config: ModelConfig,
-):
+def initialize_dummy_model(model_cls: type[nn.Module], model_config: ModelConfig):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
     vllm_config = VllmConfig(
@@ -167,9 +162,7 @@ def test_model_tensor_schema(model_id: str):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
+        on_fail="skip", check_max_version=False, check_version_reason="vllm"
     )
 
     model_arch = next(
@@ -219,8 +212,7 @@ def test_model_tensor_schema(model_id: str):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
     ctx = InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
+        model_config, tokenizer=cached_tokenizer_from_config(model_config)
     )
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()

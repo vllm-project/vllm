@@ -89,10 +89,7 @@ def main():
     # -- Step 3: Generate (inference) ------------------------------------
     # Pass the render output directly — only add sampling_params.
     generate_payload = render_data
-    generate_payload["sampling_params"] = {
-        "max_tokens": 20,
-        "temperature": 0.0,
-    }
+    generate_payload["sampling_params"] = {"max_tokens": 20, "temperature": 0.0}
 
     print("\n--- Generate ---")
     gen_resp = requests.post(f"{BASE_URL}/inference/v1/generate", json=generate_payload)

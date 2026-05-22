@@ -112,11 +112,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=maybe_padded_v,
-            softmax_scale=softmax_scale,
-            **kwargs,
+            q=q, k=k, v=maybe_padded_v, softmax_scale=softmax_scale, **kwargs
         )
 
         # Unpack the output if there are multiple results
@@ -155,11 +151,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
 
     def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        self, chunk_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self._prefill_metadata.chunked_context is not None
         return self._flash_attn_varlen_diff_headdims(

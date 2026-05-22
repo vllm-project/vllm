@@ -84,9 +84,7 @@ class InterpolateDownsampler:
         up_shape = [batch_size, self.orig_image_side, self.orig_image_side, dim]
         large = image_features.view(up_shape).permute(0, 3, 1, 2)
         small = torch.nn.functional.interpolate(
-            large,
-            size=(self.new_image_side, self.new_image_side),
-            mode=self.mode,
+            large, size=(self.new_image_side, self.new_image_side), mode=self.mode
         )
         return small.permute(0, 2, 3, 1).flatten(1, 2)
 
@@ -209,8 +207,7 @@ class WindowQFormerDownsampler(nn.Module):
         query_embeds = self.query + downsampled_w
         encoder_embeds = self.dropout(enc + self.image_positions)
         out_w = self.qformer(
-            query_embeds=query_embeds,
-            encoder_hidden_states=encoder_embeds,
+            query_embeds=query_embeds, encoder_hidden_states=encoder_embeds
         )
 
         out = self._unwin(out_w, n=n, win=self.query_side)
@@ -274,8 +271,7 @@ class Granite4VisionLLMModel(GraniteModel):
                     buf_len = feat.shape[0]
                     if buf_len != num_tokens:
                         feat = torch.nn.functional.pad(
-                            feat[:num_tokens],
-                            (0, 0, 0, max(0, num_tokens - buf_len)),
+                            feat[:num_tokens], (0, 0, 0, max(0, num_tokens - buf_len))
                         )
                     hidden_states = hidden_states + feat
             hidden_states = layer(positions, hidden_states)
@@ -351,12 +347,7 @@ class Granite4VisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(**kwargs)
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
@@ -374,10 +365,7 @@ class Granite4VisionProcessingInfo(LlavaNextProcessingInfo):
             patch_size=vision_encoder_info.get_image_size(),
         )
 
-        (
-            unpadded_feature_size,
-            newline_feature_size,
-        ) = self._get_num_unpadded_features(
+        (unpadded_feature_size, newline_feature_size) = self._get_num_unpadded_features(
             original_height=image_height,
             original_width=image_width,
             npatches=downsampled_grid,
@@ -392,9 +380,7 @@ class Granite4VisionMultiModalProcessor(
     BaseLlavaNextMultiModalProcessor[Granite4VisionProcessingInfo]
 ):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -595,8 +581,7 @@ class Granite4VisionForConditionalGeneration(
 
         hidden_states = vm.embeddings(pixel_values)
         all_hidden_states = vm.encoder(
-            inputs_embeds=hidden_states,
-            return_all_hidden_states=True,
+            inputs_embeds=hidden_states, return_all_hidden_states=True
         )
         return all_hidden_states
 
@@ -669,9 +654,7 @@ class Granite4VisionForConditionalGeneration(
         return new_image_features
 
     def _get_all_layer_features(
-        self,
-        pixel_values: torch.Tensor,
-        image_sizes: torch.Tensor,
+        self, pixel_values: torch.Tensor, image_sizes: torch.Tensor
     ) -> tuple[list[int], list[torch.Tensor]]:
         """Extract deepstack + spatial features for all levels.
 
@@ -697,8 +680,7 @@ class Granite4VisionForConditionalGeneration(
 
         if pixel_values.dim() == 5:
             pixel_values = torch.cat(
-                [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
-                dim=0,
+                [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)], dim=0
             )
 
         all_hidden_states = self._get_vision_hidden_states(pixel_values)
@@ -758,10 +740,7 @@ class Granite4VisionForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            return LlavaNextImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return LlavaNextImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("Unreachable")
 
@@ -844,8 +823,7 @@ class Granite4VisionForConditionalGeneration(
         #    Concatenate along token dim → (total_mm_tokens, lm_h * num_levels).
         N, lm_h = inputs_embeds.shape
         all_packed = torch.cat(
-            [t.to(dtype=inputs_embeds.dtype) for t in multimodal_embeddings],
-            dim=0,
+            [t.to(dtype=inputs_embeds.dtype) for t in multimodal_embeddings], dim=0
         )
         level_features = all_packed.split(lm_h, dim=-1)  # num_levels tensors
 
@@ -918,10 +896,7 @@ class Granite4VisionForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         # GraniteForCausalLM.compute_logits uses
         # LogitsProcessor(scale=1/logits_scaling)
         return self.language_model.compute_logits(hidden_states)

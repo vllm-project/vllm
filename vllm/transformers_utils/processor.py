@@ -118,20 +118,14 @@ def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
 
 
 def _merge_mm_kwargs(
-    model_config: "ModelConfig",
-    processor_cls: type | tuple[type, ...],
-    /,
-    **kwargs,
+    model_config: "ModelConfig", processor_cls: type | tuple[type, ...], /, **kwargs
 ):
     mm_config = model_config.get_multimodal_config()
     merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
     factory = _get_processor_factory_fn(processor_cls)
     allowed_kwargs = get_allowed_kwarg_only_overrides(
-        factory,
-        merged_kwargs,
-        requires_kw_only=False,
-        allow_var_kwargs=True,
+        factory, merged_kwargs, requires_kw_only=False, allow_var_kwargs=True
     )
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
@@ -146,8 +140,7 @@ def _merge_mm_kwargs(
 
 
 def get_processor_cls_name_from_config(
-    processor_name: str,
-    revision: str | None = "main",
+    processor_name: str, revision: str | None = "main"
 ) -> str | None:
     config_file = [
         "processor_config.json",
@@ -271,12 +264,7 @@ def get_processor_kwargs_keys(
     kwargs_cls: type[processing_utils.ProcessingKwargs],
 ) -> set[str]:
     dynamic_kwargs: set[str] = set()
-    modality_kwargs = {
-        "text_kwargs",
-        "images_kwargs",
-        "videos_kwargs",
-        "audio_kwargs",
-    }
+    modality_kwargs = {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
 
     try:
         # get kwargs annotations in processor
@@ -400,10 +388,7 @@ def get_feature_extractor(
 cached_get_feature_extractor = lru_cache(get_feature_extractor)
 
 
-def cached_feature_extractor_from_config(
-    model_config: "ModelConfig",
-    **kwargs: Any,
-):
+def cached_feature_extractor_from_config(model_config: "ModelConfig", **kwargs: Any):
     return cached_get_feature_extractor(
         model_config.model,
         revision=model_config.revision,
@@ -451,10 +436,7 @@ def get_image_processor(
 cached_get_image_processor = lru_cache(get_image_processor)
 
 
-def cached_image_processor_from_config(
-    model_config: "ModelConfig",
-    **kwargs: Any,
-):
+def cached_image_processor_from_config(model_config: "ModelConfig", **kwargs: Any):
     if is_gguf(model_config.model):
         assert not is_gguf(model_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
@@ -515,9 +497,7 @@ cached_get_video_processor = lru_cache(get_video_processor)
 
 
 def cached_video_processor_from_config(
-    model_config: "ModelConfig",
-    processor_cls: type[_V] | None = None,
-    **kwargs: Any,
+    model_config: "ModelConfig", processor_cls: type[_V] | None = None, **kwargs: Any
 ):
     return cached_get_video_processor(
         model_config.model,
@@ -536,8 +516,7 @@ def call_hf_processor_mm_only(
     **kwargs,
 ) -> BatchFeature:
     output_kwargs = processor._merge_kwargs(
-        get_processor_kwargs_type(processor),
-        **kwargs,
+        get_processor_kwargs_type(processor), **kwargs
     )
 
     if audio is not None and (

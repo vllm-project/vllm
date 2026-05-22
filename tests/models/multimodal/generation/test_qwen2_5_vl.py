@@ -25,14 +25,13 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
             VIDEO_PLACEHOLDER,
             "Describe this video with a short sentence ",
             "(no more than 20 words)",
-        ),
+        )
     }
 )
 
 
 WINDOW_ATTN_IMAGE_PROMPT = qwen2_5_vl_chat_template(
-    IMAGE_PLACEHOLDER,
-    "Describe the image.",
+    IMAGE_PLACEHOLDER, "Describe the image."
 )
 IMAGE_ONLY_LIMIT_MM_PER_PROMPT = {"image": 1, "video": 0}
 

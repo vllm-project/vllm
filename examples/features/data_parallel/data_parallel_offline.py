@@ -43,10 +43,7 @@ def create_parser():
 
     # Add all engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(
-        model="ibm-research/PowerMoE-3b",
-        enable_expert_parallel=True,
-    )
+    parser.set_defaults(model="ibm-research/PowerMoE-3b", enable_expert_parallel=True)
 
     # Add DP-specific args (separate from engine args to avoid conflicts)
     parser.add_argument(
@@ -84,12 +81,7 @@ def create_parser():
 
 
 def main(
-    dp_size,
-    local_dp_rank,
-    global_dp_rank,
-    dp_master_ip,
-    dp_master_port,
-    engine_args,
+    dp_size, local_dp_rank, global_dp_rank, dp_master_ip, dp_master_port, engine_args
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)

@@ -31,10 +31,7 @@ headers = {"accept": "application/json", "Content-Type": "application/json"}
 
 def load_image(url: str) -> Image.Image:
     """Download an image from URL (handles Wikimedia 403)."""
-    for hdrs in (
-        {},
-        {"User-Agent": "Mozilla/5.0 (compatible; ColQwen3-demo/1.0)"},
-    ):
+    for hdrs in ({}, {"User-Agent": "Mozilla/5.0 (compatible; ColQwen3-demo/1.0)"}):
         resp = requests.get(url, headers=hdrs, timeout=15)
         if resp.status_code == 403:
             continue
@@ -55,10 +52,7 @@ def make_image_content(image_url: str, text: str = "Describe the image.") -> dic
     image = load_image(image_url)
     return {
         "content": [
-            {
-                "type": "image_url",
-                "image_url": {"url": encode_image_base64(image)},
-            },
+            {"type": "image_url", "image_url": {"url": encode_image_base64(image)}},
             {"type": "text", "text": text},
         ]
     }
@@ -120,11 +114,7 @@ def score_text():
         "Python is a programming language.",
     ]
 
-    data = {
-        "model": MODEL,
-        "text_1": query,
-        "text_2": documents,
-    }
+    data = {"model": MODEL, "text_1": query, "text_2": documents}
 
     response = requests.post(f"{BASE_URL}/score", headers=headers, json=data)
 
@@ -188,11 +178,7 @@ def score_text_vs_images():
     print(f"\n  Loading {len(labels)} images...")
     image_contents = [make_image_content(IMAGE_URLS[name]) for name in labels]
 
-    data = {
-        "model": MODEL,
-        "data_1": query,
-        "data_2": image_contents,
-    }
+    data = {"model": MODEL, "data_1": query, "data_2": image_contents}
 
     response = requests.post(f"{BASE_URL}/score", headers=headers, json=data)
 
@@ -219,12 +205,7 @@ def rerank_text_vs_images():
     print(f"\n  Loading {len(labels)} images...")
     image_contents = [make_image_content(IMAGE_URLS[name]) for name in labels]
 
-    data = {
-        "model": MODEL,
-        "query": query,
-        "documents": image_contents,
-        "top_n": 2,
-    }
+    data = {"model": MODEL, "query": query, "documents": image_contents, "top_n": 2}
 
     response = requests.post(f"{BASE_URL}/rerank", headers=headers, json=data)
 

@@ -197,9 +197,7 @@ class Exaone4Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -272,10 +270,7 @@ class Exaone4DecoderLayer(nn.Module):
         residual = hidden_states
 
         # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Use post-LN
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -310,9 +305,7 @@ class Exaone4Model(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -357,11 +350,7 @@ class Exaone4Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -438,15 +427,8 @@ class Exaone4Model(nn.Module):
 
 class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # LoRA specific attributes
@@ -464,8 +446,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
 
         self.model = Exaone4Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -503,10 +484,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -201,9 +201,7 @@ class ArceeModel(nn.Module, EagleModelMixin):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()  # placeholder on non-embedding ranks
@@ -358,9 +356,7 @@ class ArceeForCausalLM(
 
     # Map fused module names to their submodule components
     # (for quantization and LoRA)
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
@@ -369,8 +365,7 @@ class ArceeForCausalLM(
 
         # Initialize the inner Transformer model (ArceeModel)
         self.model = ArceeModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:

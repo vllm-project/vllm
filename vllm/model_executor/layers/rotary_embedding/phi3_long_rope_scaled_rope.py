@@ -109,10 +109,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         return inv_freq
 
     def _compute_cos_sin_cache(
-        self,
-        max_position_embeddings: int,
-        rescale_factors: list[float],
-        mscale: float,
+        self, max_position_embeddings: int, rescale_factors: list[float], mscale: float
     ) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(rescale_factors)
         t = torch.arange(max_position_embeddings, dtype=torch.float)

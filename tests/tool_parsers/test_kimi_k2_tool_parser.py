@@ -7,13 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.tool_parsers.utils import (
-    run_tool_extraction,
-    run_tool_extraction_streaming,
-)
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 
@@ -221,15 +216,7 @@ def _split_tool_output_to_deltas(
     """
     deltas = [content, SECTION_BEGIN]
     for tool_id, args_json in tool_strs:
-        deltas.extend(
-            [
-                TOOL_BEGIN,
-                f"{tool_id} ",
-                ARG_BEGIN,
-                f"{args_json} ",
-                TOOL_END,
-            ]
-        )
+        deltas.extend([TOOL_BEGIN, f"{tool_id} ", ARG_BEGIN, f"{args_json} ", TOOL_END])
     deltas.append(SECTION_END)
     return deltas
 
@@ -238,8 +225,7 @@ class TestStreamingHappyPath:
     def test_single_tool_call(self, parser):
         """Verify DeltaToolCall output: name, id, arguments for one tool."""
         deltas = _split_tool_output_to_deltas(
-            "I'll help. ",
-            [("functions.get_weather:0", '{"city": "Beijing"}')],
+            "I'll help. ", [("functions.get_weather:0", '{"city": "Beijing"}')]
         )
         rec = run_tool_extraction_streaming(parser, deltas)
 
@@ -356,8 +342,7 @@ class TestStreamingEdgeCases:
     def test_marker_suppression(self, parser):
         """No special-token markers appear in reconstructed content."""
         deltas = _split_tool_output_to_deltas(
-            "I'll check. ",
-            [("functions.get_weather:0", '{"city": "Tokyo"}')],
+            "I'll check. ", [("functions.get_weather:0", '{"city": "Tokyo"}')]
         )
         rec = run_tool_extraction_streaming(parser, deltas)
 

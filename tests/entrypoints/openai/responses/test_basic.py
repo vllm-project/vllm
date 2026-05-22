@@ -24,8 +24,7 @@ async def test_simple_input(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_instructions(client: openai.AsyncOpenAI):
     response = await client.responses.create(
-        instructions="Finish the answer with QED.",
-        input="What is 13 * 24?",
+        instructions="Finish the answer with QED.", input="What is 13 * 24?"
     )
     print(response)
 
@@ -42,7 +41,7 @@ async def test_chat(client: openai.AsyncOpenAI):
             {"role": "user", "content": "What is 5 * 3?"},
             {"role": "assistant", "content": "15. QED."},
             {"role": "user", "content": "Multiply the result by 2."},
-        ],
+        ]
     )
     print(response)
 
@@ -54,12 +53,7 @@ async def test_chat(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_chat_with_input_type(client: openai.AsyncOpenAI):
     response = await client.responses.create(
-        input=[
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Hello!"}],
-            },
-        ],
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "Hello!"}]}]
     )
     print(response)
     assert response.status == "completed"
@@ -80,10 +74,7 @@ async def test_logprobs(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_streaming(client: openai.AsyncOpenAI):
-    stream = await client.responses.create(
-        input="What is 13 * 24?",
-        stream=True,
-    )
+    stream = await client.responses.create(input="What is 13 * 24?", stream=True)
     events = [event async for event in stream]
     assert isinstance(events[0], openai_responses_types.ResponseCreatedEvent)
     assert any(

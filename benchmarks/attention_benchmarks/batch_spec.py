@@ -114,11 +114,7 @@ def format_batch_spec(requests: list[BatchRequest]) -> str:
     Returns:
         Formatted string describing the batch
     """
-    kinds = {
-        "prefill": [],
-        "extend": [],
-        "decode": [],
-    }
+    kinds = {"prefill": [], "extend": [], "decode": []}
 
     for req in requests:
         tup = (req.q_len, req.kv_len)
@@ -174,9 +170,7 @@ def reorder_for_flashinfer(requests: list[BatchRequest]) -> list[BatchRequest]:
     return decodes + non_decodes
 
 
-def split_by_type(
-    requests: list[BatchRequest],
-) -> dict[str, list[BatchRequest]]:
+def split_by_type(requests: list[BatchRequest]) -> dict[str, list[BatchRequest]]:
     """
     Split requests by type for analysis.
 
@@ -186,11 +180,7 @@ def split_by_type(
     Returns:
         Dict with keys: 'decode', 'prefill', 'extend'
     """
-    result = {
-        "decode": [],
-        "prefill": [],
-        "extend": [],
-    }
+    result = {"decode": [], "prefill": [], "extend": []}
 
     for req in requests:
         if req.is_decode:

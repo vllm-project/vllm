@@ -28,7 +28,7 @@ def glm47_tokenizer():
 def sample_tools():
     return [
         ChatCompletionToolsParam(
-            function=FunctionDefinition(name="get_current_date", parameters={}),
+            function=FunctionDefinition(name="get_current_date", parameters={})
         ),
         ChatCompletionToolsParam(
             function=FunctionDefinition(
@@ -40,7 +40,7 @@ def sample_tools():
                         "date": {"type": "string"},
                     },
                 },
-            ),
+            )
         ),
     ]
 

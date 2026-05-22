@@ -12,10 +12,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-MODELS = [
-    "ISTA-DASLab/Qwen3-0.6B-RTN-NVFP4",
-    "ISTA-DASLab/Qwen3-0.6B-RTN-MXFP4",
-]
+MODELS = ["ISTA-DASLab/Qwen3-0.6B-RTN-NVFP4", "ISTA-DASLab/Qwen3-0.6B-RTN-MXFP4"]
 DTYPE = ["bfloat16"]
 EAGER = [True, False]
 

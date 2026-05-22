@@ -95,9 +95,7 @@ class ExampleConnector(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config,
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
@@ -229,8 +227,7 @@ class ExampleConnector(KVConnectorBase_V1):
         """
 
         def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
+            layer: torch.Tensor, slot_mapping: torch.Tensor
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
@@ -262,9 +259,7 @@ class ExampleConnector(KVConnectorBase_V1):
         return
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
@@ -311,8 +306,7 @@ class ExampleConnector(KVConnectorBase_V1):
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -390,10 +384,7 @@ class ExampleConnector(KVConnectorBase_V1):
     # Helper functions
     # ==============================
 
-    def _found_match_for_request(
-        self,
-        request: "Request",
-    ) -> bool:
+    def _found_match_for_request(self, request: "Request") -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
             list(request.prompt_token_ids or []),
@@ -401,9 +392,7 @@ class ExampleConnector(KVConnectorBase_V1):
         )
 
     def _found_match_for_prompt(
-        self,
-        prompt_token_ids: list[int],
-        mm_hashes: list[str],
+        self, prompt_token_ids: list[int], mm_hashes: list[str]
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
@@ -416,10 +405,7 @@ class ExampleConnector(KVConnectorBase_V1):
         return os.path.exists(foldername)
 
     def _generate_foldername_debug(
-        self,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
-        create_folder=False,
+        self, token_ids: torch.Tensor, mm_hashes: list[str], create_folder=False
     ) -> str:
         """Generate a folder name based on the hash of the bytes of the input
         ids.
@@ -438,10 +424,7 @@ class ExampleConnector(KVConnectorBase_V1):
         return foldername
 
     def _generate_filename_debug(
-        self,
-        layer_name: str,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
+        self, layer_name: str, token_ids: torch.Tensor, mm_hashes: list[str]
     ) -> str:
         """Generate a file name based on the layer name and the hash
         of the bytes of the input ids.

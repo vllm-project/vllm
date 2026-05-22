@@ -39,9 +39,7 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 
 
 def build_paged_kv_metadata(
-    seq_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    block_size: int,
+    seq_lens: torch.Tensor, block_tables: torch.Tensor, block_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build paged-KV indptr/indices/last_page_lens from seq_lens + block_tables."""
     kv_indptr = [0]
@@ -128,10 +126,7 @@ def make_nvfp4_kv_cache(
 
 
 def make_quantized_kv_cache(
-    kv_cache: torch.Tensor,
-    kv_quant_dtype: torch.dtype,
-    block_size: int,
-    head_size: int,
+    kv_cache: torch.Tensor, kv_quant_dtype: torch.dtype, block_size: int, head_size: int
 ) -> tuple:
     """Quantize kv_cache based on dtype. Returns (kv_cache, kv_cache_sf,
     kv_scale, ref_kv_cache, is_nvfp4_kv)."""

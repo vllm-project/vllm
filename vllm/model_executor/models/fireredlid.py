@@ -38,10 +38,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -54,16 +51,8 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .conformer_encoder import ConformerEncoder
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsTranscription,
-)
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .whisper_utils import ISO639_1_SUPPORTED_LANGS
 
 logger = init_logger(__name__)
@@ -78,17 +67,10 @@ class FireRedLIDAudioInputs(TensorSchema):
     """
 
     input_features: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b", "t", "nmb", dynamic_dims={"t"}),
+        list[torch.Tensor] | None, TensorShape("b", "t", "nmb", dynamic_dims={"t"})
     ]
-    speech_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
-    fake_token_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
+    speech_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
+    fake_token_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
 
 
 FireRedLIDEncoder = ConformerEncoder
@@ -118,12 +100,7 @@ class FireRedLIDAttention(nn.Module):
     """Base attention with shared QKV/FC projections for the LID decoder."""
 
     def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, d_model: int, n_head: int, *, vllm_config: VllmConfig, prefix: str = ""
     ):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
@@ -205,9 +182,7 @@ class FireRedLIDCrossAttention(FireRedLIDAttention):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ) -> torch.Tensor:
         q, _ = self.w_qs(hidden_states)
         if encoder_hidden_states is not None:
@@ -239,37 +214,24 @@ class FireRedLIDDecoderLayer(nn.Module):
     """vLLM-native decoder layer while preserving FireRedLID parameter names."""
 
     def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, d_model: int, n_head: int, *, vllm_config: VllmConfig, prefix: str = ""
     ):
         super().__init__()
         self.self_attn_norm = nn.LayerNorm(d_model)
         self.self_attn = FireRedLIDSelfAttention(
-            d_model,
-            n_head,
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.self_attn",
+            d_model, n_head, vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
         )
 
         self.cross_attn_norm = nn.LayerNorm(d_model)
         self.cross_attn = FireRedLIDCrossAttention(
-            d_model,
-            n_head,
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.cross_attn",
+            d_model, n_head, vllm_config=vllm_config, prefix=f"{prefix}.cross_attn"
         )
 
         self.mlp_norm = nn.LayerNorm(d_model)
         self.mlp = FireRedLIDFFN(d_model, d_model * 4)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.self_attn_norm(hidden_states)
@@ -298,13 +260,10 @@ class FireRedLIDDecoder(nn.Module):
         self.scale = self.d_model**0.5
 
         self.tgt_word_emb = nn.Embedding(
-            getattr(config, "vocab_size", 120),
-            self.d_model,
-            padding_idx=self.pad_id,
+            getattr(config, "vocab_size", 120), self.d_model, padding_idx=self.pad_id
         )
         self.positional_encoding = FireRedLIDPositionalEmbedding(
-            self.d_model,
-            max_len=getattr(config, "pe_maxlen", 5000),
+            self.d_model, max_len=getattr(config, "pe_maxlen", 5000)
         )
 
         self.layer_stack = nn.ModuleList(
@@ -354,8 +313,7 @@ class FireRedLIDModel(nn.Module):
         )
 
         self.decoder = FireRedLIDDecoder(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "decoder"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "decoder")
         )
 
     def forward(
@@ -370,9 +328,7 @@ class FireRedLIDModel(nn.Module):
             else None
         )
         decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_hidden_states=enc_states,
+            input_ids=input_ids, positions=positions, encoder_hidden_states=enc_states
         )
         return decoder_outputs
 
@@ -401,8 +357,7 @@ class FireRedLIDProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.get_feature_extractor()
         return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=1,
+            target_sr=feature_extractor.sampling_rate, target_channels=1
         )
 
     @property
@@ -433,9 +388,7 @@ class FireRedLIDDummyInputsBuilder(BaseDummyInputsBuilder[FireRedLIDProcessingIn
         audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -444,9 +397,7 @@ class FireRedLIDMultiModalProcessor(
     EncDecMultiModalProcessor[FireRedLIDProcessingInfo]
 ):
     def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
+        self, prompt: str | list[int], mm_items: MultiModalDataItems
     ) -> str | list[int]:
         # Dummy encoder prompt for profiling (encoder only processes audio).
         return [0]
@@ -461,24 +412,16 @@ class FireRedLIDMultiModalProcessor(
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
+            mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
@@ -510,11 +453,7 @@ class FireRedLIDMultiModalProcessor(
             return [0] * num_tokens
 
         return [
-            PromptReplacement(
-                modality="audio",
-                target=[0],
-                replacement=get_replacement,
-            )
+            PromptReplacement(modality="audio", target=[0], replacement=get_replacement)
         ]
 
 
@@ -604,8 +543,7 @@ class FireRedLIDForConditionalGeneration(
             tower_targets={"audio": FireRedLIDEncoder},
         ):
             self.model = FireRedLIDModel(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
         self.proj_out = ParallelLMHead(
@@ -618,8 +556,7 @@ class FireRedLIDForConditionalGeneration(
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            getattr(config, "vocab_size", 120),
-            scale=logit_scale,
+            getattr(config, "vocab_size", 120), scale=logit_scale
         )
 
     def forward(
@@ -632,9 +569,7 @@ class FireRedLIDForConditionalGeneration(
         if encoder_outputs is None:
             encoder_outputs = []
         decoder_outputs = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_outputs=encoder_outputs,
+            input_ids=input_ids, positions=positions, encoder_outputs=encoder_outputs
         )
         return decoder_outputs
 
@@ -661,16 +596,12 @@ class FireRedLIDForConditionalGeneration(
             dtype = tensors[0].dtype
             feat_dim = tensors[0].shape[-1]
             lengths = torch.tensor(
-                [t.size(0) for t in tensors],
-                device=device,
-                dtype=torch.int32,
+                [t.size(0) for t in tensors], device=device, dtype=torch.int32
             )
             t_max = int(lengths.max().item())
             # Pre-allocate zero-padded batch tensor
             speech = torch.zeros(
-                (len(tensors), t_max, feat_dim),
-                device=device,
-                dtype=dtype,
+                (len(tensors), t_max, feat_dim), device=device, dtype=dtype
             )
             for i, t in enumerate(tensors):
                 speech[i, : t.size(0)] = t
@@ -685,8 +616,7 @@ class FireRedLIDForConditionalGeneration(
         )
 
         enc_output, enc_lengths = self.model.get_encoder_outputs(
-            speech=speech,
-            speech_lengths=speech_lengths,
+            speech=speech, speech_lengths=speech_lengths
         )
 
         # vLLM expects one 2D tensor per multimodal item. Slice each batch entry
@@ -748,21 +678,15 @@ class FireRedLIDForConditionalGeneration(
         prompt: PromptType = {
             "encoder_prompt": {
                 "prompt": "",
-                "multi_modal_data": {
-                    "audio": (audio, int(stt_config.sample_rate)),
-                },
+                "multi_modal_data": {"audio": (audio, int(stt_config.sample_rate))},
             },
-            "decoder_prompt": {
-                "prompt": "<sos>",
-            },
+            "decoder_prompt": {"prompt": "<sos>"},
         }
         return prompt
 
     @classmethod
     def get_speech_to_text_config(
-        cls,
-        model_config: ModelConfig,
-        task_type: Literal["transcribe", "translate"],
+        cls, model_config: ModelConfig, task_type: Literal["transcribe", "translate"]
     ) -> SpeechToTextConfig:
         processor = cached_processor_from_config(model_config)
         return SpeechToTextConfig(

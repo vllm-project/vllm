@@ -18,11 +18,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -143,8 +139,7 @@ class SimpleCPUOffloadScheduler:
         self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
-                kv_cache_config,
-                vllm_config.scheduler_config.max_num_batched_tokens,
+                kv_cache_config, vllm_config.scheduler_config.max_num_batched_tokens
             )
         else:
             self._target_free = 0
@@ -248,20 +243,14 @@ class SimpleCPUOffloadScheduler:
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]
             self.cpu_block_pool.touch(pin_blocks)
-            self._pending_cpu_hits[request.request_id] = (
-                cpu_hit_blocks,
-                hit_length,
-            )
+            self._pending_cpu_hits[request.request_id] = (cpu_hit_blocks, hit_length)
             return hit_length, True
         return 0, False
 
     # TODO(yifan): this API now only matches the suffix part of the prefix cache. A more
     # general API should scan blocks in both GPU and CPU block pool in a single pass.
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> None:
         req_id = request.request_id
         block_ids_by_group = blocks.get_block_ids()
@@ -374,8 +363,7 @@ class SimpleCPUOffloadScheduler:
         )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> SimpleCPUOffloadMetadata:
         # --- Stores ---
         store_event = -1
@@ -433,9 +421,7 @@ class SimpleCPUOffloadScheduler:
         else:
             return self._prepare_eager_store_specs(scheduler_output)
 
-    def _prepare_lazy_store_specs(
-        self,
-    ) -> tuple[list[int], list[int], list[str]]:
+    def _prepare_lazy_store_specs(self) -> tuple[list[int], list[int], list[str]]:
         """Single-pass cursor walk: offload cached GPU blocks near eviction.
 
         Walks the GPU free queue from the cursor, counting blocks that are
@@ -715,9 +701,7 @@ class SimpleCPUOffloadScheduler:
         return bool(self._store_event_to_blocks)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """Always returns (False, None). GPU blocks are protected by ref_cnt,
         so the scheduler can free blocks immediately."""
@@ -749,9 +733,7 @@ class SimpleCPUOffloadScheduler:
         return False, None
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         return self.request_finished(request, block_ids=[])
 

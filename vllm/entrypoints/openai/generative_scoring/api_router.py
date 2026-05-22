@@ -81,7 +81,5 @@ async def init_generative_scoring_state(
     )
 
     state.serving_generative_scoring = OpenAIServingGenerativeScoring(
-        engine_client,
-        state.openai_serving_models,
-        request_logger=request_logger,
+        engine_client, state.openai_serving_models, request_logger=request_logger
     )

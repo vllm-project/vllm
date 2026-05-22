@@ -172,10 +172,7 @@ class FSDPTrainWorker:
                     prefix = name[: -len(".down_proj")]
                     num_experts = tensor.shape[0]
                     for i in range(num_experts):
-                        yield (
-                            f"{prefix}.{i}.down_proj.weight",
-                            tensor[i].contiguous(),
-                        )
+                        yield (f"{prefix}.{i}.down_proj.weight", tensor[i].contiguous())
                     del tensor
                 else:
                     yield name, tensor
@@ -187,8 +184,7 @@ class FSDPTrainWorker:
             packed_buffer_size_bytes=1024 * 1024 * 1024,  # 1 GB
         )
         IPCWeightTransferEngine.trainer_send_weights(
-            iterator=_full_param_iter(),
-            trainer_args=trainer_args,
+            iterator=_full_param_iter(), trainer_args=trainer_args
         )
 
 
@@ -200,19 +196,12 @@ class DataParallelInferenceEngine:
     finish initializing, and exposes generation / weight-sync helpers.
     """
 
-    def __init__(
-        self,
-        model: str,
-        pgs: list,
-        dp_master_ip: str,
-        dp_master_port: int,
-    ):
+    def __init__(self, model: str, pgs: list, dp_master_ip: str, dp_master_port: int):
         dp_size = len(pgs)
         self.llm_actors = []
         for r in range(dp_size):
             sched = PlacementGroupSchedulingStrategy(
-                placement_group=pgs[r],
-                placement_group_capture_child_tasks=True,
+                placement_group=pgs[r], placement_group_capture_child_tasks=True
             )
             actor = (
                 ray.remote(num_cpus=0, num_gpus=0)(MyLLM)
@@ -298,13 +287,7 @@ class DataParallelInferenceEngine:
 
 
 def main():
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-            }
-        }
-    )
+    ray.init(runtime_env={"env_vars": {"VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}})
 
     assert TRAIN_GPU_FRACTION + VLLM_GPU_FRACTION <= 1.0, (
         "Train + vLLM GPU fractions must sum to at most 1.0 per bundle."
@@ -329,19 +312,14 @@ def main():
     # Launch FSDP training workers, one per PG.
     scheduling = [
         PlacementGroupSchedulingStrategy(
-            placement_group=pgs[r],
-            placement_group_capture_child_tasks=True,
+            placement_group=pgs[r], placement_group_capture_child_tasks=True
         )
         for r in range(FSDP_WORLD_SIZE)
     ]
 
     fsdp_workers = [
         FSDPTrainWorker.options(scheduling_strategy=scheduling[r]).remote(
-            local_model_path,
-            r,
-            FSDP_WORLD_SIZE,
-            fsdp_master_addr,
-            fsdp_master_port,
+            local_model_path, r, FSDP_WORLD_SIZE, fsdp_master_addr, fsdp_master_port
         )
         for r in range(FSDP_WORLD_SIZE)
     ]

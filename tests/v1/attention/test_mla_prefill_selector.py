@@ -73,7 +73,7 @@ class TestGetMLAPrefillBackend:
             return
 
         vllm_config = _make_vllm_config(
-            mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
+            mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
@@ -82,16 +82,14 @@ class TestGetMLAPrefillBackend:
             )
 
             with patch.object(
-                flash_attn_cls,
-                "validate_configuration",
-                return_value=[],
+                flash_attn_cls, "validate_configuration", return_value=[]
             ):
                 backend = get_mla_prefill_backend(vllm_config)
                 assert backend.get_name() == "FLASH_ATTN"
 
     def test_explicit_backend_invalid_raises_error(self):
         vllm_config = _make_vllm_config(
-            mla_prefill_backend=MLAPrefillBackendEnum.FLASHINFER,
+            mla_prefill_backend=MLAPrefillBackendEnum.FLASHINFER
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
@@ -104,7 +102,7 @@ class TestGetMLAPrefillBackend:
 
     def test_explicit_backend_import_error_raises(self):
         vllm_config = _make_vllm_config(
-            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
@@ -137,9 +135,7 @@ class TestGetMLAPrefillBackend:
             )
 
             with patch.object(
-                flash_attn_cls,
-                "validate_configuration",
-                return_value=[],
+                flash_attn_cls, "validate_configuration", return_value=[]
             ):
                 backend = get_mla_prefill_backend(vllm_config)
                 assert backend.get_name() == "FLASH_ATTN"
@@ -170,10 +166,7 @@ class TestAutoSelectMLAPrefillBackend:
             ),
             patch.object(trtllm_cls, "validate_configuration", return_value=[]),
         ):
-            backend = _auto_select_mla_prefill_backend(
-                capability,
-                selector_config,
-            )
+            backend = _auto_select_mla_prefill_backend(capability, selector_config)
             assert backend.get_name() == "TRTLLM_RAGGED"
 
     def test_all_fail_raises_error(self):
@@ -192,10 +185,7 @@ class TestAutoSelectMLAPrefillBackend:
         with patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class):
             _auto_select_mla_prefill_backend.cache_clear()
             with pytest.raises(ValueError, match="No valid MLA"):
-                _auto_select_mla_prefill_backend(
-                    capability,
-                    selector_config,
-                )
+                _auto_select_mla_prefill_backend(capability, selector_config)
 
 
 class TestBackendValidation:
@@ -214,9 +204,7 @@ class TestBackendValidation:
 
         vllm_config = _make_vllm_config(
             model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
+                qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
             )
         )
         capability = DeviceCapability(major=10, minor=0)
@@ -227,16 +215,13 @@ class TestBackendValidation:
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
-                capability,
-                selector_config,
+                capability, selector_config
             )
             assert len(invalid_reasons) == 0
 
         vllm_config_invalid = _make_vllm_config(
             model_config=_make_mock_model_config(
-                qk_nope_head_dim=64,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
+                qk_nope_head_dim=64, qk_rope_head_dim=64, v_head_dim=128
             )
         )
         selector_config_invalid = MLAPrefillSelectorConfig(
@@ -246,8 +231,7 @@ class TestBackendValidation:
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
-                capability,
-                selector_config_invalid,
+                capability, selector_config_invalid
             )
             assert len(invalid_reasons) == 1
             assert "DeepSeek R1 MLA dimensions" in invalid_reasons[0]
@@ -258,14 +242,14 @@ class TestMLAPrefillBackendParsing:
 
     def test_valid_string_parses_to_enum(self):
         config = AttentionConfig(
-            mla_prefill_backend="FLASH_ATTN",  # type: ignore[arg-type]
+            mla_prefill_backend="FLASH_ATTN"  # type: ignore[arg-type]
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_invalid_string_raises_error(self):
         with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
             AttentionConfig(
-                mla_prefill_backend="NONEXISTENT",  # type: ignore[arg-type]
+                mla_prefill_backend="NONEXISTENT"  # type: ignore[arg-type]
             )
 
 
@@ -277,13 +261,11 @@ class TestMLAPrefillBackendConfig:
         assert config.mla_prefill_backend is None
 
     def test_explicit_flash_attn_backend(self):
-        config = AttentionConfig(
-            mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
-        )
+        config = AttentionConfig(mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN)
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_explicit_trtllm_ragged_backend(self):
         config = AttentionConfig(
-            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED

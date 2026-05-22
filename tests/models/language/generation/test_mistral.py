@@ -7,16 +7,11 @@ import pytest
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers.mistral_tool_parser import (
-    MistralToolCall,
-    MistralToolParser,
-)
+from vllm.tool_parsers.mistral_tool_parser import MistralToolCall, MistralToolParser
 
 from ...utils import check_logprobs_close
 
-MODELS = [
-    "mistralai/Mistral-7B-Instruct-v0.3",
-]
+MODELS = ["mistralai/Mistral-7B-Instruct-v0.3"]
 
 MISTRAL_FORMAT_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
@@ -175,10 +170,7 @@ def test_models(
         )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 

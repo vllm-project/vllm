@@ -210,8 +210,7 @@ def consumer(
 
 
 def can_actually_p2p(
-    batch_src: Sequence[int],
-    batch_tgt: Sequence[int],
+    batch_src: Sequence[int], batch_tgt: Sequence[int]
 ) -> Sequence[bool]:
     """
     Usually, checking if P2P access is enabled can be done by

@@ -19,10 +19,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -167,9 +164,7 @@ class Blip2QFormerSelfOutput(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        input_tensor: torch.Tensor,
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
@@ -205,8 +200,7 @@ class Blip2QFormerAttention(nn.Module):
         encoder_hidden_states: torch.FloatTensor | None = None,
     ) -> tuple[torch.Tensor]:
         self_output = self.attention(
-            hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+            hidden_states, encoder_hidden_states=encoder_hidden_states
         )
         attention_output = self.output(self_output, hidden_states)
 
@@ -235,9 +229,7 @@ class Blip2QFormerOutput(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        input_tensor: torch.Tensor,
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
@@ -298,8 +290,7 @@ class Blip2QFormerLayer(nn.Module):
 
             if self.has_cross_attention:
                 query_attention_output = self.crossattention(
-                    query_attention_output,
-                    encoder_hidden_states=encoder_hidden_states,
+                    query_attention_output, encoder_hidden_states=encoder_hidden_states
                 )
 
             layer_output = apply_chunking_to_forward(
@@ -407,9 +398,7 @@ class Blip2QFormerModel(nn.Module):
         )
 
     def forward(
-        self,
-        query_embeds: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor,
+        self, query_embeds: torch.FloatTensor, encoder_hidden_states: torch.FloatTensor
     ) -> torch.Tensor:
         query_length = query_embeds.shape[1]
 
@@ -480,16 +469,11 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -544,8 +528,7 @@ class Blip2ForConditionalGeneration(
         vision_config = config.vision_config
         self._vision_tokens_per_image = (
             get_blip_num_patches(
-                image_size=vision_config.image_size,
-                patch_size=vision_config.patch_size,
+                image_size=vision_config.image_size, patch_size=vision_config.patch_size
             )
             + 1  # include class token
         )
@@ -598,10 +581,7 @@ class Blip2ForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            return Blip2ImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return Blip2ImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("This line should be unreachable.")
 
@@ -627,8 +607,7 @@ class Blip2ForConditionalGeneration(
 
         query_tokens = self.query_tokens.expand(image_features.shape[0], -1, -1)
         query_output = self.qformer(
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_features,
+            query_embeds=query_tokens, encoder_hidden_states=image_features
         )
 
         return self.language_projection(query_output)
@@ -687,10 +666,7 @@ class Blip2ForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -704,10 +680,7 @@ class Blip2ForConditionalGeneration(
             tower_model="vision_model",
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         if num_image_tokens <= 0:
             return 0
         assert num_image_tokens % self.config.num_query_tokens == 0, (
@@ -717,10 +690,7 @@ class Blip2ForConditionalGeneration(
         num_images = num_image_tokens / self.config.num_query_tokens
         return num_images * self._vision_tokens_per_image
 
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         if num_vision_tokens <= 0:
             return 0
         assert num_vision_tokens % self._vision_tokens_per_image == 0, (

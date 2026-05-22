@@ -27,18 +27,11 @@ async def test_score_api_query_text_vs_docs_image(server: RemoteOpenAIServer):
     red_image = make_base64_image(64, 64, color=(255, 0, 0))
     blue_image = make_base64_image(64, 64, color=(0, 0, 255))
 
-    documents = [
-        make_image_mm_param(red_image),
-        make_image_mm_param(blue_image),
-    ]
+    documents = [make_image_mm_param(red_image), make_image_mm_param(blue_image)]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "queries": query, "documents": documents},
     )
     score_response.raise_for_status()
     scores = ScoreResponse.model_validate(score_response.json())
@@ -60,11 +53,7 @@ async def test_score_api_query_text_vs_docs_mix(server: RemoteOpenAIServer):
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "queries": query, "documents": documents},
     )
     score_response.raise_for_status()
     scores = ScoreResponse.model_validate(score_response.json())
@@ -80,18 +69,11 @@ async def test_score_api_query_image_vs_docs_text(server: RemoteOpenAIServer):
     red_image = make_base64_image(64, 64, color=(255, 0, 0))
     image_query = make_image_mm_param(red_image, text="red color")
 
-    documents = [
-        "Describe the red object.",
-        "The capital of France is Paris.",
-    ]
+    documents = ["Describe the red object.", "The capital of France is Paris."]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": image_query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "queries": image_query, "documents": documents},
     )
     score_response.raise_for_status()
     scores = ScoreResponse.model_validate(score_response.json())
@@ -109,10 +91,7 @@ async def test_rerank_api_query_text_vs_docs_image(server: RemoteOpenAIServer):
     red_image = make_base64_image(64, 64, color=(255, 0, 0))
     blue_image = make_base64_image(64, 64, color=(0, 0, 255))
 
-    documents = [
-        make_image_mm_param(red_image),
-        make_image_mm_param(blue_image),
-    ]
+    documents = [make_image_mm_param(red_image), make_image_mm_param(blue_image)]
 
     rerank_response = requests.post(
         server.url_for("rerank"),
@@ -143,11 +122,7 @@ async def test_rerank_api_query_text_vs_docs_mix(server: RemoteOpenAIServer):
 
     rerank_response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "query": query, "documents": documents},
     )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
@@ -167,18 +142,11 @@ async def test_rerank_api_query_image_vs_docs_text(server: RemoteOpenAIServer):
     red_image = make_base64_image(64, 64, color=(255, 0, 0))
     image_query = make_image_mm_param(red_image, text="red color")
 
-    documents = [
-        "Describe the red object.",
-        "The capital of France is Paris.",
-    ]
+    documents = ["Describe the red object.", "The capital of France is Paris."]
 
     rerank_response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": image_query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "query": image_query, "documents": documents},
     )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())

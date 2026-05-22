@@ -15,13 +15,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-)
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .cutlass import CutlassInt8ScaledMMLinearKernel
-from .ScaledMMLinearKernel import (
-    Int8ScaledMMLinearLayerConfig,
-)
+from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
 class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
@@ -42,9 +38,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
 
         replace_parameter(
-            layer,
-            w_q_name,
-            torch.nn.Parameter(w_q.t().data, requires_grad=False),
+            layer, w_q_name, torch.nn.Parameter(w_q.t().data, requires_grad=False)
         )
 
         # WEIGHT SCALE
@@ -56,9 +50,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+            layer, w_s_name, torch.nn.Parameter(weight_scale.data, requires_grad=False)
         )
 
         # INPUT SCALE
@@ -67,9 +59,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
             if self.config.input_symmetric:
                 replace_parameter(
-                    layer,
-                    i_s_name,
-                    torch.nn.Parameter(i_s.max(), requires_grad=False),
+                    layer, i_s_name, torch.nn.Parameter(i_s.max(), requires_grad=False)
                 )
                 setattr(layer, i_zp_name, None)
             else:
@@ -83,17 +73,13 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
                 scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
                 replace_parameter(
-                    layer,
-                    i_s_name,
-                    torch.nn.Parameter(scale, requires_grad=False),
+                    layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
                 )
 
                 # AZP loaded as int8 but used as int32
                 azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
                 replace_parameter(
-                    layer,
-                    i_zp_name,
-                    torch.nn.Parameter(azp, requires_grad=False),
+                    layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
                 )
         else:
             setattr(layer, i_s_name, None)
@@ -111,18 +97,13 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                 # Fold azp into azp_adj for the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
             setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
+                layer, azp_adj_name, torch.nn.Parameter(azp_adj, requires_grad=False)
             )
         else:
             setattr(layer, azp_adj_name, None)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
@@ -164,19 +145,10 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
-            A,
-            B,
-            As,
-            Bs,
-            list(self.weight_group_shape),
-            self.config.out_dtype,
+            A, B, As, Bs, list(self.weight_group_shape), self.config.out_dtype
         )
 
 

@@ -240,9 +240,7 @@ class SignalCallback:
         self._event = threading.Event()
         self._stopped = False
         self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name="signal-callback",
+            target=self._run, daemon=True, name="signal-callback"
         )
         self._thread.start()
 
@@ -359,8 +357,7 @@ class CoreEngineActorManager:
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
         env_vars_list = get_env_vars_to_copy(
-            destination=actor_class.__name__,
-            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+            destination=actor_class.__name__, exclude_vars=WORKER_SPECIFIC_ENV_VARS
         )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
@@ -386,11 +383,7 @@ class CoreEngineActorManager:
 
             ip = parallel_config.data_parallel_master_ip
             store = create_tcp_store(
-                ip,
-                0,
-                is_master=True,
-                world_size=-1,
-                wait_for_workers=False,
+                ip, 0, is_master=True, world_size=-1, wait_for_workers=False
             )
             parallel_config._coord_store_port = store.port
             self._coord_store = store
@@ -442,8 +435,7 @@ class CoreEngineActorManager:
                 ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
-                        placement_group=pg,
-                        placement_group_bundle_index=world_size,
+                        placement_group=pg, placement_group_bundle_index=world_size
                     ),
                     runtime_env=runtime_env,
                 )
@@ -741,9 +733,7 @@ class CoreEngineActorManager:
                     bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
 
                 pg = ray.util.placement_group(
-                    name=f"dp_rank_{rank}",
-                    strategy="STRICT_PACK",
-                    bundles=bundles,
+                    name=f"dp_rank_{rank}", strategy="STRICT_PACK", bundles=bundles
                 )
                 placement_groups.append(pg)
 
@@ -818,8 +808,7 @@ class CoreEngineActorManager:
                 ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
-                        placement_group=pg,
-                        placement_group_bundle_index=world_size,
+                        placement_group=pg, placement_group_bundle_index=world_size
                     ),
                     runtime_env=runtime_env,
                 )
@@ -953,8 +942,7 @@ class CoreEngineActorManager:
 
 
 def get_engine_zmq_addresses(
-    vllm_config: VllmConfig,
-    num_api_servers: int = 1,
+    vllm_config: VllmConfig, num_api_servers: int = 1
 ) -> EngineZmqAddresses:
     """Allocate ZMQ addresses for engine-client communication."""
     parallel_config = vllm_config.parallel_config
@@ -1035,8 +1023,7 @@ def launch_core_engines(
 
     if run_coordinator:
         coordinator = DPCoordinator(
-            parallel_config,
-            enable_wave_coordination=vllm_config.model_config.is_moe,
+            parallel_config, enable_wave_coordination=vllm_config.model_config.is_moe
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (

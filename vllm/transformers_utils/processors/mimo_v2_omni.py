@@ -204,11 +204,7 @@ def _transform_batch(
 
 
 def _transform_single(
-    img: Any,
-    factor: int,
-    min_px: int,
-    max_px: int,
-    device: torch.device | None = None,
+    img: Any, factor: int, min_px: int, max_px: int, device: torch.device | None = None
 ) -> tuple[torch.Tensor, int, int]:
     if isinstance(img, torch.Tensor):
         t = img.float()
@@ -507,10 +503,7 @@ class MiMoVLProcessor:
         if isinstance(src, (str, bytes)):
             src = _fetch_image(src)
         tensor, _, _ = _transform_single(
-            src,
-            factor=self.patch_size * self.merge_size,
-            device=self.device,
-            **kw,
+            src, factor=self.patch_size * self.merge_size, device=self.device, **kw
         )
         return tensor
 
@@ -560,8 +553,7 @@ class MiMoVLProcessor:
         if n % tp != 0:
             pad = tp - n % tp
             frames = torch.cat(
-                [frames, frames[-1:].repeat(pad, *([1] * (frames.ndim - 1)))],
-                dim=0,
+                [frames, frames[-1:].repeat(pad, *([1] * (frames.ndim - 1)))], dim=0
             )
             timestamps = torch.cat([timestamps, timestamps[-1:].repeat(pad)], dim=0)
 
@@ -1167,8 +1159,7 @@ class MiMoOmniProcessor(ProcessorMixin):
                         with contextlib.suppress(StopIteration):
                             contents.append(
                                 Content(
-                                    type="image",
-                                    content=ImageInput(image=next(img_it)),
+                                    type="image", content=ImageInput(image=next(img_it))
                                 )
                             )
                     elif mod == "video":
@@ -1185,23 +1176,18 @@ class MiMoOmniProcessor(ProcessorMixin):
                             if vid_type == "video":
                                 contents.append(
                                     Content(
-                                        type="video",
-                                        content=VideoInput(video=vid_item),
+                                        type="video", content=VideoInput(video=vid_item)
                                     )
                                 )
                             else:
                                 contents.append(
-                                    Content(
-                                        type="video_audio",
-                                        content=vid_item,
-                                    )
+                                    Content(type="video_audio", content=vid_item)
                                 )
                     elif mod == "audio":
                         with contextlib.suppress(StopIteration):
                             contents.append(
                                 Content(
-                                    type="audio",
-                                    content=AudioInput(audio=next(aud_it)),
+                                    type="audio", content=AudioInput(audio=next(aud_it))
                                 )
                             )
                 elif part:

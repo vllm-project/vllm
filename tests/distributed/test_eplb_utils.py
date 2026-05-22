@@ -13,9 +13,7 @@ from vllm.distributed.eplb.eplb_state import (
 
 
 def _make_model_state(
-    phy2log: torch.Tensor,
-    log2phy: torch.Tensor,
-    logcnt: torch.Tensor,
+    phy2log: torch.Tensor, log2phy: torch.Tensor, logcnt: torch.Tensor
 ) -> MagicMock:
     """Build a minimal EplbModelState mock with only the three map tensors."""
     state = MagicMock()

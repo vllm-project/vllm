@@ -43,9 +43,7 @@ def _temperature_kernel(
 
 
 def apply_temperature(
-    logits: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    temperature: torch.Tensor,
+    logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, temperature: torch.Tensor
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
@@ -164,9 +162,7 @@ def _gumbel_sample_kernel(
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
     logits = tl.load(
-        logits_ptr + token_idx * logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
+        logits_ptr + token_idx * logits_stride + block, mask=mask, other=float("-inf")
     )
     logits = logits.to(tl.float32)
 

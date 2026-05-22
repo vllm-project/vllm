@@ -75,14 +75,10 @@ def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=False,
-            is_static_input_scheme=True,
-            input_symmetric=True,
+            is_channelwise=False, is_static_input_scheme=True, input_symmetric=True
         ),
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=True,
-            is_static_input_scheme=False,
-            input_symmetric=False,
+            is_channelwise=True, is_static_input_scheme=False, input_symmetric=False
         ),
     ]
 
@@ -108,10 +104,7 @@ class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         pass
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         pass
 

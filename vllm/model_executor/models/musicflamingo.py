@@ -34,10 +34,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityData,
@@ -129,8 +126,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
             base
             ** (
                 torch.arange(0, dim, 2, dtype=torch.int64).to(
-                    device=device,
-                    dtype=torch.float,
+                    device=device, dtype=torch.float
                 )
                 / dim
             )
@@ -139,9 +135,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
 
     def _compute_position_angles(self, inv_freq):
         positions = torch.arange(
-            int(self.max_seq_len_cached),
-            device=inv_freq.device,
-            dtype=inv_freq.dtype,
+            int(self.max_seq_len_cached), device=inv_freq.device, dtype=inv_freq.dtype
         )
         positions = positions / self.max_seq_len_cached * (2 * pi)
         position_angles = positions.unsqueeze(-1) * inv_freq
@@ -151,9 +145,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
     @torch.no_grad()
     def forward(self, timestamps: Tensor, seq_len: int) -> tuple[Tensor, Tensor]:
         batch_positions = torch.arange(
-            timestamps.shape[0],
-            device=self.inv_freq.device,
-            dtype=self.inv_freq.dtype,
+            timestamps.shape[0], device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         batch_positions = batch_positions / self.max_seq_len_cached
         batch_freqs = batch_positions.unsqueeze(-1) * self.inv_freq
@@ -172,9 +164,7 @@ class MusicFlamingoFeatureInputs(AudioFlamingo3FeatureInputs):
     rote_timestamps: Annotated[
         torch.Tensor,
         TensorShape(
-            "num_chunks",
-            "num_audio_time_steps",
-            dynamic_dims={"num_audio_time_steps"},
+            "num_chunks", "num_audio_time_steps", dynamic_dims={"num_audio_time_steps"}
         ),
     ]
 
@@ -233,9 +223,7 @@ class MusicFlamingoDummyInputsBuilder(AudioFlamingo3DummyInputsBuilder):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -254,8 +242,7 @@ def _musicflamingo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 class MusicFlamingoMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
     def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
+        self, data: dict[str, torch.Tensor] | ModalityData[Any]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -276,10 +263,7 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         audio_data = mm_data.get("audio")
@@ -312,9 +296,7 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         return outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _musicflamingo_field_config(hf_inputs)
 
@@ -344,9 +326,7 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         def get_replacement_musicflamingo(item_idx: int):
             if feature_attention_mask is not None:
                 num_features = _count_audio_tokens_from_mask(
-                    feature_attention_mask,
-                    chunk_counts,
-                    item_idx,
+                    feature_attention_mask, chunk_counts, item_idx
                 )
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
@@ -362,8 +342,7 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             ]
 
             return PromptUpdateDetails.select_token_id(
-                full_tokens,
-                embed_token_id=audio_token_id,
+                full_tokens, embed_token_id=audio_token_id
             )
 
         return [
@@ -419,24 +398,18 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
         if isinstance(rote_timestamps, list):
             rote_timestamps = torch.cat(rote_timestamps, dim=0)
 
-        (
-            input_features,
-            feature_attention_mask,
-            chunk_counts,
-        ) = self._normalize_audio_feature_inputs(audio_input)
+        (input_features, feature_attention_mask, chunk_counts) = (
+            self._normalize_audio_feature_inputs(audio_input)
+        )
         hidden_states = self._encode_audio_features(
-            input_features,
-            feature_attention_mask,
+            input_features, feature_attention_mask
         )
         cos, sin = self.pos_emb(
-            rote_timestamps.to(hidden_states.device),
-            seq_len=hidden_states.shape[-2],
+            rote_timestamps.to(hidden_states.device), seq_len=hidden_states.shape[-2]
         )
         hidden_states = apply_rotary_time_emb(hidden_states, cos, sin)
         audio_features = self.multi_modal_projector(hidden_states)
 
         return self._group_audio_embeddings(
-            audio_features,
-            feature_attention_mask,
-            chunk_counts,
+            audio_features, feature_attention_mask, chunk_counts
         )

@@ -10,9 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchaudio.functional import melscale_fbanks
 from transformers import AutoFeatureExtractor, AutoProcessor, BatchFeature
-from transformers.feature_extraction_sequence_utils import (
-    SequenceFeatureExtractor,
-)
+from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 
 logger = logging.getLogger(__name__)
@@ -505,11 +503,7 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         return self.filterbank.get_seq_len(seq_len)
 
     def __call__(
-        self,
-        raw_speech,
-        sampling_rate=None,
-        return_tensors=None,
-        **kwargs,
+        self, raw_speech, sampling_rate=None, return_tensors=None, **kwargs
     ) -> BatchFeature:
         if isinstance(raw_speech, np.ndarray):
             raw_speech = [raw_speech]
@@ -546,18 +540,11 @@ class CohereASRProcessor(ProcessorMixin):
         super().__init__(feature_extractor, tokenizer)
 
     def __call__(
-        self,
-        text=None,
-        audio=None,
-        sampling_rate=None,
-        return_tensors=None,
-        **kwargs,
+        self, text=None, audio=None, sampling_rate=None, return_tensors=None, **kwargs
     ):
         if audio is not None:
             result = self.feature_extractor(
-                audio,
-                sampling_rate=sampling_rate,
-                return_tensors=return_tensors,
+                audio, sampling_rate=sampling_rate, return_tensors=return_tensors
             )
         else:
             result = BatchFeature()

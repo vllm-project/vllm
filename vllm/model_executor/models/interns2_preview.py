@@ -32,7 +32,6 @@ class InternS2PreviewProcessingInfo(Qwen3VLProcessingInfo):
 class InternS2PreviewForConditionalGeneration(Qwen3_5MoeForConditionalGeneration):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp.", "model.time_series.", "time_series."],
+            self, skip_prefixes=["mtp.", "model.time_series.", "time_series."]
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -15,9 +15,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.attention.backends.utils import (
-    make_local_attention_virtual_batches,
-)
+from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -29,8 +27,7 @@ from vllm.v1.kv_cache_interface import (
 
 @functools.lru_cache
 def create_chunked_local_attention_backend(
-    underlying_attn_backend: type[AttentionBackend],
-    attention_chunk_size: int,
+    underlying_attn_backend: type[AttentionBackend], attention_chunk_size: int
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_"
 

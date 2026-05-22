@@ -18,11 +18,7 @@ class TestWorkerExtension:
 
     def echo_args_kwargs(self, *args, **kwargs) -> dict[str, Any]:
         """Echo back both args and kwargs."""
-        return dict(
-            args=list(args),
-            kwargs=kwargs,
-            total_items=len(args) + len(kwargs),
-        )
+        return dict(args=list(args), kwargs=kwargs, total_items=len(args) + len(kwargs))
 
     def return_none(self, *args, **kwargs) -> None:
         """Test method that does not return anything"""

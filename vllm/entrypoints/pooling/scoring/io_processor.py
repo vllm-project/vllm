@@ -15,11 +15,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
-from ..typing import (
-    OfflineInputsContext,
-    OfflineOutputsContext,
-    PoolingServeContext,
-)
+from ..typing import OfflineInputsContext, OfflineOutputsContext, PoolingServeContext
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -165,10 +161,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ctx.engine_inputs = engine_inputs
         ctx.n_queries = len(scoring_data.data_1)
 
-    def post_process_online(
-        self,
-        ctx: ScoringServeContext,
-    ):
+    def post_process_online(self, ctx: ScoringServeContext):
         assert ctx.final_res_batch is not None
         assert isinstance(ctx.n_queries, int)
 
@@ -200,8 +193,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         return self._pre_process(scoring_data, tok_params)
 
     def post_process_offline(
-        self,
-        ctx: OfflineOutputsContext,
+        self, ctx: OfflineOutputsContext
     ) -> list[PoolingRequestOutput]:
         assert ctx.n_queries is not None
         return self._post_process(outputs=ctx.outputs, n_queries=ctx.n_queries)
@@ -299,10 +291,7 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):
     name = "flash-late-interaction"
 
-    def post_process_online(
-        self,
-        ctx: ScoringServeContext,
-    ):
+    def post_process_online(self, ctx: ScoringServeContext):
         assert ctx.query_final_res_batch is not None
         assert ctx.final_res_batch is not None
         assert isinstance(ctx.n_queries, int)
@@ -488,9 +477,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         tokenizer = self.tokenizer
 
         prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
-            data_1,
-            data_2,
-            model_config,
+            data_1, data_2, model_config
         )
 
         # Apply truncation before defining closures

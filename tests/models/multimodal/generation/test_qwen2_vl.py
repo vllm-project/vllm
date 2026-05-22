@@ -42,8 +42,7 @@ def qwen2_vl_chat_template(*query):
 IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     {
         "stop_sign": qwen2_vl_chat_template(
-            IMAGE_PLACEHOLDER,
-            "What is the biggest text's content in this image?",
+            IMAGE_PLACEHOLDER, "What is the biggest text's content in this image?"
         ),
         "cherry_blossom": qwen2_vl_chat_template(
             IMAGE_PLACEHOLDER,
@@ -59,7 +58,7 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
             VIDEO_PLACEHOLDER,
             "Describe this video with a short sentence ",
             "(no more than 20 words)",
-        ),
+        )
     }
 )
 
@@ -83,9 +82,7 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 
 def batch_make_image_embeddings(
-    image_batches: list[Image.Image | list[Image.Image]],
-    processor,
-    llm: VllmRunner,
+    image_batches: list[Image.Image | list[Image.Image]], processor, llm: VllmRunner
 ) -> list[Qwen2VLPromptImageEmbeddingInput]:
     """batched image embeddings for Qwen2-VL
 

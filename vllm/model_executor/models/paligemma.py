@@ -12,10 +12,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -109,17 +106,11 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
 
         return vision_encoder_info.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
 
@@ -165,16 +156,11 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -202,15 +188,13 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
             else:
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+                    image_width=image_size.width, image_height=image_size.height
                 )
 
             image_tokens = [image_token_id] * num_image_tokens
 
             return PromptUpdateDetails.select_token_id(
-                image_tokens + [bos_token_id],
-                embed_token_id=image_token_id,
+                image_tokens + [bos_token_id], embed_token_id=image_token_id
             )
 
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
@@ -227,9 +211,7 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         ]
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         mm_inputs = super().apply(inputs, timing_ctx)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
@@ -255,15 +237,8 @@ class PaliGemmaForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -341,35 +316,24 @@ class PaliGemmaForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            return PaliGemmaImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return PaliGemmaImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(
-        self,
-        vision_tower: SiglipVisionModel,
-        pixel_values: torch.Tensor,
+        self, vision_tower: SiglipVisionModel, pixel_values: torch.Tensor
     ) -> torch.Tensor:
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
         image_features = vision_tower(pixel_values.to(dtype=target_dtype))
 
         return image_features
 
-    def _process_image_input(
-        self,
-        image_input: PaliGemmaImageInputs,
-    ) -> torch.Tensor:
+    def _process_image_input(self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
         pixel_values = image_input["data"]
-        image_features = self._image_pixels_to_features(
-            self.vision_tower,
-            pixel_values,
-        )
+        image_features = self._image_pixels_to_features(self.vision_tower, pixel_values)
 
         return self.multi_modal_projector(image_features)
 
@@ -399,10 +363,7 @@ class PaliGemmaForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

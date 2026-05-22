@@ -107,10 +107,7 @@ class SingleWriterShmRingBuffer:
     """
 
     def __init__(
-        self,
-        data_buffer_size: int,
-        name: str | None = None,
-        create: bool = False,
+        self, data_buffer_size: int, name: str | None = None, create: bool = False
     ):
         self.data_buffer_size = data_buffer_size
         self.is_writer = create
@@ -156,10 +153,7 @@ class SingleWriterShmRingBuffer:
         )
 
     def handle(self):
-        return (
-            self.data_buffer_size,
-            self.shared_memory.name,
-        )
+        return (self.data_buffer_size, self.shared_memory.name)
 
     def clear(self) -> None:
         """Clear the ring buffer."""
@@ -250,15 +244,11 @@ class SingleWriterShmRingBuffer:
 
         # yield the data buffer and metadata
         data_buff = self.shared_memory.buf[buf_idx + self.MD_SIZE : buf_idx + size]
-        with (
-            memoryview(data_buff) as data_view,
-        ):
+        with memoryview(data_buff) as data_view:
             yield data_view, (id, size)
 
     def free_buf(
-        self,
-        is_free_fn: Callable[[int, memoryview], bool],
-        nbytes: int | None = None,
+        self, is_free_fn: Callable[[int, memoryview], bool], nbytes: int | None = None
     ) -> Iterable[int]:
         """
         Free a buffer of the given size. This is a no-op in shared memory,
@@ -633,12 +623,7 @@ class SingleWriterShmObjectStorage:
 
         return obj
 
-    def touch(
-        self,
-        key: str,
-        address: int = 0,
-        monotonic_id: int = 0,
-    ) -> None:
+    def touch(self, key: str, address: int = 0, monotonic_id: int = 0) -> None:
         """
         Touch an existing cached item to update its eviction status.
 

@@ -24,8 +24,7 @@ from vllm.multimodal.inputs import (
 def test_mm_kwargs_item_roundtrip():
     """Full roundtrip test with all three field types and multiple dtypes."""
     e1 = MultiModalFieldElem(
-        data=torch.zeros(1000, dtype=torch.bfloat16),
-        field=MultiModalBatchedField(),
+        data=torch.zeros(1000, dtype=torch.bfloat16), field=MultiModalBatchedField()
     )
     e2 = MultiModalFieldElem(
         data=torch.ones(100, dtype=torch.int32),
@@ -55,10 +54,7 @@ def test_mm_kwargs_item_roundtrip():
 
 def test_mm_kwargs_item_none_data():
     """Roundtrip with None data field."""
-    elem = MultiModalFieldElem(
-        data=None,
-        field=MultiModalSharedField(batch_size=2),
-    )
+    elem = MultiModalFieldElem(data=None, field=MultiModalSharedField(batch_size=2))
     item = MultiModalKwargsItem({"empty": elem})
     encoded = encode_mm_kwargs_item(item)
     decoded = decode_mm_kwargs_item(encoded)
@@ -70,10 +66,7 @@ def test_mm_kwargs_item_none_data():
 def test_mm_kwargs_item_nested_tensors():
     """Roundtrip with nested tensor data."""
     nested = [torch.randn(3, 4), torch.randn(5, 4)]
-    elem = MultiModalFieldElem(
-        data=nested,
-        field=MultiModalBatchedField(),
-    )
+    elem = MultiModalFieldElem(data=nested, field=MultiModalBatchedField())
     item = MultiModalKwargsItem({"nested": elem})
     encoded = encode_mm_kwargs_item(item)
     decoded = decode_mm_kwargs_item(encoded)
@@ -87,8 +80,7 @@ def test_mm_kwargs_item_nested_tensors():
 def test_mm_features_with_kwargs_data():
     """Test that MultiModalFeatures can carry serialized tensor data."""
     elem = MultiModalFieldElem(
-        data=torch.randn(5, 3, dtype=torch.float32),
-        field=MultiModalBatchedField(),
+        data=torch.randn(5, 3, dtype=torch.float32), field=MultiModalBatchedField()
     )
     item = MultiModalKwargsItem({"pixel_values": elem})
     encoded = encode_mm_kwargs_item(item)

@@ -10,9 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
-)
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -315,9 +313,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         # Sized for per-request batching (num_decodes + 1)
         self.num_splits_buffer = torch.empty(
-            (max_num_seqs + 1,),
-            dtype=torch.int32,
-            device=device,
+            (max_num_seqs + 1,), dtype=torch.int32, device=device
         )
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
@@ -341,9 +337,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                     vllm_config.scheduler_config.max_num_batched_tokens
                 )
                 self.compressed_slot_mapping_buffer = torch.empty(
-                    max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
+                    max_num_batched_tokens, dtype=torch.int64, device=self.device
                 )
 
             # Pre-allocate C128A topk buffers for CUDA graph address stability.
@@ -377,9 +371,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                     device=self.device,
                 )
                 self.c128a_decode_lens_buffer = torch.empty(
-                    max_num_batched_tokens,
-                    dtype=torch.int32,
-                    device=self.device,
+                    max_num_batched_tokens, dtype=torch.int32, device=self.device
                 )
                 self.c128a_prefill_buffer = torch.empty(
                     (max_num_batched_tokens, c128a_max_compressed),
@@ -388,8 +380,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 )
 
     def _build_fp8_mixed_decode_prefill(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
+        self, common_attn_metadata: CommonAttentionMetadata
     ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
         """Build FP8 metadata treating all tokens as one mixed batch.
 
@@ -420,8 +411,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return fp8_metadata
 
     def _build_fp8_separate_prefill_decode(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
+        self, common_attn_metadata: CommonAttentionMetadata
     ) -> "FlashMLASparseMetadata.FP8SeparatePrefillDecode":
         num_tokens = common_attn_metadata.num_actual_tokens
 
@@ -637,9 +627,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
     def _build_c128a_metadata(
-        self,
-        cm: CommonAttentionMetadata,
-        req_id_per_token: torch.Tensor,
+        self, cm: CommonAttentionMetadata, req_id_per_token: torch.Tensor
     ) -> dict[str, torch.Tensor | None]:
         """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio >= 128)."""
         # Must match SWA's decode split (no `require_uniform=True`) so
@@ -648,8 +636,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # query lengths.
         (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
+                cm, decode_threshold=self.reorder_batch_threshold or 1
             )
         )
 
@@ -749,7 +736,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
         else:
             (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
-                (q_concat_shape, torch.bfloat16),
+                (q_concat_shape, torch.bfloat16)
             )
 
     def _forward_bf16_kv(
@@ -769,11 +756,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             NUM_TOPK_TOKENS=topk_indices.shape[1],
         )
 
-        return self._bf16_flash_mla_kernel(
-            q,
-            kv_c_and_k_pe_cache,
-            topk_indices,
-        )
+        return self._bf16_flash_mla_kernel(q, kv_c_and_k_pe_cache, topk_indices)
 
     def _forward_fp8_kv_separate_prefill_decode(
         self,
@@ -814,10 +797,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         fp8_metadata = attn_metadata.fp8_extra_metadata
         assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
 
-        def _fp8_decode(
-            q: torch.Tensor,
-            topk_indices: torch.Tensor,
-        ) -> torch.Tensor:
+        def _fp8_decode(q: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
             # Reshape q: (num_decode_tokens, num_heads, head_dim)
             #         -> (num_decodes, seq_len, num_heads, head_dim)
             q = reshape_query_for_spec_decode(q, num_decodes)
@@ -853,8 +833,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
             if num_decode_tokens > 0:
                 attn_out[:num_decode_tokens] = _fp8_decode(
-                    q[:num_decode_tokens],
-                    topk_indices[:num_decode_tokens],
+                    q[:num_decode_tokens], topk_indices[:num_decode_tokens]
                 )
 
             assert fp8_metadata.prefill is not None
@@ -873,9 +852,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 chunk_topk_indices_workspace = topk_indices[chunk.tokens_slice]
 
                 attn_out[chunk.tokens_slice] = self._bf16_flash_mla_kernel(
-                    chunk_q,
-                    chunk_workspace,
-                    chunk_topk_indices_workspace,
+                    chunk_q, chunk_workspace, chunk_topk_indices_workspace
                 )
 
         return attn_out
@@ -1132,10 +1109,7 @@ def _build_c128a_topk_metadata_kernel(
             )
             count += tl.sum(is_valid.to(tl.int32), axis=0)
 
-        tl.store(
-            decode_lens_ptr + token_idx,
-            tl.where(is_valid_token, count, 0),
-        )
+        tl.store(decode_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
     else:
         # --- Prefill: write local indices ---
         pfx_idx = token_idx - num_decode_tokens

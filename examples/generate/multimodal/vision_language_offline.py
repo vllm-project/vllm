@@ -62,9 +62,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -84,10 +82,7 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
         f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
         for question in questions
     ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Bee-8B
@@ -111,10 +106,7 @@ def run_bee(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
@@ -137,10 +129,7 @@ def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # BLIP-2
@@ -151,14 +140,10 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-2.7b",
-        limit_mm_per_prompt={modality: 1},
+        model="Salesforce/blip2-opt-2.7b", limit_mm_per_prompt={modality: 1}
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Chameleon
@@ -173,10 +158,7 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Cheers
@@ -200,10 +182,7 @@ def run_cheers(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
@@ -223,10 +202,7 @@ def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestDat
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Deepseek-VL2
@@ -247,10 +223,7 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
         f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
@@ -290,9 +263,7 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        sampling_params=sampling_params,
+        engine_args=engine_args, prompts=prompts, sampling_params=sampling_params
     )
 
 
@@ -333,9 +304,7 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        sampling_params=sampling_params,
+        engine_args=engine_args, prompts=prompts, sampling_params=sampling_params
     )
 
 
@@ -350,10 +319,7 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Eagle2.5-VL
@@ -384,9 +350,7 @@ def run_eagle2_5(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -421,10 +385,7 @@ def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # EXAONE-4.5
@@ -464,10 +425,7 @@ def run_exaone4_5(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Fuyu
@@ -482,10 +440,7 @@ def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Gemma 3
@@ -509,10 +464,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         )
         for question in questions
     ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Gemma3N
@@ -536,10 +488,7 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
         )
         for question in questions
     ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # GLM-4v
@@ -568,9 +517,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [151329, 151336, 151338]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -610,10 +557,7 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # GLM-4.5V
@@ -653,10 +597,7 @@ def run_glm4_5v(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # GLM-4.5V-FP8
@@ -696,10 +637,7 @@ def run_glm4_5v_fp8(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # GLM-OCR
@@ -738,10 +676,7 @@ def run_glm_ocr(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # H2OVL-Mississippi
@@ -770,9 +705,7 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [tokenizer.eos_token_id]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -783,9 +716,7 @@ def run_hunyuan_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "tencent/HunyuanOCR"
 
     engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        limit_mm_per_prompt={modality: 1},
+        model=model_name, max_model_len=8192, limit_mm_per_prompt={modality: 1}
     )
 
     placeholder = "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
@@ -795,9 +726,7 @@ def run_hunyuan_vl(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=None,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=None
     )
 
 
@@ -840,10 +769,7 @@ def run_hyperclovax_seed_vision(
                                 "lens_keywords": "",
                                 "lens_local_keywords": "",
                             },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
+                            {"type": "text", "text": question},
                         ],
                     }
                 ]
@@ -854,13 +780,8 @@ def run_hyperclovax_seed_vision(
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "video",
-                            },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
+                            {"type": "video"},
+                            {"type": "text", "text": question},
                         ],
                     }
                 ]
@@ -877,13 +798,8 @@ def run_hyperclovax_seed_vision(
                                 "lens_keywords": "",
                                 "lens_local_keywords": "",
                             },
-                            {
-                                "type": "video",
-                            },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
+                            {"type": "video"},
+                            {"type": "text", "text": question},
                         ],
                     }
                 ]
@@ -892,15 +808,11 @@ def run_hyperclovax_seed_vision(
             raise ValueError(f"Unsupported modality: {modality}")
 
     prompts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=None,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=None
     )
 
 
@@ -916,9 +828,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
         # if you are running out of memory, you can reduce the "longest_edge".
         # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
-        mm_processor_kwargs={
-            "size": {"longest_edge": 3 * 364},
-        },
+        mm_processor_kwargs={"size": {"longest_edge": 3 * 364}},
         limit_mm_per_prompt={modality: 1},
     )
     prompts = [
@@ -926,10 +836,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Intern-S1
@@ -965,10 +872,7 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Intern-S1-Pro
@@ -1005,10 +909,7 @@ def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # InternVL
@@ -1051,9 +952,7 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -1078,10 +977,7 @@ def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Keye-VL
@@ -1115,10 +1011,7 @@ def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Keye-VL-1.5
@@ -1152,10 +1045,7 @@ def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Kimi-VL
@@ -1176,10 +1066,7 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Kimi-VL
@@ -1201,10 +1088,7 @@ def run_kimi_k25(questions: list[str], modality: str) -> ModelRequestData:
         tensor_parallel_size=4,
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # LightOnOCR
@@ -1217,14 +1101,10 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     engine_args = EngineArgs(
-        model="lightonai/LightOnOCR-1B",
-        limit_mm_per_prompt={modality: 1},
+        model="lightonai/LightOnOCR-1B", limit_mm_per_prompt={modality: 1}
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
@@ -1233,9 +1113,7 @@ def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "LiquidAI/LFM2-VL-450M"
 
     engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        limit_mm_per_prompt={modality: 1},
+        model=model_name, max_model_len=4096, limit_mm_per_prompt={modality: 1}
     )
 
     processor = AutoProcessor.from_pretrained(model_name)
@@ -1252,10 +1130,7 @@ def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
@@ -1287,9 +1162,7 @@ def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
     )
     stop_token_ids = None
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -1305,10 +1178,7 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # LLaVA-1.6/LLaVA-NeXT
@@ -1322,10 +1192,7 @@ def run_llava_next(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # LlaVA-NeXT-Video
@@ -1341,10 +1208,7 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # LLaVA-OneVision
@@ -1371,10 +1235,7 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
         limit_mm_per_prompt=mm_limit,
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Mantis
@@ -1393,9 +1254,7 @@ def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [128009]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -1454,12 +1313,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
 
     prompts = [
         tokenizer.apply_chat_template(
-            [
-                {
-                    "role": "user",
-                    "content": f"{placeholder}\n{question}",
-                }
-            ],
+            [{"role": "user", "content": f"{placeholder}\n{question}"}],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -1467,9 +1321,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     ]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -1508,10 +1360,7 @@ def run_minimax_vl_01(questions: list[str], modality: str) -> ModelRequestData:
         messages, add_generation_prompt=True, tokenize=False
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Mistral-3 HF-format
@@ -1532,10 +1381,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Molmo
@@ -1556,10 +1402,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Molmo2
@@ -1590,10 +1433,7 @@ def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Nemontron_VL
@@ -1628,9 +1468,7 @@ def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -1657,10 +1495,7 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # OpenPangu
@@ -1694,10 +1529,7 @@ def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Ovis
@@ -1723,10 +1555,7 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Ovis2_5
@@ -1758,10 +1587,7 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # PaddleOCR-VL
@@ -1784,10 +1610,7 @@ def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # PaliGemma
@@ -1797,14 +1620,10 @@ def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     # PaliGemma has special prompt format for VQA
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
-        model="google/paligemma-3b-mix-224",
-        limit_mm_per_prompt={modality: 1},
+        model="google/paligemma-3b-mix-224", limit_mm_per_prompt={modality: 1}
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # PaliGemma 2
@@ -1814,14 +1633,10 @@ def run_paligemma2(questions: list[str], modality: str) -> ModelRequestData:
     # PaliGemma 2 has special prompt format for VQA
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
-        model="google/paligemma2-3b-ft-docci-448",
-        limit_mm_per_prompt={modality: 1},
+        model="google/paligemma2-3b-ft-docci-448", limit_mm_per_prompt={modality: 1}
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Phi-3-Vision
@@ -1855,10 +1670,7 @@ def run_phi3v(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Phi-4-multimodal-instruct
@@ -1910,10 +1722,7 @@ def run_phi4siglip(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
     )
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Pixtral HF-format
@@ -1932,10 +1741,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen-VL
@@ -1953,10 +1759,7 @@ def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen2-VL
@@ -1969,10 +1772,7 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=5,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
-        mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
-        },
+        mm_processor_kwargs={"min_pixels": 28 * 28, "max_pixels": 1280 * 28 * 28},
         limit_mm_per_prompt=mm_limit,
     )
 
@@ -1996,10 +1796,7 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen2.5-VL
@@ -2039,10 +1836,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen2.5-Omni
@@ -2087,10 +1881,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         )
         for question in questions
     ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen3-VL-Dense
@@ -2130,10 +1921,7 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen3-VL-MOE
@@ -2173,10 +1961,7 @@ def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen3.5-Dense
@@ -2216,10 +2001,7 @@ def run_qwen3_5(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Qwen3.5-MoE
@@ -2259,10 +2041,7 @@ def run_qwen3_5_moe(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # R-4B
@@ -2276,15 +2055,10 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
     ]
 
     engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=16384,
-        limit_mm_per_prompt={modality: 1},
+        model=model_name, max_model_len=16384, limit_mm_per_prompt={modality: 1}
     )
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # SkyworkR1V
@@ -2314,9 +2088,7 @@ def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
+        engine_args=engine_args, prompts=prompts, stop_token_ids=stop_token_ids
     )
 
 
@@ -2330,9 +2102,7 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=8192,
         max_num_seqs=2,
         enforce_eager=True,
-        mm_processor_kwargs={
-            "max_image_size": {"longest_edge": 384},
-        },
+        mm_processor_kwargs={"max_image_size": {"longest_edge": 384}},
         limit_mm_per_prompt={modality: 1},
     )
     prompts = [
@@ -2340,10 +2110,7 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # Step3
@@ -2369,10 +2136,7 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # StepVL10B
@@ -2395,10 +2159,7 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 # omni-research/Tarsier-7b
@@ -2414,10 +2175,7 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     )
     prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
@@ -2454,10 +2212,7 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
         for question in questions
     ]
 
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
+    return ModelRequestData(engine_args=engine_args, prompts=prompts)
 
 
 model_example_map = {
@@ -2581,10 +2336,7 @@ def get_multi_modal_input(args):
             "Where is this image taken?",
         ]
 
-        return {
-            "data": image,
-            "questions": img_questions,
-        }
+        return {"data": image, "questions": img_questions}
 
     if args.modality == "video":
         # Input video and question
@@ -2744,10 +2496,7 @@ def parse_args():
         help="Number of frames to extract from the video.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     parser.add_argument(
         "--image-repeat-prob",
@@ -2880,11 +2629,7 @@ def main(args):
                 )
             # Repeat images with specified probability of "image_repeat_prob"
             inputs, inputs_with_empty_media = apply_image_repeat(
-                args.image_repeat_prob,
-                args.num_prompts,
-                data,
-                prompts,
-                modality,
+                args.image_repeat_prob, args.num_prompts, data, prompts, modality
             )
         else:
             # Use the same image/video for all prompts
@@ -2914,9 +2659,7 @@ def main(args):
 
     with time_counter(args.time_generate):
         outputs = llm.generate(
-            inputs,
-            sampling_params=sampling_params,
-            lora_request=lora_request,
+            inputs, sampling_params=sampling_params, lora_request=lora_request
         )
 
     print("-" * 50)

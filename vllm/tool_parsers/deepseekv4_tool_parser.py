@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     get_enable_structured_outputs_in_reasoning,

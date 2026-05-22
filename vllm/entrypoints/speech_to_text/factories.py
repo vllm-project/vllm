@@ -19,8 +19,7 @@ else:
 
 
 def register_speech_to_text_api_routers(
-    app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...],
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
 ):
     if "realtime" in supported_tasks:
         from .realtime.api_router import router as realtime_router
@@ -73,7 +72,5 @@ def init_speech_to_text_state(
         from .realtime.serving import OpenAIServingRealtime
 
         state.openai_serving_realtime = OpenAIServingRealtime(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
+            engine_client, state.openai_serving_models, request_logger=request_logger
         )

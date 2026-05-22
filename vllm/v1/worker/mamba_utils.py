@@ -620,8 +620,7 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
 
 
 def cleanup_mamba_state_idx(
-    scheduler_output: SchedulerOutput,
-    mamba_state_idx: dict[str, int],
+    scheduler_output: SchedulerOutput, mamba_state_idx: dict[str, int]
 ) -> None:
     """Pop stale `mamba_state_idx` entries for finished/preempted/resumed reqs.
 
@@ -884,10 +883,7 @@ def stage_postprocess_inputs_to_gpu(
     assert ctx.num_computed_tokens_buf is not None
     assert ctx.num_draft_tokens_buf is not None
     stage_mamba_state_idx_to_gpu(
-        mamba_state_idx,
-        req_ids,
-        num_reqs,
-        ctx.mamba_state_idx_buf,
+        mamba_state_idx, req_ids, num_reqs, ctx.mamba_state_idx_buf
     )
     stage_postprocess_metadata_to_gpu(
         scheduler_output,

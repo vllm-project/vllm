@@ -8,9 +8,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 
 MODEL = "ibm-granite/granite-4.0-h-tiny"
@@ -57,15 +55,7 @@ def tokenizer():
 
 
 # create a variety of input chunk sizes
-@pytest.mark.parametrize(
-    "min_chunk, max_chunk",
-    [
-        (1, 1),
-        (1, 2),
-        (5, 7),
-        (6, 20),
-    ],
-)
+@pytest.mark.parametrize("min_chunk, max_chunk", [(1, 1), (1, 2), (5, 7), (6, 20)])
 def test_tool_call_parser_complex(min_chunk: int, max_chunk: int, tokenizer):
     input_dicts = create_complex_input(True)
 
@@ -90,11 +80,7 @@ def test_tool_call_parser_complex(min_chunk: int, max_chunk: int, tokenizer):
         + text_messages[3]
     )
 
-    any_chat_request = ChatCompletionRequest(
-        seed=42,
-        model=MODEL,
-        messages=[],
-    )
+    any_chat_request = ChatCompletionRequest(seed=42, model=MODEL, messages=[])
 
     parser = Granite4ToolParser(tokenizer=tokenizer)
 

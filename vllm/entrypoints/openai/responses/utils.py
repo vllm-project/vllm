@@ -85,12 +85,7 @@ def construct_input_messages(
 ):
     messages: list[ChatCompletionMessageParam] = []
     if request_instructions:
-        messages.append(
-            {
-                "role": "system",
-                "content": request_instructions,
-            }
-        )
+        messages.append({"role": "system", "content": request_instructions})
 
     # Prepend the conversation history.
     if prev_msg is not None:
@@ -104,12 +99,7 @@ def construct_input_messages(
             # NOTE: We skip the reasoning output.
             if isinstance(output_item, ResponseOutputMessage):
                 for content in output_item.content:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content.text,
-                        }
-                    )
+                    messages.append({"role": "assistant", "content": content.text})
 
     # Append the new input.
     # Responses API supports simple text inputs without chat format.
@@ -140,8 +130,7 @@ def construct_chat_messages_with_tool_call(
 
 
 def _construct_message_from_response_item(
-    item: ResponseInputOutputItem,
-    prev_msg: ChatCompletionMessageParam | None = None,
+    item: ResponseInputOutputItem, prev_msg: ChatCompletionMessageParam | None = None
 ) -> ChatCompletionMessageParam | None:
     """
     Returns a new message or None. If `None`, `prev_msg` might be updated.
@@ -154,10 +143,7 @@ def _construct_message_from_response_item(
     if isinstance(item, ResponseFunctionToolCall):
         tool_call = ChatCompletionMessageToolCallParam(
             id=item.call_id,
-            function=FunctionCallTool(
-                name=item.name,
-                arguments=item.arguments,
-            ),
+            function=FunctionCallTool(name=item.name, arguments=item.arguments),
             type="function",
         )
         if prev_assistant_msg:
@@ -182,8 +168,7 @@ def _construct_message_from_response_item(
                 item.id,
             )
         return ChatCompletionAssistantMessageParam(
-            role="assistant",
-            tool_calls=[tool_call],
+            role="assistant", tool_calls=[tool_call]
         )
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""
@@ -205,10 +190,7 @@ def _construct_message_from_response_item(
             if previous_reasoning is None:
                 prev_assistant_msg["reasoning"] = reasoning
                 return None
-        return {
-            "role": "assistant",
-            "reasoning": reasoning,
-        }
+        return {"role": "assistant", "reasoning": reasoning}
     elif isinstance(item, ResponseOutputMessage):
         output_text = item.content[0].text
         if prev_assistant_msg:
@@ -216,22 +198,15 @@ def _construct_message_from_response_item(
             if previous_content is None:
                 prev_assistant_msg["content"] = output_text
                 return None
-        return {
-            "role": "assistant",
-            "content": output_text,
-        }
+        return {"role": "assistant", "content": output_text}
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
-            role="tool",
-            content=item.output,
-            tool_call_id=item.call_id,
+            role="tool", content=item.output, tool_call_id=item.call_id
         )
     elif isinstance(item, dict) and item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
-            role="tool",
-            content=item.get("output"),
-            tool_call_id=item.get("call_id"),
+            role="tool", content=item.get("output"), tool_call_id=item.get("call_id")
         )
     return item  # type: ignore[arg-type]
 
@@ -264,10 +239,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
     into:
         {"type": "function", "function": {...}}
     """
-    return {
-        "type": "function",
-        "function": tool,
-    }
+    return {"type": "function", "function": tool}
 
 
 def construct_tool_dicts(

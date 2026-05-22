@@ -31,10 +31,7 @@ else:
 
 
 def encode_audio_base64(
-    audio: np.ndarray,
-    sampling_rate: int,
-    *,
-    format: str = "WAV",
+    audio: np.ndarray, sampling_rate: int, *, format: str = "WAV"
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
@@ -42,10 +39,7 @@ def encode_audio_base64(
 
 
 def encode_audio_url(
-    audio: np.ndarray,
-    sampling_rate: int,
-    *,
-    format: str = "WAV",
+    audio: np.ndarray, sampling_rate: int, *, format: str = "WAV"
 ) -> str:
     """Encode audio as a data URL."""
     audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
@@ -54,10 +48,7 @@ def encode_audio_url(
 
 
 def encode_image_base64(
-    image: Image.Image,
-    *,
-    image_mode: str = "RGB",
-    format: str = "PNG",
+    image: Image.Image, *, image_mode: str = "RGB", format: str = "PNG"
 ) -> str:
     """
     Encode a pillow image to base64 format.
@@ -69,10 +60,7 @@ def encode_image_base64(
 
 
 def encode_image_url(
-    image: Image.Image,
-    *,
-    image_mode: str = "RGB",
-    format: str = "PNG",
+    image: Image.Image, *, image_mode: str = "RGB", format: str = "PNG"
 ) -> str:
     """
     Encode a pillow image as a data URL.
@@ -84,21 +72,13 @@ def encode_image_url(
     return f"data:{mimetype};base64,{image_b64}"
 
 
-def encode_video_base64(
-    frames: npt.NDArray,
-    *,
-    format: str = "JPEG",
-) -> str:
+def encode_video_base64(frames: npt.NDArray, *, format: str = "JPEG") -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
     return video_io.encode_base64(frames, video_format=format)
 
 
-def encode_video_url(
-    frames: npt.NDArray,
-    *,
-    format: str = "JPEG",
-) -> str:
+def encode_video_url(frames: npt.NDArray, *, format: str = "JPEG") -> str:
     video_b64 = encode_video_base64(frames, format=format)
 
     if format.lower() == "jpeg":
@@ -109,9 +89,7 @@ def encode_video_url(
     return f"data:{mimetype};base64,{video_b64}"
 
 
-def argsort_mm_positions(
-    mm_positions: MultiModalPlaceholders,
-) -> list[tuple[str, int]]:
+def argsort_mm_positions(mm_positions: MultiModalPlaceholders) -> list[tuple[str, int]]:
     """
     Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
@@ -151,11 +129,7 @@ def _batch_mm_items(
             elems[key].append(elem)
 
     return {
-        key: elems[0].field.reduce_data(
-            elems,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        key: elems[0].field.reduce_data(elems, device=device, pin_memory=pin_memory)
         for key, elems in elems.items()
     }
 
@@ -240,9 +214,7 @@ def group_and_batch_mm_kwargs(
         items_lst = [item for _, item in group]
 
         for num_items, mm_kwargs_batch in group_and_batch_mm_items(
-            items_lst,
-            device=device,
-            pin_memory=pin_memory,
+            items_lst, device=device, pin_memory=pin_memory
         ):
             yield modality, num_items, mm_kwargs_batch
 
@@ -261,8 +233,7 @@ def group_mm_kwargs_by_modality(
 
 
 def fetch_audio(
-    audio_url: str,
-    audio_io_kwargs: dict[str, Any] | None = None,
+    audio_url: str, audio_io_kwargs: dict[str, Any] | None = None
 ) -> tuple[np.ndarray, int | float]:
     """
     Args:
@@ -275,15 +246,13 @@ def fetch_audio(
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
     media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
+        media_io_kwargs=media_io_kwargs, allowed_local_media_path="/"
     )
     return media_connector.fetch_audio(audio_url)
 
 
 def fetch_image(
-    image_url: str,
-    image_io_kwargs: dict[str, Any] | None = None,
+    image_url: str, image_io_kwargs: dict[str, Any] | None = None
 ) -> Image.Image:
     """
     Args:
@@ -296,15 +265,13 @@ def fetch_image(
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
     media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
+        media_io_kwargs=media_io_kwargs, allowed_local_media_path="/"
     )
     return media_connector.fetch_image(image_url)
 
 
 def fetch_video(
-    video_url: str,
-    video_io_kwargs: dict[str, Any] | None = None,
+    video_url: str, video_io_kwargs: dict[str, Any] | None = None
 ) -> tuple[npt.NDArray, dict[str, Any]]:
     """
     Args:
@@ -317,7 +284,6 @@ def fetch_video(
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
+        media_io_kwargs=media_io_kwargs, allowed_local_media_path="/"
     )
     return media_connector.fetch_video(video_url)

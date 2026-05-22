@@ -21,12 +21,8 @@ from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
-    TritonExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_experts,
-)
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
@@ -477,11 +473,7 @@ def fused_moe(
 
 
 class BaselineMM(torch.nn.Module):
-    def __init__(
-        self,
-        b: torch.Tensor,
-        out_dtype: torch.dtype,
-    ):
+    def __init__(self, b: torch.Tensor, out_dtype: torch.dtype):
         super().__init__()
         self.b = torch.nn.Parameter(b.to(dtype=torch.float32))
         self.out_dtype = out_dtype
@@ -500,12 +492,7 @@ class BaselineSiluAndMul(torch.nn.Module):
 
 
 class TestMLP(torch.nn.Module):
-    def __init__(
-        self,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        out_dtype: torch.dtype,
-    ):
+    def __init__(self, w1: torch.Tensor, w2: torch.Tensor, out_dtype: torch.dtype):
         super().__init__()
         self.gate_up_proj = BaselineMM(w1, out_dtype)
         self.down_proj = BaselineMM(w2, out_dtype)
@@ -519,9 +506,7 @@ class TestMLP(torch.nn.Module):
 
 
 def make_naive_shared_experts(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
+    N: int, K: int, in_dtype: torch.dtype = torch.bfloat16
 ) -> torch.nn.Module:
     w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
     w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
@@ -620,8 +605,7 @@ def make_shared_experts_with_weights(
 
 
 def modular_triton_fused_moe(
-    moe_config: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
         maybe_make_prepare_finalize(
@@ -642,11 +626,7 @@ def make_shared_experts(
     quant_dtype: torch.dtype | str | None = None,
 ) -> torch.nn.Module:
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        1,
-        N,
-        K,
-        in_dtype=in_dtype,
-        quant_dtype=quant_dtype,
+        1, N, K, in_dtype=in_dtype, quant_dtype=quant_dtype
     )
 
     return make_shared_experts_with_weights(

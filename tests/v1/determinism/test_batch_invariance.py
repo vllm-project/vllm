@@ -20,13 +20,8 @@ from vllm import LLM, SamplingParams
 
 @skip_unsupported
 @pytest.mark.timeout(1000)
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
-def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
-    backend,
-):
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(backend):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
     whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
@@ -72,10 +67,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     max_tokens = int(os.getenv("VLLM_NEEDLE_MAX_TOKENS", "128"))
 
     sampling = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        seed=20240919,
+        temperature=temperature, top_p=top_p, max_tokens=max_tokens, seed=20240919
     )
 
     needle_prompt = "There once was a "
@@ -143,19 +135,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
 
 @skip_unsupported
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
-@pytest.mark.parametrize(
-    "block_m,block_n",
-    [(16, 16), (8, 16)],
-)
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
-    backend,
-    block_m,
-    block_n,
-):
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("block_m,block_n", [(16, 16), (8, 16)])
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend, block_m, block_n):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
@@ -197,11 +179,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     # )
 
     sp = SamplingParams(
-        temperature=0.6,
-        top_p=1.0,
-        max_tokens=16,
-        seed=1234,
-        logprobs=5,
+        temperature=0.6, top_p=1.0, max_tokens=16, seed=1234, logprobs=5
     )
 
     # BS=1: run prompts individually and collect logprobs per step.
@@ -375,10 +353,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 
 
 @skip_unsupported
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_simple_generation(backend):
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -398,10 +373,7 @@ def test_simple_generation(backend):
     )
 
     prompt = "the capital of france is"
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=20,
-    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
 
     print(f"\n{'=' * 80}")
     print("Running simple generation test")
@@ -425,10 +397,7 @@ def test_simple_generation(backend):
 
 
 @skip_unsupported
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_logprobs_without_batch_invariance_should_fail(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -476,13 +445,7 @@ def test_logprobs_without_batch_invariance_should_fail(
         lo, hi = random.choice(options)
         prompts.append(_random_prompt(lo, hi))
 
-    sp = SamplingParams(
-        temperature=0.6,
-        top_p=1.0,
-        max_tokens=8,
-        seed=1234,
-        logprobs=5,
-    )
+    sp = SamplingParams(temperature=0.6, top_p=1.0, max_tokens=8, seed=1234, logprobs=5)
 
     # BS=1: run prompts individually and collect logprobs per step.
     print("\n" + "=" * 80)
@@ -642,9 +605,7 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 @skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-def test_decode_logprobs_match_prefill_logprobs(
-    backend,
-):
+def test_decode_logprobs_match_prefill_logprobs(backend):
     """
     Test that verifies decode logprobs match prefill logprobs.
 
@@ -743,19 +704,13 @@ def test_decode_logprobs_match_prefill_logprobs(
                 # Actually, we need to get the actual text. Let's use a workaround:
                 # Run a generation with max_tokens = token_idx to get that prefix
                 prefix_sp = SamplingParams(
-                    temperature=0.0,
-                    max_tokens=token_idx,
-                    logprobs=1,
+                    temperature=0.0, max_tokens=token_idx, logprobs=1
                 )
                 prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]
                 prefix_prompt = prompt + prefix_output.outputs[0].text
 
             # Now run prefill with max_tokens=1 to get the logprob of the next token
-            prefill_sp = SamplingParams(
-                temperature=0.0,
-                max_tokens=1,
-                logprobs=5,
-            )
+            prefill_sp = SamplingParams(temperature=0.0, max_tokens=1, logprobs=5)
 
             print(
                 f"  [Token {token_idx}] Running prefill for prefix "

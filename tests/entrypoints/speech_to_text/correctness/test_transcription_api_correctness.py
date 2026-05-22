@@ -54,10 +54,7 @@ async def transcribe_audio(client, tokenizer, y, sr):
     with to_bytes(y, sr) as f:
         start_time = time.perf_counter()
         transcription = await client.audio.transcriptions.create(
-            file=f,
-            model=tokenizer.name_or_path,
-            language="en",
-            temperature=0.0,
+            file=f, model=tokenizer.name_or_path, language="en", temperature=0.0
         )
         end_time = time.perf_counter()
         # NOTE there's no streaming in transcriptions, can't measure ttft
@@ -193,10 +190,7 @@ def test_wer_correctness(
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
-    with RemoteOpenAIServer(
-        model_name,
-        server_args,
-    ) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 
         if not max_concurrent_request:
@@ -205,11 +199,7 @@ def test_wer_correctness(
 
         client = remote_server.get_async_client()
         wer = run_evaluation(
-            model_name,
-            client,
-            dataset,
-            max_concurrent_request,
-            n_examples,
+            model_name, client, dataset, max_concurrent_request, n_examples
         )
 
         print(f"Expected WER: {expected_wer}, Actual WER: {wer}")

@@ -13,15 +13,9 @@ from vllm.platforms import current_platform
 
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
-TEXTS_1 = [
-    "What is the capital of France?",
-    "What is the capital of Germany?",
-]
+TEXTS_1 = ["What is the capital of France?", "What is the capital of Germany?"]
 
-TEXTS_2 = [
-    "The capital of France is Paris.",
-    "The capital of Germany is Berlin.",
-]
+TEXTS_2 = ["The capital of France is Paris.", "The capital of Germany is Berlin."]
 
 
 @pytest.fixture(scope="module")
@@ -73,10 +67,7 @@ def test_1_to_1(llm, hf_model):
 
 @pytest.mark.skip_global_cleanup
 def test_1_to_n(llm, hf_model):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[0], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[0], TEXTS_2[1]]]
 
     vllm_outputs = [output.outputs.score for output in llm.score(TEXTS_1[0], TEXTS_2)]
     hf_outputs = hf_model.predict(text_pairs).tolist()
@@ -90,10 +81,7 @@ def test_1_to_n(llm, hf_model):
 
 @pytest.mark.skip_global_cleanup
 def test_n_to_n(llm, hf_model):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     vllm_outputs = [output.outputs.score for output in llm.score(TEXTS_1, TEXTS_2)]
     hf_outputs = hf_model.predict(text_pairs).tolist()
@@ -118,11 +106,7 @@ def test_max_tokens_per_doc(llm: LLM):
     long_doc = "The capital of France is Paris. " * 20
 
     # Without truncation
-    outputs_no_limit = llm.score(
-        TEXTS_1[0],
-        long_doc,
-        use_tqdm=False,
-    )
+    outputs_no_limit = llm.score(TEXTS_1[0], long_doc, use_tqdm=False)
 
     # With truncation via extra_kwargs
     outputs_with_limit = llm.score(

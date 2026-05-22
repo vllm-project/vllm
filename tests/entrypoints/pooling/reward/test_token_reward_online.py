@@ -55,8 +55,7 @@ def test_basic(server: RemoteOpenAIServer, model_name: str):
 
     # test /tokenize
     response = requests.post(
-        server.url_for("/tokenize"),
-        json={"model": model_name, "prompt": input_text},
+        server.url_for("/tokenize"), json={"model": model_name, "prompt": input_text}
     )
     assert response.json()["tokens"] == input_tokens
 
@@ -138,28 +137,15 @@ def test_completion_request_batched(server: RemoteOpenAIServer, model_name: str)
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     # test chat request basic usage
     chat_response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "messages": messages,
-            "encoding_format": "float",
-        },
+        json={"model": model_name, "messages": messages, "encoding_format": "float"},
     )
     chat_response.raise_for_status()
     chat_poolings = PoolingResponse.model_validate(chat_response.json())
@@ -265,11 +251,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
 
     float_response = requests.post(
         server.url_for("pooling"),
-        json={
-            "input": input_texts,
-            "model": model_name,
-            "encoding_format": "float",
-        },
+        json={"input": input_texts, "model": model_name, "encoding_format": "float"},
     )
     float_response.raise_for_status()
     responses_float = PoolingResponse.model_validate(float_response.json())
@@ -277,11 +259,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
 
     base64_response = requests.post(
         server.url_for("pooling"),
-        json={
-            "input": input_texts,
-            "model": model_name,
-            "encoding_format": "base64",
-        },
+        json={"input": input_texts, "model": model_name, "encoding_format": "base64"},
     )
     base64_response.raise_for_status()
     responses_base64 = PoolingResponse.model_validate(base64_response.json())
@@ -301,11 +279,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     default_response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "input": input_texts,
-            "model": model_name,
-        },
+        server.url_for("pooling"), json={"input": input_texts, "model": model_name}
     )
     default_response.raise_for_status()
     responses_default = PoolingResponse.model_validate(default_response.json())
@@ -331,11 +305,7 @@ async def test_base64_embed_dtype_and_endianness(
     url = server.url_for("pooling")
     float_response = requests.post(
         url,
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "float",
-        },
+        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
     )
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
@@ -378,11 +348,7 @@ async def test_bytes_embed_dtype_and_endianness(
     url = server.url_for("pooling")
     float_response = requests.post(
         url,
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "float",
-        },
+        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
     )
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
@@ -426,11 +392,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     url = server.url_for("pooling")
     float_response = requests.post(
         url,
-        json={
-            "model": model_name,
-            "input": input_texts,
-            "encoding_format": "float",
-        },
+        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
     )
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
@@ -525,18 +487,9 @@ async def test_invocations_chat_request(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_invocations_conversation_chat_request(server: RemoteOpenAIServer):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     request_args = {

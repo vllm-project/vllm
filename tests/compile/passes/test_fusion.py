@@ -49,10 +49,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_e8m0_used,
-    is_deep_gemm_supported,
-)
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -246,14 +243,7 @@ class TestModel(torch.nn.Module):
         ]
 
 
-def _run_fusion_test(
-    model,
-    fusion_pass,
-    vllm_config,
-    dtype,
-    hidden_size,
-    num_tokens,
-):
+def _run_fusion_test(model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens):
     """Helper function for common fusion test logic.
 
     Must be called within vllm_config context.
@@ -465,10 +455,7 @@ class TestGatedModel(torch.nn.Module):
         hidden_dim = num_heads * head_dim
 
         self.norm = RMSNormGated(
-            head_dim,
-            eps=eps,
-            group_size=None,
-            norm_before_gate=True,
+            head_dim, eps=eps, group_size=None, norm_before_gate=True
         )
 
         self.activation_quant_key = create_fp8_quant_key(

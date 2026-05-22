@@ -9,10 +9,7 @@ from vllm import TokensPrompt
 from vllm.config import PoolerConfig
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["Qwen/Qwen3-Embedding-0.6B"],
-)
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-Embedding-0.6B"])
 @torch.inference_mode
 def test_embed_models(hf_runner, vllm_runner, model: str):
     chunk_size = 10
@@ -31,13 +28,10 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
         enable_prefix_caching=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            [TokensPrompt(prompt_token_ids=t) for t in token_prompts]
         )
 
-    with hf_runner(
-        model,
-        auto_cls=AutoModel,
-    ) as hf_model:
+    with hf_runner(model, auto_cls=AutoModel) as hf_model:
         hf_outputs = []
         for token_prompt in token_prompts:
             inputs = hf_model.wrap_device({"input_ids": torch.tensor([token_prompt])})

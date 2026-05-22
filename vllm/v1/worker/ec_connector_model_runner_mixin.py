@@ -25,8 +25,7 @@ logger = init_logger(__name__)
 class ECConnectorModelRunnerMixin:
     @staticmethod
     def maybe_save_ec_to_connector(
-        encoder_cache: dict[str, torch.Tensor],
-        mm_hash: str,
+        encoder_cache: dict[str, torch.Tensor], mm_hash: str
     ):
         if not has_ec_transfer():
             logger.debug("Not have ec transfer please check")

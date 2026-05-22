@@ -67,8 +67,7 @@ class FP32ReplicatedLinear(ReplicatedLinear):
     """
 
     def forward(
-        self,
-        x: torch.Tensor,
+        self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         assert self.params_dtype == torch.float32
         return super().forward(x.to(torch.float32))
@@ -261,9 +260,7 @@ class Step3p5Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -290,11 +287,7 @@ class Step3p5Attention(nn.Module):
 
 
 class FusedMoEBlock(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -412,11 +405,7 @@ class FusedMoEBlock(nn.Module):
 
 
 class Step3p5DecoderLayer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
@@ -493,10 +482,7 @@ class Step3p5DecoderLayer(nn.Module):
         else:
             moe_layers_idx = [i for i in range(1, config.num_hidden_layers)]
         if layer_idx in moe_layers_idx:
-            self.moe = FusedMoEBlock(
-                vllm_config,
-                prefix=f"{prefix}.moe",
-            )
+            self.moe = FusedMoEBlock(vllm_config, prefix=f"{prefix}.moe")
             self.use_moe = True
         else:
             self.mlp = Step3p5MLP(
@@ -527,10 +513,7 @@ class Step3p5DecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states += residual
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -559,18 +542,14 @@ class Step3p5Model(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
+                self.vocab_size, config.hidden_size
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Step3p5DecoderLayer(
-                vllm_config,
-                prefix=prefix,
-            ),
+            lambda prefix: Step3p5DecoderLayer(vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
@@ -605,11 +584,7 @@ class Step3p5Model(nn.Module):
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         return hidden_states
 
@@ -710,9 +685,7 @@ class Step3p5Model(nn.Module):
                         # (e.g. share_expert weights if they matched)
                         param = params_dict[local_name]
                         weight_loader = getattr(
-                            param,
-                            "weight_loader",
-                            default_weight_loader,
+                            param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
                         loaded_params.add(local_name)
@@ -827,12 +800,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.model = Step3p5Model(
@@ -913,9 +881,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             )
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts

@@ -45,7 +45,7 @@ def main(args):
     embedding_size = 0
 
     input_texts = [
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ] * 2
 
     # The OpenAI client does not support the bytes encoding_format.

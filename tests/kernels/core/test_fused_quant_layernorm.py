@@ -291,9 +291,7 @@ def test_rms_norm(
         assert hidden_size % group_size[1] == 0
         num_groups = hidden_size // group_size[1]
         scales = torch.empty(
-            (num_groups, num_tokens),
-            device=x.device,
-            dtype=torch.float32,
+            (num_groups, num_tokens), device=x.device, dtype=torch.float32
         ).transpose(0, 1)
         opcheck(
             torch.ops._C.rms_norm_per_block_quant,

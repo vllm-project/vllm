@@ -18,10 +18,7 @@ def test_tensor_schema_valid_tensor():
 
 
 def test_tensor_schema_optional_fields():
-    Phi3VImagePixelInputs(
-        pixel_values=torch.randn(16, 64, 3, 32, 32),
-        image_sizes=None,
-    )
+    Phi3VImagePixelInputs(pixel_values=torch.randn(16, 64, 3, 32, 32), image_sizes=None)
 
     Phi3VImagePixelInputs(pixel_values=torch.randn(16, 64, 3, 32, 32))
 
@@ -56,9 +53,7 @@ def test_tensor_schema_rank_mismatch():
 
 def test_tensor_schema_missing_required_field():
     with pytest.raises(ValueError, match="Required field 'pixel_values' is missing"):
-        Phi3VImagePixelInputs(
-            image_sizes=torch.randint(0, 256, (16, 2)),
-        )
+        Phi3VImagePixelInputs(image_sizes=torch.randint(0, 256, (16, 2)))
 
 
 def test_tensor_schema_symbolic_dim_mismatch():
@@ -118,8 +113,7 @@ def test_tensor_schema_inconsistent_shapes_in_list():
 def test_tensor_schema_empty_list():
     with pytest.raises(ValueError, match="is an empty sequence"):
         Phi3VImagePixelInputs(
-            pixel_values=[],
-            image_sizes=torch.randint(0, 256, (0, 2)),
+            pixel_values=[], image_sizes=torch.randint(0, 256, (0, 2))
         )
 
 
@@ -186,10 +180,7 @@ def test_valid_tensor_schema_with_static_last_dim():
     image_embeds = torch.randn(256, 1024)
     image_grid_thw = torch.randint(0, 4, (2, 3))
 
-    Glm4vImageEmbeddingInputs(
-        image_embeds=image_embeds,
-        image_grid_thw=image_grid_thw,
-    )
+    Glm4vImageEmbeddingInputs(image_embeds=image_embeds, image_grid_thw=image_grid_thw)
 
 
 def test_invalid_tensor_schema_with_static_last_dim():
@@ -198,6 +189,5 @@ def test_invalid_tensor_schema_with_static_last_dim():
 
     with pytest.raises(ValueError, match="dim\\[1\\] expected 3, got 4"):
         Glm4vImageEmbeddingInputs(
-            image_embeds=image_embeds,
-            image_grid_thw=image_grid_thw,
+            image_embeds=image_embeds, image_grid_thw=image_grid_thw
         )

@@ -153,9 +153,7 @@ def _compute_default_rope_parameters(
     return inv_freq, attention_factor
 
 
-_ROPE_INIT_FUNCTIONS = {
-    "default": _compute_default_rope_parameters,
-}
+_ROPE_INIT_FUNCTIONS = {"default": _compute_default_rope_parameters}
 
 
 def _dynamic_rope_update(rope_forward):
@@ -489,10 +487,7 @@ class ResidualVectorQuantizer(nn.Module):
         )
 
     def forward(
-        self,
-        x: torch.Tensor,
-        n_q: int | None = None,
-        layers: list | None = None,
+        self, x: torch.Tensor, n_q: int | None = None, layers: list | None = None
     ):
         n_q = n_q if n_q else self.n_q
         quantized, codes, commit_loss, quantized_list = self.vq(
@@ -775,10 +770,7 @@ class AudioEncoderTransformerLayer(nn.Module):
 
 
 class AudioEncoder(nn.Module):
-    def __init__(
-        self,
-        config: MiMoAudioTokenizerConfig,
-    ):
+    def __init__(self, config: MiMoAudioTokenizerConfig):
         super().__init__()
         self.config = config
         self.max_source_positions = (
@@ -788,10 +780,7 @@ class AudioEncoder(nn.Module):
         self.skip_layer_idx = config.encoder_skip_layer_id
 
         self.conv1 = nn.Conv1d(
-            config.n_mels,
-            config.d_model,
-            kernel_size=config.kernel_size,
-            padding=1,
+            config.n_mels, config.d_model, kernel_size=config.kernel_size, padding=1
         )
         self.conv2 = nn.Conv1d(
             config.d_model,
@@ -1085,9 +1074,7 @@ def tokenize_audio_batch(mels, audio_tokenizer_encoder, segment_size=6000, devic
     input_features = torch.cat([m.to(device) for m in mels], dim=0)
     input_lens_t = torch.tensor(input_lens_flat, dtype=torch.long, device=device)
     codes_packed = encode_batch(
-        audio_tokenizer_encoder,
-        input_features=input_features,
-        input_lens=input_lens_t,
+        audio_tokenizer_encoder, input_features=input_features, input_lens=input_lens_t
     )
     codes = codes_packed.transpose(0, 1).detach()  # [total_code_T, C]
     code_lengths = []
@@ -1145,12 +1132,7 @@ class MimoAudioEncoderConfig:
 
 
 class AudioProjection(nn.Module):
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        output_size: int,
-    ) -> None:
+    def __init__(self, input_size: int, hidden_size: int, output_size: int) -> None:
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(input_size, hidden_size, bias=False),

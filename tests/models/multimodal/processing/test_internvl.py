@@ -33,10 +33,7 @@ def _get_expected_num_patches(
     blocks, _, _ = calculate_internvl_targets(
         orig_width=width,
         orig_height=height,
-        target_ratios=get_internvl_target_ratios(
-            min_num,
-            max_num,
-        ),
+        target_ratios=get_internvl_target_ratios(min_num, max_num),
         image_size=config.vision_config.image_size,
         use_thumbnail=False,
     )

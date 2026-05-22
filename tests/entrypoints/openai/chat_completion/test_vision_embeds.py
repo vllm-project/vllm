@@ -61,7 +61,7 @@ def test_single_content(model_name: str):
                                         torch.ones((1, 2), dtype=torch.float16)
                                     ),
                                 },
-                            },
+                            }
                         ],
                     }
                 ],

@@ -12,9 +12,7 @@ import numpy as np
 import torchvision.transforms as transforms
 from transformers import AutoImageProcessor
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
-from transformers.image_transforms import (
-    convert_to_rgb,
-)
+from transformers.image_transforms import convert_to_rgb
 from transformers.image_utils import (
     OPENAI_CLIP_MEAN,
     OPENAI_CLIP_STD,

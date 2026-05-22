@@ -229,15 +229,11 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
     scale_inner: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fp8_buf = torch.empty(
-        (n_groups, num_tokens, d),
-        dtype=torch.float8_e4m3fn,
-        device=o.device,
+        (n_groups, num_tokens, d), dtype=torch.float8_e4m3fn, device=o.device
     )
     scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
     scale_buf = torch.empty(
-        n_groups * scale_inner * tma_aligned_T,
-        dtype=scale_dtype,
-        device=o.device,
+        n_groups * scale_inner * tma_aligned_T, dtype=scale_dtype, device=o.device
     ).as_strided(
         (n_groups, num_tokens, scale_inner),
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
@@ -291,15 +287,11 @@ def _fused_inv_rope_fp8_quant_kernel_fake(
     scale_inner: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fp8_buf = torch.empty(
-        (n_groups, num_tokens, d),
-        dtype=torch.float8_e4m3fn,
-        device=o.device,
+        (n_groups, num_tokens, d), dtype=torch.float8_e4m3fn, device=o.device
     )
     scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
     scale_buf = torch.empty(
-        n_groups * scale_inner * tma_aligned_T,
-        dtype=scale_dtype,
-        device=o.device,
+        n_groups * scale_inner * tma_aligned_T, dtype=scale_dtype, device=o.device
     ).as_strided(
         (n_groups, num_tokens, scale_inner),
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),

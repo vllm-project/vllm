@@ -236,26 +236,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_indices = torch.zeros(
-            max_tokens,
-            dtype=torch.int32,
-            device=self.device,
+            max_tokens, dtype=torch.int32, device=self.device
         )
         self.decode_swa_indices = torch.zeros(
-            max_tokens,
-            1,
-            self.window_size,
-            dtype=torch.int32,
-            device=self.device,
+            max_tokens, 1, self.window_size, dtype=torch.int32, device=self.device
         )
         self.decode_swa_lens = torch.zeros(
-            max_tokens,
-            dtype=torch.int32,
-            device=self.device,
+            max_tokens, dtype=torch.int32, device=self.device
         )
         self.is_valid_token = torch.zeros(
-            max_tokens,
-            dtype=torch.bool,
-            device=self.device,
+            max_tokens, dtype=torch.bool, device=self.device
         )
 
     def build(
@@ -315,10 +305,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
         deepseek_v4_fields = self._build_deepseek_v4_metadata(
-            num_decodes,
-            num_prefills,
-            seq_lens,
-            query_start_loc,
+            num_decodes, num_prefills, seq_lens, query_start_loc
         )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta

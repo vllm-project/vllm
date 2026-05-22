@@ -29,10 +29,7 @@ def _trapz(f, a: float, b: float, n: int = 200) -> float:
 
 
 def solve_lloyd_max(
-    d: int,
-    bits: int,
-    max_iter: int = 200,
-    tol: float = 1e-10,
+    d: int, bits: int, max_iter: int = 200, tol: float = 1e-10
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Solve Lloyd-Max optimal quantizer for N(0, 1/d) distribution.
 

@@ -12,9 +12,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    rejection_sample,
-)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
 @triton.jit
@@ -39,10 +37,7 @@ def _flatten_sampled_kernel(
 
 class RejectionSampler:
     def __init__(
-        self,
-        sampler: Sampler,
-        spec_config: SpeculativeConfig,
-        device: torch.device,
+        self, sampler: Sampler, spec_config: SpeculativeConfig, device: torch.device
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens

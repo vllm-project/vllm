@@ -6,10 +6,7 @@ import json
 import pytest
 from transformers import AutoTokenizer
 
-from tests.tool_parsers.utils import (
-    run_tool_extraction,
-    run_tool_extraction_streaming,
-)
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -29,16 +26,9 @@ TOOL_HEADER_GIGACHAT3 = f"function call{ROLE_SEP_TOKEN}"
 TOOL_HEADER_GIGACHAT31 = "<|function_call|>"
 
 
-SIMPLE_ARGS_DICT = {
-    "action": "create",
-    "id": "preferences",
-}
+SIMPLE_ARGS_DICT = {"action": "create", "id": "preferences"}
 SIMPLE_FUNCTION_JSON = json.dumps(
-    {
-        "name": "manage_user_memory",
-        "arguments": SIMPLE_ARGS_DICT,
-    },
-    ensure_ascii=False,
+    {"name": "manage_user_memory", "arguments": SIMPLE_ARGS_DICT}, ensure_ascii=False
 )
 SIMPLE_FUNCTION_OUTPUT_GIGACHAT3 = (
     f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{SIMPLE_FUNCTION_JSON}"
@@ -51,11 +41,7 @@ SIMPLE_FUNCTION_CALL = FunctionCall(
 
 
 PARAMETERLESS_FUNCTION_JSON = json.dumps(
-    {
-        "name": "manage_user_memory",
-        "arguments": {},
-    },
-    ensure_ascii=False,
+    {"name": "manage_user_memory", "arguments": {}}, ensure_ascii=False
 )
 PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT3 = (
     f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{PARAMETERLESS_FUNCTION_JSON}"
@@ -64,8 +50,7 @@ PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT31 = (
     f"{TOOL_HEADER_GIGACHAT31}{PARAMETERLESS_FUNCTION_JSON}"
 )
 PARAMETERLESS_FUNCTION_CALL = FunctionCall(
-    name="manage_user_memory",
-    arguments=json.dumps({}, ensure_ascii=False),
+    name="manage_user_memory", arguments=json.dumps({}, ensure_ascii=False)
 )
 
 
@@ -80,11 +65,7 @@ COMPLEX_ARGS_DICT = {
     },
 }
 COMPLEX_FUNCTION_JSON = json.dumps(
-    {
-        "name": "manage_user_memory",
-        "arguments": COMPLEX_ARGS_DICT,
-    },
-    ensure_ascii=False,
+    {"name": "manage_user_memory", "arguments": COMPLEX_ARGS_DICT}, ensure_ascii=False
 )
 COMPLEX_FUNCTION_OUTPUT_GIGACHAT3 = (
     f"{MSG_SEP_TOKEN}{TOOL_HEADER_GIGACHAT3}{COMPLEX_FUNCTION_JSON}"
@@ -104,12 +85,7 @@ MIXED_OUTPUT_GIGACHAT31 = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT_GIGACHAT31}"
 @pytest.fixture(name="gigachat_tokenizer")
 def fixture_gigachat_tokenizer(default_tokenizer: TokenizerLike):
     default_tokenizer.add_tokens(
-        [
-            MSG_SEP_TOKEN,
-            ROLE_SEP_TOKEN,
-            TOOL_HEADER_GIGACHAT31,
-            EOS_TOKEN,
-        ]
+        [MSG_SEP_TOKEN, ROLE_SEP_TOKEN, TOOL_HEADER_GIGACHAT31, EOS_TOKEN]
     )
     return default_tokenizer
 
@@ -330,8 +306,7 @@ def test_tool_call(
     ],
 )
 def test_streaming_tool_call_with_large_steps(
-    model_output_deltas: list[str],
-    gigachat_tokenizer: TokenizerLike,
+    model_output_deltas: list[str], gigachat_tokenizer: TokenizerLike
 ):
     """
     Test that the closing braces are streamed correctly.
@@ -340,9 +315,7 @@ def test_streaming_tool_call_with_large_steps(
         gigachat_tokenizer
     )
     reconstructor = run_tool_extraction_streaming(
-        tool_parser,
-        model_output_deltas,
-        assert_one_tool_per_delta=False,
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
     )
     assert len(reconstructor.tool_calls) == 1
     call = reconstructor.tool_calls[0]

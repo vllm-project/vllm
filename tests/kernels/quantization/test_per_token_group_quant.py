@@ -39,10 +39,7 @@ def test_per_token_group_quant_fp8(
     # triton ref
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
-            x,
-            group_size,
-            column_major_scales=column_major,
-            use_ue8m0=scale_ue8m0,
+            x, group_size, column_major_scales=column_major, use_ue8m0=scale_ue8m0
         )
 
     assert torch.allclose(out_q.float(), ref_q.float(), atol=0.15, rtol=0.15)
@@ -103,34 +100,21 @@ def test_per_token_group_quant_fp8_packed(
         finfo = torch.finfo(fp8_dtype)
         out_q = torch.empty_like(x, dtype=fp8_dtype)
         out_s_packed = torch.empty_strided(
-            (mn, k_num_packed),
-            (1, tma_aligned_mn),
-            device=device,
-            dtype=torch.int32,
+            (mn, k_num_packed), (1, tma_aligned_mn), device=device, dtype=torch.int32
         )
         torch.as_strided(out_s_packed, (num_scale_elems,), (1,)).fill_(0x7F7F7F7F)
         torch.ops._C.per_token_group_fp8_quant_packed(
-            x,
-            out_q,
-            out_s_packed,
-            group_size,
-            1e-10,
-            finfo.min,
-            finfo.max,
+            x, out_q, out_s_packed, group_size, 1e-10, finfo.min, finfo.max
         )
     else:
         out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
-            x,
-            group_size=group_size,
-            use_ue8m0=True,
+            x, group_size=group_size, use_ue8m0=True
         )
 
     # Triton reference (row-major float32 scales, UE8M0)
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
-            x,
-            group_size,
-            use_ue8m0=True,
+            x, group_size, use_ue8m0=True
         )
 
     # Quantized values must match.
@@ -176,15 +160,12 @@ def test_per_token_group_quant_fp8_packed_all_zero():
     x = torch.zeros((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16)
 
     out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
-        x,
-        group_size=group_size,
-        use_ue8m0=True,
+        x, group_size=group_size, use_ue8m0=True
     )
 
     # Quantized values must be all zero.
     assert torch.equal(
-        out_q.view(torch.uint8),
-        torch.zeros_like(out_q, dtype=torch.uint8),
+        out_q.view(torch.uint8), torch.zeros_like(out_q, dtype=torch.uint8)
     ), "All-zero input should produce all-zero FP8 output"
 
     # UE8M0 byte produced by the kernel for all-zero input.
@@ -231,24 +212,15 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     # Then absmax/fp8_max = 1.5 * 2^k -> non-zero mantissa, triggers ceil
     # rounding to 2^(k+1). Use k=0 for simplicity; the bf16 representation of
     # 1.5*448=672.0 is exact.
-    x = torch.full(
-        (num_tokens, hidden_dim),
-        672.0,
-        device=device,
-        dtype=torch.bfloat16,
-    )
+    x = torch.full((num_tokens, hidden_dim), 672.0, device=device, dtype=torch.bfloat16)
 
     out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
-        x,
-        group_size=group_size,
-        use_ue8m0=True,
+        x, group_size=group_size, use_ue8m0=True
     )
 
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
-            x,
-            group_size,
-            use_ue8m0=True,
+            x, group_size, use_ue8m0=True
         )
 
     assert torch.equal(out_q, ref_q), "Quantized output mismatch"
@@ -313,10 +285,7 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     out_q.view(torch.uint8).fill_(0xFF)
 
     out_s_packed = torch.empty_strided(
-        (mn, k_num_packed),
-        (1, tma_aligned_mn),
-        device=device,
-        dtype=torch.int32,
+        (mn, k_num_packed), (1, tma_aligned_mn), device=device, dtype=torch.int32
     )
 
     torch.ops._C.per_token_group_fp8_quant_packed(
@@ -350,17 +319,11 @@ def test_per_token_group_quant_int8(shape, group_size: int):
     x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
     # cuda path
-    out_q, scale = int8_utils.per_token_group_quant_int8(
-        x,
-        group_size,
-    )
+    out_q, scale = int8_utils.per_token_group_quant_int8(x, group_size)
 
     # triton ref
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
-        ref_q, ref_s = int8_utils.per_token_group_quant_int8(
-            x,
-            group_size,
-        )
+        ref_q, ref_s = int8_utils.per_token_group_quant_int8(x, group_size)
 
     assert torch.allclose(out_q.float(), ref_q.float(), atol=0.15, rtol=0.15)
     assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)

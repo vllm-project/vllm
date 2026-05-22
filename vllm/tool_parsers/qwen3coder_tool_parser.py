@@ -7,9 +7,7 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,10 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     get_enable_structured_outputs_in_reasoning,
     get_model_structural_tag,
@@ -181,9 +176,7 @@ class Qwen3CoderToolParser(ToolParser):
         return function_calls
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         # Quick check to avoid unnecessary processing
         if self.tool_call_prefix not in model_output:
@@ -374,10 +367,7 @@ class Qwen3CoderToolParser(ToolParser):
                     # invocation even if the function name is the same
                     # (e.g. two consecutive "read" calls).
                     self.prev_tool_call_arr.append(
-                        {
-                            "name": self.current_function_name,
-                            "arguments": "{}",
-                        }
+                        {"name": self.current_function_name, "arguments": "{}"}
                     )
 
                     # Initialize streamed args tracking for this tool.
@@ -548,9 +538,7 @@ class Qwen3CoderToolParser(ToolParser):
                 if func_content_end != -1:
                     func_content = tool_text[func_start:func_content_end]
                     try:
-                        parsed_tool = self._parse_xml_function_call(
-                            func_content,
-                        )
+                        parsed_tool = self._parse_xml_function_call(func_content)
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr
                         ):

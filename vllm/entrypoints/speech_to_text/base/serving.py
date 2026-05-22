@@ -137,11 +137,7 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
-    async def _detect_language(
-        self,
-        audio_chunk: np.ndarray,
-        request_id: str,
-    ) -> str:
+    async def _detect_language(self, audio_chunk: np.ndarray, request_id: str) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
         Delegates prompt construction and output parsing to the model class
@@ -149,22 +145,15 @@ class OpenAISpeechToText(OpenAIServing):
         ``parse_language_detection_output``.
         """
         prompt = self.model_cls.get_language_detection_prompt(
-            audio_chunk,
-            self.asr_config,
+            audio_chunk, self.asr_config
         )
-        allowed_token_ids = self.model_cls.get_language_token_ids(
-            self.tokenizer,
-        )
+        allowed_token_ids = self.model_cls.get_language_token_ids(self.tokenizer)
         sampling_params = SamplingParams(
-            max_tokens=1,
-            temperature=0.0,
-            allowed_token_ids=allowed_token_ids,
+            max_tokens=1, temperature=0.0, allowed_token_ids=allowed_token_ids
         )
 
         result_generator = self.engine_client.generate(
-            prompt,
-            sampling_params,
-            request_id,
+            prompt, sampling_params, request_id
         )
 
         try:
@@ -174,25 +163,18 @@ class OpenAISpeechToText(OpenAIServing):
                     break
         except asyncio.CancelledError:
             await asyncio.gather(
-                self.engine_client.abort(request_id),
-                return_exceptions=True,
+                self.engine_client.abort(request_id), return_exceptions=True
             )
             raise
 
         token_ids = list(final_output.outputs[0].token_ids)
-        lang = self.model_cls.parse_language_detection_output(
-            token_ids,
-            self.tokenizer,
-        )
+        lang = self.model_cls.parse_language_detection_output(token_ids, self.tokenizer)
 
         logger.info("Auto-detected language: '%s'", lang)
         return lang
 
     async def _preprocess_speech_to_text(
-        self,
-        request: SpeechToTextRequest,
-        audio_data: bytes,
-        request_id: str,
+        self, request: SpeechToTextRequest, audio_data: bytes, request_id: str
     ) -> tuple[list[EngineInput], float]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
@@ -430,9 +412,7 @@ class OpenAISpeechToText(OpenAIServing):
         lora_request = self._maybe_get_adapters(request)
 
         engine_inputs, duration_s = await self._preprocess_speech_to_text(
-            request=request,
-            audio_data=audio_data,
-            request_id=request_id,
+            request=request, audio_data=audio_data, request_id=request_id
         )
 
         # Schedule the request and get the result generator.
@@ -462,8 +442,7 @@ class OpenAISpeechToText(OpenAIServing):
             )
         else:
             sampling_params = request.to_sampling_params(
-                max_tokens,
-                self.default_sampling_params,
+                max_tokens, self.default_sampling_params
             )
 
         if request.response_format == "verbose_json":
@@ -514,8 +493,7 @@ class OpenAISpeechToText(OpenAIServing):
                 len(engine_request_ids),
             )
             await asyncio.gather(
-                self.engine_client.abort(engine_request_ids),
-                return_exceptions=True,
+                self.engine_client.abort(engine_request_ids), return_exceptions=True
             )
             raise
 
@@ -622,8 +600,7 @@ class OpenAISpeechToText(OpenAIServing):
                 len(engine_request_ids),
             )
             await asyncio.gather(
-                self.engine_client.abort(engine_request_ids),
-                return_exceptions=True,
+                self.engine_client.abort(engine_request_ids), return_exceptions=True
             )
             raise
 

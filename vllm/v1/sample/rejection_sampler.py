@@ -128,10 +128,7 @@ class RejectionSampler(nn.Module):
         bonus_logits = logits[bonus_logits_indices]
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
-            sampling_metadata=replace(
-                sampling_metadata,
-                max_num_logprobs=-1,
-            ),
+            sampling_metadata=replace(sampling_metadata, max_num_logprobs=-1),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
             # needed later to compute the accepted token logprobs.
@@ -160,9 +157,7 @@ class RejectionSampler(nn.Module):
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
         target_logits = apply_sampling_constraints(
-            target_logits,
-            metadata.cu_num_draft_tokens,
-            sampling_metadata,
+            target_logits, metadata.cu_num_draft_tokens, sampling_metadata
         )
 
         output_token_ids = rejection_sample(
@@ -190,8 +185,7 @@ class RejectionSampler(nn.Module):
             )
 
         return SamplerOutput(
-            sampled_token_ids=output_token_ids,
-            logprobs_tensors=logprobs_tensors,
+            sampled_token_ids=output_token_ids, logprobs_tensors=logprobs_tensors
         )
 
     def _get_logprobs_tensors(
@@ -238,9 +232,7 @@ class RejectionSampler(nn.Module):
             else self.sampler.compute_logprobs(accepted_logits)
         )
         return self.sampler.gather_logprobs(
-            accepted_logprobs,
-            max_num_logprobs,
-            accepted_tokens.to(torch.int64),
+            accepted_logprobs, max_num_logprobs, accepted_tokens.to(torch.int64)
         )
 
     @staticmethod
@@ -296,8 +288,7 @@ class RejectionSampler(nn.Module):
         output_token_ids = sampling_metadata.output_token_ids
         if any_penalties_or_bad_words or needs_thinking:
             output_token_ids = self._combine_outputs_with_spec_tokens(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
+                output_token_ids, sampling_metadata.spec_token_ids
             )
 
         # Calculate indices of target logits.
@@ -373,8 +364,7 @@ class RejectionSampler(nn.Module):
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(
-        output_token_ids: list[list[int]],
-        spec_token_ids: list[list[int]] | None = None,
+        output_token_ids: list[list[int]], spec_token_ids: list[list[int]] | None = None
     ) -> list[list[int]]:
         if spec_token_ids is None:
             return output_token_ids
@@ -441,10 +431,7 @@ def rejection_sample(
     uniform_probs: torch.Tensor | None = None
     if synthetic_mode or not sampling_metadata.all_greedy:
         uniform_probs = generate_uniform_probs(
-            num_tokens,
-            num_draft_tokens,
-            sampling_metadata.generators,
-            device,
+            num_tokens, num_draft_tokens, sampling_metadata.generators, device
         )
 
     if not sampling_metadata.all_random:
@@ -544,16 +531,12 @@ def apply_sampling_constraints(
     top_k = None
     if sampling_metadata.top_k is not None:
         top_k = expand_batch_to_tokens(
-            sampling_metadata.top_k,
-            cu_num_draft_tokens,
-            num_tokens,
+            sampling_metadata.top_k, cu_num_draft_tokens, num_tokens
         )
     top_p = None
     if sampling_metadata.top_p is not None:
         top_p = expand_batch_to_tokens(
-            sampling_metadata.top_p,
-            cu_num_draft_tokens,
-            num_tokens,
+            sampling_metadata.top_p, cu_num_draft_tokens, num_tokens
         )
 
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
@@ -637,11 +620,7 @@ def generate_uniform_probs(
     # uniform_prob is sampled to be exact 0.0 as reported in
     # https://github.com/pytorch/pytorch/issues/16706. Using float64
     # mitigates the issue.
-    uniform_probs = torch.rand(
-        (num_tokens,),
-        dtype=torch.float64,
-        device=device,
-    )
+    uniform_probs = torch.rand((num_tokens,), dtype=torch.float64, device=device)
     start_idx = 0
     for req_idx, n in enumerate(num_draft_tokens):
         # Do not generate random numbers for requests with no draft tokens.
@@ -673,11 +652,7 @@ def sample_recovered_tokens(
     # NOTE(woosuk): Create only one distribution for each request.
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
-    q = torch.empty(
-        (batch_size, vocab_size),
-        dtype=torch.float32,
-        device=device,
-    )
+    q = torch.empty((batch_size, vocab_size), dtype=torch.float32, device=device)
     q.exponential_()
     for i, generator in sampling_metadata.generators.items():
         # Do not generate random numbers for requests with no draft tokens.
@@ -744,8 +719,7 @@ def rejection_greedy_sample_kernel(
                 token_id = target_argmax_id
                 rejected = draft_token_id != target_argmax_id
             tl.store(
-                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
-                token_id,
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id
             )
 
     if not rejected:
@@ -905,9 +879,7 @@ def sample_recovered_tokens_kernel(
             # `tl.argmax` will select the maximum value.
 
         inv_q = tl.load(
-            inv_q_ptr + req_idx * vocab_size + vocab_offset,
-            mask=vocab_mask,
-            other=0.0,
+            inv_q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_mask, other=0.0
         )
 
         # Local tile reduction

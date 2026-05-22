@@ -75,9 +75,7 @@ _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
 def _replace_or_register_parameter(
-    layer: torch.nn.Module,
-    name: str,
-    value: torch.Tensor | None,
+    layer: torch.nn.Module, name: str, value: torch.Tensor | None
 ) -> None:
     if value is None:
         return
@@ -88,10 +86,7 @@ def _replace_or_register_parameter(
 
 
 def _convert_awq_to_standard_format(
-    layer: torch.nn.Module,
-    w_q_name: str,
-    w_zp_name: str,
-    size_bits: int,
+    layer: torch.nn.Module, w_q_name: str, w_zp_name: str, size_bits: int
 ) -> None:
     """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
 
@@ -169,9 +164,7 @@ class AWQMarlinConfig(QuantizationConfig):
     """Config class for AWQ Marlin"""
 
     # num_bits -> type
-    TYPE_MAP = {
-        4: scalar_types.uint4,
-    }
+    TYPE_MAP = {4: scalar_types.uint4}
 
     def __init__(
         self,
@@ -467,11 +460,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         )
 
         scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
+            data=torch.empty(num_groups, output_size_per_partition, dtype=params_dtype),
             input_dim=0,
             output_dim=1,
             weight_loader=weight_loader,
@@ -499,20 +488,13 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
 
 class AWQMarlinMoEMethod(FusedMoEMethodBase):
-    def __init__(
-        self,
-        quant_config: AWQMarlinConfig,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, quant_config: AWQMarlinConfig, moe: FusedMoEConfig):
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
@@ -727,11 +709,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             a2_gscale=getattr(layer, "w2_input_global_scale", None),
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
+    def select_gemm_impl(self, prepare_finalize, layer: RoutedExperts):
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "
             "initialization logic. This function should not be called."

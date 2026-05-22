@@ -93,9 +93,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor:
         if residual is not None:
             x = x + residual
@@ -213,9 +211,7 @@ class NemotronAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -281,10 +277,7 @@ class NemotronDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -310,8 +303,7 @@ class NemotronModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
+                self.vocab_size, config.hidden_size
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -423,13 +415,7 @@ class NemotronModel(nn.Module):
 
 
 class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # LoRA specific attributes
     embedding_modules = {
@@ -487,10 +473,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

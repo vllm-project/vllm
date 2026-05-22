@@ -91,12 +91,7 @@ def generate_params():
 
 
 @pytest.mark.parametrize("device, name, use_mla, block_size", generate_params())
-def test_backend_selection(
-    device: str,
-    name: str,
-    use_mla: bool,
-    block_size: int,
-):
+def test_backend_selection(device: str, name: str, use_mla: bool, block_size: int):
     """Test attention backend selection with valid device-backend pairs."""
     # Create AttentionConfig with the specified backend
     attention_config = AttentionConfig(backend=AttentionBackendEnum[name])
@@ -191,10 +186,7 @@ def test_backend_selection(
                         if not is_supported:
                             pytest.skip("FlashMLA not supported on this platform")
                         backend = get_attn_backend(
-                            576,
-                            torch.float16,
-                            None,
-                            use_mla=use_mla,
+                            576, torch.float16, None, use_mla=use_mla
                         )
                         expected = name
                         assert backend.get_name() == expected
@@ -319,9 +311,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
 
 def test_invalid_backend():
     """Test that invalid attention backend names raise ValueError."""
-    with (
-        pytest.raises(ValueError),
-    ):
+    with pytest.raises(ValueError):
         # Invalid backend name should raise ValueError when creating enum
         AttentionConfig(backend=AttentionBackendEnum["INVALID"])
 
@@ -451,8 +441,7 @@ def test_non_causal_backend_selection(
     _cached_get_attn_backend.cache_clear()
 
     attention_config = AttentionConfig(
-        backend=AttentionBackendEnum[backend_name],
-        use_non_causal=use_non_causal,
+        backend=AttentionBackendEnum[backend_name], use_non_causal=use_non_causal
     )
     cache_config = CacheConfig(block_size=16)
     vllm_config = VllmConfig(
@@ -467,17 +456,13 @@ def test_non_causal_backend_selection(
     ):
         if should_succeed:
             backend = get_attn_backend(
-                head_size=128,
-                dtype=torch.float16,
-                kv_cache_dtype=None,
+                head_size=128, dtype=torch.float16, kv_cache_dtype=None
             )
             assert backend.get_name() == backend_name
         else:
             with pytest.raises(ValueError) as exc_info:
                 get_attn_backend(
-                    head_size=128,
-                    dtype=torch.float16,
-                    kv_cache_dtype=None,
+                    head_size=128, dtype=torch.float16, kv_cache_dtype=None
                 )
             assert "non-causal" in str(exc_info.value).lower()
 
@@ -493,10 +478,7 @@ def test_non_causal_autoselect_backend():
     """
     _cached_get_attn_backend.cache_clear()
 
-    attention_config = AttentionConfig(
-        backend=None,
-        use_non_causal=True,
-    )
+    attention_config = AttentionConfig(backend=None, use_non_causal=True)
     cache_config = CacheConfig(block_size=16)
     vllm_config = VllmConfig(
         attention_config=attention_config, cache_config=cache_config
@@ -509,9 +491,7 @@ def test_non_causal_autoselect_backend():
         patch("vllm.platforms.current_platform", CudaPlatform()),
     ):
         backend = get_attn_backend(
-            head_size=128,
-            dtype=torch.float16,
-            kv_cache_dtype=None,
+            head_size=128, dtype=torch.float16, kv_cache_dtype=None
         )
         assert backend.supports_non_causal()
 

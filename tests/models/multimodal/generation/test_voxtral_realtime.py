@@ -127,10 +127,7 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
         }
         inputs.append(input_dict)
 
-    outputs = engine.generate(
-        inputs,
-        sampling_params=sampling_params,
-    )
+    outputs = engine.generate(inputs, sampling_params=sampling_params)
 
     texts = _normalize([out.outputs[0].text for out in outputs])
     for i, (got, expected) in enumerate(zip(texts, EXPECTED_TEXT)):

@@ -82,12 +82,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(filepath.read_bytes())
 
-    def encode_base64(
-        self,
-        media: Image.Image,
-        *,
-        image_format: str = "PNG",
-    ) -> str:
+    def encode_base64(self, media: Image.Image, *, image_format: str = "PNG") -> str:
         image = media
 
         with BytesIO() as buffer:

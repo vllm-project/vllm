@@ -91,15 +91,9 @@ if __name__ == "__main__":
         enforce_eager=True,
     )
 
-    prompts = [
-        "Hello, my name is",
-        "The future of AI is",
-    ]
+    prompts = ["Hello, my name is", "The future of AI is"]
 
-    sampling_params = SamplingParams(
-        max_tokens=32,
-        temperature=0.0,
-    )
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
 
     print(f"\nRunning generate with {len(prompts)} prompt(s)...\n")
     outputs = llm.generate(prompts, sampling_params)

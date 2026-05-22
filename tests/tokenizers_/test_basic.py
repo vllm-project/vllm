@@ -3,10 +3,7 @@
 from typing import _get_protocol_attrs  # type: ignore
 
 import pytest
-from transformers import (
-    PreTrainedTokenizerBase,
-    PreTrainedTokenizerFast,
-)
+from transformers import PreTrainedTokenizerBase, PreTrainedTokenizerFast
 
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
@@ -29,8 +26,7 @@ def test_tokenizer_like_protocol():
     _assert_tokenizer_like(tokenizer)
 
     tokenizer = get_tokenizer(
-        "mistralai/Mistral-7B-Instruct-v0.3",
-        tokenizer_mode="mistral",
+        "mistralai/Mistral-7B-Instruct-v0.3", tokenizer_mode="mistral"
     )
     assert isinstance(tokenizer, MistralTokenizer)
     _assert_tokenizer_like(tokenizer)
@@ -48,9 +44,7 @@ def test_tokenizer_like_protocol():
     _assert_tokenizer_like(tokenizer)
 
     tokenizer = get_tokenizer(
-        "Qwen/Qwen-VL",
-        tokenizer_mode="qwen_vl",
-        trust_remote_code=True,
+        "Qwen/Qwen-VL", tokenizer_mode="qwen_vl", trust_remote_code=True
     )
     assert isinstance(tokenizer, HfTokenizer)
     assert "WithoutImagePad" in tokenizer.__class__.__name__

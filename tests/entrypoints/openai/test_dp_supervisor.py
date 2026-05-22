@@ -155,9 +155,7 @@ def test_handles_shutdown_event():
 
 
 @pytest.mark.asyncio
-async def test_handles_child_exit(
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_handles_child_exit(monkeypatch: pytest.MonkeyPatch):
     supervisor = DPSupervisor(_make_unit_args())
     supervisor._processes = [
         SimpleNamespace(
@@ -176,9 +174,7 @@ async def test_handles_child_exit(
 
 
 @pytest.mark.asyncio
-async def test_handles_probe_failure(
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_handles_probe_failure(monkeypatch: pytest.MonkeyPatch):
     supervisor = DPSupervisor(_make_unit_args(dp_supervisor_probe_interval_s=0.0))
     supervisor.child_ports = [8000]
     probe_results = iter([True, False])
@@ -269,11 +265,7 @@ class MockVLLMServer:
             os.kill(os.getpid(), signal.SIGKILL)
 
         config = uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=self.port,
-            log_level="warning",
-            lifespan="off",
+            app, host="127.0.0.1", port=self.port, log_level="warning", lifespan="off"
         )
         self._server = uvicorn.Server(config)
 
@@ -386,9 +378,7 @@ async def _kill_server(port: int) -> None:
 
 @contextlib.asynccontextmanager
 async def _run_supervisor(
-    args: argparse.Namespace,
-    monkeypatch: pytest.MonkeyPatch,
-    launch_fn=None,
+    args: argparse.Namespace, monkeypatch: pytest.MonkeyPatch, launch_fn=None
 ):
     if launch_fn is None:
         launch_fn = launch_mock_vllm

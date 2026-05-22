@@ -11,9 +11,7 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 import vllm.envs as envs
-from vllm.config.model_arch import (
-    ModelArchitectureConfig,
-)
+from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
@@ -428,9 +426,7 @@ class ModelConfig:
         return hash_factors(factors)
 
     def _update_nested(
-        self,
-        target: PretrainedConfig | dict[str, Any],
-        updates: dict[str, Any],
+        self, target: PretrainedConfig | dict[str, Any], updates: dict[str, Any]
     ) -> None:
         """Recursively updates a config or dict with nested updates."""
         for key, value in updates.items():
@@ -456,9 +452,7 @@ class ModelConfig:
                 setattr(target, key, value)
 
     def _apply_dict_overrides(
-        self,
-        config: PretrainedConfig,
-        overrides: dict[str, Any],
+        self, config: PretrainedConfig, overrides: dict[str, Any]
     ) -> None:
         """Apply dict overrides, handling both nested configs and dict values."""
         from transformers import PretrainedConfig
@@ -555,10 +549,7 @@ class ModelConfig:
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
         )
-        hf_config = maybe_patch_hf_config_from_gguf(
-            self.model,
-            hf_config,
-        )
+        hf_config = maybe_patch_hf_config_from_gguf(self.model, hf_config)
 
         self.hf_config = hf_config
         if dict_overrides:
@@ -633,9 +624,7 @@ class ModelConfig:
 
             if self.tokenizer_mode != "auto":
                 logger.info(
-                    "Defaulting to tokenizer_mode=%r for %s",
-                    self.tokenizer_mode,
-                    arch,
+                    "Defaulting to tokenizer_mode=%r for %s", self.tokenizer_mode, arch
                 )
 
         # Init pooler config if needed
@@ -754,9 +743,7 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    def get_model_arch_config(
-        self,
-    ) -> ModelArchitectureConfig:
+    def get_model_arch_config(self) -> ModelArchitectureConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
@@ -899,10 +886,7 @@ class ModelConfig:
             model, _ = split_remote_gguf(model)
         return get_sentence_transformer_tokenizer_config(model, self.revision)
 
-    def _get_default_runner_type(
-        self,
-        architectures: list[str],
-    ) -> RunnerType:
+    def _get_default_runner_type(self, architectures: list[str]) -> RunnerType:
         registry = self.registry
 
         # Some Sentence Transformers models use *ForCausalLM archs
@@ -924,10 +908,7 @@ class ModelConfig:
         return "generate"
 
     def _get_runner_type(
-        self,
-        architectures: list[str],
-        runner: RunnerOption,
-        convert: ConvertOption,
+        self, architectures: list[str], runner: RunnerOption, convert: ConvertOption
     ) -> RunnerType:
         if runner != "auto":
             return runner
@@ -948,9 +929,7 @@ class ModelConfig:
         return runner_type
 
     def _get_default_convert_type(
-        self,
-        architectures: list[str],
-        runner_type: RunnerType,
+        self, architectures: list[str], runner_type: RunnerType
     ) -> ConvertType:
         registry = self.registry
 
@@ -979,10 +958,7 @@ class ModelConfig:
         return "none"
 
     def _get_convert_type(
-        self,
-        architectures: list[str],
-        runner_type: RunnerType,
-        convert: ConvertOption,
+        self, architectures: list[str], runner_type: RunnerType, convert: ConvertOption
     ) -> ConvertType:
         if convert != "auto":
             return convert
@@ -1127,12 +1103,7 @@ class ModelConfig:
             else False
         )
         if all(
-            [
-                is_bitsandbytes,
-                has_quantization_config,
-                is_8bit,
-                not self.enforce_eager,
-            ]
+            [is_bitsandbytes, has_quantization_config, is_8bit, not self.enforce_eager]
         ):
             logger.warning(
                 "CUDA graph is not supported on BitsAndBytes 8bit yet, "
@@ -1157,18 +1128,13 @@ class ModelConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import (
-            MODELS_CONFIG_MAP,
-        )
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_model_config(self)
 
-    def verify_dual_chunk_attention_config(
-        self,
-        load_config: LoadConfig,
-    ) -> None:
+    def verify_dual_chunk_attention_config(self, load_config: LoadConfig) -> None:
         if hasattr(self.hf_config, "dual_chunk_attention_config"):
             # Try loading the sparse attention config
             from vllm.model_executor.model_loader.weight_utils import (
@@ -1188,10 +1154,7 @@ class ModelConfig:
                         "sparse_attention_enabled"
                     ] = True
 
-    def verify_with_parallel_config(
-        self,
-        parallel_config: ParallelConfig,
-    ) -> None:
+    def verify_with_parallel_config(self, parallel_config: ParallelConfig) -> None:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
@@ -1331,9 +1294,7 @@ class ModelConfig:
         return end - start
 
     def get_num_layers_by_block_type(
-        self,
-        parallel_config: ParallelConfig,
-        block_type: LayerBlockType = "attention",
+        self, parallel_config: ParallelConfig, block_type: LayerBlockType = "attention"
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
@@ -2001,10 +1962,7 @@ def _check_valid_dtype(model_type: str, dtype: torch.dtype):
 
 
 def _resolve_auto_dtype(
-    model_type: str,
-    config_dtype: torch.dtype,
-    *,
-    is_pooling_model: bool,
+    model_type: str, config_dtype: torch.dtype, *, is_pooling_model: bool
 ):
     supported_dtypes = [
         dtype
@@ -2063,9 +2021,7 @@ def _get_and_verify_dtype(
         if dtype == "auto":
             # Set default dtype from model config
             torch_dtype = _resolve_auto_dtype(
-                model_type,
-                config_dtype,
-                is_pooling_model=is_pooling_model,
+                model_type, config_dtype, is_pooling_model=is_pooling_model
             )
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:

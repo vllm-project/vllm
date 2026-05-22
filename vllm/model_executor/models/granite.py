@@ -174,9 +174,7 @@ class GraniteAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -231,17 +229,12 @@ class GraniteDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
         # Fully Connected
         residual = hidden_states
@@ -267,9 +260,7 @@ class GraniteModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                config.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -313,11 +304,7 @@ class GraniteModel(nn.Module):
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -383,15 +370,8 @@ class GraniteModel(nn.Module):
 
 class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # LoRA specific attributes
@@ -458,7 +438,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             {
                 "hidden_states": torch.zeros(
                     (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
+                )
             }
         )
 
@@ -468,8 +448,5 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # processed with quantization, LoRA, fine-tuning, etc.
         skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

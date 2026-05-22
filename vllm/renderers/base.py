@@ -38,10 +38,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import (
-    AsyncMicrobatchTokenizer,
-    make_async,
-)
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer, make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -124,9 +121,7 @@ class BaseRenderer(ABC, Generic[_T]):
             if ro_cache is not None:
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
-                        config.model_config,
-                        tokenizer=self.tokenizer,
-                        cache=ro_cache,
+                        config.model_config, tokenizer=self.tokenizer, cache=ro_cache
                     )
 
             # This is used to generate internal request ID for MM processing
@@ -190,9 +185,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_cache_stats.reset = True
 
     @staticmethod
-    def _clear_processor_cache(
-        processor: "BaseMultiModalProcessor | None",
-    ) -> None:
+    def _clear_processor_cache(processor: "BaseMultiModalProcessor | None") -> None:
         if processor is None:
             return
 
@@ -201,10 +194,7 @@ class BaseRenderer(ABC, Generic[_T]):
             processor_cache.clear_cache()
 
     def _warmup_mm_processor(
-        self,
-        processor: "BaseMultiModalProcessor",
-        *,
-        log_prefix: str,
+        self, processor: "BaseMultiModalProcessor", *, log_prefix: str
     ) -> None:
         from vllm.multimodal.processing import TimingContext
 
@@ -248,10 +238,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if self.mm_processor:
             try:
                 logger.debug("Warming up multi-modal processing...")
-                self._warmup_mm_processor(
-                    self.mm_processor,
-                    log_prefix="Multi-modal",
-                )
+                self._warmup_mm_processor(self.mm_processor, log_prefix="Multi-modal")
             except Exception:
                 logger.warning("Multi-modal warmup failed")
             finally:
@@ -261,8 +248,7 @@ class BaseRenderer(ABC, Generic[_T]):
             try:
                 logger.debug("Warming up readonly multi-modal processing...")
                 self._warmup_mm_processor(
-                    self._readonly_mm_processor,
-                    log_prefix="Readonly multi-modal",
+                    self._readonly_mm_processor, log_prefix="Readonly multi-modal"
                 )
             except Exception:
                 logger.warning("Readonly multi-modal warmup failed")
@@ -357,69 +343,52 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     # Step 1: Convert raw inputs to prompts
-    def render_prompt(
-        self,
-        prompt: DictPrompt | bytes,
-    ) -> DictPrompt:
+    def render_prompt(self, prompt: DictPrompt | bytes) -> DictPrompt:
         if isinstance(prompt, bytes):
             embeds = safe_load_prompt_embeds(self.model_config, prompt)
             prompt = EmbedsPrompt(prompt_embeds=embeds)
 
         return prompt
 
-    def render_prompts(
-        self,
-        prompts: Sequence[DictPrompt | bytes],
-    ) -> list[DictPrompt]:
+    def render_prompts(self, prompts: Sequence[DictPrompt | bytes]) -> list[DictPrompt]:
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
     async def render_prompts_async(
-        self,
-        prompts: Sequence[DictPrompt | bytes],
+        self, prompts: Sequence[DictPrompt | bytes]
     ) -> list[DictPrompt]:
         return self.render_prompts(prompts)
 
     @abstractmethod
     def render_messages(
-        self,
-        messages: list["ChatCompletionMessageParam"],
-        params: ChatParams,
+        self, messages: list["ChatCompletionMessageParam"], params: ChatParams
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         raise NotImplementedError
 
     async def render_messages_async(
-        self,
-        messages: list["ChatCompletionMessageParam"],
-        params: ChatParams,
+        self, messages: list["ChatCompletionMessageParam"], params: ChatParams
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
     def _tokenize_prompt(
-        self,
-        prompt: TextPrompt,
-        params: TokenizeParams,
+        self, prompt: TextPrompt, params: TokenizeParams
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
         prompt_token_ids = tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
+            prompt["prompt"], **params.get_encode_kwargs()
         )
 
         return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
     async def _tokenize_prompt_async(
-        self,
-        prompt: TextPrompt,
-        params: TokenizeParams,
+        self, prompt: TextPrompt, params: TokenizeParams
     ) -> TokensPrompt:
         tokenizer = self.get_async_tokenizer()
         prompt_token_ids = await tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
+            prompt["prompt"], **params.get_encode_kwargs()
         )
 
         return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
@@ -438,22 +407,16 @@ class BaseRenderer(ABC, Generic[_T]):
 
     @overload
     def _tokenize_singleton_prompt(
-        self,
-        prompt: TextPrompt | TokensPrompt,
-        params: TokenizeParams,
+        self, prompt: TextPrompt | TokensPrompt, params: TokenizeParams
     ) -> TokensPrompt: ...
 
     @overload
     def _tokenize_singleton_prompt(  # type: ignore[misc]
-        self,
-        prompt: EmbedsPrompt,
-        params: TokenizeParams,
+        self, prompt: EmbedsPrompt, params: TokenizeParams
     ) -> EmbedsPrompt: ...
 
     def _tokenize_singleton_prompt(
-        self,
-        prompt: SingletonDictPrompt,
-        params: TokenizeParams,
+        self, prompt: SingletonDictPrompt, params: TokenizeParams
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
@@ -474,22 +437,16 @@ class BaseRenderer(ABC, Generic[_T]):
 
     @overload
     async def _tokenize_singleton_prompt_async(
-        self,
-        prompt: TextPrompt | TokensPrompt,
-        params: TokenizeParams,
+        self, prompt: TextPrompt | TokensPrompt, params: TokenizeParams
     ) -> TokensPrompt: ...
 
     @overload
     async def _tokenize_singleton_prompt_async(  # type: ignore[misc]
-        self,
-        prompt: EmbedsPrompt,
-        params: TokenizeParams,
+        self, prompt: EmbedsPrompt, params: TokenizeParams
     ) -> EmbedsPrompt: ...
 
     async def _tokenize_singleton_prompt_async(
-        self,
-        prompt: SingletonDictPrompt,
-        params: TokenizeParams,
+        self, prompt: SingletonDictPrompt, params: TokenizeParams
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
@@ -509,9 +466,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     def _tokenize_enc_dec_prompt(
-        self,
-        prompt: EncoderDecoderDictPrompt,
-        params: TokenizeParams,
+        self, prompt: EncoderDecoderDictPrompt, params: TokenizeParams
     ) -> EncoderDecoderTokPrompt:
         enc_prompt, dec_prompt = (
             self._tokenize_singleton_prompt(prompt["encoder_prompt"], params),
@@ -523,14 +478,11 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
         return EncoderDecoderTokPrompt(
-            encoder_prompt=enc_prompt,
-            decoder_prompt=dec_prompt,
+            encoder_prompt=enc_prompt, decoder_prompt=dec_prompt
         )
 
     async def _tokenize_enc_dec_prompt_async(
-        self,
-        prompt: EncoderDecoderDictPrompt,
-        params: TokenizeParams,
+        self, prompt: EncoderDecoderDictPrompt, params: TokenizeParams
     ) -> EncoderDecoderTokPrompt:
         enc_prompt, dec_prompt = await asyncio.gather(
             self._tokenize_singleton_prompt_async(prompt["encoder_prompt"], params),
@@ -544,31 +496,22 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
         return EncoderDecoderTokPrompt(
-            encoder_prompt=enc_prompt,
-            decoder_prompt=dec_prompt,
+            encoder_prompt=enc_prompt, decoder_prompt=dec_prompt
         )
 
-    def tokenize_prompt(
-        self,
-        prompt: DictPrompt,
-        params: TokenizeParams,
-    ) -> TokPrompt:
+    def tokenize_prompt(self, prompt: DictPrompt, params: TokenizeParams) -> TokPrompt:
         if "encoder_prompt" in prompt:
             return self._tokenize_enc_dec_prompt(prompt, params)  # type: ignore[arg-type]
 
         return self._tokenize_singleton_prompt(prompt, params)
 
     def tokenize_prompts(
-        self,
-        prompts: Sequence[DictPrompt],
-        params: TokenizeParams,
+        self, prompts: Sequence[DictPrompt], params: TokenizeParams
     ) -> list[TokPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
 
     async def tokenize_prompt_async(
-        self,
-        prompt: DictPrompt,
-        params: TokenizeParams,
+        self, prompt: DictPrompt, params: TokenizeParams
     ) -> TokPrompt:
         if "encoder_prompt" in prompt:
             return await self._tokenize_enc_dec_prompt_async(prompt, params)  # type: ignore[arg-type]
@@ -576,9 +519,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return await self._tokenize_singleton_prompt_async(prompt, params)
 
     async def tokenize_prompts_async(
-        self,
-        prompts: Sequence[DictPrompt],
-        params: TokenizeParams,
+        self, prompts: Sequence[DictPrompt], params: TokenizeParams
     ) -> list[TokPrompt]:
         return await asyncio.gather(
             *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
@@ -586,9 +527,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     # Step 3: Add extra keys to the prompts
     def _apply_prompt_extras(
-        self,
-        prompts: Sequence[TokPrompt],
-        prompt_extras: dict[str, Any] | None,
+        self, prompts: Sequence[TokPrompt], prompt_extras: dict[str, Any] | None
     ):
         if not prompt_extras:
             return
@@ -704,10 +643,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return mm_inputs
 
     def _process_tokens(
-        self,
-        prompt: TokensPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokensPrompt, *, skip_mm_cache: bool = False
     ) -> TokensInput | MultiModalInput:
         """Process token inputs, with multimodal preprocessing offloaded
         to the shared thread pool in the async variant.
@@ -765,10 +701,7 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     async def _process_tokens_async(
-        self,
-        prompt: TokensPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokensPrompt, *, skip_mm_cache: bool = False
     ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
 
@@ -793,10 +726,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return engine_input
 
     def _process_singleton(
-        self,
-        prompt: SingletonTokPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: SingletonTokPrompt, *, skip_mm_cache: bool = False
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
@@ -804,10 +734,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return self._process_tokens(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
 
     async def _process_singleton_async(
-        self,
-        prompt: SingletonTokPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: SingletonTokPrompt, *, skip_mm_cache: bool = False
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
@@ -815,10 +742,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
 
     def _process_enc_dec(
-        self,
-        prompt: EncoderDecoderTokPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: EncoderDecoderTokPrompt, *, skip_mm_cache: bool = False
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
@@ -844,10 +768,7 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     async def _process_enc_dec_async(
-        self,
-        prompt: EncoderDecoderTokPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: EncoderDecoderTokPrompt, *, skip_mm_cache: bool = False
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
@@ -870,11 +791,7 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     def process_for_engine(
-        self,
-        prompt: TokPrompt,
-        arrival_time: float,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokPrompt, arrival_time: float, *, skip_mm_cache: bool = False
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
@@ -887,11 +804,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return engine_input
 
     async def process_for_engine_async(
-        self,
-        prompt: TokPrompt,
-        arrival_time: float,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokPrompt, arrival_time: float, *, skip_mm_cache: bool = False
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:

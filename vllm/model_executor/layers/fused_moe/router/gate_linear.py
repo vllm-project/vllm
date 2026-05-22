@@ -97,9 +97,7 @@ class GateLinear(ReplicatedLinear):
         # Tier 1: DSV3 specialized kernel
         if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
             output = ops.dsv3_router_gemm(
-                hidden_states=x,
-                router_weight=self.weight,
-                output_dtype=self.out_dtype,
+                hidden_states=x, router_weight=self.weight, output_dtype=self.out_dtype
             )
             return output, None
 

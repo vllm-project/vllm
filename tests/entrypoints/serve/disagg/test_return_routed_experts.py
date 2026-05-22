@@ -44,10 +44,7 @@ async def client(server: RemoteOpenAIServer):
     transport = httpx.AsyncHTTPTransport(uds=server.uds) if server.uds else None
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     async with httpx.AsyncClient(
-        transport=transport,
-        base_url=server.url_root,
-        timeout=600,
-        headers=headers,
+        transport=transport, base_url=server.url_root, timeout=600, headers=headers
     ) as c:
         yield c
 

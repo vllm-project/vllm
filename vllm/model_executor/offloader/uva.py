@@ -35,9 +35,7 @@ class UVAOffloader(BaseOffloader):
     """
 
     def __init__(
-        self,
-        cpu_offload_max_bytes: int,
-        cpu_offload_params: set[str] | None = None,
+        self, cpu_offload_max_bytes: int, cpu_offload_params: set[str] | None = None
     ):
         self.cpu_offload_max_bytes = cpu_offload_max_bytes
         self.cpu_offload_bytes = 0
@@ -49,15 +47,13 @@ class UVAOffloader(BaseOffloader):
         )
 
     def wrap_modules(
-        self,
-        modules_generator: Generator[nn.Module, None, None],
+        self, modules_generator: Generator[nn.Module, None, None]
     ) -> list[nn.Module]:
         """Wrap modules with UVA offloading."""
         modules = [self._maybe_offload_to_cpu(module) for module in modules_generator]
         if self.cpu_offload_bytes > 0:
             logger.info(
-                "Total CPU offloaded parameters: %s",
-                format_gib(self.cpu_offload_bytes),
+                "Total CPU offloaded parameters: %s", format_gib(self.cpu_offload_bytes)
             )
         return modules
 
@@ -123,11 +119,7 @@ class UVAOffloader(BaseOffloader):
                 # set `tie_weights=False` as tied weights in original model
                 # become untied when calling .to(device) individually
                 output = functional_call(
-                    module,
-                    device_state,
-                    args=args,
-                    kwargs=kwargs,
-                    tie_weights=False,
+                    module, device_state, args=args, kwargs=kwargs, tie_weights=False
                 )
                 module.forward = forward
                 return output

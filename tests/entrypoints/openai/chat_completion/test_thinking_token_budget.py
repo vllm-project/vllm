@@ -100,11 +100,7 @@ def server_qwen35_fp8_mtp_tp2():
     if not current_platform.supports_fp8():
         pytest.skip("FP8 is not supported on this platform")
 
-    spec_cfg = {
-        "method": "mtp",
-        "num_speculative_tokens": 2,
-        "max_model_len": 32768,
-    }
+    spec_cfg = {"method": "mtp", "num_speculative_tokens": 2, "max_model_len": 32768}
     args = [
         "--tensor-parallel-size",
         "2",
@@ -129,20 +125,14 @@ def server_qwen35_fp8_mtp_tp2():
         env_dict = {"CUDA_VISIBLE_DEVICES": "2,3"}
 
     with RemoteOpenAIServer(
-        QWEN35_FP8_MTP_MODEL,
-        args,
-        max_wait_seconds=3000,
-        env_dict=env_dict,
+        QWEN35_FP8_MTP_MODEL, args, max_wait_seconds=3000, env_dict=env_dict
     ) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
 async def client(request, server, server_with_auto_reasoning_config):
-    server_map = {
-        "default": server,
-        "auto_config": server_with_auto_reasoning_config,
-    }
+    server_map = {"default": server, "auto_config": server_with_auto_reasoning_config}
     target_server = server_map[request.param]
     async with target_server.get_async_client() as async_client:
         yield async_client
@@ -161,9 +151,7 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
         extra_body={"thinking_token_budget": THINK_BUDGET},
     )
     response_without_budget = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES,
-        max_tokens=100,
+        model=MODEL_NAME, messages=MESSAGES, max_tokens=100
     )
 
     msg_with = response_with_budget.choices[0].message
@@ -313,10 +301,7 @@ async def test_streaming_with_thinking_disabled_stays_in_content(
     assert message.content is not None and message.content.strip() != ""
     assert getattr(message, "reasoning", None) in (None, "")
 
-    stream = await client.chat.completions.create(
-        **request_kwargs,
-        stream=True,
-    )
+    stream = await client.chat.completions.create(**request_kwargs, stream=True)
 
     content_chunks = []
     reasoning_chunks = []

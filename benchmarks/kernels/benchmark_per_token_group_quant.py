@@ -62,10 +62,7 @@ def _run_single(
 
         def cuda_impl():
             return fp8_utils.per_token_group_quant_fp8(
-                x,
-                group_size,
-                column_major_scales=column_major,
-                use_ue8m0=scale_ue8m0,
+                x, group_size, column_major_scales=column_major, use_ue8m0=scale_ue8m0
             )
 
         def triton_impl():

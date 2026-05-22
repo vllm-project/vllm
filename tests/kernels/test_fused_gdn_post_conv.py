@@ -85,16 +85,7 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
 
     # Reference
     ref_q, ref_k, ref_v, ref_g, ref_beta = reference_post_conv(
-        conv_output,
-        a,
-        b,
-        A_log,
-        dt_bias,
-        H,
-        K,
-        V,
-        apply_l2norm,
-        output_g_exp,
+        conv_output, a, b, A_log, dt_bias, H, K, V, apply_l2norm, output_g_exp
     )
 
     # Fused kernel
@@ -156,14 +147,7 @@ def test_fused_post_conv_sanity(L):
     dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
 
     q, k, v, g, beta = fused_post_conv_prep(
-        conv_output,
-        a,
-        b,
-        A_log,
-        dt_bias,
-        num_k_heads=H,
-        head_k_dim=K,
-        head_v_dim=V,
+        conv_output, a, b, A_log, dt_bias, num_k_heads=H, head_k_dim=K, head_v_dim=V
     )
 
     # Basic sanity
@@ -196,14 +180,7 @@ def test_fused_post_conv_l0():
     dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
 
     q, k, v, g, beta = fused_post_conv_prep(
-        conv_output,
-        a,
-        b,
-        A_log,
-        dt_bias,
-        num_k_heads=H,
-        head_k_dim=K,
-        head_v_dim=V,
+        conv_output, a, b, A_log, dt_bias, num_k_heads=H, head_k_dim=K, head_v_dim=V
     )
     assert q.shape == (0, H, K)
     assert g.shape == (0, HV)

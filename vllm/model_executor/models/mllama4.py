@@ -40,9 +40,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -55,10 +53,7 @@ from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -159,10 +154,7 @@ class Llama4VisionMLP(nn.Module):
 
 class Llama4MultiModalProjector(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.linear_1 = ColumnParallelLinear(
@@ -206,10 +198,7 @@ def pixel_shuffle(input_tensor, shuffle_ratio):
 
 class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.pixel_shuffle_ratio = config.pixel_shuffle_ratio
@@ -256,10 +245,7 @@ class Llama4VisionAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         self.attn = MMEncoderAttention(
-            self.num_local_heads,
-            self.head_dim,
-            self.scaling,
-            prefix=f"{prefix}.attn",
+            self.num_local_heads, self.head_dim, self.scaling, prefix=f"{prefix}.attn"
         )
 
         if use_data_parallel:
@@ -310,10 +296,7 @@ class Llama4VisionAttention(nn.Module):
             dtype=torch.complex64,  # important
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
 
         qkv, _ = self.qkv_proj(hidden_states)
@@ -346,9 +329,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = Llama4VisionAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.mlp = Llama4VisionMLP(
             input_size=config.hidden_size,
@@ -363,10 +344,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         self.input_layernorm = nn.LayerNorm(config.hidden_size)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size)
 
-    def forward(
-        self,
-        hidden_state: torch.Tensor,
-    ):
+    def forward(self, hidden_state: torch.Tensor):
         # Self Attention
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
@@ -403,10 +381,7 @@ class Llama4VisionEncoder(nn.Module):
             ]
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
             hidden_states: Input tensor of shape
@@ -477,9 +452,7 @@ class Llama4VisionModel(nn.Module):
         self.scale = config.hidden_size**-0.5
 
         self.patch_embedding = Llama4UnfoldConvolution(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.patch_embedding",
+            config, quant_config=quant_config, prefix=f"{prefix}.patch_embedding"
         )
 
         self.class_embedding = nn.Parameter(self.scale * torch.randn(self.hidden_size))
@@ -493,21 +466,14 @@ class Llama4VisionModel(nn.Module):
 
         # encoders
         self.model = Llama4VisionEncoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.model",
+            config, quant_config=quant_config, prefix=f"{prefix}.model"
         )
 
         self.vision_adapter = Llama4VisionPixelShuffleMLP(
-            config,
-            quant_config,
-            prefix=f"{prefix}.vision_adapter",
+            config, quant_config, prefix=f"{prefix}.vision_adapter"
         )
 
-    def forward(
-        self,
-        images_flattened: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, images_flattened: torch.Tensor) -> torch.Tensor:
         # Patch embedding
         hidden_state = self.patch_embedding(images_flattened)
         num_tiles, num_patches, hidden_dim = hidden_state.shape
@@ -520,12 +486,7 @@ class Llama4VisionModel(nn.Module):
         num_patches += 1
 
         # Position embeddings
-        hidden_state = hidden_state.reshape(
-            num_tiles,
-            1,
-            num_patches,
-            hidden_dim,
-        )
+        hidden_state = hidden_state.reshape(num_tiles, 1, num_patches, hidden_dim)
         positional_embedding = self.positional_embedding_vlm.to(
             dtype=hidden_state.dtype, device=hidden_state.device
         )
@@ -593,10 +554,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         processor = self.info.get_hf_processor(**mm_kwargs)
@@ -640,9 +598,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         patches_per_image = hf_inputs.get("patches_per_image", torch.empty(0))
         return dict(
@@ -672,17 +628,14 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             aspect_ratio = out_item["aspect_ratios"].data
 
             repl = hf_processor._prompt_split_image(
-                aspect_ratio=aspect_ratio,
-                num_patches_per_chunk=num_patches_per_chunk,
+                aspect_ratio=aspect_ratio, num_patches_per_chunk=num_patches_per_chunk
             )
 
             return PromptUpdateDetails.select_text(repl, img_patch_token)
 
         return [
             PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_replacement,
+                modality="image", target=image_token, replacement=get_replacement
             )
         ]
 
@@ -887,16 +840,11 @@ class Llama4ForConditionalGeneration(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def separate_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        prefix: str,
+        self, weights: Iterable[tuple[str, torch.Tensor]], prefix: str
     ) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str, torch.Tensor]]]:
         weights1, weights2 = tee(weights, 2)
 
@@ -1132,10 +1080,7 @@ class Llama4ForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=[
-                "multi_modal_projector.",
-                "vision_model.vision_adapter.",
-            ],
+            connector=["multi_modal_projector.", "vision_model.vision_adapter."],
             tower_model="vision_model.",
         )
 

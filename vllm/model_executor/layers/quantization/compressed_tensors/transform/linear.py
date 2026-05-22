@@ -147,10 +147,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
                 submodule.process_weights_after_loading()
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.input_transform is not None:
             x = self.input_transform(x)

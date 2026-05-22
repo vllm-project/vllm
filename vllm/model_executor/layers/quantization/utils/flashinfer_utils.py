@@ -110,7 +110,7 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         ):
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
-                "SM100 and later, using CUTLASS backend instead",
+                "SM100 and later, using CUTLASS backend instead"
             )
             return FlashinferMoeBackend.CUTLASS
         return backend_map[flashinfer_moe_backend]
@@ -168,9 +168,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     for i in range(num_experts):
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            cache_permute_indices,
-            w13_weight[i].view(torch.uint8),
-            epilogue_tile_m,
+            cache_permute_indices, w13_weight[i].view(torch.uint8), epilogue_tile_m
         )
         tmp_weights1 = (
             w13_weight[i]
@@ -180,9 +178,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
         )
 
         permute_indices = get_w2_permute_indices_with_cache(
-            cache_permute_indices,
-            w2_weight[i].view(torch.uint8),
-            epilogue_tile_m,
+            cache_permute_indices, w2_weight[i].view(torch.uint8), epilogue_tile_m
         )
         tmp_weights2 = (
             w2_weight[i]
@@ -344,8 +340,7 @@ def align_fp8_moe_weights_for_fi(
 
 
 def _shuffle_deepseek_fp8_moe_weights(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
+    w13: torch.Tensor, w2: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Preprocess DeepSeek FP8 block-scale weights for the FlashInfer TRT-LLM
     kernel using the shuffle + BlockMajorK layout variant.
@@ -441,8 +436,7 @@ def _shuffle_mxfp8_moe_weights(
         )
         w2_scale_shuffled.append(
             shuffle_matrix_sf_a(
-                w2_scale[i].view(torch.uint8).reshape(hidden_size, -1),
-                epilogue_tile_m,
+                w2_scale[i].view(torch.uint8).reshape(hidden_size, -1), epilogue_tile_m
             )
         )
 
@@ -509,10 +503,7 @@ def prepare_fp8_moe_layer_for_fi(
     if not block_quant:
         min_alignment = 16 if is_gated else 128
         w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
-            w13,
-            w2,
-            layer.moe_config.is_act_and_mul,
-            min_alignment,
+            w13, w2, layer.moe_config.is_act_and_mul, min_alignment
         )
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 

@@ -59,10 +59,7 @@ class PrithviMAE:
             input_data = input_data[0]
 
         mm_data = {
-            "image": {
-                "pixel_values": input_data,
-                "location_coords": location_coords,
-            }
+            "image": {"pixel_values": input_data, "location_coords": location_coords}
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
@@ -317,8 +314,7 @@ def main(
     img_size = 512  # Size of Sen1Floods11
 
     input_data, temporal_coords, location_coords, meta_data = load_example(
-        file_paths=[data_file],
-        indices=input_indices,
+        file_paths=[data_file], indices=input_indices
     )
 
     meta_data = meta_data[0]  # only one image
@@ -347,8 +343,7 @@ def main(
         input_data = input_data * 10000  # Scale to 0-10000
 
     rgb_orig = process_channel_group(
-        orig_img=torch.Tensor(input_data[0, :, 0, ...]),
-        channels=channels,
+        orig_img=torch.Tensor(input_data[0, :, 0, ...]), channels=channels
     )
     rgb_orig = rgb_orig.to(torch.float32)
 
@@ -360,22 +355,15 @@ def main(
         output_dir, f"rgb_pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
     )
     save_geotiff(
-        image=_convert_np_uint8(img_pred),
-        output_path=img_pred_file,
-        meta=meta_data,
+        image=_convert_np_uint8(img_pred), output_path=img_pred_file, meta=meta_data
     )
 
     # Save image rgb
     if rgb_outputs:
         name_suffix = os.path.splitext(os.path.basename(data_file))[0]
-        rgb_file = os.path.join(
-            output_dir,
-            f"original_rgb_{name_suffix}.tiff",
-        )
+        rgb_file = os.path.join(output_dir, f"original_rgb_{name_suffix}.tiff")
         save_geotiff(
-            image=_convert_np_uint8(rgb_orig),
-            output_path=rgb_file,
-            meta=meta_data,
+            image=_convert_np_uint8(rgb_orig), output_path=rgb_file, meta=meta_data
         )
 
 

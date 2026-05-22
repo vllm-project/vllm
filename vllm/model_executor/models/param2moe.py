@@ -26,10 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -108,8 +105,7 @@ def _rename_and_normalize_weights(
         # Expert-score bias: rename + zero-mean
         if name.endswith(".mlp.gate.expert_bias"):
             name = name.replace(
-                ".mlp.gate.expert_bias",
-                ".mlp.gate.e_score_correction_bias",
+                ".mlp.gate.expert_bias", ".mlp.gate.e_score_correction_bias"
             )
             w = _zero_mean_tensor(w)
 
@@ -186,10 +182,7 @@ class Param2MoEAttention(nn.Module):
         partial_rotary_factor: float = getattr(config, "partial_rotary_factor", 1.0)
         rope_dim = int(self.head_dim * partial_rotary_factor)
 
-        rope_parameters: dict = {
-            "rope_type": "default",
-            "base": config.rope_theta,
-        }
+        rope_parameters: dict = {"rope_type": "default", "base": config.rope_theta}
         if config.rope_scaling is not None:
             rope_parameters.update(config.rope_scaling)
             # Normalise key: some checkpoints use "type", vLLM wants "rope_type"
@@ -214,14 +207,11 @@ class Param2MoEAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split(
-            [self.q_size_local, self.kv_size_local, self.kv_size_local],
-            dim=-1,
+            [self.q_size_local, self.kv_size_local, self.kv_size_local], dim=-1
         )
         q = q.contiguous()
         k = k.contiguous()
@@ -293,10 +283,7 @@ class Param2MoEMoEBlock(nn.Module):
     """
 
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -319,11 +306,7 @@ class Param2MoEMoEBlock(nn.Module):
         self.norm_expert_prob: bool = getattr(config, "norm_topk_prob", True)
         self.score_function: str = getattr(config, "score_function", "sigmoid")
 
-        self.gate = nn.Linear(
-            self.hidden_size,
-            self.num_experts,
-            bias=False,
-        )
+        self.gate = nn.Linear(self.hidden_size, self.num_experts, bias=False)
 
         if getattr(config, "moe_router_enable_expert_bias", True):
             self.gate.e_score_correction_bias = nn.Parameter(
@@ -385,14 +368,12 @@ class Param2MoEMoEBlock(nn.Module):
         # The gate nn.Linear weight lives in the model dtype (bfloat16),
         # so we must cast both explicitly via F.linear instead of calling
         # self.gate() which would hit a dtype mismatch.
-        router_logits = F.linear(
-            hidden_states.float(),
-            self.gate.weight.float(),
-        ).to(hidden_states.dtype)
+        router_logits = F.linear(hidden_states.float(), self.gate.weight.float()).to(
+            hidden_states.dtype
+        )
 
         expert_output = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
+            hidden_states=hidden_states, router_logits=router_logits
         )
 
         return expert_output.view(num_tokens, hidden_dim)
@@ -405,11 +386,7 @@ class Param2MoEDecoderLayer(nn.Module):
     Dense for the first ``first_k_dense_replace`` layers; MoE thereafter.
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -434,9 +411,7 @@ class Param2MoEDecoderLayer(nn.Module):
 
         if is_moe_layer:
             self.mlp = Param2MoEMoEBlock(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
         else:
             self.mlp = Param2MoEMLP(  # type: ignore[assignment]
@@ -460,10 +435,7 @@ class Param2MoEDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Pre-norm + MLP
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -472,12 +444,7 @@ class Param2MoEDecoderLayer(nn.Module):
 
 
 class Param2MoEModel(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -504,8 +471,7 @@ class Param2MoEModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Param2MoEDecoderLayer(
-                vllm_config=vllm_config,
-                prefix=prefix,
+                vllm_config=vllm_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
         )
@@ -554,10 +520,7 @@ class Param2MoEModel(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """
         Custom weight loader for the inner Param2MoEModel.
 
@@ -638,12 +601,7 @@ class Param2MoEModel(nn.Module):
             # 3. Routed expert weights → fused-MoE kernel layout
             # ------------------------------------------------------------------
             matched_expert = False
-            for (
-                param_name,
-                weight_name,
-                expert_id,
-                shard_id,
-            ) in expert_params_mapping:
+            for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
                 if weight_name not in name:
                     continue
                 new_name = name.replace(weight_name, param_name)
@@ -655,11 +613,7 @@ class Param2MoEModel(nn.Module):
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
-                    param,
-                    loaded_weight,
-                    name,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
+                    param, loaded_weight, name, shard_id=shard_id, expert_id=expert_id
                 )
                 loaded_params.add(new_name)
                 matched_expert = True
@@ -722,9 +676,7 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
         self.num_redundant_experts = 0
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
@@ -782,12 +734,7 @@ class Param2MoEForCausalLM(
     }
 
     # Modules eligible for LoRA adaptation.
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
+    supported_lora_modules = ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
 
     # Embedding layers and their weight-tying counterparts.
     embedding_modules = {
@@ -808,8 +755,7 @@ class Param2MoEForCausalLM(
         self.quant_config = quant_config
 
         self.model = Param2MoEModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         self.tie_word_embeddings: bool = getattr(config, "tie_word_embeddings", False)
@@ -867,17 +813,11 @@ class Param2MoEForCausalLM(
             inputs_embeds=inputs_embeds,
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         if not get_pp_group().is_last_rank:
             return None
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(_rename_and_normalize_weights(weights))

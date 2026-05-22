@@ -31,7 +31,7 @@ class DispatchPooler(Pooler):
             {
                 "token_embed": pooler_for_token_embed(pooler_config),
                 "embed": pooler_for_embed(pooler_config),
-            },
+            }
         )
 
     @classmethod
@@ -45,14 +45,10 @@ class DispatchPooler(Pooler):
         return cls(
             {
                 "token_classify": pooler_for_token_classify(
-                    pooler_config,
-                    pooling=AllPool(),
-                    classifier=classifier,
+                    pooler_config, pooling=AllPool(), classifier=classifier
                 ),
                 "classify": pooler_for_classify(
-                    pooler_config,
-                    pooling=pooling,
-                    classifier=classifier,
+                    pooler_config, pooling=pooling, classifier=classifier
                 ),
             }
         )
@@ -76,9 +72,7 @@ class DispatchPooler(Pooler):
         return self.poolers_by_task[task].get_pooling_updates(task)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
         cursor = pooling_metadata.pooling_cursor
@@ -141,9 +135,7 @@ class IdentityPooler(Pooler):
         return {"plugin"}
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> PoolerOutput:
         return hidden_states
 

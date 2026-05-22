@@ -6,20 +6,14 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import supports_xpu_graph
-from vllm.v1.worker.gpu.model_runner import (
-    GPUModelRunner as GPUModelRunnerV2,
-)
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 class XPUModelRunner(GPUModelRunner):
     """A model runner for XPU devices."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
         # FIXME: To be verified.
@@ -29,11 +23,7 @@ class XPUModelRunner(GPUModelRunner):
 class XPUModelRunnerV2(GPUModelRunnerV2):
     """A model runner for XPU devices."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 

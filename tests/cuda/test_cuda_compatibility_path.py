@@ -147,10 +147,7 @@ class TestCudaCompatibilityLdPathManipulation:
         compat_dir.mkdir()
         monkeypatch.setenv("VLLM_ENABLE_CUDA_COMPATIBILITY", "1")
         monkeypatch.setenv("VLLM_CUDA_COMPATIBILITY_PATH", str(compat_dir))
-        monkeypatch.setenv(
-            "LD_LIBRARY_PATH",
-            f"/usr/lib:{compat_dir}:/other/lib",
-        )
+        monkeypatch.setenv("LD_LIBRARY_PATH", f"/usr/lib:{compat_dir}:/other/lib")
         _maybe_set_cuda_compatibility_path()
         ld_path = os.environ["LD_LIBRARY_PATH"]
         parts = ld_path.split(os.pathsep)
@@ -180,8 +177,5 @@ class TestGetTorchCudaVersion:
 
     def test_returns_none_when_torch_missing(self):
         """Should return None when torch is not importable."""
-        with patch(
-            "vllm.env_override.importlib.util.find_spec",
-            return_value=None,
-        ):
+        with patch("vllm.env_override.importlib.util.find_spec", return_value=None):
             assert _get_torch_cuda_version() is None

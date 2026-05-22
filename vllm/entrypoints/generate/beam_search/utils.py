@@ -45,11 +45,7 @@ class BeamSearchSequence:
         cache_salt = prompt.get("cache_salt")
 
         if prompt["type"] == "token":
-            return tokens_input(
-                self.tokens,
-                prompt=prompt_text,
-                cache_salt=cache_salt,
-            )
+            return tokens_input(self.tokens, prompt=prompt_text, cache_salt=cache_salt)
 
         return mm_input(
             prompt_token_ids=self.tokens,

@@ -13,9 +13,7 @@ from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 # Models that require embedding scaling for prompt_embeds test
-EMBED_SCALING_MODELS = {
-    "openbmb/MiniCPM4.1-8B",
-}
+EMBED_SCALING_MODELS = {"openbmb/MiniCPM4.1-8B"}
 
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
@@ -64,7 +62,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.cpu_model],
         ),
         pytest.param(
-            "zai-org/chatglm3-6b",  # chatglm (text-only)
+            "zai-org/chatglm3-6b"  # chatglm (text-only)
         ),
         pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
@@ -83,7 +81,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
-            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
+            "Qwen/Qwen-7B-Chat"  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
@@ -94,7 +92,7 @@ AITER_MODEL_LIST = [
             ],
         ),
         pytest.param(
-            "Qwen/Qwen3-8B",  # qwen (text-only)
+            "Qwen/Qwen3-8B"  # qwen (text-only)
         ),
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
@@ -205,10 +203,7 @@ def test_models(
             )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
     if prompt_embeds is not None:
         check_logprobs_close(

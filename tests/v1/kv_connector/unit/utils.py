@@ -297,10 +297,7 @@ def create_model_runner_output(
 
 class TestExampleConnector(ExampleConnector):
     def __init__(
-        self,
-        config: VllmConfig,
-        role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig,
+        self, config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig
     ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role, kv_cache_config)
@@ -386,17 +383,12 @@ class MockKVConnector(KVConnectorBase_V1):
         )
 
     def get_num_new_matched_tokens(
-        self,
-        request: Request,
-        num_computed_tokens: int,
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         return (self.config.matched_tokens, self.config.is_async)
 
     def update_state_after_alloc(
-        self,
-        request: Request,
-        blocks: KVCacheBlocks,
-        num_external_tokens: int,
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         pass
 
@@ -449,10 +441,7 @@ def make_kv_cache_config(
         KVCacheGroupSpec(
             ["layer0", "layer2"],
             FullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=4,
-                head_size=16,
-                dtype=torch.float16,
+                block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
             ),
         )
     ]

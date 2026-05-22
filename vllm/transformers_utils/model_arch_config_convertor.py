@@ -8,15 +8,10 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
 from vllm import envs
-from vllm.config.model_arch import (
-    ModelArchitectureConfig,
-)
+from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import (
-    ConfigFormat,
-    get_safetensors_params_metadata,
-)
+from vllm.transformers_utils.config import ConfigFormat, get_safetensors_params_metadata
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)

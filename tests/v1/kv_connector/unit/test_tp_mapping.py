@@ -17,9 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     compute_tp_mapping,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-    NixlConnectorWorker,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import NixlConnectorWorker
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 # ======================================================================
@@ -36,10 +34,7 @@ def _compute_mapping(
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
 ) -> TPMapping:
     transfer_topology = SimpleNamespace(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        is_mla=is_mla,
-        total_num_kv_heads=num_kv_heads,
+        tp_rank=tp_rank, tp_size=tp_size, is_mla=is_mla, total_num_kv_heads=num_kv_heads
     )
     return compute_tp_mapping(
         transfer_topology=transfer_topology,
@@ -86,20 +81,14 @@ class TestBuildSrcSplitHandles:
         tp_size = 1
 
         plan = _compute_mapping(
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            remote_tp_size=remote_tp_size,
+            tp_rank=tp_rank, tp_size=tp_size, remote_tp_size=remote_tp_size
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec,))
         src_blocks_data = [(0x2000 + i * 1024, 1024, 0) for i in range(8)]
         num_descs = len(src_blocks_data)
         splits = list(
-            worker._build_local_splits_from_plan(
-                plan,
-                src_blocks_data,
-                num_descs,
-            )
+            worker._build_local_splits_from_plan(plan, src_blocks_data, num_descs)
         )
 
         assert len(splits) == remote_tp_size

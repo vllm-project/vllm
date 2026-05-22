@@ -9,9 +9,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
@@ -49,9 +47,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, w_q_name)
         replace_parameter(
-            layer,
-            w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False),
+            layer, w_q_name, torch.nn.Parameter(weight.t().data, requires_grad=False)
         )
 
         # WEIGHT SCALE
@@ -63,9 +59,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         if is_fused_module and not config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+            layer, w_s_name, torch.nn.Parameter(weight_scale.data, requires_grad=False)
         )
 
         # INPUT SCALE
@@ -112,16 +106,11 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 # in the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
             setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
+                layer, azp_adj_name, torch.nn.Parameter(azp_adj, requires_grad=False)
             )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
@@ -207,15 +196,11 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         # B is column-major [K, N]
         padded_weight = torch.nn.functional.pad(
-            weight.t().contiguous(),
-            (0, pad_k, 0, pad_n),
+            weight.t().contiguous(), (0, pad_k, 0, pad_n)
         ).t()
         replace_parameter(layer, weight_name, padded_weight.data)
         set_weight_attrs(
-            getattr(layer, weight_name),
-            {
-                "weight_loader": self.padded_weight_loader,
-            },
+            getattr(layer, weight_name), {"weight_loader": self.padded_weight_loader}
         )
 
         weight_scale = getattr(layer, weight_scale_name, None)
@@ -227,9 +212,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, weight_scale_name, padded_scale.data)
             set_weight_attrs(
                 getattr(layer, weight_name),
-                {
-                    "weight_loader": self.padded_weight_loader,
-                },
+                {"weight_loader": self.padded_weight_loader},
             )
 
     def apply_scaled_mm(
@@ -304,29 +287,16 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
-                A,
-                B,
-                As,
-                Bs,
-                list(self.weight_group_shape),
-                out_dtype,
+                A, B, As, Bs, list(self.weight_group_shape), out_dtype
             )
         else:
             return ops.cutlass_scaled_mm(
-                A,
-                B.T,
-                out_dtype=out_dtype,
-                scale_a=As,
-                scale_b=Bs.T,
+                A, B.T, out_dtype=out_dtype, scale_a=As, scale_b=Bs.T
             )
 
 
@@ -339,11 +309,7 @@ def cutlass_scaled_mm(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     return ops.cutlass_scaled_mm(
-        A,
-        B.T,
-        out_dtype=output_dtype,
-        scale_a=As,
-        scale_b=Bs.T,
+        A, B.T, out_dtype=output_dtype, scale_a=As, scale_b=Bs.T
     )
 
 
@@ -398,7 +364,5 @@ def _padded_cutlass_fake(
 
 
 direct_register_custom_op(
-    "padded_cutlass",
-    _padded_cutlass,
-    fake_impl=_padded_cutlass_fake,
+    "padded_cutlass", _padded_cutlass, fake_impl=_padded_cutlass_fake
 )

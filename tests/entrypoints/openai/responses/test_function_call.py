@@ -62,7 +62,7 @@ tools = [
                             "enum": ["zh-CN", "en-US", "ja-JP"],
                         },
                     },
-                },
+                }
             },
         },
     },
@@ -109,7 +109,7 @@ async def test_function_tool_use(
             "role": "user",
             "content": "Can you tell me what the current weather is in Berlin and the "
             "forecast for the next 5 days, in fahrenheit?",
-        },
+        }
     ]
     response = await client.responses.create(
         model=model_name,
@@ -147,7 +147,7 @@ async def test_max_tokens_with_tool_choice_required(
             "role": "user",
             "content": "Can you tell me what the current weather is in Berlin and the "
             "forecast for the next 5 days, in fahrenheit?",
-        },
+        }
     ]
     response = await client.responses.create(
         model=model_name,
@@ -242,9 +242,7 @@ async def test_function_calling_with_streaming_expected_arguments(
             "description": "Get current temperature for provided location in celsius.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                },
+                "properties": {"location": {"type": "string"}},
                 "required": ["location"],
                 "additionalProperties": False,
             },
@@ -256,9 +254,7 @@ async def test_function_calling_with_streaming_expected_arguments(
             "description": "Get current local time for provided location.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                },
+                "properties": {"location": {"type": "string"}},
                 "required": ["location"],
                 "additionalProperties": False,
             },
@@ -325,10 +321,7 @@ async def test_function_calling_with_streaming_expected_arguments(
     "tool_choice",
     ["auto", "required", {"type": "function", "name": "get_current_weather"}],
 )
-@pytest.mark.parametrize(
-    "enable_thinking",
-    [True, False],
-)
+@pytest.mark.parametrize("enable_thinking", [True, False])
 async def test_function_calling_with_streaming_types(
     client: openai.AsyncOpenAI, model_name: str, tool_choice, enable_thinking: bool
 ):
@@ -466,8 +459,7 @@ async def test_function_calling_with_streaming_types(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
-    "tool_choice",
-    ["required", "auto", {"type": "function", "name": "get_weather"}],
+    "tool_choice", ["required", "auto", {"type": "function", "name": "get_weather"}]
 )
 async def test_function_calling_with_streaming_forced_tool_choice(
     client: openai.AsyncOpenAI, model_name: str, tool_choice: str
@@ -479,9 +471,7 @@ async def test_function_calling_with_streaming_forced_tool_choice(
             "description": "Get current temperature for provided location in celsius.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                },
+                "properties": {"location": {"type": "string"}},
                 "required": ["location"],
                 "additionalProperties": False,
             },

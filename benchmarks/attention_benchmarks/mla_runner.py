@@ -164,9 +164,7 @@ def create_minimal_vllm_config(
         enable_chunked_prefill=True,
     )
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=1,
-    )
+    parallel_config = ParallelConfig(tensor_parallel_size=1)
 
     compilation_config = CompilationConfig()
 
@@ -245,10 +243,10 @@ def get_prefill_backend_config(prefill_backend: str) -> dict:
 # Keys are AttentionBackendEnum names (uppercase)
 _BACKEND_PROPERTIES = {
     "FLASHMLA": {
-        "query_format": "concat",  # Single concatenated tensor (vs tuple)
+        "query_format": "concat"  # Single concatenated tensor (vs tuple)
     },
     "FLASHMLA_SPARSE": {
-        "query_format": "concat",  # Single concatenated tensor (vs tuple)
+        "query_format": "concat"  # Single concatenated tensor (vs tuple)
     },
 }
 
@@ -310,10 +308,7 @@ def _get_backend_config(backend: str) -> dict:
 
 
 def _build_attention_metadata(
-    requests: list,
-    block_size: int,
-    device: torch.device,
-    builder_instance,
+    requests: list, block_size: int, device: torch.device, builder_instance
 ) -> tuple:
     """
     Build attention metadata from batch requests.
@@ -334,8 +329,7 @@ def _build_attention_metadata(
 
     # Build query start locations
     q_start_cpu = torch.tensor(
-        [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))],
-        dtype=torch.int32,
+        [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))], dtype=torch.int32
     )
     q_start_gpu = q_start_cpu.to(device)
 
@@ -397,9 +391,7 @@ def _build_attention_metadata(
 
     # Use the production build() method
     metadata = builder_instance.build(
-        common_prefix_len=0,
-        common_attn_metadata=common_attn_metadata,
-        fast_build=False,
+        common_prefix_len=0, common_attn_metadata=common_attn_metadata, fast_build=False
     )
 
     return metadata, current_block
@@ -477,10 +469,7 @@ def _create_input_tensors(
 
     # Create additional inputs needed for prefill forward
     k_c_normed = torch.randn(
-        total_q,
-        mla_dims["kv_lora_rank"],
-        device=device,
-        dtype=dtype,
+        total_q, mla_dims["kv_lora_rank"], device=device, dtype=dtype
     )
     k_pe = torch.randn(
         total_q,
@@ -557,9 +546,7 @@ def _create_backend_impl(
         if index_topk is None:
             index_topk = 2048  # Default topk for sparse MLA
         indexer = MockIndexer(
-            max_num_tokens=max_num_tokens,
-            topk_tokens=index_topk,
-            device=device,
+            max_num_tokens=max_num_tokens, topk_tokens=index_topk, device=device
         )
 
     # Build impl kwargs
@@ -746,29 +733,17 @@ def _run_single_benchmark(
         #         + 2*rope_dim bf16 bytes
         # = 512 + 16 + 128 = 656 bytes for DeepSeek dims.
         kv_cache = torch.zeros(
-            num_blocks,
-            block_size,
-            656,
-            device=device,
-            dtype=torch.uint8,
+            num_blocks, block_size, 656, device=device, dtype=torch.uint8
         )
     elif kv_cache_dtype == "fp8":
         from vllm.platforms import current_platform
 
         kv_cache = torch.zeros(
-            num_blocks,
-            block_size,
-            head_size,
-            device=device,
-            dtype=torch.uint8,
+            num_blocks, block_size, head_size, device=device, dtype=torch.uint8
         ).view(current_platform.fp8_dtype())
     else:
         kv_cache = torch.zeros(
-            num_blocks,
-            block_size,
-            head_size,
-            device=device,
-            dtype=torch.bfloat16,
+            num_blocks, block_size, head_size, device=device, dtype=torch.bfloat16
         )
 
     # Fill indexer with random indices for sparse backends

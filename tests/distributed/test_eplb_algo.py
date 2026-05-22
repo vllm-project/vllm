@@ -31,20 +31,18 @@ def test_basic_rebalance():
     log2phy, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
 
     # Verify output shapes
-    assert phy2log.shape == (
-        2,
-        16,
-    ), f"Expected `phy2log` shape (2, 16), got {phy2log.shape}"
+    assert phy2log.shape == (2, 16), (
+        f"Expected `phy2log` shape (2, 16), got {phy2log.shape}"
+    )
     assert log2phy.shape[0] == 2, (
         f"Expected `log2phy` first dimension 2, got {log2phy.shape[0]}"
     )
     assert log2phy.shape[1] == 12, (
         f"Expected `log2phy` second dimension 12, got {log2phy.shape[1]}"
     )
-    assert logcnt.shape == (
-        2,
-        12,
-    ), f"Expected `logcnt` shape (2, 12), got {logcnt.shape}"
+    assert logcnt.shape == (2, 12), (
+        f"Expected `logcnt` shape (2, 12), got {logcnt.shape}"
+    )
 
     # Verify physical to logical expert mapping range is correct
     assert torch.all(phy2log >= 0) and torch.all(phy2log < 12), (
@@ -197,7 +195,7 @@ def test_small_scale_hierarchical():
     """Test small-scale hierarchical load balancing"""
     weight = torch.tensor(
         [
-            [100, 50, 200, 75, 150, 25, 300, 80],  # 8 experts
+            [100, 50, 200, 75, 150, 25, 300, 80]  # 8 experts
         ]
     )
     num_replicas = 12
@@ -307,12 +305,7 @@ def test_compute_logical_maps_with_negative_indices():
     """
     # 2 layers, 6 physical slots, 4 logical experts.
     # Slots 2 and 5 are unused (-1).
-    phy2log = torch.tensor(
-        [
-            [0, 1, -1, 2, 3, -1],
-            [3, -1, 2, 1, 0, -1],
-        ]
-    )
+    phy2log = torch.tensor([[0, 1, -1, 2, 3, -1], [3, -1, 2, 1, 0, -1]])
     num_layers = 2
     num_logical_experts = 4
 

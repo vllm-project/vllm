@@ -49,10 +49,7 @@ def get_qwen_vl_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             if isinstance(token_ids, int):
                 token_ids = [token_ids]
 
-            return self.tokenizer.decode(
-                token_ids,
-                errors=errors or self.errors,
-            )
+            return self.tokenizer.decode(token_ids, errors=errors or self.errors)
 
     TokenizerWithoutImagePad.__name__ = f"{tokenizer.__class__.__name__}WithoutImagePad"
 

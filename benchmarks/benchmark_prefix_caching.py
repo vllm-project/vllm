@@ -69,8 +69,7 @@ def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> list[int]:
 
     # Remove the special tokens.
     return random.choices(
-        [v for v in vocab.values() if v not in all_special_ids],
-        k=length,
+        [v for v in vocab.values() if v not in all_special_ids], k=length
     )
 
 
@@ -210,11 +209,7 @@ def main(args):
     )
 
     print("------start generating------")
-    test_prefix(
-        llm=llm,
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
+    test_prefix(llm=llm, prompts=prompts, sampling_params=sampling_params)
 
 
 def create_argument_parser():

@@ -12,9 +12,7 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="BAAI/bge-reranker-v2-m3",
-        runner="pooling",
-        enforce_eager=True,
+        model="BAAI/bge-reranker-v2-m3", runner="pooling", enforce_eager=True
     )
     return parser.parse_args()
 

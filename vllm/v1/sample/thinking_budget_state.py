@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.sample.logits_processor.interface import (
-    BatchUpdate,
-    MoveDirectionality,
-)
+from vllm.v1.sample.logits_processor.interface import BatchUpdate, MoveDirectionality
 
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig

@@ -32,15 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.multimodal.parse import (
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -81,12 +74,7 @@ class CLIPImagePixelInputs(TensorSchema):
 
 
 class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         return self.get_patch_grid_length() ** 2 + 1
 
     def get_image_size(self) -> int:
@@ -133,12 +121,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
 
         pooler_config = self.ctx.model_config.pooler_config
@@ -146,8 +129,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
+                image_width=image_width, image_height=image_height
             ),
             _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
@@ -161,8 +143,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_width, image_height=target_height
         )
 
 
@@ -203,9 +184,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         return dummy_token_id
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         if inputs.mm_data_items:
             if isinstance(inputs.prompt, str):
@@ -243,9 +222,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -262,8 +239,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
             image_size = images.get_image_size(item_idx)
 
             num_image_tokens = self.info.get_num_image_tokens(
-                image_width=image_size.width,
-                image_height=image_size.height,
+                image_width=image_size.width, image_height=image_size.height
             )
             return [image_token_id] * num_image_tokens
 
@@ -272,7 +248,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
                 modality="image",
                 target=PromptIndexTargets.start(),
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -404,10 +380,7 @@ class CLIPAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         """Input shape: Batch x Time x Channel"""
 
         qkv_states, _ = self.qkv_proj(hidden_states)
@@ -474,11 +447,7 @@ class CLIPEncoderLayer(nn.Module):
             attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -536,9 +505,7 @@ class CLIPEncoder(nn.Module):
         )
 
     def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        return_all_hidden_states: bool,
+        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
     ) -> torch.Tensor | list[torch.Tensor]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
@@ -576,10 +543,7 @@ class CLIPTextTransformer(nn.Module):
             attn_cls=Attention,
         )
 
-        self.final_layer_norm = nn.LayerNorm(
-            embed_dim,
-            eps=config.layer_norm_eps,
-        )
+        self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.token_embedding(input_ids)
@@ -591,14 +555,11 @@ class CLIPTextTransformer(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, position_ids=position_ids, inputs_embeds=inputs_embeds
         )
 
         last_hidden_state = self.encoder(
-            inputs_embeds=hidden_states,
-            return_all_hidden_states=False,
+            inputs_embeds=hidden_states, return_all_hidden_states=False
         )
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
@@ -835,9 +796,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 prefix=maybe_prefix(prefix, "text_model"),
             )
             self.text_projection = nn.Linear(
-                self.text_embed_dim,
-                self.projection_dim,
-                bias=False,
+                self.text_embed_dim, self.projection_dim, bias=False
             )
 
         with self._mark_tower_model(vllm_config, "image"):
@@ -847,9 +806,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.visual_projection = nn.Linear(
-                self.vision_embed_dim,
-                self.projection_dim,
-                bias=False,
+                self.vision_embed_dim, self.projection_dim, bias=False
             )
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -868,9 +825,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         pooled_output = self.text_model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, position_ids=position_ids, inputs_embeds=inputs_embeds
         )
 
         text_features = self.text_projection(pooled_output)
@@ -924,9 +879,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         is_multimodal: torch.Tensor | None,
     ) -> torch.Tensor:
         inputs_embeds = super()._embed_text_input_ids(
-            input_ids,
-            embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, embed_input_ids, is_multimodal=is_multimodal
         )
 
         # NOTE: inputs_embeds in model runner has size text_config.projection_dim

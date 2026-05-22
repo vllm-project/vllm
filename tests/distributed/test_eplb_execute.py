@@ -8,10 +8,7 @@ import torch
 import torch.distributed
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.eplb.eplb_communicator import (
-    create_eplb_communicator,
-    has_nixl,
-)
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator, has_nixl
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -115,8 +112,7 @@ def create_expert_weights(
 
 
 def create_redundancy_config(
-    num_logical_experts: int,
-    num_physical_experts: int,
+    num_logical_experts: int, num_physical_experts: int
 ) -> list[int]:
     """Create a redundancy configuration."""
     redundancy_config = [1] * num_logical_experts
@@ -317,19 +313,14 @@ def _test_async_transfer_layer_without_mtp_worker(
         hidden_sizes = [16, 32]
 
         redundancy_config = create_redundancy_config(
-            num_logical_experts,
-            total_physical_experts,
+            num_logical_experts, total_physical_experts
         )
         old_indices = create_expert_indices_with_redundancy(
-            num_layers,
-            num_logical_experts,
-            total_physical_experts,
-            redundancy_config,
+            num_layers, num_logical_experts, total_physical_experts, redundancy_config
         )
 
         new_redundancy_config = create_redundancy_config(
-            num_logical_experts,
-            total_physical_experts,
+            num_logical_experts, total_physical_experts
         )
         new_indices = create_expert_indices_with_redundancy(
             num_layers,
@@ -339,12 +330,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         )
 
         expert_weights = create_expert_weights(
-            num_layers,
-            num_local_experts,
-            hidden_sizes,
-            ep_rank,
-            device,
-            old_indices,
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
         )
         old_indices_cpu = old_indices.cpu()
         new_indices_cpu = new_indices.cpu()
@@ -379,11 +365,7 @@ def _test_async_transfer_layer_without_mtp_worker(
             )
 
     local_ok = verify_expert_weights_after_shuffle(
-        expert_weights,
-        new_indices,
-        hidden_sizes,
-        ep_rank,
-        num_local_experts,
+        expert_weights, new_indices, hidden_sizes, ep_rank, num_local_experts
     )
     local_ok = (
         verify_redundant_experts_have_same_weights(
@@ -438,10 +420,7 @@ def _test_rearrange_expert_weights_with_redundancy(
         )
 
         old_indices = create_expert_indices_with_redundancy(
-            num_layers,
-            num_logical_experts,
-            total_physical_experts,
-            redundancy_config,
+            num_layers, num_logical_experts, total_physical_experts, redundancy_config
         )
 
         # Create new expert indices (with redundancy)
@@ -478,11 +457,7 @@ def _test_rearrange_expert_weights_with_redundancy(
 
     # Verify the rearrangement result
     local_ok = verify_expert_weights_after_shuffle(
-        expert_weights,
-        new_indices,
-        hidden_sizes,
-        ep_rank,
-        num_local_experts,
+        expert_weights, new_indices, hidden_sizes, ep_rank, num_local_experts
     )
 
     local_ok = (
@@ -529,11 +504,7 @@ def _test_rearrange_expert_weights_with_redundancy(
     "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
 )
 def test_rearrange_expert_weights_with_redundancy(
-    world_size,
-    num_layers,
-    num_local_experts,
-    num_logical_experts,
-    eplb_communicator,
+    world_size, num_layers, num_local_experts, num_logical_experts, eplb_communicator
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
@@ -614,8 +585,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     for layer in range(num_layers):
         for weight_idx in range(len(hidden_sizes)):
             if not torch.equal(
-                expert_weights[layer][weight_idx],
-                original_weights[layer][weight_idx],
+                expert_weights[layer][weight_idx], original_weights[layer][weight_idx]
             ):
                 local_ok = False
                 print(
@@ -624,16 +594,12 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
                     flush=True,
                 )
     assert_verification_synced(
-        local_ok,
-        "No-change EPLB verification failed on at least one rank.",
+        local_ok, "No-change EPLB verification failed on at least one rank."
     )
 
 
 @pytest.mark.parametrize(
-    "world_size,num_layers,num_local_experts,num_logical_experts",
-    [
-        (2, 2, 2, 3),
-    ],
+    "world_size,num_layers,num_local_experts,num_logical_experts", [(2, 2, 2, 3)]
 )
 @pytest.mark.parametrize(
     "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
@@ -671,10 +637,7 @@ def test_rearrange_expert_weights_no_change(world_size):
 
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(
-        _test_rearrange_expert_weights_no_change,
-        world_size,
-    )
+    distributed_run(_test_rearrange_expert_weights_no_change, world_size)
 
 
 def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
@@ -747,8 +710,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
     for layer in range(num_layers):
         for weight_idx in range(len(hidden_sizes)):
             if not torch.equal(
-                expert_weights[layer][weight_idx],
-                original_weights[layer][weight_idx],
+                expert_weights[layer][weight_idx], original_weights[layer][weight_idx]
             ):
                 local_ok = False
                 print(
@@ -757,8 +719,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
                     flush=True,
                 )
     assert_verification_synced(
-        local_ok,
-        "Profile-mode EPLB verification failed on at least one rank.",
+        local_ok, "Profile-mode EPLB verification failed on at least one rank."
     )
 
 
@@ -768,7 +729,4 @@ def test_rearrange_expert_weights_profile_mode(world_size):
 
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(
-        _test_rearrange_expert_weights_profile_mode,
-        world_size,
-    )
+    distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)

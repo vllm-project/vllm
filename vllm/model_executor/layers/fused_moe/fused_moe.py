@@ -536,11 +536,7 @@ def fused_moe_kernel(
     # conversion to ensure numerical stability, which is especially critical
     # on ROCm platforms.
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(
-            topk_weights_ptr + offs_token,
-            mask=token_mask,
-            other=0,
-        )
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator *= moe_weight[:, None]
 
     # Final precision conversion:
@@ -1632,9 +1628,7 @@ def fused_experts(
 
 
 def _get_config_quant_dtype(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    ocp_mx_scheme: str | None,
+    use_fp8_w8a8: bool, use_int8_w8a8: bool, ocp_mx_scheme: str | None
 ) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1730,9 +1724,7 @@ def fused_experts_impl(
     # Note: for use_int8_w8a16 or use_int4_w4a16, the activations are
     # quantized prior to calling fused_experts.
     quant_dtype = _get_config_quant_dtype(
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        ocp_mx_scheme=None,
+        use_fp8_w8a8=use_fp8_w8a8, use_int8_w8a8=use_int8_w8a8, ocp_mx_scheme=None
     )
 
     get_config_func = functools.partial(
@@ -1862,8 +1854,7 @@ def fused_experts_impl(
     )
 
     ops.moe_sum(
-        intermediate_cache3.view(*intermediate_cache3.size()),
-        out_hidden_states,
+        intermediate_cache3.view(*intermediate_cache3.size()), out_hidden_states
     )
 
     return out_hidden_states

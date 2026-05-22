@@ -10,15 +10,10 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
-    BlockHashListWithBlockSize,
-)
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
 
 logger = init_logger(__name__)
 
@@ -71,10 +66,7 @@ class ChunkedTokenDatabase:
     """Maps token positions to store keys and GPU memory addresses."""
 
     def __init__(
-        self,
-        metadata: KeyMetadata,
-        block_size: int,
-        hash_block_size: int | None = None,
+        self, metadata: KeyMetadata, block_size: int, hash_block_size: int | None = None
     ):
         self.metadata = metadata
         self.block_size = block_size
@@ -117,10 +109,7 @@ class ChunkedTokenDatabase:
         return addr_list, size_list, block_id
 
     def process_tokens(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        mask_num: int = 0,
+        self, token_len: int, block_hashes: list[BlockHash], mask_num: int = 0
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process tokens and yield (start_idx, end_idx, pool_key) tuples.
 
@@ -173,10 +162,7 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
-    def update(
-        self,
-        new_block_ids: tuple[list[int], ...] | list[int],
-    ) -> None:
+    def update(self, new_block_ids: tuple[list[int], ...] | list[int]) -> None:
         # Backward-compat: accept a single list (broadcast to single group).
         if isinstance(new_block_ids, list):
             new_block_ids = (new_block_ids,)
@@ -283,11 +269,7 @@ class ReqMeta:
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
     """Metadata passed from scheduler to worker."""
 
-    def __init__(
-        self,
-        unfinished_request_ids: set[str],
-        preempted_req_ids: set[str],
-    ):
+    def __init__(self, unfinished_request_ids: set[str], preempted_req_ids: set[str]):
         self.requests: list[ReqMeta] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids

@@ -15,10 +15,7 @@ class FusedMoERouter(ABC):
     """
 
     @abstractmethod
-    def set_capture_fn(
-        self,
-        capture_fn: Callable[[torch.Tensor], None] | None,
-    ) -> None:
+    def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         raise NotImplementedError
 
     @property

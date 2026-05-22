@@ -104,19 +104,16 @@ class MyRequest(msgspec.Struct):
 
 def test_multimodal_kwargs():
     e1 = MultiModalFieldElem(
-        torch.zeros(1000, dtype=torch.bfloat16),
-        MultiModalBatchedField(),
+        torch.zeros(1000, dtype=torch.bfloat16), MultiModalBatchedField()
     )
     e2 = MultiModalFieldElem(
         [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
         MultiModalFlatField(
-            slices=[[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]],
-            dim=0,
+            slices=[[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]], dim=0
         ),
     )
     e3 = MultiModalFieldElem(
-        torch.zeros(1000, dtype=torch.int32),
-        MultiModalSharedField(batch_size=4),
+        torch.zeros(1000, dtype=torch.int32), MultiModalSharedField(batch_size=4)
     )
     e4 = MultiModalFieldElem(
         torch.zeros(1000, dtype=torch.int32),
@@ -403,8 +400,7 @@ def test_multiple_senders_single_receiver_ipc():
                 dtype=torch.float32,
             )
             req = RequestWithTensor(
-                prompt_embeds=tensor,
-                data=f"s{sender_idx}_m{msg_idx}",
+                prompt_embeds=tensor, data=f"s{sender_idx}_m{msg_idx}"
             )
             encoded = encoders[sender_idx].encode(req)
             encoded_payloads.append((sender_idx, msg_idx, tensor, encoded))

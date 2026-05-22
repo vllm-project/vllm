@@ -33,11 +33,7 @@ def create_llm():
 
 
 def run_llm_chat(llm):
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        max_tokens=128,
-    )
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=128)
 
     conversation = [
         {"role": "system", "content": "You are a helpful assistant"},
@@ -45,9 +41,7 @@ def run_llm_chat(llm):
         {"role": "assistant", "content": "Hello! How can I assist you today?"},
     ]
     outputs = llm.chat(conversation, sampling_params, use_tqdm=False)
-    return outputs, [
-        conversation,
-    ]
+    return outputs, [conversation]
 
 
 def print_outputs(outputs: list[RequestOutput], conversations: list):

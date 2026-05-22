@@ -115,7 +115,7 @@ class TestGenerativeScoringAPI:
     @pytest.mark.parametrize(
         "label_token_ids,expected_status",
         [
-            ([9999999999, 9999999998], 400),  # Out of vocab range
+            ([9999999999, 9999999998], 400)  # Out of vocab range
         ],
         ids=["invalid_token_ids"],
     )

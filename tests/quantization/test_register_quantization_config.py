@@ -37,10 +37,7 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         self.num_bits = num_bits
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Perform fake quantization before the linear layer."""
 
@@ -119,10 +116,7 @@ def test_register_quantization_config(caplog_vllm):
 
 
 @pytest.mark.parametrize(
-    argnames="model",
-    argvalues=[
-        "meta-llama/Llama-3.2-1B-Instruct",
-    ],
+    argnames="model", argvalues=["meta-llama/Llama-3.2-1B-Instruct"]
 )
 def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""

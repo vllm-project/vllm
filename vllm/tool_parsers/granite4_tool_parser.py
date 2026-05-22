@@ -8,9 +8,7 @@ from typing import Any, Protocol, TypeVar
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,10 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
@@ -82,17 +77,12 @@ class Granite4ToolParser(ToolParser):
             assert isinstance(tc, dict)
             self.prev_tool_call_arr.append(tc)
             tool_calls.append(
-                cls(
-                    name=tc["name"],
-                    arguments=dump_args(tc["arguments"]),
-                )
+                cls(name=tc["name"], arguments=dump_args(tc["arguments"]))
             )
         return "".join(text_segments), tool_calls
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         msg = ExtractedToolCallInformation(
             tools_called=False, tool_calls=[], content=model_output
@@ -134,11 +124,7 @@ class Granite4ToolParser(ToolParser):
                 text_segments, tc_segments, FunctionCall
             )
             tool_calls = [
-                ToolCall(
-                    type="function",
-                    function=func,
-                )
-                for func in tool_call_funcs
+                ToolCall(type="function", function=func) for func in tool_call_funcs
             ]
             msg.tools_called = bool(tool_calls)
             msg.tool_calls = tool_calls
@@ -147,10 +133,7 @@ class Granite4ToolParser(ToolParser):
             logger.exception("Error in extracting tool call from response.")
         return msg
 
-    def _tool_extraction_step(
-        self,
-        delta_text: str,
-    ) -> tuple[bool, str, str]:
+    def _tool_extraction_step(self, delta_text: str) -> tuple[bool, str, str]:
         start_token_pos = start_token_end = end_token_pos = end_token_end = -1
 
         if start_match := self.start_regex.search(delta_text, partial=True):

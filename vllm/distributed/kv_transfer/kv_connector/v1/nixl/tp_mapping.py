@@ -8,10 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    BlockIds,
-    TransferTopology,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, TransferTopology
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
 # ======================================================================

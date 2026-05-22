@@ -10,10 +10,7 @@ import torch
 
 from vllm.config import ModelConfig
 
-from .layerwise import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import AutoWeightsLoader

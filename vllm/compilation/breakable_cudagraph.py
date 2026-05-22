@@ -265,11 +265,7 @@ class BreakableCUDAGraphWrapper:
         for instance in list(cls._all_instances):
             instance.clear_graphs()
 
-    def __init__(
-        self,
-        runnable: Callable[..., Any],
-        vllm_config: VllmConfig,
-    ) -> None:
+    def __init__(self, runnable: Callable[..., Any], vllm_config: VllmConfig) -> None:
         # Unlike the original CUDAGraphWrapper which strictly matches a
         # single runtime_mode, this wrapper captures whatever the
         # dispatcher emits (any non-NONE runtime_mode) -- breakable's
@@ -351,10 +347,7 @@ class BreakableCUDAGraphWrapper:
         return addrs
 
     def _capture(
-        self,
-        entry: _BreakableEntry,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
+        self, entry: _BreakableEntry, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         validate_cudagraph_capturing_enabled()
 
@@ -395,19 +388,14 @@ class BreakableCUDAGraphWrapper:
         entry.output = weak_ref_tensors(output)
 
         logger.debug(
-            "Captured breakable cudagraph for %s: %r",
-            entry.batch_descriptor,
-            capture,
+            "Captured breakable cudagraph for %s: %r", entry.batch_descriptor, capture
         )
         # Return the (already-weak) output from the captured run so the
         # caller of model(...) gets a tensor pointing at the cudagraph pool's memory
         return output
 
     def _replay(
-        self,
-        entry: _BreakableEntry,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
+        self, entry: _BreakableEntry, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         if self.is_debugging_mode and entry.input_addresses is not None:
             new_addresses = self._collect_tensor_addresses(args, kwargs)

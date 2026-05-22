@@ -13,14 +13,7 @@ from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    TypeVar,
-    Union,
-    overload,
-)
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
 import torch
 import uvloop
@@ -275,8 +268,7 @@ class RustFrontendProcessManager:
         from vllm.entrypoints.utils import jsonify_non_default_args
 
         args_json = json.dumps(
-            jsonify_non_default_args(args, exclude={"api_server_count"}),
-            sort_keys=True,
+            jsonify_non_default_args(args, exclude={"api_server_count"}), sort_keys=True
         )
         cmd.extend(["--args-json", args_json])
 

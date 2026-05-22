@@ -50,9 +50,7 @@ class MtebEmbedMixin(mteb.EncoderProtocol):
     mteb_model_meta = _empty_model_meta
 
     def similarity(
-        self,
-        embeddings1: np.ndarray,
-        embeddings2: np.ndarray,
+        self, embeddings1: np.ndarray, embeddings2: np.ndarray
     ) -> np.ndarray:
         # Cosine similarity
         norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
@@ -60,11 +58,7 @@ class MtebEmbedMixin(mteb.EncoderProtocol):
         sim = np.dot(embeddings1, embeddings2.T) / (norm1 * norm2.T)
         return sim
 
-    def similarity_pairwise(
-        self,
-        embeddings1: Array,
-        embeddings2: Array,
-    ) -> Array:
+    def similarity_pairwise(self, embeddings1: Array, embeddings2: Array) -> Array:
         # Cosine similarity
         norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
         norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
@@ -79,10 +73,7 @@ class HfMtebEncoder(MtebEmbedMixin):
         self.model = model
 
     def encode(
-        self,
-        inputs: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
+        self, inputs: DataLoader[mteb.types.BatchedInput], *args, **kwargs
     ) -> np.ndarray:
         sentences = [text for batch in inputs for text in batch["text"]]
         return self.model.encode(sentences)
@@ -95,10 +86,7 @@ class VllmMtebEncoder(MtebEmbedMixin):
         self.prompt_prefix = prompt_prefix
 
     def encode(
-        self,
-        inputs: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
+        self, inputs: DataLoader[mteb.types.BatchedInput], *args, **kwargs
     ) -> np.ndarray:
         # Hoping to discover potential scheduling
         # issues by randomizing the order.
@@ -122,10 +110,7 @@ class OpenAIClientMtebEncoder(MtebEmbedMixin):
         self.rng = np.random.default_rng(seed=42)
 
     def encode(
-        self,
-        inputs: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
+        self, inputs: DataLoader[mteb.types.BatchedInput], *args, **kwargs
     ) -> np.ndarray:
         # Hoping to discover potential scheduling
         # issues by randomizing the order.
@@ -144,12 +129,7 @@ class OpenAIClientMtebEncoder(MtebEmbedMixin):
 
 def run_mteb_embed_task(encoder: mteb.EncoderProtocol, tasks):
     tasks = mteb.get_tasks(tasks=tasks)
-    results = mteb.evaluate(
-        encoder,
-        tasks,
-        cache=None,
-        show_progress_bar=False,
-    )
+    results = mteb.evaluate(encoder, tasks, cache=None, show_progress_bar=False)
 
     main_score = results[0].scores["test"][0]["main_score"]
     return main_score
@@ -209,8 +189,7 @@ def mteb_test_embed_models(
 
         # Test embedding_size, isnan and whether to use normalize
         vllm_outputs = vllm_model.embed(
-            example_prompts,
-            tokenization_kwargs=dict(truncate_prompt_tokens=-1),
+            example_prompts, tokenization_kwargs=dict(truncate_prompt_tokens=-1)
         )
         outputs_tensor = torch.tensor(vllm_outputs)
         assert not torch.any(torch.isnan(outputs_tensor))

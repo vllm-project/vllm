@@ -40,19 +40,12 @@ def server():
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_chat_text_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
-        {
-            "role": "assistant",
-            "content": "Please classify this text request.",
-        },
-        {
-            "role": "user",
-            "content": input_text,
-        },
+        {"role": "assistant", "content": "Please classify this text request."},
+        {"role": "user", "content": input_text},
     ]
 
     response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "messages": messages},
+        server.url_for("classify"), json={"model": model_name, "messages": messages}
     )
     response.raise_for_status()
 
@@ -78,8 +71,7 @@ def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
     ]
 
     response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "messages": messages},
+        server.url_for("classify"), json={"model": model_name, "messages": messages}
     )
     response.raise_for_status()
 
@@ -105,8 +97,7 @@ def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
     ]
 
     response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "messages": messages},
+        server.url_for("classify"), json={"model": model_name, "messages": messages}
     )
     response.raise_for_status()
 
@@ -132,8 +123,7 @@ def test_chat_video_url_request(server: RemoteOpenAIServer, model_name: str):
     ]
 
     response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "messages": messages},
+        server.url_for("classify"), json={"model": model_name, "messages": messages}
     )
     response.raise_for_status()
 

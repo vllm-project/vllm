@@ -92,16 +92,9 @@ SPEC_DECODE_CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "model,spec_model,method,num_spec_tokens",
-    SPEC_DECODE_CONFIGS,
-)
+@pytest.mark.parametrize("model,spec_model,method,num_spec_tokens", SPEC_DECODE_CONFIGS)
 def test_no_sync_with_spec_decode(
-    sync_tracker,
-    model: str,
-    spec_model: str,
-    method: str,
-    num_spec_tokens: int,
+    sync_tracker, model: str, spec_model: str, method: str, num_spec_tokens: int
 ):
     """
     Test that no implicit GPU-CPU sync occurs during speculative decoding
@@ -138,8 +131,7 @@ def test_no_sync_with_spec_decode(
     )
 
     outputs = llm.generate(
-        ["Hello, my name is"],
-        SamplingParams(temperature=0, max_tokens=10),
+        ["Hello, my name is"], SamplingParams(temperature=0, max_tokens=10)
     )
 
     assert len(outputs) == 1

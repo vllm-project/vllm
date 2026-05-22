@@ -18,10 +18,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    fused_experts,
-    fused_topk,
-)
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -165,18 +162,8 @@ class ArcticMoE(nn.Module):
                     dtype=self.params_dtype,
                 )
             )
-            set_weight_attrs(
-                self.ws,
-                {
-                    "weight_loader": self.weight_loader,
-                },
-            )
-            set_weight_attrs(
-                self.w2s,
-                {
-                    "weight_loader": self.weight_loader,
-                },
-            )
+            set_weight_attrs(self.ws, {"weight_loader": self.weight_loader})
+            set_weight_attrs(self.w2s, {"weight_loader": self.weight_loader})
 
     def weight_loader(
         self,
@@ -208,12 +195,7 @@ class ArcticMoE(nn.Module):
             hidden_states, router_logits, self.top_k, renormalize=do_normalize
         )
         final_hidden_states = fused_experts(
-            hidden_states,
-            self.ws,
-            self.w2s,
-            topk_weights,
-            topk_ids,
-            inplace=True,
+            hidden_states, self.ws, self.w2s, topk_weights, topk_ids, inplace=True
         )
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
@@ -292,9 +274,7 @@ class ArcticAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -347,16 +327,11 @@ class ArcticDecoderLayer(nn.Module):
             )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual_input = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual_input + hidden_states
 
         residual_attn = hidden_states
@@ -582,10 +557,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

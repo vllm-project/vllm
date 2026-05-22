@@ -8,11 +8,7 @@ from collections.abc import Generator
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
@@ -61,11 +57,7 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
 
 
 @pytest.mark.parametrize(
-    ids=[
-        "single_tool_call",
-        "multiple_tool_calls",
-        "tool_call_with_content_before",
-    ],
+    ids=["single_tool_call", "multiple_tool_calls", "tool_call_with_content_before"],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
@@ -77,11 +69,7 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 )
             ],
@@ -99,22 +87,13 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 ),
                 ToolCall(
                     function=FunctionCall(
                         name="get_temperature_unit",
-                        arguments=json.dumps(
-                            {
-                                "location": "Guangzhou",
-                                "unit": "c",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Guangzhou", "unit": "c"}),
                     )
                 ),
             ],
@@ -135,22 +114,13 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 ),
                 ToolCall(
                     function=FunctionCall(
                         name="get_temperature_unit",
-                        arguments=json.dumps(
-                            {
-                                "location": "Guangzhou",
-                                "unit": "c",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Guangzhou", "unit": "c"}),
                     )
                 ),
             ],
@@ -223,11 +193,7 @@ def stream_delta_message_generator(
 
 
 @pytest.mark.parametrize(
-    ids=[
-        "single_tool_call",
-        "multiple_tool_calls",
-        "tool_call_with_content_before",
-    ],
+    ids=["single_tool_call", "multiple_tool_calls", "tool_call_with_content_before"],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
@@ -239,11 +205,7 @@ def stream_delta_message_generator(
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 )
             ],
@@ -261,22 +223,13 @@ def stream_delta_message_generator(
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 ),
                 ToolCall(
                     function=FunctionCall(
                         name="get_temperature_unit",
-                        arguments=json.dumps(
-                            {
-                                "location": "Guangzhou",
-                                "unit": "c",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Guangzhou", "unit": "c"}),
                     )
                 ),
             ],
@@ -297,22 +250,13 @@ def stream_delta_message_generator(
                 ToolCall(
                     function=FunctionCall(
                         name="get_current_temperature",
-                        arguments=json.dumps(
-                            {
-                                "location": "Beijing",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Beijing"}),
                     )
                 ),
                 ToolCall(
                     function=FunctionCall(
                         name="get_temperature_unit",
-                        arguments=json.dumps(
-                            {
-                                "location": "Guangzhou",
-                                "unit": "c",
-                            }
-                        ),
+                        arguments=json.dumps({"location": "Guangzhou", "unit": "c"}),
                     )
                 ),
             ],

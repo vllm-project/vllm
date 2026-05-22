@@ -290,17 +290,11 @@ def test_block_sparsity_hint_prunes_blocks():
     device = torch.device("cuda")
 
     vllm_config = create_vllm_config(
-        model_name="facebook/opt-125m",
-        block_size=16,
-        max_model_len=1024,
+        model_name="facebook/opt-125m", block_size=16, max_model_len=1024
     )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
-    batch_spec = BatchSpec(
-        seq_lens=[256],
-        query_lens=[256],
-        name="test_sparsity_hint",
-    )
+    batch_spec = BatchSpec(seq_lens=[256], query_lens=[256], name="test_sparsity_hint")
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, vllm_config.cache_config.block_size, device
@@ -320,9 +314,7 @@ def test_block_sparsity_hint_prunes_blocks():
     metadata_with_hint = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
-    metadata_with_hint.block_sparsity_hint = BlockSparsityHint(
-        hint_fn=diagonal_hint,
-    )
+    metadata_with_hint.block_sparsity_hint = BlockSparsityHint(hint_fn=diagonal_hint)
     metadata_with_hint.block_mask = metadata_with_hint._build_block_mask_direct()
     assert metadata_with_hint.block_mask.kv_num_blocks.max().item() <= 1
 

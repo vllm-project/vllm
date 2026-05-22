@@ -322,9 +322,7 @@ class ExpertMapManager:
         return self._placement_strategy
 
     @property
-    def routing_tables(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    def routing_tables(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Routing tables for round-robin placement.
 
@@ -365,9 +363,7 @@ class ExpertMapManager:
         return torch.where(self._expert_map != -1)[0].tolist()
 
     def update(
-        self,
-        moe_parallel_config: FusedMoEParallelConfig,
-        global_num_experts: int,
+        self, moe_parallel_config: FusedMoEParallelConfig, global_num_experts: int
     ) -> None:
         """
         Update expert mappings for new EP configuration.
@@ -439,17 +435,15 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
+        (self._local_num_experts, self._expert_map, self._expert_mask) = (
+            determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+            )
         )
 
         self._local_num_experts += self.num_fused_shared_experts
@@ -482,10 +476,7 @@ class ExpertMapManager:
             "Round robin not supported for AITER."
         )
 
-        global_indices = torch.arange(
-            self.global_num_experts,
-            dtype=torch.long,
-        )
+        global_indices = torch.arange(self.global_num_experts, dtype=torch.long)
         owner = torch.remainder(global_indices, self.ep_size)
         local_index = torch.div(global_indices, self.ep_size, rounding_mode="floor")
 
@@ -494,10 +485,7 @@ class ExpertMapManager:
         physical_offset = owner * base
 
         if remainder > 0:
-            remainder_tensor = torch.tensor(
-                remainder,
-                dtype=torch.long,
-            )
+            remainder_tensor = torch.tensor(remainder, dtype=torch.long)
             physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
 
         global_to_physical = physical_offset + local_index
@@ -505,10 +493,7 @@ class ExpertMapManager:
         physical_to_global[global_to_physical] = global_indices
 
         local_global = torch.arange(
-            self.ep_rank,
-            self.global_num_experts,
-            self.ep_size,
-            dtype=torch.long,
+            self.ep_rank, self.global_num_experts, self.ep_size, dtype=torch.long
         )
         if local_global.numel() != self._local_num_experts:
             local_global = local_global[: self._local_num_experts]

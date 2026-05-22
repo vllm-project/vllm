@@ -36,11 +36,7 @@ class TrtLlmNvFp4ExpertsBase:
     NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         self.moe_config = moe_config
         self.quant_config = quant_config
 
@@ -90,8 +86,7 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             g1_scale_c = self.quant_config.a2_gscale.clone()
         layer.register_parameter(
-            "g1_scale_c",
-            torch.nn.Parameter(g1_scale_c, requires_grad=False),
+            "g1_scale_c", torch.nn.Parameter(g1_scale_c, requires_grad=False)
         )
         self.g1_scale_c = layer.g1_scale_c
 
@@ -126,13 +121,10 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         """Supports Nvfp4 quantization."""
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-        ]
+        SUPPORTED_W_A = [(kNvfp4Static, kNvfp4Dynamic)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -298,8 +290,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 

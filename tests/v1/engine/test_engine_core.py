@@ -230,10 +230,7 @@ def test_engine_core_advanced_sampling():
 
     # Second request.
     request2 = make_request()
-    request2.sampling_params = SamplingParams(
-        top_p=0.99,
-        top_k=50,
-    )
+    request2.sampling_params = SamplingParams(top_p=0.99, top_k=50)
     engine_core.add_request(*engine_core.preprocess_add_request(request2))
     _check_engine_state()
 
@@ -258,9 +255,7 @@ def test_engine_core_concurrent_batches():
             self.thread_pool = ThreadPoolExecutor(max_workers=1)
 
         def execute_model(
-            self,
-            scheduler_output,
-            non_block=False,
+            self, scheduler_output, non_block=False
         ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
 

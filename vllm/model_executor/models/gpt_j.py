@@ -114,9 +114,7 @@ class GPTJAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -174,16 +172,11 @@ class GPTJBlock(nn.Module):
         self.mlp = GPTJMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
-        attn_output = self.attn(
-            position_ids=position_ids,
-            hidden_states=hidden_states,
-        )
+        attn_output = self.attn(position_ids=position_ids, hidden_states=hidden_states)
         mlp_output = self.mlp(hidden_states)
         hidden_states = attn_output + mlp_output + residual
         return hidden_states
@@ -201,10 +194,7 @@ class GPTJModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.embed_dim = config.n_embd
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            self.embed_dim,
-        )
+        self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.n_layer,
             lambda prefix: GPTJBlock(config, cache_config, quant_config, prefix=prefix),
@@ -334,10 +324,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
 

@@ -37,10 +37,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -56,11 +53,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer,
 )
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsLoRA,
-    SupportsMultiModal,
-)
+from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -139,11 +132,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         return height, width
 
     def _get_resize_output_image_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        resolution_max_side: int,
+        self, *, image_width: int, image_height: int, resolution_max_side: int
     ) -> tuple[int, int]:
         hf_processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
@@ -173,9 +162,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         image_processor: Idefics3ImageProcessor = processor.image_processor
 
         return image_processor.get_number_of_image_patches(
-            image_height,
-            image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            image_height, image_width, self.ctx.get_merged_mm_kwargs(mm_kwargs)
         )
 
     def get_num_patches(
@@ -238,12 +225,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
                     tiles_placeholder.append("\n")
 
         return "".join(
-            [
-                *tiles_placeholder,
-                "\n",
-                global_img_placeholder,
-                fake_image_token,
-            ]
+            [*tiles_placeholder, "\n", global_img_placeholder, fake_image_token]
         )
 
     def get_num_image_tokens(
@@ -312,10 +294,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
 
         mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -343,9 +322,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
 
@@ -379,10 +356,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 mm_kwargs=hf_processor_mm_kwargs,
             )
 
-            return PromptUpdateDetails.select_text(
-                image_repl,
-                embed_text=image_token,
-            )
+            return PromptUpdateDetails.select_text(image_repl, embed_text=image_token)
 
         return [
             PromptReplacement(
@@ -426,9 +400,7 @@ class Idefics3Connector(nn.Module):
         super().__init__()
         self.scale_factor = config.scale_factor
         self.modality_projection = Idefics3SimpleMLP(
-            config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "modality_projection"),
+            config, quant_config, prefix=maybe_prefix(prefix, "modality_projection")
         )
 
     def pixel_shuffle(self, x: torch.Tensor, scale_factor: int = 2) -> torch.Tensor:
@@ -468,9 +440,7 @@ class Idefics3Model(nn.Module):
             prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.connector = Idefics3Connector(
-            config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "connector"),
+            config, quant_config, prefix=maybe_prefix(prefix, "connector")
         )
         self.text_model = LlamaModel(
             vllm_config=vllm_config.with_hf_config(config.text_config),
@@ -484,9 +454,7 @@ class Idefics3Model(nn.Module):
         self.image_token_id = self.config.image_token_id
 
     def image_pixels_to_features(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_attention_mask: torch.Tensor,
+        self, pixel_values: torch.Tensor, pixel_attention_mask: torch.Tensor
     ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
@@ -516,8 +484,7 @@ class Idefics3Model(nn.Module):
 
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
+            pixel_values=pixel_values, patch_attention_mask=patch_attention_mask
         )
 
         return image_hidden_states
@@ -533,10 +500,7 @@ class Idefics3Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.text_model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
         return hidden_states
 
@@ -548,15 +512,8 @@ class Idefics3Model(nn.Module):
 )
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
@@ -582,8 +539,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             tower_targets={"image": (Idefics3VisionTransformer, Idefics3Connector)},
         ):
             self.model = Idefics3Model(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
         self.image_token_id = self.config.image_token_id
@@ -606,10 +562,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             return None
 
         if image_embeds is not None:
-            return Idefics3ImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return Idefics3ImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         if pixel_values is not None:
             pixel_attention_mask = kwargs.pop("pixel_attention_mask")
@@ -631,13 +584,11 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         pixel_attention_mask = inputs["pixel_attention_mask"]
 
         return self.model.image_pixels_to_features(
-            pixel_values,
-            pixel_attention_mask=pixel_attention_mask,
+            pixel_values, pixel_attention_mask=pixel_attention_mask
         )
 
     def _process_image_input(
-        self,
-        image_input: ImageInputs,
+        self, image_input: ImageInputs
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -690,19 +641,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             tower_model="model.vision_model",
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         hf_config = self.config
         scale_factor = hf_config.scale_factor
 
         return num_image_tokens * scale_factor**2
 
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         hf_config = self.config
         scale_factor = hf_config.scale_factor
 

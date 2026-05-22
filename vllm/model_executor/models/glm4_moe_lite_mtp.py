@@ -151,8 +151,7 @@ class Glm4MoeLiteMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): Glm4MoeLiteMultiTokenPredictorLayer(
-                    vllm_config=vllm_config,
-                    prefix=f"{prefix}.layers.{idx}",
+                    vllm_config=vllm_config, prefix=f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -161,8 +160,7 @@ class Glm4MoeLiteMultiTokenPredictor(nn.Module):
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -189,9 +187,7 @@ class Glm4MoeLiteMultiTokenPredictor(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -246,9 +242,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 

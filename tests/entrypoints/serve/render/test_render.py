@@ -98,10 +98,7 @@ async def test_completion_render_multiple_prompts(client):
     """Test completion render with multiple prompts."""
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "prompt": ["Hello world", "Goodbye world"],
-        },
+        json={"model": MODEL_NAME, "prompt": ["Hello world", "Goodbye world"]},
     )
 
     assert response.status_code == 200
@@ -155,10 +152,7 @@ async def test_chat_completion_render_with_stream_true(client):
         json={
             "model": MODEL_NAME,
             "stream": True,
-            "stream_options": {
-                "include_usage": True,
-                "continuous_usage_stats": True,
-            },
+            "stream_options": {"include_usage": True, "continuous_usage_stats": True},
             "messages": [
                 {
                     "role": "user",
@@ -189,10 +183,7 @@ async def test_completion_render_error_invalid_model(client):
     """Test completion render with invalid model returns error."""
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": "invalid-model-name",
-            "prompt": "Hello",
-        },
+        json={"model": "invalid-model-name", "prompt": "Hello"},
     )
 
     assert response.status_code == 404
@@ -225,10 +216,7 @@ async def test_completion_render_no_generation(client):
     start = time.perf_counter()
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Tell me a very long story about " * 10,
-        },
+        json={"model": MODEL_NAME, "prompt": "Tell me a very long story about " * 10},
     )
     elapsed = time.perf_counter() - start
 

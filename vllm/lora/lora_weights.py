@@ -55,9 +55,7 @@ class LoRALayerWeights:
 
     @classmethod
     def from_config(
-        cls,
-        module_name: str,
-        peft_helper: PEFTHelper,
+        cls, module_name: str, peft_helper: PEFTHelper
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
         return cls(
@@ -87,13 +85,7 @@ class LoRALayerWeights:
             [output_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
         )
 
-        return cls(
-            module_name,
-            rank=rank,
-            lora_alpha=1,
-            lora_a=lora_a,
-            lora_b=lora_b,
-        )
+        return cls(module_name, rank=rank, lora_alpha=1, lora_a=lora_a, lora_b=lora_b)
 
 
 class PackedLoRALayerWeights(LoRALayerWeights):

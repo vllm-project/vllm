@@ -224,12 +224,10 @@ class RequestState:
                 tokenizer = None
             output_kind = sampling_params.output_kind
             logprobs_processor = LogprobsProcessor.from_new_request(
-                tokenizer=tokenizer,
-                request=request,
+                tokenizer=tokenizer, request=request
             )
             detokenizer = IncrementalDetokenizer.from_new_request(
-                tokenizer=tokenizer,
-                request=request,
+                tokenizer=tokenizer, request=request
             )
             max_tokens_param = sampling_params.max_tokens
             top_p = sampling_params.top_p
@@ -311,9 +309,7 @@ class RequestState:
 
         if pooling_output is not None:
             return self._new_request_output(
-                external_req_id,
-                [self._new_pooling_output(pooling_output)],
-                finished,
+                external_req_id, [self._new_pooling_output(pooling_output)], finished
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -688,8 +684,7 @@ class OutputProcessor:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
         return OutputProcessorOutput(
-            request_outputs=request_outputs,
-            reqs_to_abort=reqs_to_abort,
+            request_outputs=request_outputs, reqs_to_abort=reqs_to_abort
         )
 
     def _finish_request(self, req_state: RequestState) -> None:

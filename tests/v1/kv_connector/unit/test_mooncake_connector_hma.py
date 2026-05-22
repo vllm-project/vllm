@@ -43,9 +43,7 @@ def test_sw_sizes(swa_enabled, expected_blocks_per_sw):
     """blocks_per_sw is correctly computed based on SWA enabled/disabled."""
     block_size = 16
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_both",
-        block_size=block_size,
+        kv_connector="MooncakeConnector", kv_role="kv_both", block_size=block_size
     )
     # Override so HMA detection works
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
@@ -77,9 +75,7 @@ def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
     """_is_hma_required is correctly derived from kv_cache_config."""
     block_size = 16
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_both",
-        block_size=block_size,
+        kv_connector="MooncakeConnector", kv_role="kv_both", block_size=block_size
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
     kv_cache_config = make_kv_cache_config(
@@ -102,9 +98,7 @@ def test_get_sw_clipped_blocks():
     """get_sw_clipped_blocks clips SWA group but keeps FA group intact."""
     block_size = 16
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_both",
-        block_size=block_size,
+        kv_connector="MooncakeConnector", kv_role="kv_both", block_size=block_size
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     # SW=128 tokens → 128/16 = 8 blocks + 1 = 9 blocks_per_sw
@@ -138,9 +132,7 @@ def test_get_sw_clipped_blocks_noop_no_hma():
     """get_sw_clipped_blocks is a no-op when HMA is not required."""
     block_size = 16
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_both",
-        block_size=block_size,
+        kv_connector="MooncakeConnector", kv_role="kv_both", block_size=block_size
     )
     # FA only → _is_hma_required = False
     kv_cache_config = make_kv_cache_config(block_size=block_size, swa_enabled=False)
@@ -191,9 +183,7 @@ def test_metadata_hma_block_ids():
     metadata.add_new_req(
         request_id="send-req",
         local_block_ids=[fa_blocks, sw_blocks],
-        kv_transfer_params={
-            "transfer_id": "send-req",
-        },
+        kv_transfer_params={"transfer_id": "send-req"},
         load_remote_cache=False,
     )
 
@@ -262,12 +252,12 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
         local_regions = [
             TransferRegion(
                 base_addr=0x1000, block_len=block_len, kv_block_len=block_len
-            ),
+            )
         ]
         remote_regions = [
             TransferRegion(
                 base_addr=0x2000, block_len=block_len, kv_block_len=block_len
-            ),
+            )
         ]
 
         ready_reqs = [("d-trim", send_meta)]
@@ -335,9 +325,7 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             remote_port=54321,
             remote_tp_size=1,
             remote_tp_rank=0,
-            req_blocks={
-                "d-mismatch": (transfer_id, [[30, 31]]),
-            },
+            req_blocks={"d-mismatch": (transfer_id, [[30, 31]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
         )
@@ -345,12 +333,12 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
         local_regions = [
             TransferRegion(
                 base_addr=0x1000, block_len=block_len, kv_block_len=block_len
-            ),
+            )
         ]
         remote_regions = [
             TransferRegion(
                 base_addr=0x2000, block_len=block_len, kv_block_len=block_len
-            ),
+            )
         ]
 
         ready_reqs = [("d-mismatch", send_meta)]
@@ -382,9 +370,7 @@ def test_request_finished_with_hma_groups():
     """request_finished correctly handles per-group block_ids."""
     block_size = 16
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_producer",
-        block_size=block_size,
+        kv_connector="MooncakeConnector", kv_role="kv_producer", block_size=block_size
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(

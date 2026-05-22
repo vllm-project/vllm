@@ -15,11 +15,7 @@ import torch
 import torch.multiprocessing as torch_mp
 
 from vllm.platforms import current_platform
-from vllm.v1.engine.tensor_ipc import (
-    TensorIpcData,
-    TensorIpcReceiver,
-    TensorIpcSender,
-)
+from vllm.v1.engine.tensor_ipc import TensorIpcData, TensorIpcReceiver, TensorIpcSender
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 DEVICE_TYPE = current_platform.device_type
@@ -293,10 +289,7 @@ def api_server_worker(
 
         # Send tensor using TensorIpcData
         ipc_data = TensorIpcData(
-            sender_id=sender_id,
-            message_id=0,
-            tensor_id=0,
-            tensor=tensor,
+            sender_id=sender_id, message_id=0, tensor_id=0, tensor=tensor
         )
         tensor_queue.put(ipc_data)
 
@@ -589,26 +582,14 @@ def test_cpu_tensor_ipc():
     # Start encoder process
     encoder_proc = mp.Process(
         target=cpu_tensor_ipc_encoder_process,
-        args=(
-            tensor_queue,
-            result_queue,
-            tensor_shape,
-            encoder_ready,
-            retrieval_done,
-        ),
+        args=(tensor_queue, result_queue, tensor_shape, encoder_ready, retrieval_done),
     )
     encoder_proc.start()
 
     # Start decoder process
     decoder_proc = mp.Process(
         target=cpu_tensor_ipc_decoder_process,
-        args=(
-            tensor_queue,
-            result_queue,
-            tensor_shape,
-            encoder_ready,
-            retrieval_done,
-        ),
+        args=(tensor_queue, result_queue, tensor_shape, encoder_ready, retrieval_done),
     )
     decoder_proc.start()
 
@@ -697,9 +678,7 @@ def concurrent_sender_process(
                 (2, sender_index + 2), float(msg_idx + 100), dtype=torch.float64
             )
             msg = MultiTensorMessage(
-                t1=t1,
-                t2=t2,
-                sender_label=f"sender_{sender_index}_msg_{msg_idx}",
+                t1=t1, t2=t2, sender_label=f"sender_{sender_index}_msg_{msg_idx}"
             )
             encoded = encoder.encode(msg)
             encoded_payloads.append(encoded)
@@ -709,11 +688,7 @@ def concurrent_sender_process(
             payload_queue.put(encoded, timeout=10.0)
 
         result_queue.put(
-            {
-                "success": True,
-                "sender_index": sender_index,
-                "num_sent": num_messages,
-            }
+            {"success": True, "sender_index": sender_index, "num_sent": num_messages}
         )
 
         # Keep alive so shared-memory handles remain valid
@@ -916,21 +891,14 @@ def test_tensor_cleanup_after_decode():
     message_id = 0
     tensor_id = 0
     ipc_data = TensorIpcData(
-        sender_id=sender_id,
-        message_id=message_id,
-        tensor_id=tensor_id,
-        tensor=tensor,
+        sender_id=sender_id, message_id=message_id, tensor_id=tensor_id, tensor=tensor
     )
     tensor_queue.put(ipc_data)
 
     # Create receiver directly
     receiver = TensorIpcReceiver(tensor_queue)
 
-    handle = {
-        "sender_id": sender_id,
-        "message_id": message_id,
-        "tensor_id": tensor_id,
-    }
+    handle = {"sender_id": sender_id, "message_id": message_id, "tensor_id": tensor_id}
 
     # Receive the tensor - this should retrieve it from the queue
     decoded_tensor = receiver(

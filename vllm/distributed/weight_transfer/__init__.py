@@ -7,6 +7,4 @@ to inference workers.
 
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
-__all__ = [
-    "WeightTransferEngineFactory",
-]
+__all__ = ["WeightTransferEngineFactory"]

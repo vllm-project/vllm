@@ -365,10 +365,7 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     """Return True if we should partition the inductor graph on this node"""
 
     import torch._inductor.ir as ir
-    from torch._inductor.scheduler import (
-        BaseSchedulerNode,
-        FusedSchedulerNode,
-    )
+    from torch._inductor.scheduler import BaseSchedulerNode, FusedSchedulerNode
     from torch._inductor.utils import (
         _unstable_customized_partition_wrapper,
         is_cudagraph_unsafe_op,

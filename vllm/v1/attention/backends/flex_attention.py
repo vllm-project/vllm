@@ -478,10 +478,7 @@ class FlexAttentionMetadata:
         )
 
         def final_mask_mod(
-            b: torch.Tensor,
-            h: torch.Tensor,
-            q_idx: torch.Tensor,
-            kv_idx: torch.Tensor,
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
         ) -> torch.Tensor:
             return request_lookup[q_idx] == request_lookup[kv_idx]
 
@@ -771,9 +768,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.direct_build: bool = supports_small_blocks
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
-            vllm_config.attention_config,
-            supports_small_blocks,
-            self.block_size,
+            vllm_config.attention_config, supports_small_blocks, self.block_size
         )
 
         if self.direct_build and self.kv_block_size != self.block_size:
@@ -801,9 +796,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
     @staticmethod
     def _get_block_sizes(
-        attn_cfg,
-        supports_small_blocks: bool,
-        cache_block_size: int,
+        attn_cfg, supports_small_blocks: bool, cache_block_size: int
     ) -> tuple[int, int]:
         q_block_size = 16 if supports_small_blocks else 128
         kv_block_size = cache_block_size if supports_small_blocks else 128
@@ -888,10 +881,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         if self.persistent_physical_to_logical is None:
             max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
             self.persistent_physical_to_logical = torch.empty(
-                max_num_seqs,
-                num_gpu_blocks,
-                dtype=torch.long,
-                device=self.device,
+                max_num_seqs, num_gpu_blocks, dtype=torch.long, device=self.device
             )
 
         if self.persistent_kv_indices is None:
@@ -1144,8 +1134,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         if self.attn_type == AttentionType.ENCODER_ONLY:
             query, key_tensor, value_tensor = map(
-                lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
-                (query, key, value),
+                lambda x: self.view_as_4d(x).permute(0, 2, 1, 3), (query, key, value)
             )
 
             query = query[:, :, :num_actual_tokens, :]
@@ -1208,9 +1197,7 @@ class FlexAttentionImpl(AttentionImpl):
 def get_kernel_options(
     query, block_m, block_n, use_direct_build: bool
 ) -> dict[str, int | bool]:
-    kernel_options: dict[str, int | bool] = {
-        "FORCE_USE_FLEX_ATTENTION": True,
-    }
+    kernel_options: dict[str, int | bool] = {"FORCE_USE_FLEX_ATTENTION": True}
 
     def ensure_divisible(candidate: int, block_size: int) -> int:
         """Pick a kernel block size that divides the logical block."""

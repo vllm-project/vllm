@@ -58,10 +58,7 @@ class TestModel(torch.nn.Module):
         return x, resid, *all_router_logits
 
     def ops_in_model_before(self):
-        return [
-            torch.ops.vllm_ir.fused_add_rms_norm,
-            torch.ops.aten.constant_pad_nd,
-        ]
+        return [torch.ops.vllm_ir.fused_add_rms_norm, torch.ops.aten.constant_pad_nd]
 
     def ops_in_model_after(self):
         return [rocm_aiter_ops.get_triton_add_rmsnorm_pad_op()]

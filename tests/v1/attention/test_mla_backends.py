@@ -338,9 +338,7 @@ class MockSparseMLAAttentionLayer:
         self._v_scale_float = float("nan")
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-            compile_native=True,
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
         )
 
     def forward_impl(
@@ -449,9 +447,7 @@ class MockMLAAttentionLayer(MLAAttention):
         # This replicates MLAAttention.process_weights_after_loading logic
         kv_b_proj_weight = kv_b_proj.weight.T
         kv_b_proj_weight = kv_b_proj_weight.view(
-            kv_lora_rank,
-            num_heads,
-            qk_nope_head_dim + v_head_dim,
+            kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim
         )
         W_UK, W_UV = kv_b_proj_weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
         # Convert from (L, N, V) to (N, L, V)
@@ -469,9 +465,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self._v_scale_float = float("nan")
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-            compile_native=True,
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
         )
 
     def get_attn_backend(self):
@@ -678,8 +672,7 @@ def run_attention_backend(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         attn_metadata = builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
         # Create output buffer
@@ -766,9 +759,7 @@ def test_backend_correctness(
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
     # Skip prefill backends that can't satisfy capability/deps/R1 constraints.
-    from vllm.v1.attention.backends.mla.prefill.selector import (
-        MLAPrefillSelectorConfig,
-    )
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
 
     try:
         prefill_invalid_reasons = prefill_backend.get_class().validate_configuration(
@@ -804,7 +795,7 @@ def test_backend_correctness(
             temp_config.hf_text_config, "num_key_value_heads", None
         )
         hf_config_override = {
-            "num_attention_heads": original_num_heads // tensor_parallel_size,
+            "num_attention_heads": original_num_heads // tensor_parallel_size
         }
         if original_num_kv_heads is not None:
             hf_config_override["num_key_value_heads"] = max(

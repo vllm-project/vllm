@@ -238,9 +238,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
     def apply_with_spec_decode(
-        self,
-        logits: torch.Tensor,
-        num_draft_tokens: list[int],
+        self, logits: torch.Tensor, num_draft_tokens: list[int]
     ) -> torch.Tensor:
         """Spec-decode version of apply().
         Priority: ``min_tokens`` > ``stop_token_ids`` / EOS.

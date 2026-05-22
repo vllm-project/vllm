@@ -54,9 +54,7 @@ def test_decode_attention(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
     b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
 
     attn_logits = torch.empty(
-        (B, H_Q, num_kv_splits, D_V + 1),
-        dtype=torch.float32,
-        device=DEVICE_TYPE,
+        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
     )
 
     # Call the original implementation.

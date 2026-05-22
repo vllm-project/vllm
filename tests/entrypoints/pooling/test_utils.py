@@ -28,8 +28,7 @@ def test_encode_pooling_output_float_or_ndarray_returns_numpy_array():
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("orjson") is None,
-    reason="orjson is not installed",
+    importlib.util.find_spec("orjson") is None, reason="orjson is not installed"
 )
 def test_orjson_serializes_numpy_array():
     from fastapi.responses import ORJSONResponse

@@ -60,10 +60,7 @@ class BaseLayerWithLoRA(nn.Module):
         """Overwrites lora tensors at index."""
         ...
 
-    def set_mapping(
-        self,
-        punica_wrapper,
-    ):
+    def set_mapping(self, punica_wrapper):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
     @classmethod

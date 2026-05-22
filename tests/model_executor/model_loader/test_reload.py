@@ -112,8 +112,7 @@ def test_materialize_layer_preserves_non_meta_tensors():
 
     # materialize the layer weights after the bias is initialized
     info = LayerReloadingInfo(
-        restore_metadata=({}, {}),
-        restore_device=torch.device("cpu"),
+        restore_metadata=({}, {}), restore_device=torch.device("cpu")
     )
     materialize_layer(layer, info)
 

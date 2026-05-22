@@ -78,21 +78,14 @@ class VideoSourceMetadata(NamedTuple):
 class VideoLoader:
     @classmethod
     def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
+        cls, source: VideoSourceMetadata, target: VideoTargetMetadata, **kwargs
     ) -> list[int]:
         """Return the list of frame indices to sample from the video."""
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def load_bytes(
-        cls,
-        data: bytes,
-        **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_bytes(cls, data: bytes, **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load video frames from bytes and return (frames_array, metadata_dict)."""
         raise NotImplementedError
 
@@ -167,10 +160,7 @@ class OpenCVVideoBackendMixin:
 
     @classmethod
     def _read_frames_with_recovery(
-        cls,
-        cap: "cv2.VideoCapture",
-        frame_indices: list[int],
-        total_frames: int,
+        cls, cap: "cv2.VideoCapture", frame_indices: list[int], total_frames: int
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
         """
         Read frames with dynamic window forward-scan recovery.
@@ -219,10 +209,7 @@ class OpenCVVideoBackendMixin:
 
             if not ok:
                 if is_target_frame:
-                    logger.warning(
-                        "Failed to grab frame %d during video loading.",
-                        idx,
-                    )
+                    logger.warning("Failed to grab frame %d during video loading.", idx)
                     failed_frames_idx.append(idx)
                 continue
 
@@ -251,16 +238,14 @@ class OpenCVVideoBackendMixin:
                         )
                 elif is_target_frame:
                     logger.warning(
-                        "Failed to retrieve frame %d during video loading.",
-                        idx,
+                        "Failed to retrieve frame %d during video loading.", idx
                     )
                     failed_frames_idx.append(idx)
 
         # Log any remaining failed frames
         for failed_idx in failed_frames_idx:
             logger.warning(
-                "Frame %d could not be recovered (end of video).",
-                failed_idx,
+                "Frame %d could not be recovered (end of video).", failed_idx
             )
 
         # Stack frames
@@ -273,10 +258,7 @@ class OpenCVVideoBackendMixin:
 
     @classmethod
     def _read_frames_no_recovery(
-        cls,
-        cap,
-        frame_indices: set[int],
-        max_frame_idx: int,
+        cls, cap, frame_indices: set[int], max_frame_idx: int
     ) -> tuple[npt.NDArray, list[int]]:
         num_expected_frames = len(frame_indices)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -370,9 +352,7 @@ class PyAVVideoBackendMixin:
     """
 
     @staticmethod
-    def get_metadata(
-        container: "av.container.InputContainer",
-    ) -> VideoSourceMetadata:
+    def get_metadata(container: "av.container.InputContainer") -> VideoSourceMetadata:
         if not container.streams.video:
             raise ValueError("No video streams found in container")
         stream = container.streams.video[0]
@@ -445,10 +425,7 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
 
     @classmethod
     def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
+        cls, source: VideoSourceMetadata, target: VideoTargetMetadata, **kwargs
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         duration = source.duration
@@ -579,10 +556,7 @@ class DynamicVideoBackend(VideoBackend):
 
     @classmethod
     def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
+        cls, source: VideoSourceMetadata, target: VideoTargetMetadata, **kwargs
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         duration = source.duration
@@ -643,10 +617,7 @@ class DynamicVideoBackend(VideoBackend):
 class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod
     def get_candidate_target_fps(
-        cls,
-        video_fps: float,
-        sampling_fps: float,
-        max_fps: float = 8.0,
+        cls, video_fps: float, sampling_fps: float, max_fps: float = 8.0
     ) -> list[float]:
         """
         Return the subset of `video_fps` factors that remain multiples
@@ -793,10 +764,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
 
     @classmethod
     def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
+        cls, source: VideoSourceMetadata, target: VideoTargetMetadata, **kwargs
     ):
         max_fps = kwargs.get("max_fps")
         frame_sample_mode = kwargs.get("frame_sample_mode")
@@ -827,9 +795,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
                 ).astype(int)
             else:
                 float_indices = np.arange(
-                    0.0,
-                    stop=total_num_frames - 1,
-                    step=float(video_fps / max_fps),
+                    0.0, stop=total_num_frames - 1, step=float(video_fps / max_fps)
                 )
                 if np.round(float_indices[-1]) != total_num_frames - 1:
                     float_indices = np.concatenate(
@@ -855,10 +821,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
                 candidate_target_fps,
             )
             _, indices = cls.get_frame_times_and_chosen_fps(
-                selected_target_fps,
-                total_num_frames,
-                num_frames,
-                video_fps,
+                selected_target_fps, total_num_frames, num_frames, video_fps
             )
         return indices.tolist()
 
@@ -877,9 +840,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
-            num_frames=num_frames,
-            fps=sampling_fps,
-            max_duration=source.duration,
+            num_frames=num_frames, fps=sampling_fps, max_duration=source.duration
         )
 
         frame_idx = cls.compute_frames_index_to_sample(
@@ -906,21 +867,13 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
 
     @classmethod
     def load_bytes(
-        cls,
-        data: bytes,
-        num_frames: int = -1,
-        **kwargs,
+        cls, data: bytes, num_frames: int = -1, **kwargs
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frame_sample_mode = cast(str | None, kwargs.pop("frame_sample_mode", None))
         max_fps = cast(int, kwargs.pop("max_fps", 2))
         sampling_fps = cast(int, kwargs.pop("sampling_fps", 2))
         out = cls.load_bytes_opencv(
-            data,
-            frame_sample_mode,
-            num_frames,
-            max_fps,
-            sampling_fps,
-            **kwargs,
+            data, frame_sample_mode, num_frames, max_fps, sampling_fps, **kwargs
         )
         return out
 
@@ -959,10 +912,7 @@ class NemotronVLVideoBackend(VideoBackend):
 class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod
     def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
+        cls, source: VideoSourceMetadata, target: VideoTargetMetadata, **kwargs
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
@@ -1029,14 +979,11 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         # recompute source metadata with adjusted duration to ensure correct
         # sampling indices computation
         target = VideoTargetMetadata(
-            num_frames=num_frames,
-            fps=fps,
-            max_duration=max_duration,
+            num_frames=num_frames, fps=fps, max_duration=max_duration
         )
 
         frame_indices_list = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
+            source=source, target=target
         )
 
         frames, valid_frame_indices = cls.read_frames(

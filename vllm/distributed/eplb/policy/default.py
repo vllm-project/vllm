@@ -178,10 +178,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         pphy2mlog = (
             pphy2mlog.reshape(num_layers, num_nodes, -1)
             + np.arange(
-                0,
-                num_logical_experts,
-                num_logical_experts // num_nodes,
-                dtype=np.int64,
+                0, num_logical_experts, num_logical_experts // num_nodes, dtype=np.int64
             )[None, :, None]
         ).reshape(num_layers, -1)
         # Map node-local logical indices back to global logical expert ids.
@@ -190,10 +187,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
     @classmethod
     def preserve_intragpu_slots(
-        cls,
-        phy2log: np.ndarray,
-        num_ranks: int,
-        old_phy2log: np.ndarray,
+        cls, phy2log: np.ndarray, num_ranks: int, old_phy2log: np.ndarray
     ) -> np.ndarray:
         """
         Reorder the new mapping per GPU so that experts that remain on the same GPU

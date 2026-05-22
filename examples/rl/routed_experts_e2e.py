@@ -73,9 +73,7 @@ class InferenceResult:
 
 
 async def _run_async_inference(
-    engine_args: AsyncEngineArgs,
-    prompts: list[str],
-    max_new_tokens: int,
+    engine_args: AsyncEngineArgs, prompts: list[str], max_new_tokens: int
 ) -> InferenceResult:
     """Run inference using AsyncLLM."""
     from vllm.sampling_params import SamplingParams
@@ -89,10 +87,7 @@ async def _run_async_inference(
     )
     assert num_experts > 0, "Could not determine num_experts from model config"
 
-    sampling_params = SamplingParams(
-        temperature=0,
-        max_tokens=max_new_tokens,
-    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=max_new_tokens)
 
     async def _generate_one(prompt: str, idx: int):
         request_id = str(uuid.uuid4())
@@ -161,10 +156,7 @@ def run_inference(
 # ---------------------------------------------------------------------------
 
 
-def validate_expert_ids(
-    experts_list: list[np.ndarray],
-    num_experts: int,
-) -> None:
+def validate_expert_ids(experts_list: list[np.ndarray], num_experts: int) -> None:
     """Check that all expert IDs are within valid range [0, num_experts)."""
     for i, experts in enumerate(experts_list):
         assert np.all(experts >= 0), (
@@ -190,10 +182,7 @@ def validate_shapes(experts_list: list[np.ndarray]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def compare_token_ids(
-    baseline: list[list[int]],
-    reference: list[list[int]],
-) -> float:
+def compare_token_ids(baseline: list[list[int]], reference: list[list[int]]) -> float:
     """Compare token IDs from two runs. Returns mismatch ratio."""
     assert len(baseline) == len(reference), (
         f"Length mismatch: {len(baseline)} vs {len(reference)}"
@@ -231,9 +220,7 @@ def compare_token_ids(
 
 
 def compare_routed_experts(
-    baseline: list[np.ndarray],
-    reference: list[np.ndarray],
-    threshold: float = 0.05,
+    baseline: list[np.ndarray], reference: list[np.ndarray], threshold: float = 0.05
 ) -> float:
     """Compare two runs of routed experts. Returns mismatch ratio.
 
@@ -366,9 +353,7 @@ def main():
 
         print("\n--- Routed Experts ---")
         expert_mismatch = compare_routed_experts(
-            baseline.experts_list,
-            reference.experts_list,
-            threshold=args.threshold,
+            baseline.experts_list, reference.experts_list, threshold=args.threshold
         )
 
         print(

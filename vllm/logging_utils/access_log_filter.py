@@ -69,8 +69,7 @@ class UvicornAccessLogFilter(logging.Filter):
 
 
 def create_uvicorn_log_config(
-    excluded_paths: list[str] | None = None,
-    log_level: str = "info",
+    excluded_paths: list[str] | None = None, log_level: str = "info"
 ) -> dict:
     """
     Create a uvicorn logging configuration with access log filtering.
@@ -97,7 +96,7 @@ def create_uvicorn_log_config(
             "access_log_filter": {
                 "()": UvicornAccessLogFilter,
                 "excluded_paths": excluded_paths or [],
-            },
+            }
         },
         "formatters": {
             "default": {

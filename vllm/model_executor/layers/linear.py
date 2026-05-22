@@ -18,16 +18,12 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
-    linear_batch_invariant,
-)
+from vllm.model_executor.layers.batch_invariant import linear_batch_invariant
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.utils import (
-    dispatch_unquantized_gemm,
-)
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     BlockQuantScaleParameter,
@@ -71,9 +67,7 @@ def register_weight_loader_v2_supported_method(cls):
 
 
 def adjust_marlin_shard(
-    param: Parameter,
-    shard_size: int,
-    shard_offset: int,
+    param: Parameter, shard_size: int, shard_offset: int
 ) -> tuple[int, int]:
     marlin_tile_size: int | None = getattr(param, "marlin_tile_size", None)
     if marlin_tile_size is None:
@@ -83,9 +77,7 @@ def adjust_marlin_shard(
 
 
 def adjust_block_scale_shard(
-    weight_block_size: tuple[int, ...] | None,
-    shard_size: int,
-    shard_offset: int,
+    weight_block_size: tuple[int, ...] | None, shard_size: int, shard_offset: int
 ) -> tuple[int, int]:
     assert weight_block_size is not None
     block_n = weight_block_size[0]
@@ -95,9 +87,7 @@ def adjust_block_scale_shard(
 
 
 def adjust_bitsandbytes_4bit_shard(
-    param: Parameter,
-    shard_offsets: dict[str, tuple[int, int]],
-    loaded_shard_id: str,
+    param: Parameter, shard_offsets: dict[str, tuple[int, int]], loaded_shard_id: str
 ) -> tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
@@ -112,9 +102,7 @@ def adjust_bitsandbytes_4bit_shard(
 
 
 def adjust_scalar_to_fused_array(
-    param_data: torch.Tensor,
-    loaded_weight: torch.Tensor,
-    shard_id: int | str,
+    param_data: torch.Tensor, loaded_weight: torch.Tensor, shard_id: int | str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """For fused modules (QKV and MLP) we have an array of length
     N that holds 1 scale for each "logical" matrix. So the param
@@ -169,10 +157,7 @@ class LinearMethodBase(QuantizeMethodBase):
 
     @abstractmethod
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Apply the weights in layer to the input tensor.
         Expects create_weights to have been called before on the layer."""
@@ -218,10 +203,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
@@ -353,11 +335,7 @@ class ReplicatedLinear(LinearBase):
                 torch.empty(self.output_size, dtype=self.params_dtype)
             )
             set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
+                self.bias, {"output_dim": 0, "weight_loader": self.weight_loader}
             )
         else:
             self.register_parameter("bias", None)
@@ -386,8 +364,7 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(
-        self,
-        x: torch.Tensor,
+        self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
@@ -493,11 +470,7 @@ class ColumnParallelLinear(LinearBase):
                 torch.empty(self.output_size_per_partition, dtype=params_dtype)
             )
             set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
+                self.bias, {"output_dim": 0, "weight_loader": self.weight_loader}
             )
         else:
             self.register_parameter("bias", None)
@@ -575,10 +548,7 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(
-        self,
-        input_,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def forward(self, input_) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -1483,11 +1453,7 @@ class RowParallelLinear(LinearBase):
         if bias:
             self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
             set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
+                self.bias, {"output_dim": 0, "weight_loader": self.weight_loader}
             )
         else:
             self.register_parameter("bias", None)
@@ -1537,10 +1503,7 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(
-        self,
-        input_,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+    def forward(self, input_) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.input_is_parallel:
             input_parallel = input_
         else:

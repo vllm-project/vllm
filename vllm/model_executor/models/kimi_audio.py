@@ -77,9 +77,7 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
     """WhisperEncoder for Kimi-Audio with packed_modules_mapping."""
 
     # packed_modules_mapping for Q/K/V fusion during weight loading
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -146,13 +144,11 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
         feature_extractor = cached_feature_extractor_from_config(
-            self.ctx.model_config,
-            subfolder=KIMIA_WHISPER_SUBFOLDER,
+            self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
         )
 
         return KimiAudioProcessor(
-            feature_extractor=feature_extractor,
-            tokenizer=self.get_tokenizer(),
+            feature_extractor=feature_extractor, tokenizer=self.get_tokenizer()
         )
 
     def get_feature_extractor(self, **kwargs: object):
@@ -193,7 +189,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
         return {
             "audio": self._get_dummy_audios(
                 length=target_audio_length, num_audios=num_audios
-            ),
+            )
         }
 
     def get_dummy_processor_inputs(
@@ -231,8 +227,7 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
     """Custom data parser for Kimi-Audio multimodal data."""
 
     def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[AudioItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -282,18 +277,13 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, Any]:
         """Get multi-modal field configuration."""
         return _KIMIAUDIO_FIELD_CONFIG
 
     def _get_prompt_updates(
-        self,
-        mm_items,
-        hf_processor_mm_kwargs,
-        out_mm_kwargs,
+        self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs
     ) -> Sequence[PromptReplacement]:
         """Get prompt updates for audio tokens."""
         # Get audio feature lengths from processed output
@@ -325,7 +315,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
                 modality="audio",
                 target=[KimiAudioProcessor.KIMIA_TEXT_BLANK],
                 replacement=get_replacement_kimiaudio,
-            ),
+            )
         ]
 
 
@@ -374,10 +364,7 @@ class KimiAudioMultiModalProjector(nn.Module):
     dummy_inputs=KimiAudioDummyInputsBuilder,
 )
 class KimiAudioForConditionalGeneration(
-    nn.Module,
-    SupportsMultiModal,
-    SupportsPP,
-    SupportsTranscription,
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsTranscription
 ):
     """Kimi-Audio model for ASR transcription."""
 
@@ -403,10 +390,7 @@ class KimiAudioForConditionalGeneration(
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
         },
-        orig_to_new_substr={
-            ".fc1.": ".mlp.fc1.",
-            ".fc2.": ".mlp.fc2.",
-        },
+        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
     )
 
     # Audio placeholder token sequence
@@ -433,8 +417,7 @@ class KimiAudioForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = KimiAudioWhisperEncoder(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "audio_tower"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "audio_tower")
             )
             self.multi_modal_projector = KimiAudioMultiModalProjector(
                 whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
@@ -580,18 +563,12 @@ class KimiAudioForConditionalGeneration(
             inputs_embeds = None
 
         hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -618,8 +595,7 @@ class KimiAudioForConditionalGeneration(
         """Get speech-to-text config with custom processor."""
         # Load feature extractor for config values
         feature_extractor = cached_feature_extractor_from_config(
-            model_config,
-            subfolder=KIMIA_WHISPER_SUBFOLDER,
+            model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
         )
 
         return SpeechToTextConfig(
@@ -663,8 +639,7 @@ class KimiAudioForConditionalGeneration(
         prompt_token_ids = tokenizer.encode(prompt)
 
         return TokensPrompt(
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_data={"audio": audio},
+            prompt_token_ids=prompt_token_ids, multi_modal_data={"audio": audio}
         )
 
     @classmethod

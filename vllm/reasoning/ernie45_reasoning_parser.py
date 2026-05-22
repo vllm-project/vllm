@@ -101,8 +101,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             if response_end_idx != -1:
                 content = content[:response_end_idx]
             return DeltaMessage(
-                reasoning=reasoning,
-                content=content if content else None,
+                reasoning=reasoning, content=content if content else None
             )
         elif self.end_token_id in previous_token_ids:
             # </think> in previous, thinking content ends

@@ -73,8 +73,7 @@ class MockVllmConfig:
 
 def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
     models = OpenAIServingModels(
-        engine_client=engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
     )
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
@@ -85,10 +84,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         chat_template_content_format="auto",
     )
     return OpenAIServingCompletion(
-        engine,
-        models,
-        openai_serving_render=serving_render,
-        request_logger=None,
+        engine, models, openai_serving_render=serving_render, request_logger=None
     )
 
 
@@ -138,10 +134,7 @@ async def test_completion_error_non_stream():
     mock_engine.generate = MagicMock(side_effect=mock_generate)
 
     request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-        max_tokens=10,
-        stream=False,
+        model=MODEL_NAME, prompt="Test prompt", max_tokens=10, stream=False
     )
 
     with pytest.raises(GenerationError):
@@ -161,10 +154,7 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
-    request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-    )
+    request = CompletionRequest(model=MODEL_NAME, prompt="Test prompt")
 
     result = await serving_completion.render_completion_request(request)
 
@@ -190,10 +180,7 @@ async def test_renderer_only_completion_request_skips_mm_cache():
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
-    request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-    )
+    request = CompletionRequest(model=MODEL_NAME, prompt="Test prompt")
 
     result = await serving_completion.openai_serving_render.render_completion_request(
         request
@@ -270,10 +257,7 @@ async def test_completion_error_stream():
     mock_engine.generate = MagicMock(side_effect=mock_generate)
 
     request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-        max_tokens=10,
-        stream=True,
+        model=MODEL_NAME, prompt="Test prompt", max_tokens=10, stream=True
     )
 
     response = await serving_completion.create_completion(request)
@@ -305,18 +289,10 @@ def test_json_schema_response_format_missing_schema():
 def test_negative_prompt_token_ids_nested():
     """Negative token IDs in prompt (nested list) should raise validation error."""
     with pytest.raises(Exception, match="greater than or equal to 0"):
-        CompletionRequest(
-            model=MODEL_NAME,
-            prompt=[[-1]],
-            max_tokens=10,
-        )
+        CompletionRequest(model=MODEL_NAME, prompt=[[-1]], max_tokens=10)
 
 
 def test_negative_prompt_token_ids_flat():
     """Negative token IDs in prompt (flat list) should raise validation error."""
     with pytest.raises(Exception, match="greater than or equal to 0"):
-        CompletionRequest(
-            model=MODEL_NAME,
-            prompt=[-1],
-            max_tokens=10,
-        )
+        CompletionRequest(model=MODEL_NAME, prompt=[-1], max_tokens=10)

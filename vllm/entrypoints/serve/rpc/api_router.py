@@ -27,8 +27,7 @@ async def collective_rpc(raw_request: Request):
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=f"JSON decode error: {e}",
+            status_code=HTTPStatus.BAD_REQUEST.value, detail=f"JSON decode error: {e}"
         ) from e
     method = body.get("method")
     if method is None:

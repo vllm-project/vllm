@@ -12,23 +12,17 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.fixture
 def unsupported_string_schemas():
-    return [
-        {"type": "string", "format": "non_existing_format"},
-    ]
+    return [{"type": "string", "format": "non_existing_format"}]
 
 
 @pytest.fixture
 def unsupported_integer_schemas():
-    return [
-        {"type": "integer", "multipleOf": 120},
-    ]
+    return [{"type": "integer", "multipleOf": 120}]
 
 
 @pytest.fixture
 def unsupported_number_schemas():
-    return [
-        {"type": "number", "multipleOf": 120},
-    ]
+    return [{"type": "number", "multipleOf": 120}]
 
 
 @pytest.fixture

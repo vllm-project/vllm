@@ -34,18 +34,10 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         out_dtype = x.dtype
         x_fp8, x_scale = quant_mxfp8(x)
         return torch.ops._xpu_C.fp8_gemm(
-            x_fp8,
-            layer.weight,
-            out_dtype,
-            x_scale,
-            layer.weight_scale,
-            bias,
+            x_fp8, layer.weight, out_dtype, x_scale, layer.weight_scale, bias
         )

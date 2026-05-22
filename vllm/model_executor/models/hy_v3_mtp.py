@@ -71,9 +71,7 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
 
 class HYV3SharedHead(nn.Module):
     def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None = None
     ) -> None:
         super().__init__()
         self.head = ParallelLMHead(
@@ -161,8 +159,7 @@ class HYV3MultiTokenPredictor(nn.Module):
         )
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -187,9 +184,7 @@ class HYV3MultiTokenPredictor(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -225,16 +220,12 @@ class HYV3MTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        self, logits: torch.Tensor, sampling_metadata: SamplingMetadata
     ) -> SamplerOutput | None:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens

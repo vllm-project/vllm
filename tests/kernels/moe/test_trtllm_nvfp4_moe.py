@@ -54,11 +54,7 @@ if pytest and (
 # (m, n, k) = (tokens, intermediate_size_per_partition, hidden_dim).
 # The (64, 704, 4096) row matches Gemma4's MoE shape and exercises the
 # non-256-aligned intermediate (padded inside the wrapper).
-MNK_FACTORS = [
-    (2, 1024, 1024),
-    (64, 2048, 1536),
-    (64, 704, 4096),
-]
+MNK_FACTORS = [(2, 1024, 1024), (64, 2048, 1536), (64, 704, 4096)]
 
 _SWIGLU_LIMIT = 0.1
 _LARGE_OUTPUT1_SCALE = 32768.0
@@ -85,10 +81,7 @@ ACTIVATION_CASES = [
     pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, id="silu"),
     pytest.param(MoEActivation.SILU, SILU_WITH_CLAMP, _SWIGLU_LIMIT, id="silu_clamp"),
     pytest.param(
-        MoEActivation.RELU2_NO_MUL,
-        MoEActivation.RELU2_NO_MUL,
-        None,
-        id="relu2_no_mul",
+        MoEActivation.RELU2_NO_MUL, MoEActivation.RELU2_NO_MUL, None, id="relu2_no_mul"
     ),
     pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, id="gelu"),
 ]

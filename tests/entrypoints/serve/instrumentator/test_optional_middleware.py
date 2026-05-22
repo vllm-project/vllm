@@ -56,22 +56,14 @@ async def test_no_request_id_header(server: RemoteOpenAIServer):
     assert "X-Request-Id" not in response.headers
 
 
-@pytest.mark.parametrize(
-    "server",
-    [["--api-key", "test"]],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", [["--api-key", "test"]], indirect=True)
 @pytest.mark.asyncio
 async def test_missing_api_token(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("v1/models"))
     assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
-@pytest.mark.parametrize(
-    "server",
-    [["--api-key", "test"]],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", [["--api-key", "test"]], indirect=True)
 @pytest.mark.asyncio
 async def test_passed_api_token(server: RemoteOpenAIServer):
     response = requests.get(
@@ -80,11 +72,7 @@ async def test_passed_api_token(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
-@pytest.mark.parametrize(
-    "server",
-    [["--api-key", "test"]],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", [["--api-key", "test"]], indirect=True)
 @pytest.mark.asyncio
 async def test_not_v1_or_v2_path_skips_auth(server: RemoteOpenAIServer):
     # Authorization check is skipped for paths that
@@ -98,49 +86,27 @@ async def test_not_v1_or_v2_path_skips_auth(server: RemoteOpenAIServer):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "server",
-    [["--api-key", "test"]],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", [["--api-key", "test"]], indirect=True)
 @pytest.mark.asyncio
 async def test_v2_endpoint_rejects_missing_api_token(server: RemoteOpenAIServer):
     # /v2/embed should require authentication when --api-key is set.
-    body = {
-        "model": MODEL_NAME,
-        "texts": ["hello"],
-        "embedding_types": ["float"],
-    }
+    body = {"model": MODEL_NAME, "texts": ["hello"], "embedding_types": ["float"]}
     response = requests.post(server.url_for("/v2/embed"), json=body)
     assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
-@pytest.mark.parametrize(
-    "server",
-    [["--api-key", "test"]],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", [["--api-key", "test"]], indirect=True)
 @pytest.mark.asyncio
 async def test_v2_endpoint_accepts_valid_api_token(server: RemoteOpenAIServer):
     # /v2/embed should accept requests with a valid API key.
-    body = {
-        "model": MODEL_NAME,
-        "texts": ["hello"],
-        "embedding_types": ["float"],
-    }
+    body = {"model": MODEL_NAME, "texts": ["hello"], "embedding_types": ["float"]}
     response = requests.post(
-        server.url_for("/v2/embed"),
-        json=body,
-        headers={"Authorization": "Bearer test"},
+        server.url_for("/v2/embed"), json=body, headers={"Authorization": "Bearer test"}
     )
     assert response.status_code == HTTPStatus.OK
 
 
-@pytest.mark.parametrize(
-    "server",
-    ["--enable-request-id-headers"],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", ["--enable-request-id-headers"], indirect=True)
 @pytest.mark.asyncio
 async def test_enable_request_id_header(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
@@ -148,11 +114,7 @@ async def test_enable_request_id_header(server: RemoteOpenAIServer):
     assert len(response.headers.get("X-Request-Id", "")) == 32
 
 
-@pytest.mark.parametrize(
-    "server",
-    ["--enable-request-id-headers"],
-    indirect=True,
-)
+@pytest.mark.parametrize("server", ["--enable-request-id-headers"], indirect=True)
 @pytest.mark.asyncio
 async def test_custom_request_id_header(server: RemoteOpenAIServer):
     response = requests.get(

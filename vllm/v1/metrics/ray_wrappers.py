@@ -103,9 +103,7 @@ class RayGaugeWrapper(RayPrometheusMetric):
         name = self._get_sanitized_opentelemetry_name(name)
 
         self.metric = ray_metrics.Gauge(
-            name=name,
-            description=documentation,
-            tag_keys=tag_keys,
+            name=name, description=documentation, tag_keys=tag_keys
         )
 
     def set(self, value: int | float):
@@ -130,9 +128,7 @@ class RayCounterWrapper(RayPrometheusMetric):
         tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Counter(
-            name=name,
-            description=documentation,
-            tag_keys=tag_keys,
+            name=name, description=documentation, tag_keys=tag_keys
         )
 
     def inc(self, value: int | float = 1.0):

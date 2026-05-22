@@ -41,9 +41,7 @@ class OpenAIServingTokenization(OpenAIServing):
         trust_request_chat_template: bool = False,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
-            models=models,
-            request_logger=request_logger,
+            engine_client=engine_client, models=models, request_logger=request_logger
         )
 
         self.openai_serving_render = openai_serving_render
@@ -53,9 +51,7 @@ class OpenAIServingTokenization(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
-        self,
-        request: TokenizeRequest,
-        raw_request: Request,
+        self, request: TokenizeRequest, raw_request: Request
     ) -> TokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -99,10 +95,7 @@ class OpenAIServingTokenization(OpenAIServing):
         input_ids: list[int] = []
         for engine_input in engine_inputs:
             self._log_inputs(
-                request_id,
-                engine_input,
-                params=None,
-                lora_request=lora_request,
+                request_id, engine_input, params=None, lora_request=lora_request
             )
 
             prompt_components = self._extract_prompt_components(engine_input)
@@ -122,9 +115,7 @@ class OpenAIServingTokenization(OpenAIServing):
         )
 
     async def create_detokenize(
-        self,
-        request: DetokenizeRequest,
-        raw_request: Request,
+        self, request: DetokenizeRequest, raw_request: Request
     ) -> DetokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -149,9 +140,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         return DetokenizeResponse(prompt=prompt_text)
 
-    async def get_tokenizer_info(
-        self,
-    ) -> TokenizerInfoResponse | ErrorResponse:
+    async def get_tokenizer_info(self) -> TokenizerInfoResponse | ErrorResponse:
         """Get comprehensive tokenizer information."""
         tokenizer = self.renderer.get_tokenizer()
         info = TokenizerInfo(tokenizer, self.chat_template).to_dict()

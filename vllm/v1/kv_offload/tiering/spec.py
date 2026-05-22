@@ -127,11 +127,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         tier_config, primary_kv_view, self
                     )
                     secondary_tiers.append(tier)
-                    logger.info(
-                        "Created secondary tier #%d (%s)",
-                        i,
-                        tier.tier_type,
-                    )
+                    logger.info("Created secondary tier #%d (%s)", i, tier.tier_type)
                 except Exception as e:
                     logger.error(
                         "Failed to create secondary tier from config %s: %s",

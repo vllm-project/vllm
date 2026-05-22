@@ -129,10 +129,7 @@ class BambaMixerDecoderLayer(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         if residual is None:
             residual = hidden_states
@@ -224,10 +221,7 @@ class BambaAttentionDecoderLayer(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def self_attention(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -251,8 +245,7 @@ class BambaAttentionDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attention(
-            positions=positions,
-            hidden_states=hidden_states,
+            positions=positions, hidden_states=hidden_states
         )
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
@@ -280,10 +273,7 @@ class BambaModel(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
@@ -330,9 +320,7 @@ class BambaModel(nn.Module):
         residual = None
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
 
         if not get_pp_group().is_last_rank:
@@ -403,11 +391,7 @@ class BambaForCausalLM(
     SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["up_proj", "down_proj"],
     }
 
@@ -419,8 +403,7 @@ class BambaForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -430,8 +413,7 @@ class BambaForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -505,10 +487,7 @@ class BambaForCausalLM(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -128,17 +128,11 @@ def main(args):
 
     print("------warm up------")
     test_long_document_qa(
-        llm=llm,
-        prompts=warmup_prompts,
-        sampling_params=sampling_params,
+        llm=llm, prompts=warmup_prompts, sampling_params=sampling_params
     )
 
     print("------start generating------")
-    test_long_document_qa(
-        llm=llm,
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
+    test_long_document_qa(llm=llm, prompts=prompts, sampling_params=sampling_params)
 
 
 def create_argument_parser():

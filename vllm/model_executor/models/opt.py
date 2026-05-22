@@ -113,10 +113,7 @@ class OPTAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         attn_output = self.attn(q, k, v)
@@ -167,10 +164,7 @@ class OPTDecoderLayer(nn.Module):
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
         # 125m, 1.7B, ..., 175B applies layer norm BEFORE attention
@@ -211,8 +205,7 @@ class OPTDecoder(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.word_embed_proj_dim,
+            config.vocab_size, config.word_embed_proj_dim
         )
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
@@ -362,15 +355,9 @@ class OPTModel(nn.Module):
 
 
 class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "decoder.": "model.decoder.",
-        }
-    )
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"decoder.": "model.decoder."})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -409,10 +396,7 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

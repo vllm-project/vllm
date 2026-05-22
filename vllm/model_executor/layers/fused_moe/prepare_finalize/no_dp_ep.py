@@ -12,9 +12,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 def _quantize_input(
-    a1: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    defer_input_quant: bool = False,
+    a1: torch.Tensor, quant_config: FusedMoEQuantConfig, defer_input_quant: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     # Defer input quant to moe kernel for backends (e.g. AITER, FI)
     # which use a single kernel call for quant + experts.
@@ -125,10 +123,7 @@ class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolit
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
         return a1q, a1q_scale, router_logits
 
-    def finalize(
-        self,
-        fused_expert_output: torch.Tensor,
-    ) -> torch.Tensor:
+    def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         return fused_expert_output
 
 

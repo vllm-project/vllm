@@ -186,9 +186,7 @@ class AsyncLLM(EngineClient):
             )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                ],
+                activities=[torch.profiler.ProfilerActivity.CPU],
                 with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     profiler_dir,
@@ -1067,9 +1065,7 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-        from vllm.distributed.weight_transfer.base import (
-            WeightTransferInitRequest,
-        )
+        from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
 
         if isinstance(request, WeightTransferInitRequest):
             init_info_dict = request.init_info
@@ -1083,8 +1079,7 @@ class AsyncLLM(EngineClient):
     async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Start a new weight update."""
         await self.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
+            "start_weight_update", kwargs={"is_checkpoint_format": is_checkpoint_format}
         )
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:

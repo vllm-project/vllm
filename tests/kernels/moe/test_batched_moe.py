@@ -204,12 +204,7 @@ def test_batched_mm(
         block_shape=block_shape,
     )
 
-    ref_output = native_batched_masked_quant_matmul(
-        A,
-        B,
-        ref_output,
-        num_expert_tokens,
-    )
+    ref_output = native_batched_masked_quant_matmul(A, B, ref_output, num_expert_tokens)
 
     q_ref_output = native_batched_masked_quant_matmul(
         A_q,

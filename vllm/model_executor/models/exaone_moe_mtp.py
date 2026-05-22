@@ -22,11 +22,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.exaone_moe import ExaoneMoeDecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .utils import (
-    AutoWeightsLoader,
-    is_pp_missing_parameter,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, is_pp_missing_parameter, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -56,9 +52,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
+            self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
         )
 
         self.fc = ColumnParallelLinear(
@@ -114,9 +108,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
 
         if not get_pp_group().is_last_rank:
@@ -229,9 +221,7 @@ class ExaoneMoeMTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 

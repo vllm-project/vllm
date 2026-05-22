@@ -31,10 +31,7 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         out = run_nvfp4_emulations(
             x=x,

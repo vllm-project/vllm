@@ -13,10 +13,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
@@ -31,10 +28,7 @@ from vllm.multimodal.inputs import (
     NestedTensors,
 )
 from vllm.multimodal.parse import ImageProcessorItems, VideoProcessorItems
-from vllm.multimodal.processing.processor import (
-    PromptReplacement,
-    PromptUpdateDetails,
-)
+from vllm.multimodal.processing.processor import PromptReplacement, PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
@@ -84,25 +78,17 @@ def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 
 class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
-    def _resolve_downsample_mode(
-        self,
-        mm_kwargs: Mapping[str, object],
-    ) -> str:
+    def _resolve_downsample_mode(self, mm_kwargs: Mapping[str, object]) -> str:
         ds = mm_kwargs.get("downsample_mode")
         if ds is not None:
             return str(ds)
         return self.info._get_downsample_mode()
 
     def get_image_prompt_texts(
-        self,
-        image_size,
-        image_idx: int = 0,
-        downsample_mode: str | None = None,
+        self, image_size, image_idx: int = 0, downsample_mode: str | None = None
     ) -> str:
         return self.info.get_slice_image_placeholder(
-            image_size,
-            image_idx=image_idx,
-            downsample_mode=downsample_mode,
+            image_size, image_idx=image_idx, downsample_mode=downsample_mode
         )
 
     def get_video_prompt_texts(
@@ -200,11 +186,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         }
 
         ds_mode = self._resolve_downsample_mode(mm_kwargs)
-        insert_layer_id = getattr(
-            self.info.get_hf_config(),
-            "insert_layer_id",
-            -1,
-        )
+        insert_layer_id = getattr(self.info.get_hf_config(), "insert_layer_id", -1)
         merger_flag = ds_mode != "4x" and insert_layer_id >= 0
         image_inputs["use_vit_merger"] = [
             torch.tensor([merger_flag], dtype=torch.bool) for _ in range(n_images)
@@ -285,10 +267,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         }
 
     def _get_prompt_updates(
-        self,
-        mm_items,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs,
+        self, mm_items, hf_processor_mm_kwargs: Mapping[str, object], out_mm_kwargs
     ):
         ds_mode = self._resolve_downsample_mode(hf_processor_mm_kwargs)
 
@@ -313,32 +292,25 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
-                "image",
-                (MiniCPMVImageEmbeddingItems, ImageProcessorItems),
+                "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
             )
             image_size = images.get_image_size(item_idx)
             return PromptUpdateDetails.select_text(
                 self.get_image_prompt_texts(
-                    image_size,
-                    item_idx,
-                    downsample_mode=ds_mode,
+                    image_size, item_idx, downsample_mode=ds_mode
                 ),
                 image_embed_text,
             )
 
         def get_video_replacement(item_idx: int):
             videos = mm_items.get_items(
-                "video",
-                (MiniCPMVVideoEmbeddingItems, VideoProcessorItems),
+                "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
             )
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
             return PromptUpdateDetails.select_text(
                 self.get_video_prompt_texts(
-                    frame_size,
-                    num_frames,
-                    downsample_mode=ds_mode,
-                    video_idx=item_idx,
+                    frame_size, num_frames, downsample_mode=ds_mode, video_idx=item_idx
                 ),
                 video_embed_text,
             )
@@ -350,17 +322,13 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
         return [
             PromptReplacement(
-                modality=modality,
-                target=pattern,
-                replacement=get_replacement[modality],
+                modality=modality, target=pattern, replacement=get_replacement[modality]
             )
             for modality, pattern in placeholders
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _minicpmv4_6_field_config(hf_inputs)
 
@@ -404,10 +372,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             pass
         return self.get_image_max_slice_num()
 
-    def _get_downsample_mode(
-        self,
-        downsample_mode: str | None = None,
-    ) -> str:
+    def _get_downsample_mode(self, downsample_mode: str | None = None) -> str:
         if downsample_mode is not None:
             return downsample_mode
         image_processor = self.get_image_processor()
@@ -441,22 +406,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         # transformers v5.7+ requires `scale_resolution` arg
         try:
             grids = image_processor.get_sliced_grid(
-                image_size,
-                max_slice_nums,
-                scale_res,
+                image_size, max_slice_nums, scale_res
             )
         except TypeError:
-            grids = image_processor.get_sliced_grid(
-                image_size,
-                max_slice_nums,
-            )
+            grids = image_processor.get_sliced_grid(image_size, max_slice_nums)
 
         if grids is None:
             best_size = image_processor.find_best_resize(
-                image_size,
-                scale_res,
-                patch_size,
-                allow_upscale=True,
+                image_size, scale_res, patch_size, allow_upscale=True
             )
             source_tokens = (
                 best_size[0] * best_size[1] // (patch_size * patch_size * token_divisor)
@@ -464,19 +421,13 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return [0, 0], source_tokens, 0
 
         best_resize = image_processor.find_best_resize(
-            image_size,
-            scale_res,
-            patch_size,
+            image_size, scale_res, patch_size
         )
         source_tokens = (
             best_resize[0] * best_resize[1] // (patch_size * patch_size * token_divisor)
         )
         refine_size = image_processor.get_refine_size(
-            image_size,
-            grids,
-            scale_res,
-            patch_size,
-            allow_upscale=True,
+            image_size, grids, scale_res, patch_size, allow_upscale=True
         )
         patch_w = refine_size[0] // grids[0]
         patch_h = refine_size[1] // grids[1]
@@ -492,9 +443,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode: str | None = None,
     ) -> str:
         grids, source_tokens, patch_tokens = self._compute_visual_tokens(
-            image_size,
-            max_slice_nums,
-            downsample_mode=downsample_mode,
+            image_size, max_slice_nums, downsample_mode=downsample_mode
         )
         image_processor = self.get_image_processor()
         # transformers v5.7+ removed `get_slice_image_placeholder` from the
@@ -536,19 +485,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode: str | None = None,
     ) -> int:
         grids, source_tokens, patch_tokens = self._compute_visual_tokens(
-            image_size,
-            max_slice_nums,
-            downsample_mode=downsample_mode,
+            image_size, max_slice_nums, downsample_mode=downsample_mode
         )
         return source_tokens + grids[0] * grids[1] * patch_tokens
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel()
@@ -621,24 +565,16 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
     def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        self, config, quant_config: QuantizationConfig | None = None, prefix: str = ""
     ):
         super().__init__()
         self.window_kernel_size = (2, 2)
         self.embed_dim = config.hidden_size
 
         self.self_attn = MiniCPMV4_6ViTWindowAttentionSelfAttn(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
-        self.layer_norm1 = nn.LayerNorm(
-            self.embed_dim,
-            eps=config.layer_norm_eps,
-        )
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
         hidden_4x = self.embed_dim * 4
         inter_4x = config.intermediate_size * 4
@@ -649,10 +585,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         self.linear_2 = nn.Linear(inter_4x, self.embed_dim, bias=True)
 
     def _apply_window_attention(
-        self,
-        valid_states: torch.Tensor,
-        H: int,
-        W: int,
+        self, valid_states: torch.Tensor, H: int, W: int
     ) -> torch.Tensor:
         D = valid_states.shape[-1]
         wh, ww = self.window_kernel_size
@@ -669,10 +602,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         return x.view(H * W, D)
 
     def _apply_mlp_downsample(
-        self,
-        valid_states: torch.Tensor,
-        H: int,
-        W: int,
+        self, valid_states: torch.Tensor, H: int, W: int
     ) -> torch.Tensor:
         D = valid_states.shape[-1]
         wh, ww = self.window_kernel_size
@@ -715,32 +645,19 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
             new_H, new_W = H // wh, W // ww
             all_merged.append(self._apply_mlp_downsample(hs, H, W))
             new_tgt_sizes[b] = torch.tensor(
-                [new_H, new_W],
-                device=device,
-                dtype=tgt_sizes.dtype,
+                [new_H, new_W], device=device, dtype=tgt_sizes.dtype
             )
 
         new_num_patches = new_tgt_sizes[:, 0] * new_tgt_sizes[:, 1]
         new_max_patches = int(new_num_patches.max().item())
-        new_hidden = torch.zeros(
-            B,
-            new_max_patches,
-            D,
-            device=device,
-            dtype=dtype,
-        )
+        new_hidden = torch.zeros(B, new_max_patches, D, device=device, dtype=dtype)
         for b, merged in enumerate(all_merged):
             new_hidden[b, : merged.shape[0], :] = merged
 
         # Build new attention mask after spatial downsampling
         new_attention_mask: torch.Tensor | None = None
         if attention_mask is not None:
-            mask = torch.zeros(
-                B,
-                new_max_patches,
-                dtype=torch.bool,
-                device=device,
-            )
+            mask = torch.zeros(B, new_max_patches, dtype=torch.bool, device=device)
             for b in range(B):
                 mask[b, : int(new_num_patches[b].item())] = True
             min_val = torch.finfo(dtype).min
@@ -799,9 +716,7 @@ class MiniCPMV4_6Merger(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        tgt_sizes: torch.Tensor,
+        self, hidden_states: torch.Tensor, tgt_sizes: torch.Tensor
     ) -> list[torch.Tensor]:
         """
         Args:
@@ -818,8 +733,7 @@ class MiniCPMV4_6Merger(nn.Module):
 
             hs = hs.reshape(h // m1, m1, w // m2, m2, -1)
             hs = hs.permute(0, 2, 1, 3, 4).reshape(
-                (h // m1) * (w // m2),
-                m1 * m2 * hs.shape[-1],
+                (h // m1) * (w // m2), m1 * m2 * hs.shape[-1]
             )
             hs = self.mlp[0](hs)
 
@@ -829,8 +743,7 @@ class MiniCPMV4_6Merger(nn.Module):
                     cur_h, cur_w = cur_h // m1, cur_w // m2
                     hs = hs.reshape(cur_h, m1, cur_w, m2, -1)
                     hs = hs.permute(0, 2, 1, 3, 4).reshape(
-                        cur_h * cur_w,
-                        m1 * m2 * hs.shape[-1],
+                        cur_h * cur_w, m1 * m2 * hs.shape[-1]
                     )
                     hs = self.mlp[t](hs)
 
@@ -845,12 +758,7 @@ class MiniCPMV4_6Merger(nn.Module):
     dummy_inputs=MiniCPMVDummyInputsBuilder,
 )
 class MiniCPMV4_6ForConditionalGeneration(
-    nn.Module,
-    SupportsMultiModal,
-    SupportsPP,
-    HasInnerState,
-    IsHybrid,
-    SupportsMRoPE,
+    nn.Module, SupportsMultiModal, SupportsPP, HasInnerState, IsHybrid, SupportsMRoPE
 ):
     supports_encoder_tp_data = True
 
@@ -885,9 +793,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         raise ValueError("Only image or video modality is supported")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list["MultiModalFeatureSpec"],
+        self, input_tokens: list[int], mm_features: list["MultiModalFeatureSpec"]
     ) -> tuple[torch.Tensor, int]:
         """MiniCPM-V uses embedding injection for vision, not spatial M-RoPE.
 
@@ -951,8 +857,7 @@ class MiniCPMV4_6ForConditionalGeneration(
     # ----- Multimodal parsing -----
 
     def _parse_and_validate_vision_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> MiniCPMVImagePixelInputs | MiniCPMVImageEmbeddingInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -962,8 +867,7 @@ class MiniCPMV4_6ForConditionalGeneration(
 
         if image_embeds is not None:
             return MiniCPMVImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
+                type="image_embeds", image_embeds=image_embeds
             )
 
         tgt_sizes = kwargs.pop("tgt_sizes")
@@ -981,9 +885,7 @@ class MiniCPMV4_6ForConditionalGeneration(
     # ----- Vision forward -----
 
     def get_vision_hidden_states(
-        self,
-        data: MiniCPMVImagePixelInputs,
-        downsample_mode: str | None = None,
+        self, data: MiniCPMVImagePixelInputs, downsample_mode: str | None = None
     ) -> list[torch.Tensor]:
         pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
@@ -994,25 +896,13 @@ class MiniCPMV4_6ForConditionalGeneration(
         device = pixel_values[0].device
         target_dtype = self.vpm.embeddings.patch_embedding.weight.dtype
 
-        all_pixel_values = torch.zeros(
-            B,
-            3,
-            P,
-            L,
-            dtype=target_dtype,
-            device=device,
-        )
+        all_pixel_values = torch.zeros(B, 3, P, L, dtype=target_dtype, device=device)
         for i, pv in enumerate(pixel_values):
             all_pixel_values[i, ..., : pv.shape[-1]] = pv.to(target_dtype)
 
         num_patches = tgt_sizes.prod(-1)
         max_patches = int(num_patches.max().item())
-        patch_attn_mask = torch.zeros(
-            B,
-            max_patches,
-            dtype=torch.bool,
-            device=device,
-        )
+        patch_attn_mask = torch.zeros(B, max_patches, dtype=torch.bool, device=device)
         for i in range(B):
             patch_attn_mask[i, : num_patches[i]] = True
 
@@ -1041,9 +931,7 @@ class MiniCPMV4_6ForConditionalGeneration(
 
         if use_vit_merger:
             hidden_states, tgt_sizes, attention_mask = self.vit_merger(
-                hidden_states,
-                tgt_sizes,
-                attention_mask,
+                hidden_states, tgt_sizes, attention_mask
             )
 
         for layer in self.vpm.encoder.layers[insert_layer_id + 1 :]:
@@ -1063,8 +951,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         if use_vit_merger is not None:
             downsample_mode = "16x" if use_vit_merger else "4x"
         image_features = self.get_vision_hidden_states(
-            image_input,
-            downsample_mode=downsample_mode,
+            image_input, downsample_mode=downsample_mode
         )
         num_slices = image_input["num_slices"]
         results = []
@@ -1112,8 +999,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             if image_input is not None:
                 multimodal_embeddings += tuple(
                     self._process_vision_input(
-                        image_input,
-                        use_vit_merger=use_vit_merger,
+                        image_input, use_vit_merger=use_vit_merger
                     )
                 )
 
@@ -1125,8 +1011,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             if video_input is not None:
                 multimodal_embeddings += tuple(
                     self._process_vision_input(
-                        video_input,
-                        use_vit_merger=use_vit_merger,
+                        video_input, use_vit_merger=use_vit_merger
                     )
                 )
 
@@ -1142,9 +1027,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.language_model.embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, self.language_model.embed_input_ids, is_multimodal=is_multimodal
         )
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
@@ -1176,18 +1059,12 @@ class MiniCPMV4_6ForConditionalGeneration(
             inputs_embeds=inputs_embeds,
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     # ----- Weight loading -----
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

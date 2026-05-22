@@ -38,15 +38,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.multimodal.parse import (
-    ImageProcessorItems,
-    ImageSize,
-    MultiModalDataItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -118,12 +111,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
 
         pooler_config = self.ctx.model_config.pooler_config
@@ -131,8 +119,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
+                image_width=image_width, image_height=image_height
             ),
             _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
@@ -189,9 +176,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         return dummy_token_id
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         if inputs.mm_data_items:
             if isinstance(inputs.prompt, str):
@@ -229,9 +214,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -257,17 +240,12 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
                 modality="image",
                 target=PromptIndexTargets.start(),
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
 class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         return self.get_patch_grid_length() ** 2
 
     def get_image_size(self) -> int:
@@ -417,10 +395,7 @@ class SiglipAttention(nn.Module):
                 prefix=f"{prefix}.attn",
             )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         """Input shape: Batch x Time x Channel"""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
@@ -495,17 +470,10 @@ class SiglipEncoderLayer(nn.Module):
             attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = SiglipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
@@ -552,9 +520,7 @@ class SiglipEncoder(nn.Module):
         )
 
     def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        return_all_hidden_states: bool,
+        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
     ) -> torch.Tensor | list[torch.Tensor]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
@@ -659,9 +625,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         )
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
-            config=config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
+            config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -738,9 +702,7 @@ class SiglipVisionTransformer(nn.Module):
         # Only create and load the head weights if we actually need them
         self.head = (
             SiglipMultiheadAttentionPoolingHead(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.head",
+                config=config, quant_config=quant_config, prefix=f"{prefix}.head"
             )
             if self.use_head
             else None
@@ -764,8 +726,7 @@ class SiglipVisionTransformer(nn.Module):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
-            pixel_values,
-            interpolate_pos_encoding=interpolate_pos_encoding,
+            pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
         )
         # Produces either the last layer output or all of the hidden states,
         # depending on if we have select_layers or not
@@ -1085,9 +1046,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         last_hidden_state = self.text_model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, position_ids=position_ids, inputs_embeds=inputs_embeds
         )
         text_features = self.text_model.head(last_hidden_state)
 
@@ -1100,9 +1059,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         return text_features
 
     def _flip_sequences_by_position_ids(
-        self,
-        features: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, features: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         """Flip sequences so EOS token moves to first position for CLS pooling.
 
@@ -1185,9 +1142,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         is_multimodal: torch.Tensor | None,
     ) -> torch.Tensor:
         inputs_embeds = super()._embed_text_input_ids(
-            input_ids,
-            embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, embed_input_ids, is_multimodal=is_multimodal
         )
 
         # NOTE: inputs_embeds in model runner has size text_config.projection_size

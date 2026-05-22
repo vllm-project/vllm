@@ -193,11 +193,7 @@ class WorkerWrapperBase:
     real initialization happens in `init_worker`.
     """
 
-    def __init__(
-        self,
-        rpc_rank: int = 0,
-        global_rank: int | None = None,
-    ) -> None:
+    def __init__(self, rpc_rank: int = 0, global_rank: int | None = None) -> None:
         """
         Initialize the worker wrapper with the given vllm_config and rpc_rank.
         Note: rpc_rank is the rank of the worker in the executor. In most cases,
@@ -219,10 +215,7 @@ class WorkerWrapperBase:
         if self.worker is not None:
             self.worker.shutdown()
 
-    def update_environment_variables(
-        self,
-        envs_list: list[dict[str, str]],
-    ) -> None:
+    def update_environment_variables(self, envs_list: list[dict[str, str]]) -> None:
         envs = envs_list[self.rpc_rank]
         update_environment_variables(envs)
 
@@ -303,8 +296,7 @@ class WorkerWrapperBase:
         else:
             self.mm_receiver_cache = (
                 MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
-                    vllm_config,
-                    shared_worker_lock,
+                    vllm_config, shared_worker_lock
                 )
             )
 

@@ -120,10 +120,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual + hidden_states * (
             self.config.scale_depth / math.sqrt(self.config.mup_denominator)
         )
@@ -161,10 +158,7 @@ class EagleMiniCPMModel(nn.Module):
         )
         self.input_norm1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.input_norm2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config, start_layer)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -209,11 +203,7 @@ class EagleMiniCPMModel(nn.Module):
         hidden_states = self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.eagle_layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         return hidden_states, hidden_states
 
@@ -290,15 +280,8 @@ class EagleMiniCPMModel(nn.Module):
 
 class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # LoRA specific attributes
@@ -366,10 +349,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle
         hidden_states2 = hidden_states2 / self.scale_width
         return hidden_states, hidden_states2
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

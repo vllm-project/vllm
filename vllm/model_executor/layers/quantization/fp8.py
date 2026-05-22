@@ -12,9 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
-)
+from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
@@ -27,9 +25,7 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -85,9 +81,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_supported,
-)
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -435,21 +429,14 @@ class Fp8LinearMethod(LinearMethodBase):
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer direct FP8 path
         # we will use BF16 dequant when direct FP8 is not supported.
         if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
-                return self.fp8_linear.apply_weights(
-                    layer,
-                    x,
-                    bias,
-                )
+                return self.fp8_linear.apply_weights(layer, x, bias)
             else:
                 if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
                     return self.fp8_linear.apply_weights(layer, x, bias)
@@ -625,10 +612,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
-            block_n, block_k = (
-                self.weight_block_size[0],
-                self.weight_block_size[1],
-            )
+            block_n, block_k = (self.weight_block_size[0], self.weight_block_size[1])
             # NOTE: To ensure proper alignment of the block-wise quantization
             # scales, the output_size of the weights for both the gate and up
             # layers must be divisible by block_n.
@@ -802,14 +786,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # MI300x and MI325x use FNUZ format for FP8. Convert if needed.
         if current_platform.is_fp8_fnuz():
             w13, w13_scale, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                w13,
-                w13_scale,
-                w13_input_scale,
+                w13, w13_scale, w13_input_scale
             )
             w2, w2_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                w2,
-                w2_scale,
-                w2_input_scale,
+                w2, w2_scale, w2_input_scale
             )
 
         # Per tensor kernels require single activation scale. Use the max.

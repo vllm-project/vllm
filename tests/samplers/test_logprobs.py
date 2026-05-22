@@ -17,14 +17,7 @@ MAX_LOGPROBS = max(NUM_TOP_LOGPROBS, NUM_PROMPT_LOGPROBS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("greedy", [True, False])
 @pytest.mark.parametrize("flat_logprobs", [True, False])
-def test_ranks(
-    vllm_runner,
-    model,
-    dtype,
-    greedy,
-    flat_logprobs,
-    example_prompts,
-):
+def test_ranks(vllm_runner, model, dtype, greedy, flat_logprobs, example_prompts):
     with vllm_runner(model, dtype=dtype, max_logprobs=MAX_LOGPROBS) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
         example_prompt_tokens = [tokenizer.encode(prompt) for prompt in example_prompts]

@@ -185,9 +185,7 @@ class HyperCLOVAXAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -198,11 +196,7 @@ class HyperCLOVAXAttention(nn.Module):
 
 
 class HyperCLOVAXDecoderLayer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -211,15 +205,9 @@ class HyperCLOVAXDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier
-        max_position_embeddings = getattr(
-            config,
-            "max_position_embeddings",
-            8192,
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         dual_chunk_attention_config = getattr(
-            config,
-            "dual_chunk_attention_config",
-            None,
+            config, "dual_chunk_attention_config", None
         )
         attention_bias = getattr(config, "attention_bias", False)
 
@@ -319,9 +307,7 @@ class HyperCLOVAXModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                self.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -445,15 +431,8 @@ class HyperCLOVAXModel(nn.Module):
 
 class HyperCLOVAXForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # LoRA specific attributes
@@ -495,8 +474,7 @@ class HyperCLOVAXForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if hasattr(config, "logits_scaling"):
                 logit_scale *= config.logits_scaling  # muP
             self.logits_processor = LogitsProcessor(
-                config.vocab_size,
-                scale=logit_scale,
+                config.vocab_size, scale=logit_scale
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -512,9 +490,7 @@ class HyperCLOVAXForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         layer_type: type[nn.Module] = HyperCLOVAXDecoderLayer,
     ):
         return HyperCLOVAXModel(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            layer_type=layer_type,
+            vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -533,17 +509,11 @@ class HyperCLOVAXForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["lm_head."] if self.config.tie_word_embeddings else None,

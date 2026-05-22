@@ -10,10 +10,7 @@ import zmq
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.network_utils import (
-    make_zmq_path,
-    make_zmq_socket,
-)
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
     pass

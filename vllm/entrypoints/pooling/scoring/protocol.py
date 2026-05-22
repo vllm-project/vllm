@@ -75,10 +75,7 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         )
 
     def to_pooling_params(self, task: PoolingTask = "classify"):
-        return PoolingParams(
-            task=task,
-            use_activation=self.use_activation,
-        )
+        return PoolingParams(task=task, use_activation=self.use_activation)
 
 
 class ScoreDataRequest(ScoringRequestMixin):

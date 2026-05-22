@@ -148,18 +148,8 @@ def check_logprobs_close(
         elif len(outputs_0) == 4:
             assert len(outputs_1) == 4
             # Break out tokens, text, sample logprobs & prompt logprobs
-            (
-                output_ids_0,
-                output_str_0,
-                logprobs_0,
-                prompt_logprobs_0,
-            ) = outputs_0
-            (
-                output_ids_1,
-                output_str_1,
-                logprobs_1,
-                prompt_logprobs_1,
-            ) = outputs_1
+            (output_ids_0, output_str_0, logprobs_0, prompt_logprobs_0) = outputs_0
+            (output_ids_1, output_str_1, logprobs_1, prompt_logprobs_1) = outputs_1
 
             # Test prompt logprobs closeness
             if prompt_logprobs_0 is not None and prompt_logprobs_1 is not None:
@@ -294,9 +284,7 @@ def build_model_context(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
+        on_fail="skip", check_max_version=False, check_version_reason="vllm"
     )
 
     model_config_kwargs = model_config_kwargs or {}
@@ -325,8 +313,7 @@ def build_model_context(
     )
 
     return InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
+        model_config, tokenizer=cached_tokenizer_from_config(model_config)
     )
 
 
@@ -538,33 +525,19 @@ def dummy_hf_overrides(
         )
 
     if hasattr(hf_config, "vision_config"):
-        hf_config.vision_config.update(
-            {
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            }
-        )
+        hf_config.vision_config.update({"num_layers": 1, "num_hidden_layers": 1})
 
         if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
             hf_config.vision_config.update({"enc_n_layers": 1})
 
     # e.g.: ibm-granite/granite-speech-3.3-2b
     if hasattr(hf_config, "encoder_config"):
-        hf_config.encoder_config.update(
-            {
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            }
-        )
+        hf_config.encoder_config.update({"num_layers": 1, "num_hidden_layers": 1})
 
     # e.g.: Qwen/Qwen2-Audio-7B-Instruct
     if hasattr(hf_config, "audio_config"):
         hf_config.audio_config.update(
-            {
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-                "encoder_layers": 1,
-            }
+            {"num_layers": 1, "num_hidden_layers": 1, "encoder_layers": 1}
         )
 
     return hf_config

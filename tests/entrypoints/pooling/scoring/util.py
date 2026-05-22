@@ -32,10 +32,7 @@ class ColBERTScoringHfRunner(torch.nn.Module):
         if self.device.type == "cpu":
             extra["attn_implementation"] = "eager"
 
-        self.model = AutoModel.from_pretrained(
-            model_name,
-            **extra,
-        ).to(self.device)
+        self.model = AutoModel.from_pretrained(model_name, **extra).to(self.device)
         self.model.eval()
 
         path = hf_hub_download(model_name, filename="model.safetensors")
@@ -90,18 +87,14 @@ def make_base64_image(
 
 
 def make_image_mm_param(
-    image_uri: str,
-    text: str | None = None,
+    image_uri: str, text: str | None = None
 ) -> ScoreMultiModalParam:
     """Build a ScoreMultiModalParam containing an image (and optional text)."""
     content: list = [
         ChatCompletionContentPartImageParam(
-            type="image_url",
-            image_url={"url": image_uri},
-        ),
+            type="image_url", image_url={"url": image_uri}
+        )
     ]
     if text is not None:
-        content.append(
-            ChatCompletionContentPartTextParam(type="text", text=text),
-        )
+        content.append(ChatCompletionContentPartTextParam(type="text", text=text))
     return ScoreMultiModalParam(content=content)

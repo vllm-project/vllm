@@ -25,9 +25,7 @@ class TokenPoolingMethod(nn.Module, ABC):
 
     @abstractmethod
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> list[TokenPoolingMethodOutputItem]:
         raise NotImplementedError
 
@@ -42,9 +40,7 @@ class AllPool(TokenPoolingMethod):
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         # Use the already-CPU num_scheduled_tokens tensor so `.tolist()`
@@ -85,9 +81,7 @@ class StepPool(AllPool):
         return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
         # Use the CPU copy of prompt_token_ids so the step_tag_id mask can be

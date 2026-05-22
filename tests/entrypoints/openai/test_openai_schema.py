@@ -121,10 +121,7 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
     suppress_health_check=[HealthCheck.filter_too_much],
 )
 def test_openapi_stateless(case: Case):
-    key = (
-        case.operation.method.upper(),
-        case.operation.path,
-    )
+    key = (case.operation.method.upper(), case.operation.path)
     if case.operation.path.startswith("/v1/responses"):
         # Skip responses API as it is meant to be stateful.
         return

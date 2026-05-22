@@ -189,8 +189,7 @@ except ImportError:
     _HAS_TRITON = False
 
 _skip_no_gpu = pytest.mark.skipif(
-    not (_HAS_CUDA and _HAS_TRITON),
-    reason="Requires CUDA GPU and Triton",
+    not (_HAS_CUDA and _HAS_TRITON), reason="Requires CUDA GPU and Triton"
 )
 
 

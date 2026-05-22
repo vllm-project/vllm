@@ -46,11 +46,7 @@ class EagleMistralDecoderLayer(MistralDecoderLayer):
 @support_torch_compile
 class EagleMistralModel(MistralModel):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        start_layer_id: int = 0,
+        self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ) -> None:
         # Bypass MistralModel.__init__ to avoid creating duplicate attention
         # layer entries in the global context.
@@ -100,11 +96,7 @@ class EagleMistralModel(MistralModel):
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
@@ -115,9 +107,7 @@ class EagleMistralModel(MistralModel):
 
 
 class EagleMistralForCausalLM(MistralForCausalLM):
-    mistral_mapping = MistralForCausalLM.mistral_mapping | {
-        "eagle_linear": "model.fc",
-    }
+    mistral_mapping = MistralForCausalLM.mistral_mapping | {"eagle_linear": "model.fc"}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         # Bypass MistralForCausalLM.__init__ to use the draft model config

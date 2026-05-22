@@ -16,9 +16,7 @@ from .utils import create_requests, create_scheduler
 pytestmark = pytest.mark.cpu_test
 
 
-def _make_model_runner_output(
-    scheduler_output: SchedulerOutput,
-) -> ModelRunnerOutput:
+def _make_model_runner_output(scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,

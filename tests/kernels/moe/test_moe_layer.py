@@ -66,11 +66,7 @@ from vllm.v1.worker.workspace import (
 
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
-SHAPE_COMBOS = [
-    (1, 128, 256),
-    (32, 512, 512),
-    (222, 1024, 2048),
-]
+SHAPE_COMBOS = [(1, 128, 256), (32, 512, 512), (222, 1024, 2048)]
 MAX_M = max([x[0] for x in SHAPE_COMBOS])
 
 NUM_EXPERTS = [8, 64]
@@ -106,13 +102,7 @@ if has_deep_ep():
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
-QUANT_METHODS = [
-    None,
-    "fp8",
-    "fp8_blocked",
-    "modelopt_fp8",
-    "modelopt_fp4",
-]
+QUANT_METHODS = [None, "fp8", "fp8_blocked", "modelopt_fp8", "modelopt_fp4"]
 
 # Which quantization methods each backend supports.
 # fmt: off
@@ -189,8 +179,7 @@ def sp_wrapper(
     if is_sequence_parallel:
 
         def wrapper(
-            hidden_states: torch.Tensor,
-            router_logits: torch.Tensor,
+            hidden_states: torch.Tensor, router_logits: torch.Tensor
         ) -> torch.Tensor:
             # Split sequence across TP ranks
             # Both hidden_states and router_logits have [num_tokens, ...] shape
@@ -208,9 +197,7 @@ def sp_wrapper(
 
 
 def maybe_roundup_layer_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    backend: str | None,
+    hidden_size: int, act_dtype: torch.dtype, backend: str | None
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -253,11 +240,7 @@ def rank_chunk(num: int, r: int, w: int) -> int:
 
 
 def chunk_by_rank(
-    t: torch.Tensor,
-    r: int,
-    w: int,
-    dim: int = 0,
-    device: torch.device | None = None,
+    t: torch.Tensor, r: int, w: int, dim: int = 0, device: torch.device | None = None
 ) -> torch.Tensor:
     chunk = cdiv(t.shape[dim], w)
     t = t.narrow(dim, r * chunk, chunk)
@@ -561,10 +544,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
 
 
 def chunk_scales_by_rank(
-    t: torch.Tensor | None,
-    r: int,
-    w: int,
-    device: torch.device | None = None,
+    t: torch.Tensor | None, r: int, w: int, device: torch.device | None = None
 ) -> torch.Tensor | None:
     if t is not None and t.numel() > 1:
         # Calculate start index by summing chunk sizes for all previous ranks
@@ -581,10 +561,7 @@ def chunk_scales_by_rank(
 
 
 def chunk_scales(
-    t: torch.Tensor | None,
-    start: int,
-    end: int,
-    device: torch.device | None = None,
+    t: torch.Tensor | None, start: int, end: int, device: torch.device | None = None
 ) -> torch.Tensor | None:
     if t is not None and t.numel() > 1:
         t = t[start:end]
@@ -608,25 +585,15 @@ class QuantizedWeights:
 
 
 def _quantize_fp8_halves(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    block_shape: list[int] | None = None,
+    w1: torch.Tensor, w2: torch.Tensor, block_shape: list[int] | None = None
 ) -> QuantizedWeights:
     """Quantize w13 gate/up halves separately to FP8, producing per-shard scales."""
     half = w1.shape[1] // 2
     w1q_a, w1s_a, _ = moe_quantize_weights(
-        w1[:, :half, :],
-        None,
-        fp8_dtype,
-        False,
-        block_shape,
+        w1[:, :half, :], None, fp8_dtype, False, block_shape
     )
     w1q_b, w1s_b, _ = moe_quantize_weights(
-        w1[:, half:, :],
-        None,
-        fp8_dtype,
-        False,
-        block_shape,
+        w1[:, half:, :], None, fp8_dtype, False, block_shape
     )
     assert w1s_a is not None and w1s_b is not None
 
@@ -655,9 +622,7 @@ def _quantize_fp8_halves(
     )
 
 
-def quantization_to_quant_dtype(
-    quantization: str | None,
-) -> torch.dtype | str | None:
+def quantization_to_quant_dtype(quantization: str | None) -> torch.dtype | str | None:
     if quantization is None:
         return None
     elif quantization in ["fp8", "fp8_blocked", "modelopt_fp8"]:
@@ -669,10 +634,7 @@ def quantization_to_quant_dtype(
 
 
 def make_quant_config(
-    quantization: str | None,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    num_experts: int,
+    quantization: str | None, w1: torch.Tensor, w2: torch.Tensor, num_experts: int
 ) -> tuple[QuantizationConfig | None, QuantizedWeights]:
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
@@ -1110,21 +1072,11 @@ def make_fake_moe_layer(
         w1_s = None
         w2_s = None
 
-    shared_experts = create_shared_experts_from_config(
-        shared_experts_config,
-        in_dtype,
-    )
+    shared_experts = create_shared_experts_from_config(shared_experts_config, in_dtype)
 
-    quant_config = FusedMoEQuantConfig.make(
-        quant_dtype,
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-    )
+    quant_config = FusedMoEQuantConfig.make(quant_dtype, w1_scale=w1_s, w2_scale=w2_s)
 
-    def _moe(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
+    def _moe(hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         # Save original hidden_states for shared experts (before transform)
         original_hidden_states = hidden_states
 
@@ -1139,8 +1091,7 @@ def make_fake_moe_layer(
             router_logits, _ = gate(hidden_states)
 
         topk_weights, topk_ids = router.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
+            hidden_states=hidden_states, router_logits=router_logits
         )
 
         # Shared experts use original (untransformed) hidden_states
@@ -1311,17 +1262,13 @@ def _test_body_eplb(
     eplb_moe_layer.set_eplb_state(
         moe_layer_idx=0,
         expert_load_view=torch.zeros(
-            (1, num_experts),
-            dtype=torch.int32,
-            device=device,
+            (1, num_experts), dtype=torch.int32, device=device
         ),
         logical_to_physical_map=logical_to_physical.reshape(num_experts, 1).unsqueeze(
             0
         ),
         logical_replica_count=torch.ones(
-            (1, num_experts),
-            dtype=torch.int32,
-            device=device,
+            (1, num_experts), dtype=torch.int32, device=device
         ),
     )
 
@@ -1507,9 +1454,7 @@ def _run_one_config(
         # num_tokens_across_dp should have one entry per DP group, not per total rank
         # When EP is enabled, dp_size represents the number of DP groups
         num_tokens_across_dp = torch.tensor(
-            [num_tokens] * dp_size,
-            device=device,
-            dtype=torch.int,
+            [num_tokens] * dp_size, device=device, dtype=torch.int
         )
 
         # Call the test body function with all necessary context
@@ -1726,10 +1671,7 @@ def _parallel_worker(
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
             # later subtests do not inherit stale communication state.
-            if test_config.backend in {
-                "deepep_low_latency",
-                "deepep_high_throughput",
-            }:
+            if test_config.backend in {"deepep_low_latency", "deepep_high_throughput"}:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
@@ -1849,12 +1791,7 @@ def test_moe_layer(
 
     try:
         parallel_launch_with_config(
-            world_size,
-            _parallel_worker,
-            vllm_config,
-            None,
-            test_configs,
-            verbosity,
+            world_size, _parallel_worker, vllm_config, None, test_configs, verbosity
         )
     finally:
         torch.accelerator.synchronize()  # TODO: Is this needed?

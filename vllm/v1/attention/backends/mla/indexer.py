@@ -9,10 +9,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
-    get_paged_mqa_logits_metadata,
-    has_deep_gemm,
-)
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, has_deep_gemm
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -23,9 +20,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.utils import (
-    split_decodes_and_prefills,
-)
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
@@ -236,9 +231,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     @classmethod
     def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 
@@ -309,10 +302,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.kv_cache_spec.block_size * get_total_cp_world_size(),
         )
         self.expanded_block_table_buffer = torch.zeros(
-            (
-                scheduler_config.max_num_batched_tokens,
-                max_num_blocks_per_req,
-            ),
+            (scheduler_config.max_num_batched_tokens, max_num_blocks_per_req),
             dtype=torch.int32,
             device=self.device,
         )
@@ -611,9 +601,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                    seq_lens,
-                    self.kv_cache_spec.storage_block_size,
-                    self.num_sms,
+                    seq_lens, self.kv_cache_spec.storage_block_size, self.num_sms
                 )
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(

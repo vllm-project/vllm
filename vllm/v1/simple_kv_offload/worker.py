@@ -63,10 +63,7 @@ class SimpleCPUOffloadWorker:
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
 
-    def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-    ) -> None:
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Register GPU KV caches and allocate pinned CPU tensors.
         The worker will infer the underlying raw storage from the kv_caches.
 
@@ -201,8 +198,7 @@ class SimpleCPUOffloadWorker:
         pass
 
     def get_finished(
-        self,
-        finished_req_ids: set[str],
+        self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         """Submit transfers and report completed events to the scheduler.
 
@@ -263,7 +259,7 @@ class SimpleCPUOffloadWorker:
         if not self._completed_store_events:
             return None
         meta = SimpleCPUOffloadWorkerMetadata(
-            completed_store_events=self._completed_store_events,
+            completed_store_events=self._completed_store_events
         )
         self._completed_store_events = {}
         return meta

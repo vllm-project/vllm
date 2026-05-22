@@ -174,30 +174,20 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
 ) -> None:
     parser = make_parser()
     req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="auto",
+        messages=[], model="m", tools=sample_tools, tool_choice="auto"
     )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
     req = ChatCompletionRequest(
-        messages=[],
-        model="m",
-        tools=sample_tools,
-        tool_choice="required",
+        messages=[], model="m", tools=sample_tools, tool_choice="required"
     )
     tag = parser.get_structural_tag(req)
     assert isinstance(tag, StructuralTag)
 
     if sample_tools:
         tool = sample_tools[0]
-        req = ChatCompletionRequest(
-            messages=[],
-            model="m",
-            tools=sample_tools,
-        )
+        req = ChatCompletionRequest(messages=[], model="m", tools=sample_tools)
         req.tool_choice = ChatCompletionNamedToolChoiceParam(
             function=ChatCompletionNamedFunction(name=tool.function.name)
         )
@@ -247,16 +237,9 @@ def test_composed_schema_converts_object_and_array_params():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "wait": {
-                        "anyOf": [
-                            {"type": "object"},
-                            {"type": "null"},
-                        ],
-                    },
+                    "wait": {"anyOf": [{"type": "object"}, {"type": "null"}]},
                     "patches": {
-                        "allOf": [
-                            {"type": "array", "items": {"type": "object"}},
-                        ],
+                        "allOf": [{"type": "array", "items": {"type": "object"}}]
                     },
                 },
             },

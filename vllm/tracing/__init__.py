@@ -59,7 +59,7 @@ _REGISTERED_TRACING_BACKENDS: dict[
         init_otel_worker_tracer,
         instrument_otel,
         manual_instrument_otel,
-    ),
+    )
 }
 
 
@@ -76,9 +76,7 @@ def init_tracer(
 
 
 def maybe_init_worker_tracer(
-    instrumenting_module_name: str,
-    process_kind: str,
-    process_name: str,
+    instrumenting_module_name: str, process_kind: str, process_name: str
 ):
     is_available, _, init_worker_tracer_fn, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():

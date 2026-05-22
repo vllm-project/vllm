@@ -117,10 +117,7 @@ class ECExampleConnector(ECConnectorBase):
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def has_cache_item(
-        self,
-        identifier: str,
-    ) -> bool:
+    def has_cache_item(self, identifier: str) -> bool:
         """
         Check if cache exist externally for the media
 
@@ -132,11 +129,7 @@ class ECExampleConnector(ECConnectorBase):
         """
         return self._found_match_for_mm_data(identifier)
 
-    def update_state_after_alloc(
-        self,
-        request: "Request",
-        index: int,
-    ) -> None:
+    def update_state_after_alloc(self, request: "Request", index: int) -> None:
         """
         Update ECConnector state after encoder cache allocation.
         """
@@ -148,8 +141,7 @@ class ECExampleConnector(ECConnectorBase):
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
         """Build the connector metadata for this step.
 

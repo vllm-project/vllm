@@ -12,9 +12,7 @@ except ImportError as e:
         "    pip install cohere_melody"
     ) from e
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,9 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import Tool
@@ -81,9 +77,7 @@ class BaseCohereCommandToolParser(ToolParser):
         return None
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         result = self.melody_unary.process_full_text(model_output)
         tool_calls = [
@@ -102,11 +96,7 @@ class BaseCohereCommandToolParser(ToolParser):
 
 
 class CohereCommand3ToolParser(BaseCohereCommandToolParser):
-    def __init__(
-        self,
-        tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
-    ):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(
             tokenizer,
             streaming_opts=PyFilterOptions().cmd3(),
@@ -115,11 +105,7 @@ class CohereCommand3ToolParser(BaseCohereCommandToolParser):
 
 
 class CohereCommand4ToolParser(BaseCohereCommandToolParser):
-    def __init__(
-        self,
-        tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
-    ):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(
             tokenizer,
             streaming_opts=PyFilterOptions().cmd4(),

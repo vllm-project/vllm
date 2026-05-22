@@ -10,27 +10,18 @@ _T = TypeVar("_T", bound=Iterable)
 
 @overload
 def maybe_tqdm(
-    it: Sequence[_T],
-    *,
-    use_tqdm: bool | Callable[..., tqdm],
-    **tqdm_kwargs: Any,
+    it: Sequence[_T], *, use_tqdm: bool | Callable[..., tqdm], **tqdm_kwargs: Any
 ) -> Sequence[_T]: ...
 
 
 @overload
 def maybe_tqdm(
-    it: Iterable[_T],
-    *,
-    use_tqdm: bool | Callable[..., tqdm],
-    **tqdm_kwargs: Any,
+    it: Iterable[_T], *, use_tqdm: bool | Callable[..., tqdm], **tqdm_kwargs: Any
 ) -> Iterable[_T]: ...
 
 
 def maybe_tqdm(
-    it: Iterable[_T],
-    *,
-    use_tqdm: bool | Callable[..., tqdm],
-    **tqdm_kwargs: Any,
+    it: Iterable[_T], *, use_tqdm: bool | Callable[..., tqdm], **tqdm_kwargs: Any
 ) -> Iterable[_T]:
     if not use_tqdm:
         return it

@@ -40,7 +40,7 @@ SINGLE_CONVERSATION = [
                 "audio_url": {
                     "url": "https://huggingface.co/datasets/nvidia/AudioSkills/"
                     "resolve/main/assets/"
-                    "dogs_barking_in_sync_with_the_music.wav",
+                    "dogs_barking_in_sync_with_the_music.wav"
                 },
             },
         ],
@@ -67,7 +67,7 @@ BATCHED_CONVERSATIONS = [
                     "audio_url": {
                         "url": "https://huggingface.co/datasets/nvidia/"
                         "AudioSkills/resolve/main/assets/"
-                        "Ch6Ae9DT6Ko_00-04-03_00-04-31.wav",
+                        "Ch6Ae9DT6Ko_00-04-03_00-04-31.wav"
                     },
                 },
             ],
@@ -119,14 +119,9 @@ def test_single_generation(llm):
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
-    outputs = llm.chat(
-        messages=SINGLE_CONVERSATION,
-        sampling_params=sampling_params,
-    )
+    outputs = llm.chat(messages=SINGLE_CONVERSATION, sampling_params=sampling_params)
     assert_output_matches(
-        outputs[0],
-        expected["transcriptions"][0],
-        expected["token_ids"][0],
+        outputs[0], expected["transcriptions"][0], expected["token_ids"][0]
     )
 
 
@@ -140,16 +135,11 @@ def test_batched_generation(llm):
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
-    outputs = llm.chat(
-        messages=BATCHED_CONVERSATIONS,
-        sampling_params=sampling_params,
-    )
+    outputs = llm.chat(messages=BATCHED_CONVERSATIONS, sampling_params=sampling_params)
 
     for i, output in enumerate(outputs):
         assert_output_matches(
-            output,
-            expected["transcriptions"][i],
-            expected["token_ids"][i],
+            output, expected["transcriptions"][i], expected["token_ids"][i]
         )
 
 
@@ -157,12 +147,10 @@ def test_single_and_batched_generation_match(llm):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
     single_output = llm.chat(
-        messages=SINGLE_CONVERSATION,
-        sampling_params=sampling_params,
+        messages=SINGLE_CONVERSATION, sampling_params=sampling_params
     )[0]
     batched_output = llm.chat(
-        messages=BATCHED_CONVERSATIONS,
-        sampling_params=sampling_params,
+        messages=BATCHED_CONVERSATIONS, sampling_params=sampling_params
     )[0]
 
     assert single_output.outputs[0].text == batched_output.outputs[0].text

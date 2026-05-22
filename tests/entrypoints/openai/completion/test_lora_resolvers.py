@@ -77,9 +77,7 @@ class MockLoRAResolver(LoRAResolver):
     ) -> LoRARequest | None:
         if lora_name == "test-lora":
             return LoRARequest(
-                lora_name="test-lora",
-                lora_int_id=1,
-                lora_path="/fake/path/test-lora",
+                lora_name="test-lora", lora_int_id=1, lora_path="/fake/path/test-lora"
             )
         elif lora_name == "invalid-lora":
             return LoRARequest(
@@ -140,8 +138,7 @@ def mock_serving_setup():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
-        engine_client=mock_engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=mock_engine, base_model_paths=BASE_MODEL_PATHS
     )
 
     serving_render = OpenAIServingRender(
@@ -166,10 +163,7 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup, monkeyp
     mock_engine, serving_completion = mock_serving_setup
 
     lora_model_name = "test-lora"
-    req_found = CompletionRequest(
-        model=lora_model_name,
-        prompt="Generate with LoRA",
-    )
+    req_found = CompletionRequest(model=lora_model_name, prompt="Generate with LoRA")
 
     # Suppress potential errors during the mocked generate call,
     # as we are primarily checking for add_lora and generate calls
@@ -194,10 +188,7 @@ async def test_serving_completion_resolver_not_found(mock_serving_setup, monkeyp
     mock_engine, serving_completion = mock_serving_setup
 
     non_existent_model = "non-existent-lora-adapter"
-    req = CompletionRequest(
-        model=non_existent_model,
-        prompt="what is 1+1?",
-    )
+    req = CompletionRequest(model=non_existent_model, prompt="what is 1+1?")
 
     response = await serving_completion.create_completion(req)
 
@@ -218,10 +209,7 @@ async def test_serving_completion_resolver_add_lora_fails(
     mock_engine, serving_completion = mock_serving_setup
 
     invalid_model = "invalid-lora"
-    req = CompletionRequest(
-        model=invalid_model,
-        prompt="what is 1+1?",
-    )
+    req = CompletionRequest(model=invalid_model, prompt="what is 1+1?")
 
     response = await serving_completion.create_completion(req)
 
@@ -245,10 +233,7 @@ async def test_serving_completion_flag_not_set(mock_serving_setup):
     mock_engine, serving_completion = mock_serving_setup
 
     lora_model_name = "test-lora"
-    req_found = CompletionRequest(
-        model=lora_model_name,
-        prompt="Generate with LoRA",
-    )
+    req_found = CompletionRequest(model=lora_model_name, prompt="Generate with LoRA")
 
     await serving_completion.create_completion(req_found)
 

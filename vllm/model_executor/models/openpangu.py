@@ -40,10 +40,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import (
-    Attention,
-    StaticSinkAttention,
-)
+from vllm.model_executor.layers.attention import Attention, StaticSinkAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
@@ -224,10 +221,7 @@ class OpenPanguMoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -391,9 +385,7 @@ class OpenPanguMLAAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         return self.mla_attn(positions, hidden_states)
 
@@ -500,9 +492,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -512,9 +502,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         return output
 
     def _init_rotary_emb(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
@@ -658,49 +646,31 @@ class OpenPanguSinkAttention(nn.Module):
         if self.param_sink_number > 0:
             self.param_sink_key = torch.nn.Parameter(
                 torch.empty(
-                    (
-                        self.param_sink_number,
-                        self.num_kv_heads,
-                        self.head_dim,
-                    ),
+                    (self.param_sink_number, self.num_kv_heads, self.head_dim),
                     device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
             )
             set_weight_attrs(
                 self.param_sink_key,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                {"output_dim": 1, "weight_loader": self.weight_loader},
             )
 
             if self.param_sink_with_value:
                 self.param_sink_value = torch.nn.Parameter(
                     torch.empty(
-                        (
-                            self.param_sink_number,
-                            self.num_kv_heads,
-                            self.v_channels,
-                        ),
+                        (self.param_sink_number, self.num_kv_heads, self.v_channels),
                         device=current_platform.current_device(),
                         dtype=config.torch_dtype,
                     )
                 )
                 set_weight_attrs(
                     self.param_sink_value,
-                    {
-                        "output_dim": 1,
-                        "weight_loader": self.weight_loader,
-                    },
+                    {"output_dim": 1, "weight_loader": self.weight_loader},
                 )
             else:
                 self.param_sink_value = torch.zeros(
-                    (
-                        self.param_sink_number,
-                        self.num_kv_heads,
-                        self.v_channels,
-                    ),
+                    (self.param_sink_number, self.num_kv_heads, self.v_channels),
                     device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
@@ -745,9 +715,7 @@ class OpenPanguSinkAttention(nn.Module):
         param_data.copy_(loaded_weight)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
@@ -795,10 +763,7 @@ class OpenPanguSinkAttention(nn.Module):
 
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
-        self,
-        config: PretrainedConfig,
-        prefix: str,
-        vllm_config: VllmConfig,
+        self, config: PretrainedConfig, prefix: str, vllm_config: VllmConfig
     ) -> None:
         super().__init__()
 
@@ -958,10 +923,7 @@ class OpenPanguDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         if (
             self.routed_scaling_factor is not None
@@ -1286,10 +1248,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -1334,9 +1293,7 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
         self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts

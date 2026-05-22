@@ -14,8 +14,7 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     pytest.skip(
-        "trtllm kvfp8 dequant is not supported on ROCm.",
-        allow_module_level=True,
+        "trtllm kvfp8 dequant is not supported on ROCm.", allow_module_level=True
     )
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -50,11 +49,7 @@ def make_contiguous_kv_cache(num_blocks, num_kv_heads, block_size, head_size):
 
 
 def make_cross_layer_kv_cache(
-    num_blocks,
-    num_kv_heads,
-    block_size,
-    head_size,
-    num_layers=4,
+    num_blocks, num_kv_heads, block_size, head_size, num_layers=4
 ):
     """
     Create a non-contiguous per-layer view mimicking cross-layer allocation.
@@ -124,52 +119,34 @@ def test_trtllm_kvfp8_dequant(
     num_pages_per_seq: int,
     contiguous: bool,
 ):
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
 
     if contiguous:
         kv_cache, scale = make_contiguous_kv_cache(
-            NUM_BLOCKS,
-            num_kv_heads,
-            block_size,
-            head_size,
+            NUM_BLOCKS, num_kv_heads, block_size, head_size
         )
     else:
         kv_cache, scale = make_cross_layer_kv_cache(
-            NUM_BLOCKS,
-            num_kv_heads,
-            block_size,
-            head_size,
+            NUM_BLOCKS, num_kv_heads, block_size, head_size
         )
 
     k_scale = scale.clone()
     v_scale = scale.clone()
 
     block_tables = torch.randint(
-        1,
-        NUM_BLOCKS,
-        (batch_size, num_pages_per_seq),
-        dtype=torch.int32,
+        1, NUM_BLOCKS, (batch_size, num_pages_per_seq), dtype=torch.int32
     )
 
     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
 
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
     expected_bt = torch.arange(
-        1,
-        batch_size * num_pages_per_seq + 1,
-        dtype=torch.int32,
-        device="cuda",
+        1, batch_size * num_pages_per_seq + 1, dtype=torch.int32, device="cuda"
     ).reshape(batch_size, num_pages_per_seq)
     torch.testing.assert_close(mock_block_table, expected_bt)
 
@@ -180,34 +157,23 @@ def test_trtllm_kvfp8_dequant(
 @torch.inference_mode()
 def test_block_tables_with_zero_pages():
     """Pages with index <= 0 must be skipped (early return in kernel)."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
     kv_cache, scale = make_contiguous_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size
     )
     k_scale = v_scale = scale.clone()
 
     # Mix of valid pages and zeros (padding)
     block_tables = torch.tensor(
-        [[5, 0, 10], [0, 0, 0], [3, 7, 0]],
-        dtype=torch.int32,
-        device="cuda",
+        [[5, 0, 10], [0, 0, 0], [3, 7, 0]], dtype=torch.int32, device="cuda"
     )
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
@@ -217,28 +183,20 @@ def test_block_tables_with_zero_pages():
             if block_tables[b, p].item() > 0:
                 idx = b * block_tables.shape[1] + p + 1
                 torch.testing.assert_close(
-                    mock_kv_cache[idx],
-                    ref[idx],
-                    atol=1e-3,
-                    rtol=1e-3,
+                    mock_kv_cache[idx], ref[idx], atol=1e-3, rtol=1e-3
                 )
 
 
 @torch.inference_mode()
 def test_all_zero_block_tables():
     """All-zero block_tables: kernel should write nothing."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 16, 64
 
     kv_cache, scale = make_contiguous_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size
     )
     k_scale = v_scale = scale.clone()
 
@@ -246,11 +204,7 @@ def test_all_zero_block_tables():
 
     # Should not crash even though no pages are valid
     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     assert mock_kv_cache.shape[0] == 2 * 4 + 1
     assert mock_block_table.shape == (2, 4)
@@ -259,18 +213,13 @@ def test_all_zero_block_tables():
 @torch.inference_mode()
 def test_different_k_v_scales():
     """Verify K and V are dequantized with independent scales."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
     kv_cache, _ = make_contiguous_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size
     )
     k_scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
     v_scale = torch.tensor([2.0], dtype=torch.float32, device="cuda")
@@ -278,11 +227,7 @@ def test_different_k_v_scales():
     block_tables = torch.tensor([[1, 2]], dtype=torch.int32, device="cuda")
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
@@ -292,29 +237,20 @@ def test_different_k_v_scales():
 @torch.inference_mode()
 def test_single_page_per_seq():
     """Minimum grid dim 1 = 1 page per sequence."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 128
 
     kv_cache, scale = make_contiguous_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size
     )
     k_scale = v_scale = scale.clone()
 
     block_tables = torch.tensor([[5], [10], [20]], dtype=torch.int32, device="cuda")
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
@@ -324,19 +260,14 @@ def test_single_page_per_seq():
 @torch.inference_mode()
 def test_large_page_indices():
     """Page indices near the top of the buffer stress offset arithmetic."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 128
     large_num_blocks = 32768
 
     kv_cache, scale = make_contiguous_kv_cache(
-        large_num_blocks,
-        num_kv_heads,
-        block_size,
-        head_size,
+        large_num_blocks, num_kv_heads, block_size, head_size
     )
     k_scale = v_scale = scale.clone()
 
@@ -348,11 +279,7 @@ def test_large_page_indices():
     )
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
@@ -362,35 +289,22 @@ def test_large_page_indices():
 @torch.inference_mode()
 def test_large_block_size():
     """block_size=64 -> HEAD_STRIDE=8192, large tl.arange per thread block."""
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 64, 128
 
     kv_cache, scale = make_contiguous_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size
     )
     k_scale = v_scale = scale.clone()
 
     block_tables = torch.randint(
-        1,
-        NUM_BLOCKS,
-        (2, 4),
-        dtype=torch.int32,
-        device="cuda",
+        1, NUM_BLOCKS, (2, 4), dtype=torch.int32, device="cuda"
     )
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 
@@ -403,37 +317,23 @@ def test_cross_layer_many_layers():
     Non-contiguous with 36 layers -- matches real gpt-oss-120b.
     Strides are far from contiguous (factor of 36 in the gaps).
     """
-    from vllm.v1.attention.backends.flashinfer import (
-        trtllm_prefill_attn_kvfp8_dequant,
-    )
+    from vllm.v1.attention.backends.flashinfer import trtllm_prefill_attn_kvfp8_dequant
 
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
     num_layers = 36
 
     kv_cache, scale = make_cross_layer_kv_cache(
-        NUM_BLOCKS,
-        num_kv_heads,
-        block_size,
-        head_size,
-        num_layers=num_layers,
+        NUM_BLOCKS, num_kv_heads, block_size, head_size, num_layers=num_layers
     )
     k_scale = v_scale = scale.clone()
 
     block_tables = torch.randint(
-        1,
-        NUM_BLOCKS,
-        (4, 6),
-        dtype=torch.int32,
-        device="cuda",
+        1, NUM_BLOCKS, (4, 6), dtype=torch.int32, device="cuda"
     )
 
     mock_kv_cache, _ = trtllm_prefill_attn_kvfp8_dequant(
-        kv_cache,
-        block_tables,
-        k_scale,
-        v_scale,
-        torch.bfloat16,
+        kv_cache, block_tables, k_scale, v_scale, torch.bfloat16
     )
     ref = ref_dequant(kv_cache, block_tables, k_scale, v_scale, torch.bfloat16)
 

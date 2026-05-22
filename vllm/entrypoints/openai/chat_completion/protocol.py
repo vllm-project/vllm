@@ -328,12 +328,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        default=None, description=("Additional kwargs to pass to the HF processor.")
     )
     structured_outputs: StructuredOutputsParams | None = Field(
-        default=None,
-        description="Additional kwargs for structured outputs",
+        default=None, description="Additional kwargs for structured outputs"
     )
     priority: int = Field(
         default=0,
@@ -534,9 +532,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def to_sampling_params(
-        self,
-        max_tokens: int,
-        default_sampling_params: dict,
+        self, max_tokens: int, default_sampling_params: dict
     ) -> SamplingParams:
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -580,10 +576,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 structural_tag = response_format
                 assert structural_tag is not None and isinstance(
                     structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
+                    (LegacyStructuralTagResponseFormat, StructuralTagResponseFormat),
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)

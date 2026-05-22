@@ -262,9 +262,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         return sliced_lora_b
 
     def expand_packed_lora(
-        self,
-        lora_a: list[torch.Tensor],
-        lora_b: list[torch.Tensor],
+        self, lora_a: list[torch.Tensor], lora_b: list[torch.Tensor]
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """
         Expand packed adapter groups when they don't match n_slices.
@@ -456,11 +454,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
             self.kv_proj_shard_size,
             self.kv_proj_shard_size,
         )
-        self.output_ids = (
-            self.q_shard_id,
-            self.kv_shard_id,
-            self.kv_shard_id,
-        )
+        self.output_ids = (self.q_shard_id, self.kv_shard_id, self.kv_shard_id)
 
     def create_lora_weights(
         self,

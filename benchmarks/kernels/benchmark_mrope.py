@@ -123,17 +123,9 @@ def benchmark_mrope(
 
     # Warm up
     for _ in range(warmup_iter):
-        mrope_helper_class.forward_native(
-            positions,
-            query.clone(),
-            key.clone(),
-        )
+        mrope_helper_class.forward_native(positions, query.clone(), key.clone())
 
-        mrope_helper_class.forward_cuda(
-            positions,
-            query.clone(),
-            key.clone(),
-        )
+        mrope_helper_class.forward_cuda(positions, query.clone(), key.clone())
 
     torch.accelerator.synchronize()
 
@@ -145,11 +137,7 @@ def benchmark_mrope(
         torch.accelerator.synchronize()
         start_time = time.time()
 
-        mrope_helper_class.forward_native(
-            positions,
-            query_clone,
-            key_clone,
-        )
+        mrope_helper_class.forward_native(positions, query_clone, key_clone)
 
         torch.accelerator.synchronize()
         torch_times.append(time.time() - start_time)
@@ -161,11 +149,7 @@ def benchmark_mrope(
         key_clone = key.clone()
         torch.accelerator.synchronize()
         start_time = time.time()
-        mrope_helper_class.forward_cuda(
-            positions,
-            query_clone,
-            key_clone,
-        )
+        mrope_helper_class.forward_cuda(positions, query_clone, key_clone)
         torch.accelerator.synchronize()
         triton_times.append(time.time() - start_time)
 

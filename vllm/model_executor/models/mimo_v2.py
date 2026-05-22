@@ -47,9 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.flash_attn_diffkv import (
-    FlashAttentionDiffKVBackend,
-)
+from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -106,10 +104,7 @@ class MiMoV2MLP(nn.Module):
 
 class MiMoV2MoE(nn.Module):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        is_nextn: bool = False,
+        self, vllm_config: VllmConfig, prefix: str = "", is_nextn: bool = False
     ):
         super().__init__()
 
@@ -316,9 +311,7 @@ class MiMoV2Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
@@ -390,10 +383,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
 
         self.is_layer_sparse = self.is_moe_layer(layer_id)
         if self.is_layer_sparse:
-            self.mlp = MiMoV2MoE(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.mlp",
-            )
+            self.mlp = MiMoV2MoE(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
         else:
             self.mlp = MiMoV2MLP(
                 hidden_size=self.hidden_size,
@@ -420,10 +410,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -470,8 +457,7 @@ class MiMoV2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiMoV2FlashDecoderLayer(
-                vllm_config=vllm_config,
-                prefix=prefix,
+                vllm_config=vllm_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
         )
@@ -683,8 +669,7 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.config = config
         self.quant_config = quant_config
         self.model = MiMoV2Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         if get_pp_group().is_last_rank:
@@ -718,10 +703,7 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

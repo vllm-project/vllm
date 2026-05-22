@@ -27,10 +27,7 @@ class ExllamaLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda_alike():
-            return (
-                False,
-                "Exllama is only supported on CUDA and ROCm",
-            )
+            return (False, "Exllama is only supported on CUDA and ROCm")
 
         if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return (
@@ -147,10 +144,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
 

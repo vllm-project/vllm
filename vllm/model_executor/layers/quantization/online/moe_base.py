@@ -82,10 +82,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
             w2_bias = torch.nn.Parameter(
                 torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    device="meta",
-                    dtype=layer.orig_dtype,
+                    num_experts, hidden_size, device="meta", dtype=layer.orig_dtype
                 ),
                 requires_grad=False,
             )
@@ -102,9 +99,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         pass
 
     def _maybe_inject_biases(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        layer: torch.nn.Module,
+        self, quant_config: FusedMoEQuantConfig, layer: torch.nn.Module
     ) -> None:
         """Inject biases into the quant config if the model has them
         (e.g. GPT-OSS biased MoE)."""

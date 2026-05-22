@@ -77,16 +77,8 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
             def disable_connect(*args, **kwargs):
                 raise RuntimeError("No http calls allowed")
 
-            m.setattr(
-                urllib3.connection.HTTPConnection,
-                "connect",
-                disable_connect,
-            )
-            m.setattr(
-                urllib3.connection.HTTPSConnection,
-                "connect",
-                disable_connect,
-            )
+            m.setattr(urllib3.connection.HTTPConnection, "connect", disable_connect)
+            m.setattr(urllib3.connection.HTTPSConnection, "connect", disable_connect)
 
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
@@ -146,16 +138,8 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             def disable_connect(*args, **kwargs):
                 raise RuntimeError("No http calls allowed")
 
-            m.setattr(
-                urllib3.connection.HTTPConnection,
-                "connect",
-                disable_connect,
-            )
-            m.setattr(
-                urllib3.connection.HTTPSConnection,
-                "connect",
-                disable_connect,
-            )
+            m.setattr(urllib3.connection.HTTPConnection, "connect", disable_connect)
+            m.setattr(urllib3.connection.HTTPSConnection, "connect", disable_connect)
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
             _re_import_modules()

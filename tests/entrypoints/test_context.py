@@ -16,10 +16,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 
 
 def create_mock_request_output(
-    prompt_token_ids=None,
-    output_token_ids=None,
-    num_cached_tokens=0,
-    finished=True,
+    prompt_token_ids=None, output_token_ids=None, num_cached_tokens=0, finished=True
 ):
     """Helper function to create a mock RequestOutput object for testing."""
     outputs = []
@@ -245,9 +242,7 @@ def test_preamble_tokens_not_counted_as_reasoning(mock_parser):
     mock_parser.current_recipient = None  # preamble
 
     mock_output = create_mock_request_output(
-        prompt_token_ids=[1, 2, 3],
-        output_token_ids=[4, 5, 6],
-        num_cached_tokens=0,
+        prompt_token_ids=[1, 2, 3], output_token_ids=[4, 5, 6], num_cached_tokens=0
     )
     context.append_output(mock_output)
 
@@ -264,9 +259,7 @@ def test_commentary_with_recipient_counted_as_reasoning(mock_parser):
     mock_parser.current_recipient = "python"
 
     mock_output = create_mock_request_output(
-        prompt_token_ids=[1, 2, 3],
-        output_token_ids=[4, 5, 6],
-        num_cached_tokens=0,
+        prompt_token_ids=[1, 2, 3], output_token_ids=[4, 5, 6], num_cached_tokens=0
     )
     context.append_output(mock_output)
 
@@ -392,10 +385,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
 
     # Second token of first turn
     context.append_output(
-        create_mock_request_output(
-            output_token_ids=[102],
-            finished=False,
-        )
+        create_mock_request_output(output_token_ids=[102], finished=False)
     )
 
     # Last token of first turn (finished=True signals end of message)
@@ -437,10 +427,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
 
     # More tokens in reasoning channel
     context.append_output(
-        create_mock_request_output(
-            output_token_ids=[202],
-            finished=False,
-        )
+        create_mock_request_output(output_token_ids=[202], finished=False)
     )
 
     context.append_output(
@@ -488,10 +475,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     )
 
     context.append_output(
-        create_mock_request_output(
-            output_token_ids=[302],
-            finished=True,
-        )
+        create_mock_request_output(output_token_ids=[302], finished=True)
     )
 
     # Final token counts check
@@ -549,7 +533,7 @@ async def test_streaming_message_synchronization(mock_parser):
             author=Author(role=Role.ASSISTANT, name="assistant"),
             content=[TextContent(text="Response 1")],
             recipient=Role.USER,
-        ),
+        )
     ]
 
     # This should trigger the message synchronization logic
@@ -599,10 +583,7 @@ def test_turn_metrics_copy_and_reset():
     """Test TurnMetrics copy and reset methods work correctly."""
     # Create a TurnMetrics with specific values
     original_metrics = TurnMetrics(
-        input_tokens=10,
-        output_tokens=20,
-        cached_input_tokens=5,
-        tool_output_tokens=3,
+        input_tokens=10, output_tokens=20, cached_input_tokens=5, tool_output_tokens=3
     )
 
     # Test copy functionality
@@ -685,9 +666,7 @@ def test_simple_context_output_messages_single_call():
     """Non-streaming: single append_output produces a single output message."""
     context = SimpleContext()
     output = create_simple_context_output(
-        text="Hello world",
-        token_ids=[10, 20, 30],
-        prompt_token_ids=[1, 2, 3],
+        text="Hello world", token_ids=[10, 20, 30], prompt_token_ids=[1, 2, 3]
     )
     context.append_output(output)
 
@@ -705,23 +684,17 @@ def test_simple_context_output_messages_streaming_consolidation():
     # Simulate 3 streaming deltas
     context.append_output(
         create_simple_context_output(
-            text="Hello",
-            token_ids=[10],
-            prompt_token_ids=[1, 2, 3],
+            text="Hello", token_ids=[10], prompt_token_ids=[1, 2, 3]
         )
     )
     context.append_output(
         create_simple_context_output(
-            text=" world",
-            token_ids=[20],
-            prompt_token_ids=[1, 2, 3],
+            text=" world", token_ids=[20], prompt_token_ids=[1, 2, 3]
         )
     )
     context.append_output(
         create_simple_context_output(
-            text="!",
-            token_ids=[30],
-            prompt_token_ids=[1, 2, 3],
+            text="!", token_ids=[30], prompt_token_ids=[1, 2, 3]
         )
     )
 
@@ -739,9 +712,7 @@ def test_simple_context_output_messages_many_deltas():
     for i, word in enumerate(words):
         context.append_output(
             create_simple_context_output(
-                text=word,
-                token_ids=[100 + i],
-                prompt_token_ids=[1, 2],
+                text=word, token_ids=[100 + i], prompt_token_ids=[1, 2]
             )
         )
 
@@ -814,17 +785,11 @@ def test_simple_context_final_output():
 
     context.append_output(
         create_simple_context_output(
-            text="foo",
-            token_ids=[1, 2],
-            prompt_token_ids=[10],
+            text="foo", token_ids=[1, 2], prompt_token_ids=[10]
         )
     )
     context.append_output(
-        create_simple_context_output(
-            text="bar",
-            token_ids=[3],
-            prompt_token_ids=[10],
-        )
+        create_simple_context_output(text="bar", token_ids=[3], prompt_token_ids=[10])
     )
 
     final = context.final_output
@@ -838,11 +803,7 @@ def test_simple_context_output_messages_empty_text_with_tokens():
     empty (e.g. special tokens)."""
     context = SimpleContext()
     context.append_output(
-        create_simple_context_output(
-            text="",
-            token_ids=[99],
-            prompt_token_ids=[1],
-        )
+        create_simple_context_output(text="", token_ids=[99], prompt_token_ids=[1])
     )
 
     messages = context.output_messages
@@ -856,11 +817,7 @@ def test_simple_context_output_messages_no_mutation():
     corrupt internal state."""
     context = SimpleContext()
     context.append_output(
-        create_simple_context_output(
-            text="hello",
-            token_ids=[1],
-            prompt_token_ids=[10],
-        )
+        create_simple_context_output(text="hello", token_ids=[1], prompt_token_ids=[10])
     )
 
     msgs1 = context.output_messages
@@ -871,9 +828,7 @@ def test_simple_context_output_messages_no_mutation():
     # Appending more output updates the property
     context.append_output(
         create_simple_context_output(
-            text=" world",
-            token_ids=[2],
-            prompt_token_ids=[10],
+            text=" world", token_ids=[2], prompt_token_ids=[10]
         )
     )
 

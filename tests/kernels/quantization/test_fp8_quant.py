@@ -11,9 +11,7 @@ from tests.kernels.quant_utils import (
     ref_dynamic_per_token_quant,
 )
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_quantize,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_quantize
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -34,8 +32,7 @@ def opcheck_fp8_quant(
 ):
     if scale is not None:
         opcheck(
-            torch.ops._C.static_scaled_fp8_quant,
-            (output, input, scale, group_shape),
+            torch.ops._C.static_scaled_fp8_quant, (output, input, scale, group_shape)
         )
     elif use_per_token_if_dynamic:
         scale = torch.empty(

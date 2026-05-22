@@ -9,9 +9,7 @@ from torch.nn.parameter import Parameter
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
-)
+from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -178,9 +176,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)

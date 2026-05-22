@@ -37,10 +37,7 @@ GET_WEATHER_SCHEMA = {
     "description": "Get current temperature for provided coordinates in celsius.",  # noqa
     "parameters": {
         "type": "object",
-        "properties": {
-            "latitude": {"type": "number"},
-            "longitude": {"type": "number"},
-        },
+        "properties": {"latitude": {"type": "number"}, "longitude": {"type": "number"}},
         "required": ["latitude", "longitude"],
         "additionalProperties": False,
     },
@@ -98,13 +95,7 @@ def server():
     assert importlib.util.find_spec("gpt_oss") is not None, (
         "Harmony tests require gpt_oss package to be installed"
     )
-    args = [
-        "--enforce-eager",
-        "--tool-server",
-        "demo",
-        "--max_model_len",
-        "5000",
-    ]
+    args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
     env_dict = {
         **BASE_TEST_ENV,
         "VLLM_ENABLE_RESPONSES_API_STORE": "1",
@@ -128,8 +119,7 @@ async def client(server):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="What is 123 * 456?",
+        model=model_name, input="What is 123 * 456?"
     )
     assert response is not None
     print("response: ", response)
@@ -140,9 +130,7 @@ async def test_basic(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic_with_instructions(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="What is 123 * 456?",
-        instructions="Respond in Korean.",
+        model=model_name, input="What is 123 * 456?", instructions="Respond in Korean."
     )
     assert response is not None
     assert response.status == "completed"
@@ -199,7 +187,7 @@ async def test_chat_with_input_type(client: OpenAI, model_name: str):
             {
                 "role": "user",
                 "content": [{"type": "input_text", "text": "What is 123 * 456?"}],
-            },
+            }
         ],
     )
     assert response is not None
@@ -227,10 +215,7 @@ async def test_structured_output(client: OpenAI, model_name: str):
                     "properties": {
                         "name": {"type": "string"},
                         "date": {"type": "string"},
-                        "participants": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
+                        "participants": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["name", "date", "participants"],
                     "additionalProperties": False,
@@ -269,9 +254,7 @@ async def test_structured_output_with_parse(client: OpenAI, model_name: str):
 async def test_store(client: OpenAI, model_name: str):
     for store in [True, False]:
         response = await client.responses.create(
-            model=model_name,
-            input="What is 123 * 456?",
-            store=store,
+            model=model_name, input="What is 123 * 456?", store=store
         )
         assert response is not None
 
@@ -290,9 +273,7 @@ async def test_store(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_background(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="What is 123 * 456?",
-        background=True,
+        model=model_name, input="What is 123 * 456?", background=True
     )
     assert response is not None
 
@@ -312,9 +293,7 @@ async def test_background(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_background_cancel(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="Write a long story about a cat.",
-        background=True,
+        model=model_name, input="Write a long story about a cat.", background=True
     )
     assert response is not None
     time.sleep(1)
@@ -408,7 +387,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                {"type": "code_interpreter", "container": {"type": "auto"}},
+                {"type": "code_interpreter", "container": {"type": "auto"}}
             ],
             stream=True,
             background=background,
@@ -760,10 +739,7 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     )
 
     response_2 = await client.responses.create(
-        model=model_name,
-        input=input_messages,
-        tools=tools,
-        temperature=0.0,
+        model=model_name, input=input_messages, tools=tools, temperature=0.0
     )
     assert response_2.status == "completed"
     assert response_2.output_text is not None
@@ -775,7 +751,7 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
     """Function calling via streaming, with retry for non-determinism."""
     tools = [GET_WEATHER_SCHEMA]
     input_list = [
-        {"role": "user", "content": "What's the weather like in Paris today?"},
+        {"role": "user", "content": "What's the weather like in Paris today?"}
     ]
 
     def _has_function_call(evts: list) -> bool:
@@ -863,7 +839,7 @@ async def test_function_calling_no_code_interpreter_events(
     """
     tools = [GET_WEATHER_SCHEMA]
     input_list = [
-        {"role": "user", "content": "What's the weather like in Paris today?"},
+        {"role": "user", "content": "What's the weather like in Paris today?"}
     ]
 
     def _has_function_call(evts: list) -> bool:
@@ -911,9 +887,7 @@ async def test_function_calling_no_code_interpreter_events(
     "potential fixes in the code interpreter MCP implementation."
 )
 async def test_code_interpreter_streaming(
-    client: OpenAI,
-    model_name: str,
-    pairs_of_event_types: dict[str, str],
+    client: OpenAI, model_name: str, pairs_of_event_types: dict[str, str]
 ):
     tools = [{"type": "code_interpreter", "container": {"type": "auto"}}]
     input_text = (
@@ -1080,8 +1054,7 @@ async def test_function_call_with_previous_input_messages(
     assert response.status == "completed"
 
     function_call = next(
-        (item for item in response.output if item.type == "function_call"),
-        None,
+        (item for item in response.output if item.type == "function_call"), None
     )
     assert function_call is not None, (
         f"Expected function_call, got: "

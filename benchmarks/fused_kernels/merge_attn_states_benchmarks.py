@@ -60,12 +60,7 @@ def short_dtype(dtype: torch.dtype) -> str:
     return str(dtype).removeprefix("torch.")
 
 
-def make_inputs(
-    num_tokens: int,
-    num_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
-):
+def make_inputs(num_tokens: int, num_heads: int, head_size: int, dtype: torch.dtype):
     """Create random prefix/suffix outputs and LSEs."""
     prefix_output = torch.randn(
         (num_tokens, num_heads, head_size), dtype=dtype, device="cuda"
@@ -202,9 +197,7 @@ def benchmark(num_tokens, num_heads, head_size, dtype_str, provider):
             (num_tokens, num_heads, head_size), dtype=input_dtype, device="cuda"
         )
         quant_fp8 = QuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-            column_major_scales=False,
+            static=True, group_shape=GroupShape.PER_TENSOR, column_major_scales=False
         )
         quant_input = merge_buf.view(-1, head_size)
         compiled_quant = torch.compile(
@@ -223,9 +216,7 @@ def benchmark(num_tokens, num_heads, head_size, dtype_str, provider):
             (num_tokens, num_heads, head_size), dtype=input_dtype, device="cuda"
         )
         quant_fp8 = QuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-            column_major_scales=False,
+            static=True, group_shape=GroupShape.PER_TENSOR, column_major_scales=False
         )
         quant_input = merge_buf.view(-1, head_size)
         compiled_quant = torch.compile(

@@ -107,11 +107,7 @@ class Moondream3Config(PretrainedConfig):
     model_type = "moondream3"
     is_composition = True
 
-    def __init__(
-        self,
-        config: dict | None = None,
-        **kwargs,
-    ):
+    def __init__(self, config: dict | None = None, **kwargs):
         config = config or {}
 
         # Parse text config

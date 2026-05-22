@@ -27,10 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.model_executor.parameter import (
-    GroupQuantScaleParameter,
-    PackedvLLMParameter,
-)
+from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 
@@ -214,11 +211,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
         )
 
         scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
+            data=torch.empty(num_groups, output_size_per_partition, dtype=params_dtype),
             input_dim=0,
             output_dim=1,
             weight_loader=weight_loader,
@@ -248,18 +241,8 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.isa_hint = isa_hint
 
         interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
-        weight = unpack_cols(
-            packed_weight,
-            bits,
-            input_size,
-            output_size,
-        )
-        zeros = unpack_cols(
-            packed_zeros,
-            bits,
-            group_num,
-            output_size,
-        )
+        weight = unpack_cols(packed_weight, bits, input_size, output_size)
+        zeros = unpack_cols(packed_zeros, bits, group_num, output_size)
         weight = (
             weight.view(input_size, -1, pack_factor)[:, :, interleave_map]
             .reshape(input_size, output_size)
@@ -288,10 +271,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
         packed_zeros = layer.qzeros.data
         scales = layer.scales.data
         blocked_w, blocked_zp, blocked_s = ops.convert_weight_packed_scale_zp(
-            packed_weight,
-            packed_zeros,
-            scales,
-            ops.CPUQuantAlgo.AWQ,
+            packed_weight, packed_zeros, scales, ops.CPUQuantAlgo.AWQ
         )
 
         layer.packed_weight = blocked_w
@@ -302,20 +282,14 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.scales = None
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if layer.use_w4a8:
             return self._apply_sglang_int4(layer, x, bias)
         return self._apply_woq(layer, x, bias)
 
     def _apply_woq(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Original WOQ int4 GEMM path."""
         x = ops.cpu_gemm_wna16(
@@ -331,18 +305,11 @@ class CPUAWQLinearMethod(LinearMethodBase):
         return x
 
     def _apply_sglang_int4(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """SGLang INT4 W4A8 GEMM path."""
         return ops.int4_scaled_mm_cpu(
-            x,
-            layer.packed_weight,
-            layer.packed_qzeros,
-            layer.packed_scales,
-            bias,
+            x, layer.packed_weight, layer.packed_qzeros, layer.packed_scales, bias
         )
 
 

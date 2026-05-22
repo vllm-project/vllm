@@ -23,10 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
@@ -52,13 +49,7 @@ class HYV3ToolParser(ToolParser):
     # Following the same approach as
     # qwen3coder_tool_parser._convert_param_value which uses
     # param_type.startswith("int"), startswith("uint"), etc.
-    _INTEGER_PREFIXES: tuple[str, ...] = (
-        "int",
-        "uint",
-        "long",
-        "short",
-        "unsigned",
-    )
+    _INTEGER_PREFIXES: tuple[str, ...] = ("int", "uint", "long", "short", "unsigned")
     _NUMBER_PREFIXES: tuple[str, ...] = ("num", "float")
 
     @staticmethod
@@ -82,9 +73,7 @@ class HYV3ToolParser(ToolParser):
 
     @staticmethod
     def _get_arg_schema(
-        function_name: str,
-        arg_key: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        function_name: str, arg_key: str, tools: list[ChatCompletionToolsParam] | None
     ) -> dict:
         """Look up a specific argument's property schema from the tools list."""
         if tools is None:
@@ -126,9 +115,7 @@ class HYV3ToolParser(ToolParser):
 
     @staticmethod
     def _is_only_string_type(
-        function_name: str,
-        arg_key: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        function_name: str, arg_key: str, tools: list[ChatCompletionToolsParam] | None
     ) -> bool:
         """Return True if the parameter's type set is exactly {"string"}.
 
@@ -314,9 +301,7 @@ class HYV3ToolParser(ToolParser):
             )
 
     def _extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> list[ToolCall]:
         try:
             function_call_tuples = []
@@ -359,9 +344,7 @@ class HYV3ToolParser(ToolParser):
             return []
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
@@ -460,9 +443,7 @@ class HYV3ToolParser(ToolParser):
                         index=self.current_tool_id,
                         id=self._current_tool_call_id,
                         type="function",
-                        function=DeltaFunctionCall(
-                            name=tool_name,
-                        ),
+                        function=DeltaFunctionCall(name=tool_name),
                     )
                 ]
             )
@@ -487,9 +468,7 @@ class HYV3ToolParser(ToolParser):
         )
 
     def _extract_streaming_incremental(
-        self,
-        name_delta: DeltaMessage | None,
-        request: ChatCompletionRequest,
+        self, name_delta: DeltaMessage | None, request: ChatCompletionRequest
     ) -> DeltaMessage | None:
         """Incremental phase-2: scan tags in buffer, emit JSON diffs.
 
@@ -535,8 +514,7 @@ class HYV3ToolParser(ToolParser):
         ak_start = tail.find(self.arg_key_start_token)
         if ak_start != -1:
             ak_end = tail.find(
-                self.arg_key_end_token,
-                ak_start + len(self.arg_key_start_token),
+                self.arg_key_end_token, ak_start + len(self.arg_key_start_token)
             )
             if ak_end != -1:
                 partial_key = tail[
@@ -544,9 +522,7 @@ class HYV3ToolParser(ToolParser):
                 ].strip()
                 self._current_arg_key = partial_key
                 self._current_arg_is_string = HYV3ToolParser._is_only_string_type(
-                    self._streaming_tool_name or "",
-                    partial_key,
-                    request.tools,
+                    self._streaming_tool_name or "", partial_key, request.tools
                 )
 
                 av_start = tail.find(self.arg_value_start_token, ak_end)
@@ -600,10 +576,7 @@ class HYV3ToolParser(ToolParser):
 
             # Record into prev_tool_call_arr
             self.prev_tool_call_arr.append(
-                {
-                    "name": self._streaming_tool_name,
-                    "arguments": final_args,
-                }
+                {"name": self._streaming_tool_name, "arguments": final_args}
             )
             self.streamed_args_for_tool.append(final_json)
 

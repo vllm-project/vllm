@@ -20,9 +20,7 @@ class TestCheckSequenceRepetition:
         """Test detection of simple repetitive patterns"""
         token_ids = [1, 2, 3, 1, 2, 3, 1, 2, 3]
         params = RepetitionDetectionParams(
-            max_pattern_size=3,
-            min_pattern_size=2,
-            min_count=3,
+            max_pattern_size=3, min_pattern_size=2, min_count=3
         )
         assert check_sequence_repetition(token_ids, params)
 
@@ -30,9 +28,7 @@ class TestCheckSequenceRepetition:
         """Test that pattern below min_count is not detected"""
         token_ids = [1, 2, 3, 1, 2, 3]
         params = RepetitionDetectionParams(
-            max_pattern_size=3,
-            min_pattern_size=2,
-            min_count=3,
+            max_pattern_size=3, min_pattern_size=2, min_count=3
         )
         assert not check_sequence_repetition(token_ids, params)
 
@@ -40,9 +36,7 @@ class TestCheckSequenceRepetition:
         """Test detection of 2-token patterns"""
         token_ids = [1, 2, 1, 2, 1, 2, 1, 2]
         params = RepetitionDetectionParams(
-            max_pattern_size=5,
-            min_pattern_size=2,
-            min_count=4,
+            max_pattern_size=5, min_pattern_size=2, min_count=4
         )
         assert check_sequence_repetition(token_ids, params)
 
@@ -50,9 +44,7 @@ class TestCheckSequenceRepetition:
         """Test that non-repetitive sequences are not flagged"""
         token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9]
         params = RepetitionDetectionParams(
-            max_pattern_size=5,
-            min_pattern_size=2,
-            min_count=2,
+            max_pattern_size=5, min_pattern_size=2, min_count=2
         )
         assert not check_sequence_repetition(token_ids, params)
 
@@ -60,18 +52,14 @@ class TestCheckSequenceRepetition:
         """Test that incomplete repetitions are not detected"""
         token_ids = [1, 2, 3, 1, 2, 3, 1, 2, 4]
         params = RepetitionDetectionParams(
-            max_pattern_size=3,
-            min_pattern_size=2,
-            min_count=3,
+            max_pattern_size=3, min_pattern_size=2, min_count=3
         )
         assert not check_sequence_repetition(token_ids, params)
 
     def test_empty_token_list(self):
         """Test with empty token list"""
         params = RepetitionDetectionParams(
-            max_pattern_size=3,
-            min_pattern_size=2,
-            min_count=2,
+            max_pattern_size=3, min_pattern_size=2, min_count=2
         )
         assert not check_sequence_repetition([], params)
 
@@ -91,9 +79,7 @@ class TestCheckSequenceRepetition:
         """Test detection when repetition occurs at the end"""
         token_ids = [1, 2, 3, 4, 5, 6, 5, 6, 5, 6]
         params = RepetitionDetectionParams(
-            max_pattern_size=3,
-            min_pattern_size=2,
-            min_count=3,
+            max_pattern_size=3, min_pattern_size=2, min_count=3
         )
         assert check_sequence_repetition(token_ids, params)
 
@@ -101,9 +87,7 @@ class TestCheckSequenceRepetition:
         """Test large pattern repeated many times"""
         token_ids = [1, 2, 3, 4, 5, 6, 7, 8] * 5
         params = RepetitionDetectionParams(
-            max_pattern_size=10,
-            min_pattern_size=2,
-            min_count=3,
+            max_pattern_size=10, min_pattern_size=2, min_count=3
         )
         assert check_sequence_repetition(token_ids, params)
 
@@ -121,9 +105,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=2, min_count=3
             ),
         )
         request = Request(
@@ -139,9 +121,7 @@ class TestRepetitionDetectionIntegration:
 
     def test_detection_disabled_no_stop(self):
         """Test that disabled detection doesn't stop generation"""
-        params = SamplingParams(
-            max_tokens=100,
-        )
+        params = SamplingParams(max_tokens=100)
         request = Request(
             request_id="test",
             prompt_token_ids=[1, 2, 3],
@@ -157,9 +137,7 @@ class TestRepetitionDetectionIntegration:
             min_tokens=10,
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=2, min_count=3
             ),
         )
         request = Request(
@@ -176,9 +154,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=2, min_count=3
             ),
         )
         request = Request(
@@ -195,9 +171,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=3,
-                min_pattern_size=3,
-                min_count=2,
+                max_pattern_size=3, min_pattern_size=3, min_count=2
             ),
         )
         request = Request(
@@ -215,9 +189,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=2, min_count=3
             ),
         )
         request = Request(
@@ -236,9 +208,7 @@ class TestRepetitionDetectionIntegration:
             max_tokens=100,
             stop_token_ids=[999],
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=2, min_count=3
             ),
         )
         request = Request(
@@ -256,9 +226,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=3,
-                min_count=3,
+                max_pattern_size=5, min_pattern_size=3, min_count=3
             ),
         )
         request = Request(
@@ -275,9 +243,7 @@ class TestRepetitionDetectionIntegration:
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
-                max_pattern_size=5,
-                min_pattern_size=2,
-                min_count=5,
+                max_pattern_size=5, min_pattern_size=2, min_count=5
             ),
         )
         request = Request(

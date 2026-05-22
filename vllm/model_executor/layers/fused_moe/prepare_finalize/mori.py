@@ -116,9 +116,5 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
         num_token = output.shape[0]
-        result = self.mori_op.combine(
-            fused_expert_output,
-            None,
-            topk_ids,
-        )[0]
+        result = self.mori_op.combine(fused_expert_output, None, topk_ids)[0]
         output.copy_(result[:num_token])

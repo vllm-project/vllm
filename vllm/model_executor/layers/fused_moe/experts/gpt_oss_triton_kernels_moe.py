@@ -81,9 +81,7 @@ def _patch_make_bitmatrix_metadata() -> None:
     import triton.language as tl
 
     try:
-        from vllm.third_party.triton_kernels.tensor_details import (
-            bitmatrix as _bm,
-        )
+        from vllm.third_party.triton_kernels.tensor_details import bitmatrix as _bm
         from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
             BitmatrixMetadata,
             _keyed_add,
@@ -232,16 +230,10 @@ if has_triton_kernels():
             ScatterIndx,
             matmul_ogs,
         )
-        from triton_kernels.tensor import (
-            BIT,
-            Bitmatrix,
-        )
+        from triton_kernels.tensor import BIT, Bitmatrix
 
         try:
-            from triton_kernels.tensor import (
-                SparseMatrix,
-                make_ragged_tensor_metadata,
-            )
+            from triton_kernels.tensor import SparseMatrix, make_ragged_tensor_metadata
         except ImportError:
             # TODO(mgoin): drop the v3.5.1 pin and remove this fallback once
             # the gpt-oss perf regression in v3.6.0+ is resolved upstream.
@@ -493,9 +485,7 @@ def triton_kernel_fused_experts(
 
 
 def make_routing_data(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    num_local_experts: int,
+    topk_ids: torch.Tensor, topk_weights: torch.Tensor, num_local_experts: int
 ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
     topk_ids = topk_ids.to(torch.int16)
     topk_weights = topk_weights.to(torch.bfloat16)
@@ -550,8 +540,7 @@ def make_routing_data(
     dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
     combine_indx = sparse_logits.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
-        sparse_logits.mask_metadata.col_sum,
-        dispatch_indx.shape[0],
+        sparse_logits.mask_metadata.col_sum, dispatch_indx.shape[0]
     )
     gate_scal = sparse_logits.vals.flatten()[combine_indx]
     routing_data = RoutingData(
@@ -581,12 +570,9 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, None)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -641,10 +627,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         return TopKWeightAndReduceNoOP()
 
     def _make_routing_data(
-        self,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        num_local_experts: int,
+        self, topk_ids: torch.Tensor, topk_weights: torch.Tensor, num_local_experts: int
     ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
         return make_routing_data(topk_ids, topk_weights, num_local_experts)
 
@@ -775,10 +758,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         ops.moe_sum(input, output)
 
     def activation(
-        self,
-        activation: MoEActivation,
-        output: torch.Tensor,
-        input: torch.Tensor,
+        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
     ) -> None:
         quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
         if activation == MoEActivation.SWIGLUOAI:
@@ -797,11 +777,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             activation == MoEActivation.SILU
             and quant_config.gemm1_clamp_limit is not None
         ):
-            swiglu_limit_func(
-                output,
-                input,
-                quant_config.gemm1_clamp_limit,
-            )
+            swiglu_limit_func(output, input, quant_config.gemm1_clamp_limit)
         else:
             super().activation(activation, output, input)
 
@@ -913,11 +889,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 top_k_num=topk,
             )
 
-        self.activation(
-            activation,
-            intermediate_cache2,
-            act_input,
-        )
+        self.activation(activation, intermediate_cache2, act_input)
 
         # matmul_ogs grouped reduction fuses sum across multiple experts:
         # y[dst_indx // n_expts_act, :] += x
@@ -959,11 +931,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     """Monolithic Triton MXFP4 expert. Wraps triton_kernel_moe_forward()."""
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         self.topk = moe_config.experts_per_token
         self.renormalize = moe_config.routing_method in (
@@ -985,12 +953,9 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, None)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -998,9 +963,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
@@ -1020,8 +983,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 

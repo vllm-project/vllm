@@ -22,10 +22,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -55,24 +52,16 @@ class KananaVImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", "cps"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
 
-    vision_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    vision_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 KananaVImageInputs: TypeAlias = KananaVImagePixelInputs
 
 
 def build_pos_embeds(
-    config: Qwen2VLVisionConfig,
-    num_input_tokens: int,
-    vision_hidden_size: int,
+    config: Qwen2VLVisionConfig, num_input_tokens: int, vision_hidden_size: int
 ) -> nn.Parameter | None:
     """Build positional embeddings for the visual encoder output."""
     if config.pos_emb:
@@ -84,11 +73,7 @@ def build_pos_embeds(
     return pos_emb
 
 
-def build_mlp(
-    depth: int,
-    hidden_size: int,
-    output_hidden_size: int,
-) -> nn.Sequential:
+def build_mlp(depth: int, hidden_size: int, output_hidden_size: int) -> nn.Sequential:
     """Simple SiLU-activated MLP used as a projector readout."""
     layers = [nn.Linear(hidden_size, output_hidden_size)]
     for _ in range(1, depth):
@@ -104,11 +89,7 @@ class PatchMerge(nn.Module):
         super().__init__()
         self.merge_size = merge_size
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        channel_last: bool = False,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, channel_last: bool = False) -> torch.Tensor:
         """Merge patches by `merge_size x merge_size`."""
         if channel_last:
             x = rearrange(x, "B H W D -> B D H W")
@@ -125,11 +106,7 @@ class PatchMerge(nn.Module):
 class DynamicCAbstractor(nn.Module):
     """Dynamic C-Abstractor based on RegNet blocks."""
 
-    def __init__(
-        self,
-        config: Qwen2VLVisionConfig,
-        num_input_tokens: int,
-    ) -> None:
+    def __init__(self, config: Qwen2VLVisionConfig, num_input_tokens: int) -> None:
         super().__init__()
         assert hasattr(config, "merge_size"), "merge_size must be provided."
         self.config = config
@@ -172,24 +149,12 @@ class DynamicCAbstractor(nn.Module):
         mlp_depth = self.config.mlp_depth
 
         RegBlock = partial(
-            RegStage,
-            stride=1,
-            dilation=1,
-            act_layer=nn.SiLU,
-            norm_layer=LayerNorm2d,
+            RegStage, stride=1, dilation=1, act_layer=nn.SiLU, norm_layer=LayerNorm2d
         )
 
-        s1 = RegBlock(
-            depth,
-            encoder_hidden_size,
-            hidden_size,
-        )
+        s1 = RegBlock(depth, encoder_hidden_size, hidden_size)
         sampler = PatchMerge(merge_size=self.merge_size)
-        s2 = RegBlock(
-            depth,
-            self.merge_size**2 * hidden_size,
-            hidden_size,
-        )
+        s2 = RegBlock(depth, self.merge_size**2 * hidden_size, hidden_size)
 
         if depth:
             self.net = nn.ModuleList([s1, sampler, s2])
@@ -227,26 +192,18 @@ class DynamicCAbstractor(nn.Module):
                     num_prefix_tokens=0,
                 )
                 _local_pos_emb = rearrange(
-                    _local_pos_emb,
-                    "1 (h w) d -> 1 h w d",
-                    h=H,
-                    w=W,
+                    _local_pos_emb, "1 (h w) d -> 1 h w d", h=H, w=W
                 )
                 reshaped_visual_embeds = reshaped_visual_embeds + _local_pos_emb
 
             reshaped_visual_embeds = self._forward(
-                reshaped_visual_embeds,
-                input_size=(H, W),
+                reshaped_visual_embeds, input_size=(H, W)
             )
             flattened_visual_embeds.append(reshaped_visual_embeds)
         reshaped_visual_embeds = torch.cat(flattened_visual_embeds, dim=0)
         return BaseModelOutput(last_hidden_state=reshaped_visual_embeds)
 
-    def _forward(
-        self,
-        x: torch.Tensor,
-        input_size: tuple[int, int],
-    ) -> torch.Tensor:
+    def _forward(self, x: torch.Tensor, input_size: tuple[int, int]) -> torch.Tensor:
         h, w = input_size
         x = rearrange(x, "1 h w d -> 1 d h w", h=h, w=w)
         if self.config.depth:
@@ -318,14 +275,10 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
 
         # Compute cu_seqlens in numpy then move to device, same as base model.
         cu_seqlens = np.repeat(
-            grid_thw_np[:, 1] * grid_thw_np[:, 2],
-            grid_thw_np[:, 0],
+            grid_thw_np[:, 1] * grid_thw_np[:, 2], grid_thw_np[:, 0]
         ).cumsum(axis=0, dtype=np.int32)
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(
-            self.device,
-            non_blocking=True,
-        )
+        cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
 
         # Shape to (S, B, D) with batch dimension 1 as expected by the blocks.
         x = x.unsqueeze(1)
@@ -356,8 +309,7 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
         if not return_dict:
             return tuple(v for v in [hidden_states, encoder_states] if v is not None)
         return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
+            last_hidden_state=hidden_states, hidden_states=encoder_states
         )
 
     def get_num_tokens(self) -> int:
@@ -371,9 +323,7 @@ class KananaVProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
-            image_width=9999,
-            image_height=9999,
-            num_frames=1,
+            image_width=9999, image_height=9999, num_frames=1
         )
         return max_image_size
 
@@ -422,15 +372,11 @@ class KananaVProcessingInfo(BaseProcessingInfo):
         return preprocessed_size, num_vision_tokens
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         target_width, target_height = self.get_image_size_with_most_features()
         num_vision_tokens = self._get_vision_info(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=1,
+            image_width=target_width, image_height=target_height, num_frames=1
         )[1]
         return {"image": num_vision_tokens}
 
@@ -450,7 +396,7 @@ class KananaVDummyInputsBuilder(BaseDummyInputsBuilder[KananaVProcessingInfo]):
         return {
             "image": self._get_dummy_images(
                 width=9999, height=9999, num_images=num_images
-            ),
+            )
         }
 
 
@@ -546,16 +492,12 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
 
         return [
             PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement,
-            ),
+                modality="image", target="<image>", replacement=get_replacement
+            )
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         pixel_sizes = hf_inputs.get("pixel_sizes", torch.empty(0))
 
@@ -672,9 +614,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return multi_modal_embeddings
 
     def _get_visual_feature_at(
-        self,
-        v_output: Sequence[torch.Tensor],
-        layer_index: int | Sequence[int],
+        self, v_output: Sequence[torch.Tensor], layer_index: int | Sequence[int]
     ) -> torch.Tensor:
         if isinstance(layer_index, (list, tuple)):
             visual_features = torch.stack(v_output, dim=1)[
@@ -685,9 +625,7 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return visual_features
 
     def forward_vision(
-        self,
-        pixel_values: torch.Tensor,
-        image_metas: dict | None = None,
+        self, pixel_values: torch.Tensor, image_metas: dict | None = None
     ) -> torch.Tensor:
         vision_model_args = {
             "pixel_values": pixel_values,
@@ -703,20 +641,15 @@ class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         return visual_features
 
     def forward_projector(
-        self,
-        visual_features: torch.Tensor,
-        image_metas: dict | None = None,
+        self, visual_features: torch.Tensor, image_metas: dict | None = None
     ) -> torch.Tensor:
         visual_embeds = self.abstractor(
-            visual_features,
-            grid_thw=image_metas["vision_grid_thw"],
+            visual_features, grid_thw=image_metas["vision_grid_thw"]
         )["last_hidden_state"]
         return visual_embeds
 
     def forward_and_project_vision(
-        self,
-        pixel_values: torch.Tensor,
-        image_metas: dict | None = None,
+        self, pixel_values: torch.Tensor, image_metas: dict | None = None
     ) -> torch.Tensor:
         assert pixel_values is not None
         visual_features = self.forward_vision(pixel_values, image_metas=image_metas)

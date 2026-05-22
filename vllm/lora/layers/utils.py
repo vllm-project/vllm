@@ -96,17 +96,11 @@ def try_get_optimal_moe_lora_config(
     # from the config lookup — the non-quantized branch in get_default_config
     # ignores it anyway.
     config = try_get_optimal_moe_config(w1_shape, w2_shape, top_k, dtype, M).copy()
-    if op_type in [
-        "fused_moe_lora_w13_shrink",
-        "fused_moe_lora_w2_shrink",
-    ]:
+    if op_type in ["fused_moe_lora_w13_shrink", "fused_moe_lora_w2_shrink"]:
         config["BLOCK_SIZE_N"] = min(
             config.get("BLOCK_SIZE_N", 64), next_power_of_2(rank)
         )
-    elif op_type in [
-        "fused_moe_lora_w13_expand",
-        "fused_moe_lora_w2_expand",
-    ]:
+    elif op_type in ["fused_moe_lora_w13_expand", "fused_moe_lora_w2_expand"]:
         config["BLOCK_SIZE_K"] = max(
             16, min(config.get("BLOCK_SIZE_K", 32), next_power_of_2(rank))
         )

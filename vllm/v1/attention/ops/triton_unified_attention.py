@@ -170,8 +170,7 @@ def _store_output_td(
         block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
     )
     output_desc.store(
-        [0, 0, 0],
-        acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+        [0, 0, 0], acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED)
     )
 
 
@@ -533,9 +532,7 @@ def kernel_unified_attention(
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
             V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                V,
-                0.0,
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
@@ -743,10 +740,7 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
 
 
 def _get_tile_size(
-    head_size: int,
-    sliding_window: int,
-    element_size: int,
-    is_prefill: bool,
+    head_size: int, sliding_window: int, element_size: int, is_prefill: bool
 ) -> int:
     """Select tile size with Gemma3-specific optimization."""
     if _is_gemma3_attention(head_size, sliding_window):

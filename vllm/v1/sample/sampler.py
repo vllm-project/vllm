@@ -221,9 +221,7 @@ class Sampler(nn.Module):
 
     @staticmethod
     def apply_temperature(
-        logits: torch.Tensor,
-        temp: torch.Tensor,
-        all_random: bool,
+        logits: torch.Tensor, temp: torch.Tensor, all_random: bool
     ) -> torch.Tensor:
         # Use in-place division to avoid creating a new tensor.
         # Avoid division by zero if there are greedy requests.
@@ -302,9 +300,7 @@ class Sampler(nn.Module):
 
     @staticmethod
     def gather_logprobs(
-        logprobs: torch.Tensor,
-        num_logprobs: int,
-        token_ids: torch.Tensor,
+        logprobs: torch.Tensor, num_logprobs: int, token_ids: torch.Tensor
     ) -> LogprobsTensors:
         """
         Gather logprobs for topk and sampled/prompt token.
@@ -352,8 +348,7 @@ class Sampler(nn.Module):
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(
-        output_token_ids: list[list[int]],
-        spec_token_ids: list[list[int]] | None = None,
+        output_token_ids: list[list[int]], spec_token_ids: list[list[int]] | None = None
     ) -> list[list[int]]:
         if spec_token_ids is None:
             return output_token_ids
@@ -383,8 +378,7 @@ class Sampler(nn.Module):
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
+                output_token_ids, sampling_metadata.spec_token_ids
             )
 
         # Apply allowed token ids.
@@ -403,14 +397,10 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
-                repeat_indices=None,
+                output_token_ids, sampling_metadata.spec_token_ids, repeat_indices=None
             )
             logits = holder.apply_to_logits(
-                logits,
-                predict_bonus_token,
-                sampling_metadata.spec_token_ids,
+                logits, predict_bonus_token, sampling_metadata.spec_token_ids
             )
         return logits
 

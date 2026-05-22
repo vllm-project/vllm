@@ -35,9 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
-    select_mxfp8_moe_backend,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import select_mxfp8_moe_backend
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
@@ -133,10 +131,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
-    def __init__(
-        self,
-        exclude_modules: list[str],
-    ):
+    def __init__(self, exclude_modules: list[str]):
         super().__init__()
         self.exclude_modules: list[str] = exclude_modules
 
@@ -237,9 +232,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
-    def _extract_modelopt_quant_algo(
-        hf_quant_cfg: dict[str, Any] | None,
-    ) -> str | None:
+    def _extract_modelopt_quant_algo(hf_quant_cfg: dict[str, Any] | None) -> str | None:
         """Extract upper-cased quant_algo from a modelopt config.
 
         Returns the quant_algo string (upper-cased), or None if the config
@@ -522,10 +515,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
 
@@ -603,10 +593,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
 
@@ -732,10 +719,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.w8a8_block_fp8_linear.apply_weights(layer, x, bias)
 
@@ -749,9 +733,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(
-        self,
-        quant_config: ModelOptFp8Config,
-        moe_config: FusedMoEConfig,
+        self, quant_config: ModelOptFp8Config, moe_config: FusedMoEConfig
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
@@ -836,11 +818,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # They will be combined to a single scale after weight loading.
         # For non-gated MoE, allocate 1 scale for w13.
         w13_weight_scale = PerTensorScaleParameter(
-            data=torch.full(
-                (num_experts, w13_num_shards),
-                1.0,
-                dtype=torch.float32,
-            ),
+            data=torch.full((num_experts, w13_num_shards), 1.0, dtype=torch.float32),
             weight_loader=weight_loader,
         )
         w2_weight_scale = PerTensorScaleParameter(
@@ -1224,10 +1202,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
@@ -1370,10 +1345,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
@@ -1386,17 +1358,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
 
     def __init__(
-        self,
-        quant_config: ModelOptNvFp4Config,
-        moe_config: FusedMoEConfig,
+        self, quant_config: ModelOptNvFp4Config, moe_config: FusedMoEConfig
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
-            config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            config=self.moe, weight_key=kNvfp4Static, activation_key=kNvfp4Dynamic
         )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -1520,9 +1488,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         w13_input_scale = PerTensorScaleParameter(
             data=torch.empty(
-                global_sf_num_experts,
-                w13_num_shards,
-                dtype=torch.float32,
+                global_sf_num_experts, w13_num_shards, dtype=torch.float32
             ),
             weight_loader=weight_loader,
         )
@@ -1549,27 +1515,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            a13_scale,
-            w2,
-            w2_scale,
-            w2_scale_2,
-            a2_scale,
-        ) = convert_to_nvfp4_moe_kernel_format(
-            nvfp4_backend=self.nvfp4_backend,
-            layer=layer,
-            w13=layer.w13_weight,
-            w13_scale=layer.w13_weight_scale,
-            w13_scale_2=w13_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
-            w2_scale_2=layer.w2_weight_scale_2,
-            a2_scale=layer.w2_input_scale,
-            is_act_and_mul=self.moe.is_act_and_mul,
+        (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale) = (
+            convert_to_nvfp4_moe_kernel_format(
+                nvfp4_backend=self.nvfp4_backend,
+                layer=layer,
+                w13=layer.w13_weight,
+                w13_scale=layer.w13_weight_scale,
+                w13_scale_2=w13_weight_scale_2,
+                a13_scale=layer.w13_input_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                w2_scale_2=layer.w2_weight_scale_2,
+                a2_scale=layer.w2_input_scale,
+                is_act_and_mul=self.moe.is_act_and_mul,
+            )
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -1734,9 +1693,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
                 )
 
         return cls(
-            is_checkpoint_mxfp8_serialized,
-            kv_cache_quant_method,
-            exclude_modules,
+            is_checkpoint_mxfp8_serialized, kv_cache_quant_method, exclude_modules
         )
 
 
@@ -1837,10 +1794,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
@@ -1849,9 +1803,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     """FlashInfer TRTLLM MXFP8 block-scale MoE for ModelOpt checkpoints."""
 
     def __init__(
-        self,
-        quant_config: ModelOptMxFp8Config,
-        moe_config: FusedMoEConfig,
+        self, quant_config: ModelOptMxFp8Config, moe_config: FusedMoEConfig
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
@@ -2017,8 +1969,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             )
             w13_sf_shuffled_i = shuffle_matrix_sf_a(
                 w13_sf_i.view(torch.uint8).reshape(
-                    intermediate_size_factor * layer.intermediate_size_per_partition,
-                    -1,
+                    intermediate_size_factor * layer.intermediate_size_per_partition, -1
                 ),
                 epilogue_tile_m,
             )
@@ -2042,14 +1993,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             layer, "w2_weight", torch.stack(w2_weight_shuffled).contiguous()
         )
         replace_parameter(
-            layer,
-            "w13_weight_scale",
-            torch.stack(w13_scale_shuffled).contiguous(),
+            layer, "w13_weight_scale", torch.stack(w13_scale_shuffled).contiguous()
         )
         replace_parameter(
-            layer,
-            "w2_weight_scale",
-            torch.stack(w2_scale_shuffled).contiguous(),
+            layer, "w2_weight_scale", torch.stack(w2_scale_shuffled).contiguous()
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -2096,10 +2043,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from flashinfer.fused_moe.core import (
-            ActivationType,
-            Fp8QuantizationType,
-        )
+        from flashinfer.fused_moe.core import ActivationType, Fp8QuantizationType
 
         assert self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
@@ -2136,8 +2080,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         topk_group = layer.topk_group or None
 
         hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
-            x,
-            is_sf_swizzled_layout=False,
+            x, is_sf_swizzled_layout=False
         )
 
         kwargs: dict = dict(
@@ -2361,13 +2304,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
                 return ModelOptFp8MoEMethod(
-                    quant_config=self.fp8_config,
-                    moe_config=layer.moe_config,
+                    quant_config=self.fp8_config, moe_config=layer.moe_config
                 )
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4FusedMoE(
-                    quant_config=self.nvfp4_config,
-                    moe_config=layer.moe_config,
+                    quant_config=self.nvfp4_config, moe_config=layer.moe_config
                 )
             return None
 

@@ -78,8 +78,7 @@ class DeepseekOCR2ProcessingInfo(BaseProcessingInfo):
         )
 
         return self.ctx.get_hf_processor(
-            DeepseekOCRProcessor,
-            **{**v2_processor_config, **kwargs},
+            DeepseekOCRProcessor, **{**v2_processor_config, **kwargs}
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -180,9 +179,7 @@ class DeepseekOCR2MultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         images_spatial_crop = hf_inputs.get("images_spatial_crop", torch.empty((0, 2)))
         is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
@@ -217,9 +214,7 @@ class DeepseekOCR2MultiModalProcessor(
                 size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=CROP_MODE,
+                    image_width=size.width, image_height=size.height, cropping=CROP_MODE
                 )
             return [image_token_id] * num_image_tokens
 
@@ -333,9 +328,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             data=pixel_values,
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
-            resolve_bindings={
-                "base_size": base_size,
-            },
+            resolve_bindings={"base_size": base_size},
         )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
@@ -432,10 +425,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

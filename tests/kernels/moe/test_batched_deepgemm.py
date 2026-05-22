@@ -57,17 +57,11 @@ def test_batched_deepgemm_vs_triton(
     max_num_tokens = 1 << (max_cnt - 1).bit_length()
 
     prep_finalize = BatchedPrepareAndFinalize(
-        max_num_tokens=max_num_tokens,
-        num_local_experts=E,
-        num_dispatchers=1,
-        rank=0,
+        max_num_tokens=max_num_tokens, num_local_experts=E, num_dispatchers=1, rank=0
     )
 
     quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        per_act_token_quant=False,
-        block_shape=BLOCK_SIZE,
+        w1_scale=w1_s, w2_scale=w2_s, per_act_token_quant=False, block_shape=BLOCK_SIZE
     )
 
     # triton (reference)
@@ -77,11 +71,7 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEKernel(
-        prep_finalize,
-        triton_experts,
-        inplace=False,
-    )
+    mk_triton = FusedMoEKernel(prep_finalize, triton_experts, inplace=False)
 
     out_triton = mk_triton.apply(
         hidden_states=a,
@@ -102,11 +92,7 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEKernel(
-        prep_finalize,
-        deepgemm_experts,
-        inplace=False,
-    )
+    mk_deepgemm = FusedMoEKernel(prep_finalize, deepgemm_experts, inplace=False)
 
     out_deepgemm = mk_deepgemm.apply(
         hidden_states=a,

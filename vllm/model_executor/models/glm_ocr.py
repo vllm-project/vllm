@@ -44,20 +44,13 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -71,13 +64,8 @@ from vllm.model_executor.models.glm4_1v import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .utils import (
-    maybe_prefix,
-)
-from .vision import (
-    get_vit_attn_backend,
-    is_vit_use_data_parallel,
-)
+from .utils import maybe_prefix
+from .vision import get_vit_attn_backend, is_vit_use_data_parallel
 
 logger = init_logger(__name__)
 
@@ -185,18 +173,12 @@ class GlmOcrVisionAttention(nn.Module):
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
+                qk_concat, rotary_pos_emb_cos, rotary_pos_emb_sin
             )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -215,12 +197,7 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         prefix: str = "",
     ) -> None:
         super().__init__(
-            dim,
-            num_heads,
-            mlp_hidden_dim,
-            norm_layer,
-            quant_config,
-            prefix,
+            dim, num_heads, mlp_hidden_dim, norm_layer, quant_config, prefix
         )
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -322,14 +299,11 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         )
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim,
-            dtype=torch.get_default_dtype(),
+            head_size=head_dim, dtype=torch.get_default_dtype()
         )
 
     def forward(
-        self,
-        x: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
+        self, x: torch.Tensor, grid_thw: torch.Tensor | list[list[int]]
     ) -> torch.Tensor:
         if isinstance(grid_thw, list):
             grid_thw = torch.tensor(grid_thw, dtype=torch.int32)

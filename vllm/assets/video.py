@@ -109,7 +109,7 @@ class VideoAsset:
     num_frames: int = -1
 
     _NAME_TO_FILE: ClassVar[dict[VideoAssetName, str]] = {
-        "baby_reading": "sample_demo_1.mp4",
+        "baby_reading": "sample_demo_1.mp4"
     }
 
     @property

@@ -38,12 +38,7 @@ class TestPlotFilters:
         )
 
     @pytest.mark.parametrize(
-        "target,expected_count",
-        [
-            ("5.0", 1),
-            ("10.0", 1),
-            ("1.0", 1),
-        ],
+        "target,expected_count", [("5.0", 1), ("10.0", 1), ("1.0", 1)]
     )
     def test_equal_to_numeric(self, target, expected_count):
         """Test PlotEqualTo with numeric values."""

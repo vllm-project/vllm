@@ -50,7 +50,7 @@ SKIP_BACKENDS = {"CUSTOM", "TORCH_SDPA"}
 
 BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
     # fp8 is an alias for fp8_ds_mla for FlashMLA Sparse
-    "FLASHMLA_SPARSE": {"fp8"},
+    "FLASHMLA_SPARSE": {"fp8"}
 }
 
 
@@ -485,15 +485,9 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
 
     # Backend-specific metadata that can't be easily parsed from code
     backend_metadata = {
-        "TRTLLM_RAGGED": {
-            "description": "TensorRT-LLM ragged attention",
-        },
-        "FLASHINFER": {
-            "description": "FlashInfer CUTLASS backend",
-        },
-        "FLASH_ATTN": {
-            "description": "FlashAttention varlen (FA2/FA3/FA4)",
-        },
+        "TRTLLM_RAGGED": {"description": "TensorRT-LLM ragged attention"},
+        "FLASHINFER": {"description": "FlashInfer CUTLASS backend"},
+        "FLASH_ATTN": {"description": "FlashAttention varlen (FA2/FA3/FA4)"},
     }
 
     for backend_name in priority_order:
@@ -733,12 +727,7 @@ def parse_impl_bool_attr(
             try:
                 parent_tree = ast.parse(parent_file.read_text())
                 return parse_impl_bool_attr(
-                    parent_tree,
-                    parent_name,
-                    attr_name,
-                    default,
-                    parent_file,
-                    _visited,
+                    parent_tree, parent_name, attr_name, default, parent_file, _visited
                 )
             except Exception:
                 pass
@@ -983,10 +972,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         fa4_compute_cap = _parse_fa4_supported_caps()
 
     return {
-        "fa2": {
-            "supports_fp8": False,
-            "supports_sink": False,
-        },
+        "fa2": {"supports_fp8": False, "supports_sink": False},
         "fa3": {
             "compute_capability": fa3_compute_cap,
             "supports_fp8": fa3_supports_fp8,
@@ -1027,7 +1013,7 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
     return {
         "native": {
             # Native FlashInfer: everything except SM100
-            "supports_sink": False,
+            "supports_sink": False
         },
         "trtllm": {
             # TRTLLM pathway on Blackwell
@@ -1044,8 +1030,7 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
 
 def _expand_flash_attn_variants(
-    all_backends: list[dict[str, Any]],
-    fa_features: dict[str, dict[str, Any]],
+    all_backends: list[dict[str, Any]], fa_features: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Expand FLASH_ATTN into FA2, FA3, and FA4 variants."""
     expanded = []
@@ -1096,8 +1081,7 @@ def _expand_flash_attn_variants(
 
 
 def _expand_flashinfer_variants(
-    all_backends: list[dict[str, Any]],
-    fi_features: dict[str, dict[str, Any]],
+    all_backends: list[dict[str, Any]], fi_features: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Expand FLASHINFER into native and TRTLLM variants."""
     expanded = []
@@ -1352,8 +1336,7 @@ def _sort_key(x: dict[str, Any]) -> tuple[str, int]:
 
 
 def _render_table(
-    columns: list[TableColumn],
-    backends: list[dict[str, Any]],
+    columns: list[TableColumn], backends: list[dict[str, Any]]
 ) -> list[str]:
     """Render a markdown table from column specs and backend data."""
     header = "| " + " | ".join(name for name, _ in columns) + " |"
@@ -1467,9 +1450,7 @@ When no backend is specified (the default):
 
 
 def _priority_table(
-    title: str,
-    backends: list[str],
-    annotations: dict[str, str] | None = None,
+    title: str, backends: list[str], annotations: dict[str, str] | None = None
 ) -> list[str]:
     """Generate a priority table for a list of backends."""
 
@@ -1511,9 +1492,7 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
 
     lines.extend(["### MLA Attention (DeepSeek-style)", ""])
 
-    mla_sm100_annotations = {
-        "FLASHINFER_MLA_SPARSE": "**\\***",
-    }
+    mla_sm100_annotations = {"FLASHINFER_MLA_SPARSE": "**\\***"}
     if "mla_sm100" in priorities:
         lines.extend(
             _priority_table(sm100, priorities["mla_sm100"], mla_sm100_annotations)

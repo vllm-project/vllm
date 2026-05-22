@@ -150,9 +150,7 @@ class MCPToolServer(ToolServer):
         return tool_name in self.harmony_tool_descriptions
 
     def get_tool_description(
-        self,
-        server_label: str,
-        allowed_tools: list[str] | None = None,
+        self, server_label: str, allowed_tools: list[str] | None = None
     ) -> ToolNamespaceConfig | None:
         cfg = self.harmony_tool_descriptions.get(server_label)
         if cfg is None:
@@ -168,9 +166,7 @@ class MCPToolServer(ToolServer):
             return None
 
         return ToolNamespaceConfig(
-            name=cfg.name,
-            description=cfg.description,
-            tools=filtered,
+            name=cfg.name, description=cfg.description, tools=filtered
         )
 
     @asynccontextmanager

@@ -134,7 +134,7 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
         max_model_len=1024,
         max_loras=4,
         compilation_config=vllm.config.CompilationConfig(
-            cudagraph_specialize_lora=cudagraph_specialize_lora,
+            cudagraph_specialize_lora=cudagraph_specialize_lora
         ),
     )
     generate_and_test(llm, llama32_lora_files)
@@ -171,10 +171,7 @@ def test_llama_lora_tp4_fully_sharded_loras(llama32_lora_files):
 
 
 @multi_gpu_test(num_gpus=2)
-def test_tp2_serialize_and_deserialize_lora(
-    tmp_path,
-    llama32_lora_files,
-):
+def test_tp2_serialize_and_deserialize_lora(tmp_path, llama32_lora_files):
     # Run the tensorizing of the LoRA adapter and the model in a subprocess
     # to guarantee cleanup
 

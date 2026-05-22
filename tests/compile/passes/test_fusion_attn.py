@@ -229,16 +229,10 @@ BACKENDS_FP4: list[AttentionBackendEnum] = []
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
     PATTERN_TEST_MODELS_FP8 = [
-        (
-            "RedHatAI/Meta-Llama-3.1-8B-FP8",
-            TestAttentionFp8StaticQuantPatternModel,
-        )
+        ("RedHatAI/Meta-Llama-3.1-8B-FP8", TestAttentionFp8StaticQuantPatternModel)
     ]
     PATTERN_TEST_MODELS_FP4 = [
-        (
-            "nvidia/Llama-3.1-8B-Instruct-NVFP4",
-            TestAttentionNvfp4QuantPatternModel,
-        )
+        ("nvidia/Llama-3.1-8B-Instruct-NVFP4", TestAttentionNvfp4QuantPatternModel)
     ]
     BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
@@ -308,11 +302,7 @@ def test_attention_quant_pattern(
     backend_cls = backend.get_class()
     block_size = backend_cls.get_preferred_block_size(16)
 
-    model_config = ModelConfig(
-        model=model_name,
-        max_model_len=2048,
-        dtype=dtype,
-    )
+    model_config = ModelConfig(model=model_name, max_model_len=2048, dtype=dtype)
     vllm_config = VllmConfig(
         model_config=model_config,
         scheduler_config=SchedulerConfig(
@@ -321,8 +311,7 @@ def test_attention_quant_pattern(
             is_encoder_decoder=model_config.is_encoder_decoder,
         ),
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=custom_ops_list,
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=custom_ops_list
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
         attention_config=AttentionConfig(backend=backend),

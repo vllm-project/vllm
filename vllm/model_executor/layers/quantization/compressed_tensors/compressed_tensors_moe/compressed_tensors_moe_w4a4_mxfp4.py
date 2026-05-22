@@ -15,12 +15,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     mxfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    CutlassExpertsMxfp4,
-)
-from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-    MarlinExperts,
-)
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsMxfp4
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
@@ -126,8 +122,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         if self.use_cutlass_mxfp4:
             # W4A4: both weights and activations quantized to MXFP4
             return mxfp4_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=layer.w13_weight_scale, w2_scale=layer.w2_weight_scale
             )
         else:
             # W4A16: weight-only via Marlin

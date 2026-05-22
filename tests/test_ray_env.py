@@ -68,10 +68,7 @@ class TestUserExtensions:
 
     @patch.dict(
         os.environ,
-        {
-            "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": "MYLIB_",
-            "MYLIB_FOO": "bar",
-        },
+        {"VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": "MYLIB_", "MYLIB_FOO": "bar"},
         clear=False,
     )
     def test_user_prefix(self):
@@ -81,10 +78,7 @@ class TestUserExtensions:
 
     @patch.dict(
         os.environ,
-        {
-            "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": "MY_SECRET",
-            "MY_SECRET": "val",
-        },
+        {"VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": "MY_SECRET", "MY_SECRET": "val"},
         clear=False,
     )
     def test_user_extra_var(self):
@@ -109,10 +103,7 @@ class TestExclusion:
 
     @patch.dict(
         os.environ,
-        {
-            "VLLM_HOST_IP": "10.0.0.1",
-            "VLLM_NIXL_SIDE_CHANNEL_HOST": "10.0.0.1",
-        },
+        {"VLLM_HOST_IP": "10.0.0.1", "VLLM_NIXL_SIDE_CHANNEL_HOST": "10.0.0.1"},
         clear=False,
     )
     def test_worker_specific_host_vars_are_excluded(self):
@@ -121,10 +112,7 @@ class TestExclusion:
         assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in result
 
     @patch.dict(os.environ, {"LMCACHE_LOCAL_CPU": "True"}, clear=False)
-    @patch(
-        "vllm.ray.ray_env.RAY_NON_CARRY_OVER_ENV_VARS",
-        {"LMCACHE_LOCAL_CPU"},
-    )
+    @patch("vllm.ray.ray_env.RAY_NON_CARRY_OVER_ENV_VARS", {"LMCACHE_LOCAL_CPU"})
     def test_non_carry_over_blacklist(self):
         result = get_env_vars_to_copy()
         assert "LMCACHE_LOCAL_CPU" not in result
@@ -160,9 +148,7 @@ class TestEdgeCases:
 
     @patch.dict(
         os.environ,
-        {
-            "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": " MYLIB_ , OTHER_ ",
-        },
+        {"VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": " MYLIB_ , OTHER_ "},
         clear=False,
     )
     def test_csv_whitespace_handling(self):

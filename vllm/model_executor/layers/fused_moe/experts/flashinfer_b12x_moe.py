@@ -42,11 +42,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         assert quant_config.quant_dtype == "nvfp4", (
             "FlashInferB12xExperts only supports nvfp4 quantization."
@@ -128,8 +124,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
 

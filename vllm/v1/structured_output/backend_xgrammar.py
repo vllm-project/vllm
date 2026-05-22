@@ -58,8 +58,7 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-                self.tokenizer,
-                vocab_size=self.vocab_size,
+                self.tokenizer, vocab_size=self.vocab_size
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
@@ -95,9 +94,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 # Falling back to deprecated method of compiling structural tag
                 tags = [
                     xgr.StructuralTagItem(
-                        begin=s["begin"],
-                        schema=json.dumps(s["schema"]),
-                        end=s["end"],
+                        begin=s["begin"], schema=json.dumps(s["schema"]), end=s["end"]
                     )
                     for s in s_tag["structures"]
                 ]
@@ -114,8 +111,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
-                ctx,
-                max_rollback_tokens=self.num_speculative_tokens,
+                ctx, max_rollback_tokens=self.num_speculative_tokens
             ),
             vocab_size=self.vocab_size,
             ctx=ctx,
@@ -343,9 +339,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             if "structures" in s_tag:
                 tags = [
                     xgr.StructuralTagItem(
-                        begin=s["begin"],
-                        schema=json.dumps(s["schema"]),
-                        end=s["end"],
+                        begin=s["begin"], schema=json.dumps(s["schema"]), end=s["end"]
                     )
                     for s in s_tag["structures"]
                 ]

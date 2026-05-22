@@ -32,10 +32,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    Attention,
-    ChunkedLocalAttention,
-)
+from vllm.model_executor.layers.attention import Attention, ChunkedLocalAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
@@ -154,8 +151,7 @@ class Llama4MoE(nn.Module):
         router_logits, _ = self.router(hidden_states)
 
         experts_out = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
+            hidden_states=hidden_states, router_logits=router_logits
         )
 
         if self.is_sequence_parallel:
@@ -276,9 +272,7 @@ class Llama4Attention(nn.Module):
         return attn_scale.unsqueeze(-1)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -347,8 +341,7 @@ class Llama4DecoderLayer(nn.Module):
         )
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.feed_forward",
+                vllm_config=vllm_config, prefix=f"{prefix}.feed_forward"
             )
         else:
             self.feed_forward = LlamaMLP(
@@ -780,9 +773,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
             self.num_redundant_experts = example_moe.n_redundant_experts
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -821,9 +812,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         return loader.load_weights(weights)
 
     def permute_qk_weight_for_rotary(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
+        self, name: str, loaded_weight: torch.Tensor
     ) -> tuple[str, torch.Tensor]:
         modules = name.split(".")
         # Permute Q/K weights and corresponding scales for rotary embedding.

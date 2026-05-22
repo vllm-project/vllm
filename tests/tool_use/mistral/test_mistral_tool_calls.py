@@ -47,9 +47,7 @@ class StreamedToolCallResult:
 
 
 async def _collect_streamed_tool_call(
-    stream: openai.AsyncStream,
-    *,
-    expected_finish_reason: str = "tool_calls",
+    stream: openai.AsyncStream, *, expected_finish_reason: str = "tool_calls"
 ) -> StreamedToolCallResult:
     result = StreamedToolCallResult()
 
@@ -210,18 +208,8 @@ _NOT_SET = object()
 @pytest.mark.parametrize(
     "tools, tool_choice, streaming_id_len_pre_v11",
     [
-        pytest.param(
-            [WEATHER_TOOL, SEARCH_TOOL],
-            _NOT_SET,
-            9,
-            id="auto",
-        ),
-        pytest.param(
-            [WEATHER_TOOL],
-            "required",
-            30,
-            id="required",
-        ),
+        pytest.param([WEATHER_TOOL, SEARCH_TOOL], _NOT_SET, 9, id="auto"),
+        pytest.param([WEATHER_TOOL], "required", 30, id="required"),
     ],
 )
 async def test_tool_call_auto_or_required(

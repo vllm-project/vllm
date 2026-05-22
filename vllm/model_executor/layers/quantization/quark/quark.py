@@ -123,9 +123,7 @@ class QuarkConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
 
             scheme = self.get_scheme(
-                layer=layer,
-                layer_name=prefix,
-                dynamic_mxfp4_quant=True,
+                layer=layer, layer_name=prefix, dynamic_mxfp4_quant=True
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -282,9 +280,7 @@ class QuarkConfig(QuantizationConfig):
         return is_per_tensor_activation
 
     def _is_fp8_w8a8(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -313,9 +309,7 @@ class QuarkConfig(QuantizationConfig):
         return is_per_tensor_activation
 
     def _is_static_tensor_w8a8(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -341,9 +335,7 @@ class QuarkConfig(QuantizationConfig):
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
     def _is_w4a8_mxfp4_fp8(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
         if weight_quant is None or input_quant is None:
             return False
@@ -366,9 +358,7 @@ class QuarkConfig(QuantizationConfig):
         return is_weight_mxfp4 and is_input_fp8
 
     def _is_dynamic_per_token_w8a8(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
         """Detect W8A8 INT8 with per-tensor or per-channel
         weights and dynamic per-token input."""
@@ -494,11 +484,7 @@ class QuarkConfig(QuantizationConfig):
 
         # Input and weight dtypes need to be any of fp4,
         # fp6_e3m2 or fp6_e3m2, possibly mixed.
-        if weight_quant.get("dtype") not in {
-            "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
-        }:
+        if weight_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}:
             logger.debug(
                 "Quark model's weight quantization is incompatible with OCP MX format: "
                 "dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
@@ -702,10 +688,7 @@ class QuarkLinearMethod(LinearMethodBase):
         )
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme

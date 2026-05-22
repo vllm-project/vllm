@@ -4,10 +4,7 @@
 import pytest
 
 from tests.models.language.pooling.embed_utils import correctness_test_embed_models
-from tests.models.utils import (
-    EmbedModelInfo,
-    RerankModelInfo,
-)
+from tests.models.utils import EmbedModelInfo, RerankModelInfo
 from vllm.platforms import current_platform
 
 from .mteb_embed_utils import mteb_test_embed_models
@@ -98,9 +95,7 @@ MODELS = [
         enable_test=True,
     ),
     EmbedModelInfo(
-        "Qwen/Qwen3-Embedding-4B",
-        architecture="Qwen3ForCausalLM",
-        enable_test=False,
+        "Qwen/Qwen3-Embedding-4B", architecture="Qwen3ForCausalLM", enable_test=False
     ),
 ]
 

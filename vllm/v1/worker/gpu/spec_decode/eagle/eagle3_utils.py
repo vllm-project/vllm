@@ -12,8 +12,7 @@ logger = init_logger(__name__)
 
 
 def set_eagle3_aux_hidden_state_layers(
-    model: nn.Module,
-    spec_config: SpeculativeConfig,
+    model: nn.Module, spec_config: SpeculativeConfig
 ) -> None:
     if not supports_eagle3(model):
         raise RuntimeError("Model does not support EAGLE3 interface")

@@ -61,9 +61,7 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
         # The standard Qwen3VLProcessor handles both text and image inputs
         # correctly for the Qwen3-VL backbone.
         return self.ctx.get_hf_processor(
-            Qwen3VLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            Qwen3VLProcessor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
     @property
@@ -86,9 +84,7 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
         return limits
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
         result: dict[str, int] = {"image": max_image_tokens}
@@ -187,10 +183,7 @@ class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
         # Build the projection layer if embed_dim is known
         if self.embed_dim is not None:
             self.custom_text_proj = nn.Linear(
-                hidden_size,
-                self.embed_dim,
-                bias=False,
-                dtype=head_dtype,
+                hidden_size, self.embed_dim, bias=False, dtype=head_dtype
             )
         else:
             # Will be created during load_weights when dim is inferred
@@ -198,10 +191,7 @@ class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
-        self.pooler = pooler_for_token_embed(
-            pooler_config,
-            projector=None,
-        )
+        self.pooler = pooler_for_token_embed(pooler_config, projector=None)
 
     def forward(
         self,

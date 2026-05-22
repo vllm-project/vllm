@@ -135,9 +135,7 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -159,18 +157,14 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         self.connector_scheduler.request_finished(request)
         return False, None
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         # HMA-enabled path: same cleanup as the single-group variant since
         # this connector owns no external state per block.
@@ -196,9 +190,7 @@ class DecodeBenchConnectorScheduler:
         self._pending_fills: dict[str, tuple[tuple[list[int], ...], int]] = {}
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         """
         For new requests, return the number of tokens that should be filled
@@ -262,10 +254,7 @@ class DecodeBenchConnectorScheduler:
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
         # as it's cleared after build_connector_meta
-        self._pending_fills[req_id] = (
-            block_ids_per_group,
-            num_external_tokens,
-        )
+        self._pending_fills[req_id] = (block_ids_per_group, num_external_tokens)
         self._filled_requests.add(req_id)
 
         logger.debug(
@@ -326,8 +315,7 @@ class DecodeBenchConnectorWorker:
         self.group_to_layers = {0: list(kv_caches.keys())}
 
         logger.debug(
-            "DecodeBenchConnector: Registered %d KV cache layers",
-            len(kv_caches),
+            "DecodeBenchConnector: Registered %d KV cache layers", len(kv_caches)
         )
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):

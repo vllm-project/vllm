@@ -9,9 +9,7 @@ os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 import torch
 
 from vllm.benchmarks.lib.utils import default_vllm_config
-from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
-)
+from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -84,11 +82,7 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
 
     def run():
         return linear_op.apply(
-            input=A_ref,
-            weight=B,
-            weight_scale=Bs,
-            input_scale=None,
-            bias=None,
+            input=A_ref, weight=B, weight_scale=Bs, input_scale=None, bias=None
         )
 
     return run

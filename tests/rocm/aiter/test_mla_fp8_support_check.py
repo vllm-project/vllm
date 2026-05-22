@@ -30,10 +30,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         # Should return False without raising
-        with patch(
-            "inspect.signature",
-            side_effect=ImportError("No module"),
-        ):
+        with patch("inspect.signature", side_effect=ImportError("No module")):
             result = _check_aiter_mla_fp8_support()
             assert result is False
 
@@ -46,8 +43,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         with patch(
-            "inspect.signature",
-            side_effect=ModuleNotFoundError("Module not found"),
+            "inspect.signature", side_effect=ModuleNotFoundError("Module not found")
         ):
             # Should return False without raising
             assert _check_aiter_mla_fp8_support() is False
@@ -62,10 +58,7 @@ class TestAiterMlaFp8SupportCheck:
 
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
-        with patch(
-            "inspect.signature",
-            side_effect=AttributeError("No attribute"),
-        ):
+        with patch("inspect.signature", side_effect=AttributeError("No attribute")):
             assert _check_aiter_mla_fp8_support() is False
             assert aiter_ops._AITER_MLA_SUPPORTS_FP8 is False
 
@@ -77,10 +70,7 @@ class TestAiterMlaFp8SupportCheck:
 
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
-        with patch(
-            "inspect.signature",
-            side_effect=ValueError("No signature"),
-        ):
+        with patch("inspect.signature", side_effect=ValueError("No signature")):
             assert _check_aiter_mla_fp8_support() is False
             assert aiter_ops._AITER_MLA_SUPPORTS_FP8 is False
 
@@ -92,10 +82,7 @@ class TestAiterMlaFp8SupportCheck:
 
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
-        with patch(
-            "inspect.signature",
-            side_effect=TypeError("Not a callable"),
-        ):
+        with patch("inspect.signature", side_effect=TypeError("Not a callable")):
             assert _check_aiter_mla_fp8_support() is False
             assert aiter_ops._AITER_MLA_SUPPORTS_FP8 is False
 

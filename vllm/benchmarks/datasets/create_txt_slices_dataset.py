@@ -84,12 +84,7 @@ def create_txt_slices_jsonl(
     rng_py = random.Random(seed)
 
     input_lens, output_lens, _ = get_sampling_params(
-        rng_np,
-        num_prompts,
-        range_ratio,
-        input_len,
-        output_len,
-        tokenizer,
+        rng_np, num_prompts, range_ratio, input_len, output_len, tokenizer
     )
 
     num_available_tokens = len(token_ids)
@@ -113,32 +108,22 @@ def create_txt_slices_jsonl(
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    logger.info(
-        "Wrote %d prompts to %s",
-        len(records),
-        output_path,
-    )
+    logger.info("Wrote %d prompts to %s", len(records), output_path)
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Convert a plain-text file into a JSONL dataset "
-        "for CustomDataset (--dataset-name custom).",
+        "for CustomDataset (--dataset-name custom)."
     )
     parser.add_argument(
-        "--input",
-        required=True,
-        help="Path or URL to the source text file.",
+        "--input", required=True, help="Path or URL to the source text file."
     )
     parser.add_argument(
-        "--output",
-        required=True,
-        help="Path for the output JSONL file.",
+        "--output", required=True, help="Path for the output JSONL file."
     )
     parser.add_argument(
-        "--tokenizer",
-        required=True,
-        help="HuggingFace tokenizer name or path.",
+        "--tokenizer", required=True, help="HuggingFace tokenizer name or path."
     )
     parser.add_argument(
         "--num-prompts",

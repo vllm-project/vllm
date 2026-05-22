@@ -27,16 +27,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         return {"is_prefilling": self.is_prefilling[:num_reqs]}
 
     def get_extra_attn_kwargs(
-        self,
-        attn_metadata_builder: Any,
-        num_reqs: int,
+        self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
@@ -110,9 +106,7 @@ class MambaHybridModelState(DefaultModelState):
                     input_batch.num_draft_tokens_per_req > 0
                 ) & ~input_batch.is_prefilling_np
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask,
-                    input_batch.num_draft_tokens_per_req,
-                    -1,
+                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
@@ -139,9 +133,7 @@ class MambaHybridModelState(DefaultModelState):
         )
 
     def postprocess_state(
-        self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
+        self, input_batch: InputBatch, num_sampled: torch.Tensor
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.

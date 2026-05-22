@@ -55,10 +55,7 @@ def x() -> torch.Tensor:
 
 @pytest.mark.parametrize(
     "model_fn,split_ops",
-    [
-        (_to_copy_model, ["aten::_to_copy.default"]),
-        (_empty_model, []),
-    ],
+    [(_to_copy_model, ["aten::_to_copy.default"]), (_empty_model, [])],
     ids=["aten::_to_copy.default", "aten::empty.memory_format"],
 )
 def test_non_primitive_kwargs_lifted_to_consts(

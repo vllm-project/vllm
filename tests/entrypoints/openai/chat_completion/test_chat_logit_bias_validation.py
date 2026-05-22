@@ -12,23 +12,13 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def get_vocab_size(model_name):
-    config = ModelConfig(
-        model=model_name,
-        seed=0,
-        dtype="bfloat16",
-    )
+    config = ModelConfig(model=model_name, seed=0, dtype="bfloat16")
     return config.get_vocab_size()
 
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "1024",
-        "--enforce-eager",
-    ]
+    args = ["--dtype", "bfloat16", "--max-model-len", "1024", "--enforce-eager"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

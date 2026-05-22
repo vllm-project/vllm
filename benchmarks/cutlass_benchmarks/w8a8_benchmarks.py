@@ -32,11 +32,7 @@ def bench_fn(
 ) -> TMeasurement:
     min_run_time = 1
 
-    globals = {
-        "args": args,
-        "kwargs": kwargs,
-        "fn": fn,
-    }
+    globals = {"args": args, "kwargs": kwargs, "fn": fn}
     return TBenchmark.Timer(
         stmt="fn(*args, **kwargs)",
         globals=globals,

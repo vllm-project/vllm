@@ -32,10 +32,7 @@ from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
 
-EMBEDDING_MODULES = {
-    "embed_tokens": "input_embeddings",
-    "lm_head": "output_embeddings",
-}
+EMBEDDING_MODULES = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
 
 DEVICE_TYPE = current_platform.device_type
 DEVICES = (
@@ -55,10 +52,7 @@ def test_from_lora_tensors(qwen3_lora_files, device):
         qwen3_lora_files, max_position_embeddings=4096
     )
     lora_model = LoRAModel.from_lora_tensors(
-        1,
-        tensors,
-        peft_helper=peft_helper,
-        device=device,
+        1, tensors, peft_helper=peft_helper, device=device
     )
     for module_name, lora in lora_model.loras.items():
         assert lora.module_name == module_name
@@ -344,14 +338,8 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
             self.fully_sharded = fully_sharded
 
     manager.modules = {
-        "model.layers.0.self_attn.q_proj": DummyModule(
-            tp_size=32,
-            fully_sharded=True,
-        ),
-        "model.layers.0.mlp.experts": DummyModule(
-            tp_size=32,
-            fully_sharded=True,
-        ),
+        "model.layers.0.self_attn.q_proj": DummyModule(tp_size=32, fully_sharded=True),
+        "model.layers.0.mlp.experts": DummyModule(tp_size=32, fully_sharded=True),
     }
 
     assert manager.get_dummy_lora_warmup_rank(8) == 32

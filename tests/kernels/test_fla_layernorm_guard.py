@@ -107,11 +107,7 @@ SEEDS = [0, 42]
 @pytest.mark.parametrize("is_rms_norm", IS_RMS_NORM)
 @torch.inference_mode()
 def test_layer_norm_fwd_basic(
-    num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    seed: int,
-    is_rms_norm: bool,
+    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, is_rms_norm: bool
 ) -> None:
     """Test basic layer norm forward pass without z (gate) tensor."""
     set_random_seed(seed)
@@ -248,10 +244,7 @@ def test_layer_norm_fwd_with_groups(
 @pytest.mark.parametrize("num_tokens", [7, 63, 128, 513, 1024, 2049])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @torch.inference_mode()
-def test_layer_norm_rows_per_block(
-    num_tokens: int,
-    dtype: torch.dtype,
-) -> None:
+def test_layer_norm_rows_per_block(num_tokens: int, dtype: torch.dtype) -> None:
     """Test that rows_per_block logic works correctly for various M sizes."""
     set_random_seed(42)
     device = torch.device("cuda:0")
@@ -313,9 +306,7 @@ def test_strided_input(dtype: torch.dtype) -> None:
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_output_buffer_provided(
-    num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
+    num_tokens: int, hidden_size: int, dtype: torch.dtype
 ) -> None:
     """Test that the kernel works when an output buffer is provided."""
     set_random_seed(42)
@@ -354,10 +345,7 @@ def test_output_buffer_provided(
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @torch.inference_mode()
-def test_multidimensional_input(
-    shape: tuple,
-    dtype: torch.dtype,
-) -> None:
+def test_multidimensional_input(shape: tuple, dtype: torch.dtype) -> None:
     """Test that the autograd function handles multidimensional inputs."""
     set_random_seed(42)
     device = torch.device("cuda:0")

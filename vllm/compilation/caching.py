@@ -83,21 +83,13 @@ class StandaloneCompiledArtifacts:
             )
 
     def get(self, submod_name: str, shape: str) -> bytes:
-        logger.debug(
-            "getting artifact for submod %s with shape %s",
-            submod_name,
-            shape,
-        )
+        logger.debug("getting artifact for submod %s with shape %s", submod_name, shape)
         return self.submodule_bytes_store[
             self.submodule_bytes[f"{submod_name}_{shape}"]
         ]
 
     def get_loaded(self, submod_name: str, shape: str) -> Any:
-        logger.debug(
-            "getting artifact for submod %s with shape %s",
-            submod_name,
-            shape,
-        )
+        logger.debug("getting artifact for submod %s with shape %s", submod_name, shape)
         return self.loaded_submodule_store[
             self.submodule_bytes[f"{submod_name}_{shape}"]
         ]
@@ -286,11 +278,9 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
 
         if compiled_fn.vllm_backend:
-            (
-                standalone_compile_artifacts,
-                sym_shape_indices_map,
-                returns_tuple_map,
-            ) = compiled_fn.vllm_backend.collect_standalone_compile_artifacts()
+            (standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map) = (
+                compiled_fn.vllm_backend.collect_standalone_compile_artifacts()
+            )
             state["standalone_compile_artifacts"] = standalone_compile_artifacts
             state["sym_shape_indices_map"] = sym_shape_indices_map
             state["returns_tuple_map"] = returns_tuple_map
@@ -474,9 +464,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     dummy_cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "dummy_cache")
     os.makedirs(dummy_cache_dir, exist_ok=True)
     vllm_backend.compiler_manager.initialize_cache(
-        cache_dir=dummy_cache_dir,
-        disable_cache=True,
-        prefix=prefix,
+        cache_dir=dummy_cache_dir, disable_cache=True, prefix=prefix
     )
 
     # spot check that cached submodules exist in the graph structure
@@ -511,17 +499,12 @@ def reconstruct_serializable_fn_from_mega_artifact(
         is_first = i == 0
         is_last = i == len(piecewise_submod_names) - 1
         wrapped_backend = wrap_with_cudagraph_if_needed(
-            piecewise_backend,
-            vllm_config,
-            compilation_config,
-            is_first,
-            is_last,
+            piecewise_backend, vllm_config, compilation_config, is_first, is_last
         )
 
         submod_callables[submod_name] = wrapped_backend
         logger.debug(
-            "Replaced submodule %s with piecewise backend from cache",
-            submod_name,
+            "Replaced submodule %s with piecewise backend from cache", submod_name
         )
 
     # Use codegen'd execution code if available, fall back to split_gm
@@ -555,9 +538,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
         optimized_call = runtime_callable
 
     fn = VllmSerializableFunction(
-        **state,
-        optimized_call=optimized_call,
-        vllm_backend=None,
+        **state, optimized_call=optimized_call, vllm_backend=None
     )
     return fn
 

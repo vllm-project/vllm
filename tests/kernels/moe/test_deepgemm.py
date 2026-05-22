@@ -14,9 +14,7 @@ import torch
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.activation import (
-    MoEActivation,
-)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -41,12 +39,7 @@ from vllm.utils.deep_gemm import (
 BLOCK_SIZE = [128, 128]
 
 
-def make_block_quant_fp8_weights(
-    e: int,
-    n: int,
-    k: int,
-    block_size: list[int],
-):
+def make_block_quant_fp8_weights(e: int, n: int, k: int, block_size: list[int]):
     """
     Generate (w1, w2) expert weights and their per-block scale tensors
     in FP8 block-quantized format.
@@ -108,10 +101,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
     quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        a1_scale=a1_scale,
-        block_shape=block_size,
+        w1_scale=w1_s, w2_scale=w2_s, a1_scale=a1_scale, block_shape=block_size
     )
     moe_config = make_dummy_moe_config()
 
@@ -123,8 +113,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
             use_monolithic=False,
         ),
         fused_experts=TritonOrDeepGemmExperts(
-            moe_config=moe_config,
-            quant_config=quant_config,
+            moe_config=moe_config, quant_config=quant_config
         ),
         inplace=False,
     )
@@ -157,12 +146,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
 
 
 # Note: N <= 512 will disable the deepgemm path due to performance issues.
-MNKs = [
-    (1024, 768, 128),
-    (2048, 768, 512),
-    (512, 1024, 1024),
-    (4096, 4096, 1024),
-]
+MNKs = [(1024, 768, 128), (2048, 768, 512), (512, 1024, 1024), (4096, 4096, 1024)]
 
 TOPKS = [2, 6]
 NUM_EXPERTS = [32]
@@ -193,12 +177,7 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
         run_single_case(
-            m=m,
-            n=n,
-            k=k,
-            topk=topk,
-            num_experts=num_experts,
-            block_size=BLOCK_SIZE,
+            m=m, n=n, k=k, topk=topk, num_experts=num_experts, block_size=BLOCK_SIZE
         )
 
         # ensure that the DeepGEMM path was indeed taken.
@@ -213,11 +192,7 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
 # ---------------------------------------------------------------------------
 
 
-def make_mxfp4_weights(
-    e: int,
-    n: int,
-    k: int,
-):
+def make_mxfp4_weights(e: int, n: int, k: int):
     """
     Generate (w1, w2) expert weights in MXFP4 packed format with float32 scales,
     plus BF16 reference weights for validation.
@@ -293,9 +268,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        GroupShape,
-    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
     from vllm.platforms import current_platform
 
     _fp8_dtype = current_platform.fp8_dtype()
@@ -320,8 +293,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
             use_monolithic=False,
         ),
         fused_experts=DeepGemmFP4Experts(
-            moe_config=moe_config,
-            quant_config=quant_config,
+            moe_config=moe_config, quant_config=quant_config
         ),
         inplace=False,
     )
@@ -385,13 +357,7 @@ def test_deepgemm_fp4_vs_triton(
         if topk > num_experts:
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
-        run_single_fp4_case(
-            m=m,
-            n=n,
-            k=k,
-            topk=topk,
-            num_experts=num_experts,
-        )
+        run_single_fp4_case(m=m, n=n, k=k, topk=topk, num_experts=num_experts)
 
         # ensure that the DeepGEMM FP4 path was indeed taken.
         assert call_counter["cnt"] == 1, (

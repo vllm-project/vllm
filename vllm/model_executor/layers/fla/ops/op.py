@@ -52,11 +52,5 @@ else:
     """
 
     @triton.jit
-    def make_tensor_descriptor(
-        base,
-        shape,
-        strides,
-        block_shape,
-        _builder=None,
-    ):
+    def make_tensor_descriptor(base, shape, strides, block_shape, _builder=None):
         return None

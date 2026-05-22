@@ -183,10 +183,7 @@ class ApplyRotaryEmb(CustomOp):
         return output
 
     def _pre_process(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
         origin_shape = x.shape
         if len(origin_shape) == 3:
@@ -202,10 +199,7 @@ class ApplyRotaryEmb(CustomOp):
         return x, cos, sin, origin_shape, origin_dtype
 
     def _post_process(
-        self,
-        output: torch.Tensor,
-        origin_shape: torch.Size,
-        origin_dtype: torch.dtype,
+        self, output: torch.Tensor, origin_shape: torch.Size, origin_dtype: torch.dtype
     ) -> torch.Tensor:
         if len(origin_shape) == 3:
             output = output.squeeze(0)
@@ -214,10 +208,7 @@ class ApplyRotaryEmb(CustomOp):
         return output
 
     def forward_native(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
         output = self.forward_static(
             x, cos, sin, self.is_neox_style, self.enable_fp32_compute
@@ -225,10 +216,7 @@ class ApplyRotaryEmb(CustomOp):
         return output
 
     def forward_cuda(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
@@ -248,10 +236,7 @@ class ApplyRotaryEmb(CustomOp):
         return output
 
     def forward_hip(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
         if self.apply_rotary_emb_flash_attn is not None:
             x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
@@ -276,10 +261,7 @@ class ApplyRotaryEmb(CustomOp):
         return output
 
     def forward_cpu(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
         # TODO (bigPYJ1151): need to enable fused CPU ROPE here
         return self.forward_native(x, cos, sin)

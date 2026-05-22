@@ -5,19 +5,13 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import (
-    rocm_aiter_ops,
-)
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-)
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -60,10 +54,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return True, None
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         `AiterInt8ScaledMMLinearKernel` implements a fused version of
@@ -252,11 +243,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         w_name, *_ = self.layer_param_names
         w, *_ = self._get_layer_params(layer)
 
-        replace_parameter(
-            layer,
-            w_name,
-            torch.nn.Parameter(w.t(), requires_grad=False),
-        )
+        replace_parameter(layer, w_name, torch.nn.Parameter(w.t(), requires_grad=False))
 
     def apply_scaled_mm(
         self,
@@ -306,11 +293,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         if As.dtype != Bs.dtype:
             from vllm.model_executor.layers.quantization.utils.fp8_utils import (

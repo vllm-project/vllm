@@ -162,9 +162,7 @@ class LoRAModelManager:
             )
 
     def _maybe_init_mm(
-        self,
-        vllm_config: VllmConfig,
-        max_num_batched_tokens: int,
+        self, vllm_config: VllmConfig, max_num_batched_tokens: int
     ) -> None:
         mm_registry = MULTIMODAL_REGISTRY
 
@@ -282,10 +280,7 @@ class LoRAModelManager:
     def adapter_slots(self) -> int:
         return self.lora_slots
 
-    def activate_adapter(
-        self,
-        lora_id: int,
-    ) -> bool:
+    def activate_adapter(self, lora_id: int) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
@@ -315,11 +310,7 @@ class LoRAModelManager:
                 )
                 continue
 
-            module.set_lora(
-                index,
-                module_lora.lora_a,
-                module_lora.lora_b,
-            )
+            module.set_lora(index, module_lora.lora_a, module_lora.lora_b)
             logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
@@ -360,10 +351,7 @@ class LoRAModelManager:
         assert punica_wrapper is not None
 
         punica_wrapper.update_metadata(
-            mapping,
-            self.lora_index_to_id,
-            self.lora_slots + 1,
-            self.vocab_size,
+            mapping, self.lora_index_to_id, self.lora_slots + 1, self.vocab_size
         )
 
     def remove_all_adapters(self):
@@ -523,10 +511,7 @@ class LoRAModelManager:
         return padded
 
     def create_dummy_lora(
-        self,
-        lora_id: int,
-        rank: int,
-        embedding_modules: dict[str, str] | None = None,
+        self, lora_id: int, rank: int, embedding_modules: dict[str, str] | None = None
     ) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
@@ -685,9 +670,7 @@ class LoRAModelManager:
         if not is_supported_lora_module(module_name, self.supported_lora_modules):
             return False
         return is_in_target_modules(
-            module_name,
-            self.lora_config.target_modules,
-            self.packed_modules_mapping,
+            module_name, self.lora_config.target_modules, self.packed_modules_mapping
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
@@ -868,14 +851,8 @@ class LoRAModelManager:
                     2, 0, 1
                 ).contiguous()
 
-                module_lora.lora_a = [
-                    gate_up_proj_lora.lora_a,
-                    down_proj_lora.lora_a,
-                ]
-                module_lora.lora_b = [
-                    gate_up_proj_lora.lora_b,
-                    down_proj_lora.lora_b,
-                ]
+                module_lora.lora_a = [gate_up_proj_lora.lora_a, down_proj_lora.lora_a]
+                module_lora.lora_b = [gate_up_proj_lora.lora_b, down_proj_lora.lora_b]
             else:
                 # Some 3D MoE models haven't added the `is_3d_moe_weight`
                 # attribute yet, so fallback here
@@ -909,10 +886,7 @@ class LoRAModelManager:
                 module_lora.lora_b = lora_b
 
     def _convert_3d_to_2d_moe_lora(
-        self,
-        lora_model: LoRAModel,
-        module: FusedMoEWithLoRA,
-        module_name: str,
+        self, lora_model: LoRAModel, module: FusedMoEWithLoRA, module_name: str
     ) -> None:
         """Convert a 3D-format MoE LoRA checkpoint into the 2D pack layout
         that `FusedMoEWithLoRA.set_lora` expects.
@@ -1002,10 +976,7 @@ class LoRAModelManager:
         lora_model.loras.pop(module_name + ".base_layer", None)
 
     def _slice_moe_lora_ep(
-        self,
-        lora_model: LoRAModel,
-        module: FusedMoEWithLoRA,
-        module_name: str,
+        self, lora_model: LoRAModel, module: FusedMoEWithLoRA, module_name: str
     ) -> None:
         """Slice the cached LoRA tensors down to this rank's local experts.
 
@@ -1205,10 +1176,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             was_added = False
         return was_added
 
-    def activate_adapter(
-        self,
-        lora_id: int,
-    ) -> bool:
+    def activate_adapter(self, lora_id: int) -> bool:
         if (
             lora_id not in self._active_adapters
             and len(self._active_adapters) >= self.lora_slots

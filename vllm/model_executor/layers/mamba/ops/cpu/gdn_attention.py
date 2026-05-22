@@ -58,12 +58,7 @@ def cpu_gdn_attention_core(
 
     if torch.cpu._is_amx_tile_supported():
         return cpu_gdn_attention_core_amx(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            attn_metadata_i,
-            layer,
+            mixed_qkv, b, a, core_attn_out, attn_metadata_i, layer
         )
 
     state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
@@ -114,10 +109,7 @@ def cpu_gdn_attention_core(
         value = value.transpose(0, 1).contiguous()
 
         g, beta_output = gdn_gating(
-            A_log=layer.A_log,
-            a=decode_a,
-            b=decode_b,
-            dt_bias=layer.dt_bias,
+            A_log=layer.A_log, a=decode_a, b=decode_b, dt_bias=layer.dt_bias
         )
         if g.ndim == 2:
             g = g.unsqueeze(1)
@@ -229,12 +221,7 @@ def cpu_gdn_attention_core_amx(
     ssm_state = layer.kv_cache[1]
     # rehape to [num_allocated_slots, num_v_heads / tp_size, k_dim, v_dim]
     num_allocated_slots, head_num, v_dim, k_dim = ssm_state.size()
-    ssm_state = ssm_state.view(
-        num_allocated_slots,
-        head_num,
-        k_dim,
-        v_dim,
-    )
+    ssm_state = ssm_state.view(num_allocated_slots, head_num, k_dim, v_dim)
 
     mixed_qkv = mixed_qkv.contiguous()
     a = a.contiguous()

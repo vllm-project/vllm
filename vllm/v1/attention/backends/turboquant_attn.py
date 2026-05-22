@@ -26,9 +26,7 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.model_executor.layers.quantization.turboquant.centroids import (
-    get_centroids,
-)
+from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -93,10 +91,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     forward_includes_kv_cache_update: bool = False
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "turboquant_k8v4",
         "turboquant_4bit_nc",
@@ -442,15 +437,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             k = key[:N].view(N, self.num_kv_heads, self.head_size)
             v = value[:N].view(N, self.num_kv_heads, self.head_size)
             attn_out = self._prefill_attention(
-                q,
-                k,
-                v,
-                kv_cache,
-                attn_metadata,
-                Pi,
-                centroids,
-                PiT,
-                layer=layer,
+                q, k, v, kv_cache, attn_metadata, Pi, centroids, PiT, layer=layer
             )
         else:
             # Mixed batch: decodes first (guaranteed by reorder_batch).
@@ -745,8 +732,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Shared across all layers — saves 60× memory at long context.
         # Required for CUDA Graph capture (per-layer growth incompatible with CG).
         k_buf, v_buf = current_workspace_manager().get_simultaneous(
-            (buf_shape, torch.float16),
-            (buf_shape, torch.float16),
+            (buf_shape, torch.float16), (buf_shape, torch.float16)
         )
         # Skip .zero_() — kernel writes all positions up to cached_len,
         # and we only read [:cached_len] afterwards.
@@ -843,12 +829,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             k_pos = torch.arange(seq_len, device=device).unsqueeze(0)
             mask = k_pos <= q_pos  # (q_len, seq_len)
             out = F.scaled_dot_product_attention(
-                q_t,
-                k_t,
-                v_t,
-                attn_mask=mask,
-                scale=self.scale,
-                enable_gqa=(Hk < Hq),
+                q_t, k_t, v_t, attn_mask=mask, scale=self.scale, enable_gqa=(Hk < Hq)
             )  # (1, Hq, q_len, D)
             return out[0].transpose(0, 1)  # (q_len, Hq, D)
 

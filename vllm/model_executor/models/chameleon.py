@@ -43,10 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -149,16 +146,10 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _apply_hf_processor_tokens_only(self, prompt_tokens: list[int]) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
@@ -168,9 +159,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         return prompt_tokens + [sep_token_id]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -341,9 +330,7 @@ class ChameleonAttention(nn.Module):
         return q, k
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -404,10 +391,7 @@ class ChameleonDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -461,10 +445,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = hidden_states + residual
@@ -676,9 +657,7 @@ class ChameleonVQVAEEncoder(nn.Module):
             for i_block in range(self.num_res_blocks):
                 block.append(
                     ChameleonVQVAEEncoderResnetBlock(
-                        config=config,
-                        in_channels=block_in,
-                        out_channels=block_out,
+                        config=config, in_channels=block_in, out_channels=block_out
                     )
                 )
                 block_in = block_out
@@ -699,9 +678,7 @@ class ChameleonVQVAEEncoder(nn.Module):
 
         self.mid = nn.Module()
         self.mid.block_1 = ChameleonVQVAEEncoderResnetBlock(
-            config=config,
-            in_channels=block_in,
-            out_channels=block_in,
+            config=config, in_channels=block_in, out_channels=block_in
         )
         self.mid.attn_1 = (
             ChameleonVQVAEEncoderAttnBlock(block_in)
@@ -709,9 +686,7 @@ class ChameleonVQVAEEncoder(nn.Module):
             else nn.Identity()
         )
         self.mid.block_2 = ChameleonVQVAEEncoderResnetBlock(
-            config=config,
-            in_channels=block_in,
-            out_channels=block_in,
+            config=config, in_channels=block_in, out_channels=block_in
         )
 
         self.norm_out = torch.nn.GroupNorm(
@@ -835,10 +810,7 @@ class ChameleonModel(nn.Module):
 
         self.config = config
         self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
         self.vocabulary_mapping = ChameleonImageVocabularyMapping(config.vocabulary_map)
         decoder_layer = (
             ChameleonDecoderLayer
@@ -896,11 +868,7 @@ class ChameleonModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -946,8 +914,7 @@ class ChameleonForConditionalGeneration(
             tower_targets={"image": ChameleonVQVAE},
         ):
             self.model = ChameleonModel(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
         self.lm_head = ParallelLMHead(
@@ -1008,10 +975,7 @@ class ChameleonForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
 
         # Disallow image tokens which does not include special

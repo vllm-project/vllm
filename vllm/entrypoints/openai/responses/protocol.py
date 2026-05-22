@@ -48,12 +48,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import (
-    Field,
-    ValidationError,
-    field_serializer,
-    model_validator,
-)
+from pydantic import Field, ValidationError, field_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -219,8 +214,7 @@ class ResponsesRequest(OpenAIBaseModel):
         ),
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        default=None, description=("Additional kwargs to pass to the HF processor.")
     )
     priority: int = Field(
         default=0,
@@ -257,8 +251,7 @@ class ResponsesRequest(OpenAIBaseModel):
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     structured_outputs: StructuredOutputsParams | None = Field(
-        default=None,
-        description="Additional kwargs for structured outputs",
+        default=None, description="Additional kwargs for structured outputs"
     )
 
     repetition_penalty: float | None = None
@@ -322,16 +315,10 @@ class ResponsesRequest(OpenAIBaseModel):
             max_output_tokens_param="max_output_tokens",
         )
 
-    _DEFAULT_SAMPLING_PARAMS = {
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "top_k": 0,
-    }
+    _DEFAULT_SAMPLING_PARAMS = {"temperature": 1.0, "top_p": 1.0, "top_k": 0}
 
     def to_sampling_params(
-        self,
-        default_max_tokens: int,
-        default_sampling_params: dict | None = None,
+        self, default_max_tokens: int, default_sampling_params: dict | None = None
     ) -> SamplingParams:
         if self.max_output_tokens is None:
             max_tokens = default_max_tokens

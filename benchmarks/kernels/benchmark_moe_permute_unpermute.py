@@ -125,13 +125,7 @@ def benchmark_unpermute(
     )
 
     def prepare():
-        (
-            permuted_hidden_states,
-            _,
-            first_token_off,
-            inv_perm_idx,
-            _,
-        ) = moe_permute(
+        (permuted_hidden_states, _, first_token_off, inv_perm_idx, _) = moe_permute(
             qhidden_states,
             a1q_scale=None,
             topk_ids=topk_ids,
@@ -139,21 +133,13 @@ def benchmark_unpermute(
             expert_map=None,
         )
         # convert to fp16/bf16 as gemm output
-        return (
-            permuted_hidden_states.to(dtype),
-            first_token_off,
-            inv_perm_idx,
-        )
+        return (permuted_hidden_states.to(dtype), first_token_off, inv_perm_idx)
 
     def run(input: tuple):
         (permuted_hidden_states, first_token_off, inv_perm_idx) = input
         output = torch.empty_like(hidden_states)
         moe_unpermute(
-            output,
-            permuted_hidden_states,
-            topk_weights,
-            inv_perm_idx,
-            first_token_off,
+            output, permuted_hidden_states, topk_weights, inv_perm_idx, first_token_off
         )
 
     # JIT compilation & warmup
@@ -320,15 +306,7 @@ def main(args: argparse.Namespace):
     outputs = _distribute(
         "benchmark",
         [
-            (
-                batch_size,
-                E,
-                hidden_size,
-                topk,
-                dtype,
-                use_fp8_w8a8,
-                use_int8_w8a16,
-            )
+            (batch_size, E, hidden_size, topk, dtype, use_fp8_w8a8, use_int8_w8a16)
             for batch_size in batch_sizes
         ],
     )

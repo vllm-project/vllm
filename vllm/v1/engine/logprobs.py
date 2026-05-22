@@ -14,10 +14,7 @@ from vllm.logprobs import (
     create_prompt_logprobs,
     create_sample_logprobs,
 )
-from vllm.tokenizers.detokenizer_utils import (
-    TokenizerLike,
-    convert_ids_list_to_tokens,
-)
+from vllm.tokenizers.detokenizer_utils import TokenizerLike, convert_ids_list_to_tokens
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
@@ -41,9 +38,7 @@ class LogprobsProcessor:
 
     @classmethod
     def from_new_request(
-        cls,
-        tokenizer: TokenizerLike | None,
-        request: EngineCoreRequest,
+        cls, tokenizer: TokenizerLike | None, request: EngineCoreRequest
     ) -> "LogprobsProcessor":
         sampling_params = request.sampling_params
         assert sampling_params is not None
@@ -118,10 +113,7 @@ class LogprobsProcessor:
                 self.num_logprobs,
             )
 
-    def _update_prompt_logprobs(
-        self,
-        prompt_logprobs_tensors: LogprobsTensors,
-    ) -> None:
+    def _update_prompt_logprobs(self, prompt_logprobs_tensors: LogprobsTensors) -> None:
         """Update with prompt logprobs from EngineCore.
 
         Args:
@@ -207,8 +199,7 @@ class LogprobsProcessor:
 
     @staticmethod
     def _get_sampled_context_ids(
-        logprobs_source: SampleLogprobs | PromptLogprobs | None,
-        max_context: int = 4,
+        logprobs_source: SampleLogprobs | PromptLogprobs | None, max_context: int = 4
     ) -> list[int]:
         """Extract recent sampled token IDs from a logprobs source.
 

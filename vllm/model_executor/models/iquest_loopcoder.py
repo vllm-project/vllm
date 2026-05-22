@@ -49,12 +49,7 @@ from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .utils import (
-    AutoWeightsLoader,
-    extract_layer_index,
-    make_layers,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, extract_layer_index, make_layers, maybe_prefix
 
 
 class LoopCoderAttention(nn.Module):
@@ -143,13 +138,11 @@ class LoopCoderAttention(nn.Module):
             else:
                 if base_cache_config is not None:
                     loop_cache_config = replace(
-                        base_cache_config,
-                        sliding_window=self.loop_window_size,
+                        base_cache_config, sliding_window=self.loop_window_size
                     )
                 else:
                     loop_cache_config = CacheConfig(
-                        sliding_window=self.loop_window_size,
-                        cache_dtype="auto",
+                        sliding_window=self.loop_window_size, cache_dtype="auto"
                     )
 
             self.attn.append(
@@ -388,8 +381,7 @@ class IQuestLoopCoderModel(nn.Module):
                 "This model uses sliding window but `max_window_layers` = {} "
                 "is less than `num_hidden_layers` = {}. Please open an issue "
                 "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
+                    config.max_window_layers, config.num_hidden_layers
                 )
             )
 
@@ -580,10 +572,7 @@ class IQuestLoopCoderForCausalLM(nn.Module):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

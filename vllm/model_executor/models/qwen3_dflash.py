@@ -105,9 +105,7 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
+            self.head_dim, max_position=max_position, rope_parameters=rope_parameters
         )
         self.attn = Attention(
             self.num_heads,
@@ -123,9 +121,7 @@ class DFlashQwen3Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         """DFlash attention assumes that the KV cache is already populated
         with the context K/V from the target model's hidden states. This forward op
@@ -203,10 +199,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -216,11 +209,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        start_layer_id: int = 0,
-        prefix: str = "",
+        self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = ""
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -275,13 +264,9 @@ class DFlashQwen3Model(nn.Module):
                 return_bias=False,
             )
         self.hidden_norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
+            self.config.hidden_size, eps=self.config.rms_norm_eps
         )
-        self.norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -396,10 +381,7 @@ class DFlashQwen3Model(nn.Module):
         all_k_normed = torch.empty_like(all_k)
         for i in range(L):
             ops.rms_norm(
-                all_k_normed[i],
-                all_k[i],
-                self._k_norm_weights[i],
-                self._rms_norm_eps,
+                all_k_normed[i], all_k[i], self._k_norm_weights[i], self._rms_norm_eps
             )
 
         # --- Fused RoPE across all layers ---
@@ -428,11 +410,7 @@ class DFlashQwen3Model(nn.Module):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
             attn.impl.do_kv_cache_update(
-                attn,
-                all_k_final[i],
-                all_v[i],
-                kv_cache,
-                context_slot_mapping,
+                attn, all_k_final[i], all_v[i], kv_cache, context_slot_mapping
             )
 
     def forward(
@@ -449,9 +427,7 @@ class DFlashQwen3Model(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -550,10 +526,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model(input_ids, positions, inputs_embeds)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             return logits
@@ -561,8 +534,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
-            (logits.shape[0], self.config.vocab_size),
-            float("-inf"),
+            (logits.shape[0], self.config.vocab_size), float("-inf")
         )
         logits_new[:, targets] = logits
         return logits_new
@@ -578,10 +550,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             context_states, context_positions, context_slot_mapping
         )
 
-    def combine_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if not self.model.use_aux_hidden_state:
             return hidden_states
         needs_squeeze = hidden_states.dim() == 1
@@ -619,10 +588,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs.append("embed_tokens")
         if not self.model.use_aux_hidden_state:
             skip_substrs.append("fc.")
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=None, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()

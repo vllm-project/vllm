@@ -114,17 +114,13 @@ class MiniCPMVImagePixelInputs(TensorSchema):
     # Note that the patch size may vary, so we pass it as a list instead of a
     # batched tensor.
     pixel_values: Annotated[
-        list[torch.Tensor],
-        TensorShape("bns", "c", "h", "w", dynamic_dims={"h", "w"}),
+        list[torch.Tensor], TensorShape("bns", "c", "h", "w", dynamic_dims={"h", "w"})
     ]
     tgt_sizes: Annotated[
         torch.Tensor,
         TensorShape("bns", 2),  # This should be in `(height, width)` format.
     ]
-    num_slices: Annotated[
-        torch.Tensor,
-        TensorShape("bn"),
-    ]
+    num_slices: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 class MiniCPMVImageEmbeddingInputs(TensorSchema):
@@ -189,10 +185,7 @@ class Resampler2_5(BaseResampler):
         assert isinstance(max_h, int) and isinstance(max_w, int)
 
         if max_h > self.max_size[0] or max_w > self.max_size[1]:
-            self.max_size = (
-                max(max_h, self.max_size[0]),
-                max(max_w, self.max_size[1]),
-            )
+            self.max_size = (max(max_h, self.max_size[0]), max(max_w, self.max_size[1]))
             self._set_2d_pos_cache(self.max_size, device)
 
     def forward(self, x: torch.Tensor, tgt_sizes: torch.Tensor) -> torch.Tensor:
@@ -467,8 +460,7 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
         self,
         data: Mapping[str, torch.Tensor],
         fields_factory: Callable[
-            [Mapping[str, torch.Tensor]],
-            Mapping[str, MultiModalFieldConfig],
+            [Mapping[str, torch.Tensor]], Mapping[str, MultiModalFieldConfig]
         ],
     ) -> None:
         super().__init__(
@@ -488,8 +480,7 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
         self,
         data: Mapping[str, torch.Tensor],
         fields_factory: Callable[
-            [Mapping[str, torch.Tensor]],
-            Mapping[str, MultiModalFieldConfig],
+            [Mapping[str, torch.Tensor]], Mapping[str, MultiModalFieldConfig]
         ],
     ) -> None:
         super().__init__(
@@ -509,25 +500,21 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
 
 class MiniCPMVMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return MiniCPMVImageEmbeddingItems(
-                data,
-                fields_factory=_minicpmv_field_config,
+                data, fields_factory=_minicpmv_field_config
             )
 
         return super()._parse_image_data(data)
 
     def _parse_video_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[VideoItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return MiniCPMVVideoEmbeddingItems(
-                data,
-                fields_factory=_minicpmv_field_config,
+                data, fields_factory=_minicpmv_field_config
             )
 
         return super()._parse_video_data(data)
@@ -559,7 +546,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_data_parser(self):
         return MiniCPMVMultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
+            expected_hidden_size=self._get_expected_hidden_size()
         )
 
     def get_model_version(self):
@@ -590,18 +577,14 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             if max_slice_nums is None:
                 max_slice_nums = image_processor.max_slice_nums
             grids = image_processor.get_sliced_grid(
-                image_size,
-                max_slice_nums=max_slice_nums,
+                image_size, max_slice_nums=max_slice_nums
             )
             patch_size = image_processor.patch_size
             scale_resolution = image_processor.scale_resolution
 
             allow_upscale = grids is None
             best_size = image_processor.find_best_resize(
-                image_size,
-                scale_resolution,
-                patch_size,
-                allow_upscale=allow_upscale,
+                image_size, scale_resolution, patch_size, allow_upscale=allow_upscale
             )
             h_patches = best_size[1] // patch_size
             w_patches = best_size[0] // patch_size
@@ -609,11 +592,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
             if grids is not None:
                 refine_size = image_processor.get_refine_size(
-                    image_size,
-                    grids,
-                    scale_resolution,
-                    patch_size,
-                    allow_upscale=True,
+                    image_size, grids, scale_resolution, patch_size, allow_upscale=True
                 )
                 pw = refine_size[0] // grids[0]
                 ph = refine_size[1] // grids[1]
@@ -653,22 +632,16 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             max_slice_nums = image_processor.max_slice_nums
 
         return image_processor.get_sliced_grid(
-            image_size,
-            max_slice_nums=max_slice_nums,
+            image_size, max_slice_nums=max_slice_nums
         )
 
     def get_num_image_tokens(
-        self,
-        image_size: ImageSize,
-        max_slice_nums: int | None = None,
+        self, image_size: ImageSize, max_slice_nums: int | None = None
     ) -> int:
         image_processor = self.get_image_processor()
         version = self.get_model_version()
 
-        grid = self.get_sliced_grid(
-            image_size,
-            max_slice_nums=max_slice_nums,
-        )
+        grid = self.get_sliced_grid(image_size, max_slice_nums=max_slice_nums)
 
         if version == (4, 6):
             patch_size = image_processor.patch_size
@@ -676,10 +649,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
             allow_upscale = grid is None
             best_size = image_processor.find_best_resize(
-                image_size,
-                scale_resolution,
-                patch_size,
-                allow_upscale=allow_upscale,
+                image_size, scale_resolution, patch_size, allow_upscale=allow_upscale
             )
             h_p = best_size[1] // patch_size
             w_p = best_size[0] // patch_size
@@ -689,11 +659,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
                 return source_tokens
 
             refine_size = image_processor.get_refine_size(
-                image_size,
-                grid,
-                scale_resolution,
-                patch_size,
-                allow_upscale=True,
+                image_size, grid, scale_resolution, patch_size, allow_upscale=True
             )
             pw = refine_size[0] // grid[0]
             ph = refine_size[1] // grid[1]
@@ -724,15 +690,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         frame_size = self.get_video_frame_size_with_most_features()
 
         return self.get_num_image_tokens(
-            frame_size,
-            max_slice_nums=self.get_video_max_slice_num(),
+            frame_size, max_slice_nums=self.get_video_max_slice_num()
         )
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
         num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
         num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
         return num_video_tokens_total
@@ -751,9 +712,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -819,10 +778,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
-        return self.info.get_slice_image_placeholder(
-            image_size,
-            image_idx=image_idx,
-        )
+        return self.info.get_slice_image_placeholder(image_size, image_idx=image_idx)
 
     def get_video_prompt_texts(self, image_size: ImageSize, num_frames: int) -> str:
         return (
@@ -953,12 +909,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
         mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs, tok_kwargs)
 
-        return BatchFeature(
-            {
-                "input_ids": input_ids,
-                **mm_inputs,
-            }
-        )
+        return BatchFeature({"input_ids": input_ids, **mm_inputs})
 
     def _hf_processor_applies_updates(
         self,
@@ -999,8 +950,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_size = images.get_image_size(item_idx)
 
             return PromptUpdateDetails.select_text(
-                self.get_image_prompt_texts(image_size, item_idx),
-                "<unk>",
+                self.get_image_prompt_texts(image_size, item_idx), "<unk>"
             )
 
         def get_video_replacement(item_idx: int):
@@ -1012,8 +962,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             num_frames = videos.get_num_frames(item_idx)
 
             return PromptUpdateDetails.select_text(
-                self.get_video_prompt_texts(frame_size, num_frames),
-                "<unk>",
+                self.get_video_prompt_texts(frame_size, num_frames), "<unk>"
             )
 
         get_replacement = {
@@ -1029,13 +978,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
     def _recompute_cached_prompt_update(
-        self,
-        cached_update: ResolvedPromptUpdate,
-        new_item_idx: int,
+        self, cached_update: ResolvedPromptUpdate, new_item_idx: int
     ) -> ResolvedPromptUpdate:
         new_update = super()._recompute_cached_prompt_update(
-            cached_update,
-            new_item_idx,
+            cached_update, new_item_idx
         )
 
         if cached_update.modality == "image":
@@ -1072,9 +1018,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return new_update
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _minicpmv_field_config(hf_inputs)
 
@@ -1145,9 +1089,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self._resampler_moved = True
 
     def _parse_and_validate_vision_input(
-        self,
-        modality: str,
-        **kwargs: object,
+        self, modality: str, **kwargs: object
     ) -> MiniCPMVImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -1157,8 +1099,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         if image_embeds is not None:
             return MiniCPMVImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
+                type="image_embeds", image_embeds=image_embeds
             )
 
         tgt_sizes = kwargs.pop("tgt_sizes")
@@ -1198,8 +1139,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         return modalities
 
     def _process_vision_input(
-        self,
-        image_input: MiniCPMVImageInputs,
+        self, image_input: MiniCPMVImageInputs
     ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"]
@@ -1254,10 +1194,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1274,11 +1211,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             language_model="llm", connector="resampler", tower_model="vpm"
         )
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         raise NotImplementedError
 
     def init_vision_module(
@@ -1309,11 +1242,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 0)
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         return MiniCPMForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
@@ -1395,26 +1324,15 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
 class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 5)
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
@@ -1486,26 +1404,15 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (2, 6)
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         return Qwen2ForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
@@ -1584,26 +1491,15 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 0)
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
@@ -1681,26 +1577,15 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
 
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         assert self.version == (4, 5)
 
-    def init_llm(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
+    def init_llm(self, vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         return Qwen3ForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(

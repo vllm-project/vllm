@@ -32,10 +32,7 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import numa_utils
-from vllm.utils.gc_utils import (
-    freeze_gc_heap,
-    maybe_attach_gc_debug_callback,
-)
+from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
@@ -463,9 +460,7 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
-    def step_with_batch_queue(
-        self,
-    ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
+    def step_with_batch_queue(self) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
 
@@ -767,10 +762,7 @@ class EngineCore:
         return self.model_executor.pin_lora(lora_id)
 
     def save_sharded_state(
-        self,
-        path: str,
-        pattern: str | None = None,
-        max_size: int | None = None,
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.model_executor.save_sharded_state(
             path=path, pattern=pattern, max_size=max_size
@@ -1032,11 +1024,7 @@ class EngineCoreProc(EngineCore):
             yield addresses
 
             # Send ready message.
-            ready_msg = {
-                "status": "READY",
-                "local": local_client,
-                "headless": headless,
-            }
+            ready_msg = {"status": "READY", "local": local_client, "headless": headless}
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
                 ready_msg["parallel_config_hash"] = (
@@ -1055,11 +1043,7 @@ class EngineCoreProc(EngineCore):
         # Send registration message.
         handshake_socket.send(
             msgspec.msgpack.encode(
-                {
-                    "status": "HELLO",
-                    "local": local_client,
-                    "headless": headless,
-                }
+                {"status": "HELLO", "local": local_client, "headless": headless}
             )
         )
 
@@ -1790,10 +1774,7 @@ class DPEngineCoreProc(EngineCoreProc):
             ):
                 self.current_wave = new_wave
                 if not self.engines_running:
-                    logger.debug(
-                        "EngineCore starting idle loop for wave %d.",
-                        new_wave,
-                    )
+                    logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
         else:
             super()._handle_client_request(request_type, request)

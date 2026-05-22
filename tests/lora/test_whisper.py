@@ -44,26 +44,16 @@ def create_whisper_llm(enable_lora: bool = True, max_loras: int = 2):
 
 
 def run_whisper_inference(
-    llm: vllm.LLM,
-    lora_path: str | None = None,
-    lora_id: int = 1,
+    llm: vllm.LLM, lora_path: str | None = None, lora_id: int = 1
 ) -> list[str]:
     """Run Whisper inference with optional LoRA adapter."""
     # Load test audio
     audio_asset = AudioAsset("mary_had_lamb")
     audio_data = audio_asset.audio_and_sample_rate
 
-    inputs = [
-        {
-            "prompt": WHISPER_PROMPT,
-            "multi_modal_data": {"audio": audio_data},
-        }
-    ]
+    inputs = [{"prompt": WHISPER_PROMPT, "multi_modal_data": {"audio": audio_data}}]
 
-    sampling_params = vllm.SamplingParams(
-        temperature=0,
-        max_tokens=200,
-    )
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=200)
 
     # Prepare LoRA request if adapter path is provided
     lora_request = None

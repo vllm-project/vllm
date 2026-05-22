@@ -160,19 +160,7 @@ def correct_attn_out(
     # Kernel launch config
     grid = (B, H, 1)
 
-    regular_args = (
-        out,
-        out,
-        lses,
-        lse,
-        o_sB,
-        o_sH,
-        o_sD,
-        l_sN,
-        l_sB,
-        l_sH,
-        cp_rank,
-    )
+    regular_args = (out, out, lses, lse, o_sB, o_sH, o_sD, l_sN, l_sB, l_sH, cp_rank)
     const_args = {"HEAD_DIM": D, "N_ROUNDED": N, "IS_BASE_E": is_lse_base_on_e}
     ctx.call_kernel(_correct_attn_cp_out_kernel, grid, *regular_args, **const_args)
     return out, lse

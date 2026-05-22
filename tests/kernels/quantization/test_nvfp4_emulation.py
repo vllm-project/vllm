@@ -5,9 +5,7 @@ import pytest
 import torch
 from safetensors import safe_open
 
-from vllm.model_executor.layers.quantization.utils import (
-    nvfp4_emulation_utils,
-)
+from vllm.model_executor.layers.quantization.utils import nvfp4_emulation_utils
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
     ref_nvfp4_quant_dequant,
@@ -17,8 +15,7 @@ from vllm.triton_utils import triton
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Triton NVFP4 kernel requires CUDA.",
+    not current_platform.is_cuda_alike(), reason="Triton NVFP4 kernel requires CUDA."
 )
 def test_triton_dequantize_nvfp4(monkeypatch) -> None:
     """Test the Triton dequantization kernel against the CPU reference
@@ -120,28 +117,16 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
 
         # Triton path
         triton_result = dequantize_to_dtype(
-            fp4_cuda,
-            sf_cuda,
-            gs_cuda,
-            torch.bfloat16,
-            block_size,
-            swizzle=False,
+            fp4_cuda, sf_cuda, gs_cuda, torch.bfloat16, block_size, swizzle=False
         )
 
         # Reference path (PyTorch ops on CUDA, Triton dispatch disabled)
         with monkeypatch.context() as m:
             m.setattr(
-                nvfp4_emulation_utils.current_platform,
-                "is_cuda_alike",
-                lambda: False,
+                nvfp4_emulation_utils.current_platform, "is_cuda_alike", lambda: False
             )
             reference = dequantize_to_dtype(
-                fp4_cuda,
-                sf_cuda,
-                gs_cuda,
-                torch.bfloat16,
-                block_size,
-                swizzle=False,
+                fp4_cuda, sf_cuda, gs_cuda, torch.bfloat16, block_size, swizzle=False
             )
 
         torch.testing.assert_close(triton_result, reference, atol=0, rtol=0)
@@ -207,8 +192,7 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="Triton NVFP4 kernel requires CUDA.",
+    not current_platform.is_cuda_alike(), reason="Triton NVFP4 kernel requires CUDA."
 )
 @pytest.mark.parametrize(
     "m, k",
@@ -258,9 +242,7 @@ def test_triton_nvfp4_quant_dequant(
     # CPU reference path
     with monkeypatch.context() as mp:
         mp.setattr(
-            nvfp4_emulation_utils.current_platform,
-            "is_cuda_alike",
-            lambda: False,
+            nvfp4_emulation_utils.current_platform, "is_cuda_alike", lambda: False
         )
         reference = ref_nvfp4_quant_dequant(x.cpu(), global_scale.cpu(), block_size)
 
@@ -285,9 +267,7 @@ def test_triton_nvfp4_quant_dequant(
     ):
         with monkeypatch.context() as mp2:
             mp2.setattr(
-                nvfp4_emulation_utils.current_platform,
-                "is_cuda_alike",
-                lambda: False,
+                nvfp4_emulation_utils.current_platform, "is_cuda_alike", lambda: False
             )
             ref_nvfp4_quant_dequant(input_tensor, input_global_scale, input_block_size)
 

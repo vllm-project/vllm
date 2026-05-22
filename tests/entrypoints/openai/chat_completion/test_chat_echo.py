@@ -15,11 +15,7 @@ MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 
 
 def get_vocab_size(model_name):
-    config = ModelConfig(
-        model=model_name,
-        seed=0,
-        dtype="float16",
-    )
+    config = ModelConfig(model=model_name, seed=0, dtype="float16")
     return config.get_vocab_size()
 
 
@@ -98,9 +94,7 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI):
     ]
 
     completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        extra_body={"prompt_logprobs": -1},
+        model=MODEL_NAME, messages=messages, extra_body={"prompt_logprobs": -1}
     )
 
     assert completion.prompt_logprobs is not None
@@ -118,10 +112,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=1,
-        extra_body={
-            "top_logprobs": -1,
-            "logprobs": "true",
-        },
+        extra_body={"top_logprobs": -1, "logprobs": "true"},
     )
     assert completion.choices[0].logprobs is not None
     assert completion.choices[0].logprobs.content is not None

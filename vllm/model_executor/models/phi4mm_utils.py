@@ -162,11 +162,7 @@ class GLUPointWiseConv(nn.Module):
         self.bias_in_glu = bias_in_glu
         if causal:
             self.ext_pw_conv_1d = nn.Conv1d(
-                input_dim,
-                output_dim * 2,
-                kernel_size,
-                1,
-                padding=(kernel_size - 1),
+                input_dim, output_dim * 2, kernel_size, 1, padding=(kernel_size - 1)
             )
         else:
             self.ext_pw_conv_1d = nn.Conv1d(
@@ -993,14 +989,8 @@ class CausalConv2D(nn.Conv2d):
             dtype,
         )
 
-    def forward(
-        self,
-        x: Tensor,
-    ) -> Tensor:
-        x = F.pad(
-            x,
-            pad=(self._left_padding, self._right_padding, 0, 0),
-        )
+    def forward(self, x: Tensor) -> Tensor:
+        x = F.pad(x, pad=(self._left_padding, self._right_padding, 0, 0))
         x = super().forward(x)
         return x
 
@@ -1480,8 +1470,7 @@ class NemoConvSubsampling(torch.nn.Module):
 
             # splitting pointwise convs by time
             x = torch.cat(
-                [self.conv[i * 3 + 3](chunk) for chunk in torch.split(x, new_t, 2)],
-                2,
+                [self.conv[i * 3 + 3](chunk) for chunk in torch.split(x, new_t, 2)], 2
             )  # conv2D, pointwise
             x = self.conv[i * 3 + 4](x)  # activation
         return x
@@ -1603,10 +1592,7 @@ class AttBlock(BlockBase, AttModule):
         return (1, self.input_size)
 
 
-def masked_softmax(
-    scores: Tensor,
-    mask: Tensor | None,
-) -> Tensor:
+def masked_softmax(scores: Tensor, mask: Tensor | None) -> Tensor:
     if mask is not None:
         mask = mask.unsqueeze(1).eq(0)  # (batch, 1, time1, time2)
         scores = scores.masked_fill(mask, -torch.inf)
@@ -1757,11 +1743,7 @@ class MultiHeadedAttention(nn.Module):
                 ]
             ):
                 x = torch.nn.functional.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=attn_mask,
-                    dropout_p=self.dropout_rate,
+                    q, k, v, attn_mask=attn_mask, dropout_p=self.dropout_rate
                 )
         else:
             if self.h != self.h_k:
@@ -1861,9 +1843,7 @@ def unfold_tensor(xs_pad: Tensor, max_seq_len: int) -> Tensor:
     xs_pad = xs_pad.transpose(-1, -2)  # convert to N, D, T
     # N x D x 1 x T => N x (D x max_seq_len) x T'
     xs_pad = F.unfold(
-        xs_pad[..., None, :],
-        kernel_size=(1, max_seq_len),
-        stride=(1, max_seq_len),
+        xs_pad[..., None, :], kernel_size=(1, max_seq_len), stride=(1, max_seq_len)
     )
     new_bsz, _, slen = xs_pad.shape
     # N x D x max_seq_len x T'

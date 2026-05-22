@@ -28,8 +28,7 @@ def _ray_init():
     TemporaryActor which drops async method signatures."""
     project_root = str(pathlib.Path(__file__).resolve().parents[2])
     ray.init(
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": project_root}},
+        ignore_reinit_error=True, runtime_env={"env_vars": {"PYTHONPATH": project_root}}
     )
 
 
@@ -128,10 +127,7 @@ def test_multi_replicas(ray_init):
     ray.get(actor2.start.remote(pg2))
 
     out1, out2 = ray.get(
-        [
-            actor1.generate.remote("Hello world"),
-            actor2.generate.remote("Hello world"),
-        ]
+        [actor1.generate.remote("Hello world"), actor2.generate.remote("Hello world")]
     )
     assert len(out1) > 0
     assert len(out2) > 0
@@ -148,10 +144,7 @@ def test_multi_replicas_with_bundle_indices(ray_init):
     ray.get(actor2.start.remote(pg, bundle_indices="0,3"))
 
     out1, out2 = ray.get(
-        [
-            actor1.generate.remote("Hello world"),
-            actor2.generate.remote("Hello world"),
-        ]
+        [actor1.generate.remote("Hello world"), actor2.generate.remote("Hello world")]
     )
     assert len(out1) > 0
     assert len(out2) > 0
@@ -162,10 +155,7 @@ def test_env_var_and_runtime_env_propagation():
     Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
     propagate to RayWorkerProc actors.
     """
-    sentinel_vars = {
-        "NCCL_DEBUG": "INFO",
-        "HF_TOKEN": "test_sentinel_token",
-    }
+    sentinel_vars = {"NCCL_DEBUG": "INFO", "HF_TOKEN": "test_sentinel_token"}
     for k, v in sentinel_vars.items():
         os.environ[k] = v
 
@@ -185,7 +175,7 @@ def test_env_var_and_runtime_env_propagation():
             "env_vars": {
                 "RAY_RUNTIME_ENV_TEST": "ray_runtime_env",
                 "PYTHONPATH": project_root,
-            },
+            }
         }
 
         actor = AsyncLLMActor.remote()

@@ -62,9 +62,7 @@ class RotaryEmbeddingBase(CustomOp):
             self.cos_sin_cache: torch.Tensor
             self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            is_neox_style=self.is_neox_style,
-        )
+        self.apply_rotary_emb = ApplyRotaryEmb(is_neox_style=self.is_neox_style)
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -156,12 +154,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, head_size)
         query_rot = query[..., :rotary_dim]
         query_pass = query[..., rotary_dim:]
-        query_rot = ApplyRotaryEmb.forward_static(
-            query_rot,
-            cos,
-            sin,
-            is_neox_style,
-        )
+        query_rot = ApplyRotaryEmb.forward_static(query_rot, cos, sin, is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         # key may be None in some cases, e.g. cross-layer KV sharing
@@ -170,12 +163,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             key = key.view(num_tokens, -1, head_size)
             key_rot = key[..., :rotary_dim]
             key_pass = key[..., rotary_dim:]
-            key_rot = ApplyRotaryEmb.forward_static(
-                key_rot,
-                cos,
-                sin,
-                is_neox_style,
-            )
+            key_rot = ApplyRotaryEmb.forward_static(key_rot, cos, sin, is_neox_style)
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -221,12 +209,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style,
+            positions, query, key, self.head_size, cos_sin_cache, self.is_neox_style
         )
         return query, key
 
@@ -239,12 +222,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         if self.use_aiter:
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
             self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
+                positions, query, key, self.head_size, cos_sin_cache, self.is_neox_style
             )
             return query, key
         return self.forward_cuda(positions, query, key)
@@ -265,12 +243,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
             ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
+                positions, query, key, self.head_size, cos_sin_cache, self.is_neox_style
             )
         return query, key
 
@@ -287,12 +260,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style,
+            positions, query, key, self.head_size, cos_sin_cache, self.is_neox_style
         )
         return query, key
 

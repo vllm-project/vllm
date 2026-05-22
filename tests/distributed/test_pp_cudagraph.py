@@ -6,24 +6,10 @@ from typing_extensions import LiteralString
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 
-@pytest.mark.parametrize(
-    "PP_SIZE, MODEL_NAME",
-    [
-        (2, "JackFram/llama-160m"),
-    ],
-)
-@pytest.mark.parametrize(
-    "ATTN_BACKEND",
-    [
-        "FLASH_ATTN",
-    ],
-)
+@pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [(2, "JackFram/llama-160m")])
+@pytest.mark.parametrize("ATTN_BACKEND", ["FLASH_ATTN"])
 @create_new_process_for_each_test()
-def test_pp_cudagraph(
-    PP_SIZE: int,
-    MODEL_NAME: str,
-    ATTN_BACKEND: LiteralString,
-):
+def test_pp_cudagraph(PP_SIZE: int, MODEL_NAME: str, ATTN_BACKEND: LiteralString):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

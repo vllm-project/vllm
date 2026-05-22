@@ -14,19 +14,13 @@ import zmq
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.utils.network_utils import (
-    get_ip,
-    get_open_port,
-    make_zmq_socket,
-)
+from vllm.utils.network_utils import get_ip, get_open_port, make_zmq_socket
 
 if TYPE_CHECKING:
     pass
@@ -268,9 +262,7 @@ _PREFILL_ZMQ_RE = re.compile(r"___prefill_addr_(.+?)___decode_addr_")
 _DECODE_ZMQ_RE = re.compile(r"___decode_addr_(.+)_[0-9a-f]{32}(?:-.*)?$")
 
 
-def parse_moriio_zmq_address(
-    zmq_address: str,
-) -> tuple[str, int, int]:
+def parse_moriio_zmq_address(zmq_address: str) -> tuple[str, int, int]:
     """Parse the MoRI-IO zmq address into its components.
 
     Parses ``"host:IP,handshake:PORT,notify:PORT"`` into

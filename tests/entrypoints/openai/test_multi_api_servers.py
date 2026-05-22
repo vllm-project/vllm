@@ -46,10 +46,7 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(
     client: openai.AsyncOpenAI, server: RemoteOpenAIServer, model_name: str
 ) -> None:
@@ -101,10 +98,7 @@ async def test_single_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completion_streaming(
     client: openai.AsyncOpenAI, server: RemoteOpenAIServer, model_name: str
 ) -> None:
@@ -113,10 +107,7 @@ async def test_completion_streaming(
     async def make_streaming_request():
         # Perform a non-streaming request to get the expected full output
         single_completion = await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0
         )
         single_output = single_completion.choices[0].text
 

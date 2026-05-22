@@ -37,9 +37,7 @@ def _pack_int4_along_n(w_int4_kn: torch.Tensor) -> torch.Tensor:
     assert N % 8 == 0
     shifts = torch.arange(8, device=w_int4_kn.device, dtype=torch.int32) * 4
     return torch.sum(
-        (w_int4_kn.view(K, N // 8, 8) & 0xF) << shifts,
-        dim=2,
-        dtype=torch.int32,
+        (w_int4_kn.view(K, N // 8, 8) & 0xF) << shifts, dim=2, dtype=torch.int32
     ).contiguous()
 
 
@@ -143,20 +141,10 @@ def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
         qzeros = _pack_int4_along_n(zeros_int4)
 
     out = triton_w4a16_gemm(
-        a=a,
-        b_q=b_packed,
-        scales=scales,
-        qzeros=qzeros,
-        group_size=G,
-        zp_bias=8,
+        a=a, b_q=b_packed, scales=scales, qzeros=qzeros, group_size=G, zp_bias=8
     )
     ref = _w4a16_reference(
-        a,
-        b_packed,
-        scales,
-        group_size=G,
-        qzeros_gn8=qzeros,
-        zp_bias=8,
+        a, b_packed, scales, group_size=G, qzeros_gn8=qzeros, zp_bias=8
     )
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
@@ -176,12 +164,7 @@ def test_triton_w4a16_gemm_requires_contiguous_inputs():
 
     with pytest.raises(AssertionError):
         triton_w4a16_gemm(
-            a=a,
-            b_q=b_packed,
-            scales=scales,
-            qzeros=None,
-            group_size=G,
-            zp_bias=8,
+            a=a, b_q=b_packed, scales=scales, qzeros=None, group_size=G, zp_bias=8
         )
 
 
@@ -271,10 +254,7 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
     layer.register_parameter(
         "weight_scale",
         GroupQuantScaleParameter(
-            data=scales_ckpt_nkg,
-            weight_loader=weight_loader,
-            input_dim=1,
-            output_dim=0,
+            data=scales_ckpt_nkg, weight_loader=weight_loader, input_dim=1, output_dim=0
         ),
     )
     layer.register_parameter(

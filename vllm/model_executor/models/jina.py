@@ -17,11 +17,7 @@ from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
-from ..layers.pooler.tokwise import (
-    StepPool,
-    TokenPooler,
-    TokenPoolingMethodOutputItem,
-)
+from ..layers.pooler.tokwise import StepPool, TokenPooler, TokenPoolingMethodOutputItem
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
@@ -54,11 +50,7 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
         )
 
         self.pooler = DispatchPooler(
-            {
-                "token_embed": TokenPooler(
-                    pooling=JinaForRankingPool(self.projector),
-                )
-            }
+            {"token_embed": TokenPooler(pooling=JinaForRankingPool(self.projector))}
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -93,9 +85,7 @@ class JinaForRankingPool(StepPool):
         return {"token_embed"}
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
         prompt_token_ids = pooling_metadata.get_prompt_token_ids()
@@ -131,18 +121,14 @@ _SUPPORTED_TASKS = {"retrieval", "text-matching", "classification", "clustering"
 
 
 def _load_adapter(
-    model: str,
-    task: str,
-    revision: str | None,
+    model: str, task: str, revision: str | None
 ) -> tuple[dict, dict[str, torch.Tensor]] | None:
     """Load adapter config and weights from a local path or HF repo.
 
     Returns (adapter_config, adapter_weights) or None if not found.
     """
     config_bytes = get_hf_file_bytes(
-        f"adapters/{task}/adapter_config.json",
-        model,
-        revision,
+        f"adapters/{task}/adapter_config.json", model, revision
     )
     if config_bytes is None:
         return None
@@ -150,9 +136,7 @@ def _load_adapter(
     adapter_config = json.loads(config_bytes)
 
     weights_bytes = get_hf_file_bytes(
-        f"adapters/{task}/adapter_model.safetensors",
-        model,
-        revision,
+        f"adapters/{task}/adapter_model.safetensors", model, revision
     )
     if weights_bytes is None:
         return None
@@ -205,9 +189,7 @@ class JinaEmbeddingsV5Model(Qwen3ForCausalLM, VllmModelForPooling):
         )
         if self._task not in _SUPPORTED_TASKS:
             logger.warning(
-                "Unknown jina_task=%r. Falling back to %r.",
-                self._task,
-                _DEFAULT_TASK,
+                "Unknown jina_task=%r. Falling back to %r.", self._task, _DEFAULT_TASK
             )
             self._task = _DEFAULT_TASK
 

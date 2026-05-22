@@ -6,9 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    init_int8_linear_kernel,
-)
+from vllm.model_executor.kernels.linear import init_int8_linear_kernel
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -49,10 +47,7 @@ class QuarkW8A8Int8(QuarkScheme):
 
         # Quark stores per-channel weight_scale as 1D [N]; reshape to [N, 1].
         def _scale_weight_loader(
-            param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor,
-            *args,
-            **kwargs,
+            param: torch.nn.Parameter, loaded_weight: torch.Tensor, *args, **kwargs
         ):
             if loaded_weight.dim() == 1:
                 loaded_weight = loaded_weight.unsqueeze(-1)

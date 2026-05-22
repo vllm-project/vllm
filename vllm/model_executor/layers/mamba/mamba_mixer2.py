@@ -94,11 +94,7 @@ class Mixer2RMSNormGated(CustomOp):
             "Tensor parallel world size must divide hidden size."
         )
 
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        gate: torch.Tensor,
-    ):
+    def forward_native(self, x: torch.Tensor, gate: torch.Tensor):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
         #      In this case we parallelize along the reduction dim.
@@ -146,9 +142,7 @@ class Mixer2RMSNormGated(CustomOp):
         return self.weight * x.to(input_dtype)
 
     def forward_cuda(
-        self,
-        x: torch.Tensor,
-        gate: torch.Tensor,
+        self, x: torch.Tensor, gate: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
@@ -169,9 +163,7 @@ class Mixer2RMSNormGated(CustomOp):
 
 
 def mamba_v2_sharded_weight_loader(
-    shard_spec: list[tuple[int, int, float]],
-    tp_size: int,
-    tp_rank: int,
+    shard_spec: list[tuple[int, int, float]], tp_size: int, tp_rank: int
 ) -> LoaderFunction:
     """Create a weight loader for mamba v2. This ensures that the projections
     are correctly sharded so that they can be split into x, B, C. It also
@@ -447,10 +439,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
         self.A = nn.Parameter(
-            torch.empty(
-                divide(num_heads, self.tp_size),
-                dtype=torch.float32,
-            )
+            torch.empty(divide(num_heads, self.tp_size), dtype=torch.float32)
         )
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
@@ -528,9 +517,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
+        self, hidden_states: torch.Tensor, mup_vector: torch.Tensor | None = None
     ):
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -539,10 +526,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # 2. Prepare inputs for conv + SSM
         ssm_output = torch.empty(
-            [
-                hidden_states.shape[0],
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
+            [hidden_states.shape[0], (self.num_heads // self.tp_size) * self.head_dim],
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -551,9 +535,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # (split `projected_states` into hidden_states_B_C, dt in the custom op to
         # ensure it is not treated as an intermediate tensor by torch compile)
         torch.ops.vllm.mamba_mixer2(
-            projected_states,
-            ssm_output,
-            _encode_layer_name(self.prefix),
+            projected_states, ssm_output, _encode_layer_name(self.prefix)
         )
 
         # 4. gated MLP
@@ -622,12 +604,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         for use_initial_states in (False, True):
             initial_states = (
                 torch.randn(
-                    batch,
-                    nheads,
-                    headdim,
-                    dstate,
-                    device=device,
-                    dtype=ssm_state_dtype,
+                    batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
                 )
                 if use_initial_states
                 else None
@@ -666,11 +643,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
-    def conv_ssm_forward(
-        self,
-        projected_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def conv_ssm_forward(self, projected_states: torch.Tensor, output: torch.Tensor):
         hidden_states_B_C, dt = torch.split(
             projected_states[..., self.tped_intermediate_size :],
             [self.tped_conv_size, self.tped_dt_size],
@@ -739,9 +712,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dim=0,
         )
         dt_d, dt_p = torch.split(
-            dt[:num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
-            dim=0,
+            dt[:num_actual_tokens], [num_decode_tokens, num_prefill_tokens], dim=0
         )
 
         if is_mamba_cache_all:
@@ -784,9 +755,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-            output[:num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
-            dim=0,
+            output[:num_actual_tokens], [num_decode_tokens, num_prefill_tokens], dim=0
         )
 
         # Process prefill requests
@@ -1072,9 +1041,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
 
 def mamba_mixer2(
-    projected_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
+    projected_states: torch.Tensor, output: torch.Tensor, layer_name: LayerNameType
 ) -> None:
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -1083,9 +1050,7 @@ def mamba_mixer2(
 
 
 def mamba_mixer2_fake(
-    projected_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
+    projected_states: torch.Tensor, output: torch.Tensor, layer_name: LayerNameType
 ) -> None:
     return
 

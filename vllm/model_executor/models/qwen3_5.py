@@ -32,13 +32,9 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-)
+from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3_5RMSNorm,
-)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -59,10 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeTextConfig,
@@ -119,10 +112,7 @@ class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        layer_type: str,
-        prefix: str = "",
+        self, vllm_config: VllmConfig, layer_type: str, prefix: str = ""
     ) -> None:
         super(Qwen3NextDecoderLayer, self).__init__()
 
@@ -156,8 +146,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         # Qwen3.5 use all layers for MLP / Qwen3.5-MoE use sparse MoE blocks
         if config.model_type == "qwen3_5_moe_text":
             self.mlp = Qwen3NextSparseMoeBlock(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.mlp",
+                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
             )
         elif config.model_type == "qwen3_5_text":
             self.mlp = Qwen3NextMLP(
@@ -180,18 +169,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_scale = getattr(config, "layer_scale", False)
         if self.layer_scale:
             self.attn_layer_scale = torch.nn.Parameter(
-                torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
-                ),
+                torch.zeros(1, 1, config.hidden_size)
             )
             self.ffn_layer_scale = torch.nn.Parameter(
-                torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
-                ),
+                torch.zeros(1, 1, config.hidden_size)
             )
 
 
@@ -221,10 +202,7 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         def get_layer(prefix: str):
             return Qwen3_5DecoderLayer(
@@ -431,18 +409,10 @@ class Qwen3_5Model(Qwen3NextModel):
 
 
 class Qwen3_5ForCausalLMBase(
-    nn.Module,
-    HasInnerState,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsPP,
+    nn.Module, HasInnerState, SupportsEagle3, SupportsLoRA, SupportsPP
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -511,17 +481,11 @@ class Qwen3_5ForCausalLMBase(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
         return loader.load_weights(weights)
 
 
@@ -598,9 +562,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.language_model.embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, self.language_model.embed_input_ids, is_multimodal=is_multimodal
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -667,16 +629,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
@@ -718,9 +676,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
 class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts

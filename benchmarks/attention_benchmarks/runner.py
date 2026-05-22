@@ -83,10 +83,7 @@ def log_warnings_and_errors_only():
 
 
 def _build_common_attn_metadata(
-    q_lens: list[int],
-    kv_lens: list[int],
-    block_size: int,
-    device: torch.device,
+    q_lens: list[int], kv_lens: list[int], block_size: int, device: torch.device
 ) -> CommonAttentionMetadata:
     """Build CommonAttentionMetadata from query/kv lengths."""
     batch_size = len(q_lens)
@@ -124,10 +121,7 @@ def _build_common_attn_metadata(
     )
 
 
-def _create_vllm_config(
-    config: BenchmarkConfig,
-    max_num_blocks: int,
-) -> VllmConfig:
+def _create_vllm_config(config: BenchmarkConfig, max_num_blocks: int) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
     model_config = ModelConfig(
         model="meta-llama/Meta-Llama-3-8B",
@@ -139,8 +133,7 @@ def _create_vllm_config(
     )
 
     cache_config = CacheConfig(
-        block_size=config.block_size,
-        cache_dtype=config.kv_cache_dtype,
+        block_size=config.block_size, cache_dtype=config.kv_cache_dtype
     )
     cache_config.num_gpu_blocks = max_num_blocks
     cache_config.num_cpu_blocks = 0
@@ -198,10 +191,7 @@ def _create_vllm_config(
 
 
 def _create_backend_impl(
-    backend_cfg: dict,
-    config: BenchmarkConfig,
-    device: torch.device,
-    dtype: torch.dtype,
+    backend_cfg: dict, config: BenchmarkConfig, device: torch.device, dtype: torch.dtype
 ):
     """Create backend implementation instance."""
     backend_class = backend_cfg["backend_class"]
@@ -537,8 +527,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
 
             attn_metadata = builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_metadata,
+                common_prefix_len=0, common_attn_metadata=common_metadata
             )
 
             # Only quantize queries when the impl supports it

@@ -58,9 +58,7 @@ class BeamSearchOnlineMixin(ABC):
 
         logprobs_num = 2 * beam_width
         sampling_params = SamplingParams(
-            logprobs=logprobs_num,
-            max_tokens=1,
-            temperature=temperature,
+            logprobs=logprobs_num, max_tokens=1, temperature=temperature
         )
         all_beams = [
             BeamSearchSequence(

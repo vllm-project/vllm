@@ -42,10 +42,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -69,18 +66,13 @@ IMAGE_PAD_TOKEN_MAP = {
     "llama": "<|reserved_special_token_0|>",
     "qwen2": "<|image_pad|>",
 }
-IMAGE_PAD_TOKEN_ID_MAP = {
-    "gemma2": 7,
-    "llama": 128002,
-    "qwen2": 151655,
-}
+IMAGE_PAD_TOKEN_ID_MAP = {"gemma2": 7, "llama": 128002, "qwen2": 151655}
 
 
 def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
     index = y_soft.argmax(dim, keepdim=True)
     return torch.zeros_like(
-        y_soft,
-        memory_format=torch.legacy_contiguous_format,
+        y_soft, memory_format=torch.legacy_contiguous_format
     ).scatter_(dim, index, 1.0)
 
 
@@ -129,9 +121,7 @@ class VisualTokenizer(torch.nn.Module):
             )
         elif model_type == "siglip_vision_model":
             return SiglipVisionModel(
-                config=config.backbone_config,
-                quant_config=quant_config,
-                prefix=prefix,
+                config=config.backbone_config, quant_config=quant_config, prefix=prefix
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -207,10 +197,7 @@ class VisualTokenizer(torch.nn.Module):
         # [BatchSize, #Token, 5], after which, tokens' shape should become
         # [BatchSize, #Token, VocabSize]
         tokens = torch.nn.functional.pad(
-            tokens,
-            (0, len(IMAGE_INDICATOR_IDS)),
-            mode="constant",
-            value=0,
+            tokens, (0, len(IMAGE_INDICATOR_IDS)), mode="constant", value=0
         )
         return tokens
 
@@ -320,15 +307,14 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
         return mm_data
 
 
 class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     def image_indicators_to_visual_tokens(
-        self,
-        image_indicators: list[int],
+        self, image_indicators: list[int]
     ) -> list[int]:
         """
         Filter image indicators placeholders and convert them to corresponding
@@ -355,10 +341,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         hf_processor = self.info.get_hf_processor()
@@ -373,16 +356,11 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _apply_hf_processor_tokens_only(self, prompt_tokens: list[int]) -> list[int]:
         return prompt_tokens
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -405,10 +383,8 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 
         return [
             PromptReplacement(
-                modality="image",
-                target=IMAGE_TOKEN,
-                replacement=get_replacement_ovis,
-            ),
+                modality="image", target=IMAGE_TOKEN, replacement=get_replacement_ovis
+            )
         ]
 
 
@@ -548,10 +524,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

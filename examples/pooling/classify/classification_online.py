@@ -38,26 +38,17 @@ def main(args):
         "The future of AI is",
     ]
 
-    payload = {
-        "model": model,
-        "input": prompts,
-    }
+    payload = {"model": model, "input": prompts}
     response = requests.post(classify_url, headers=headers, json=payload)
     pprint.pprint(response.json())
 
     # /classify can accept token ids as input
     token_ids = []
     for prompt in prompts:
-        response = requests.post(
-            tokenize_url,
-            json={"model": model, "prompt": prompt},
-        )
+        response = requests.post(tokenize_url, json={"model": model, "prompt": prompt})
         token_ids.append(response.json()["tokens"])
 
-    payload = {
-        "model": model,
-        "input": token_ids,
-    }
+    payload = {"model": model, "input": token_ids}
     response = requests.post(classify_url, headers=headers, json=payload)
     pprint.pprint(response.json())
 

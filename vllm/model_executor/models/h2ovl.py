@@ -77,9 +77,7 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         use_msac: bool | None = None,
     ) -> int:
         return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-            use_msac=use_msac,
+            image_width=image_width, image_height=image_height, use_msac=use_msac
         )
 
 
@@ -126,15 +124,11 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
             return hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
         return PromptReplacement(
-            modality="image",
-            target="<image>",
-            replacement=get_replacement_internvl,
+            modality="image", target="<image>", replacement=get_replacement_internvl
         )
 
     def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is

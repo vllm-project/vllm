@@ -16,10 +16,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 # --- wait_prefetch op ---
 
 
-def _wait_prefetch_impl(
-    input_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
+def _wait_prefetch_impl(input_tensor: torch.Tensor, layer_idx: int) -> None:
     """Wait for prefetch of layer_idx to complete.
 
     Synchronizes the compute stream with the copy stream to ensure
@@ -33,10 +30,7 @@ def _wait_prefetch_impl(
     get_offloader()._wait_for_layer(layer_idx)
 
 
-def _wait_prefetch_fake(
-    input_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
+def _wait_prefetch_fake(input_tensor: torch.Tensor, layer_idx: int) -> None:
     """Fake implementation for torch.compile tracing."""
     return
 
@@ -44,10 +38,7 @@ def _wait_prefetch_fake(
 # --- start_prefetch op ---
 
 
-def _start_prefetch_impl(
-    output_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
+def _start_prefetch_impl(output_tensor: torch.Tensor, layer_idx: int) -> None:
     """Start async prefetch of layer_idx weights.
 
     Initiates H2D copy on the copy stream for the specified layer.
@@ -61,10 +52,7 @@ def _start_prefetch_impl(
     get_offloader()._start_prefetch(layer_idx)
 
 
-def _start_prefetch_fake(
-    output_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
+def _start_prefetch_fake(output_tensor: torch.Tensor, layer_idx: int) -> None:
     """Fake implementation for torch.compile tracing."""
     return
 

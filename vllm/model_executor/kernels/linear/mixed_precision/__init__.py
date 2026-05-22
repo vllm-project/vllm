@@ -4,12 +4,8 @@
 from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
     AllSparkLinearKernel,
 )
-from vllm.model_executor.kernels.linear.mixed_precision.conch import (
-    ConchLinearKernel,
-)
-from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
-    CPUWNA16LinearKernel,
-)
+from vllm.model_executor.kernels.linear.mixed_precision.conch import ConchLinearKernel
+from vllm.model_executor.kernels.linear.mixed_precision.cpu import CPUWNA16LinearKernel
 from vllm.model_executor.kernels.linear.mixed_precision.cutlass import (
     CutlassW4A8LinearKernel,
 )
@@ -22,9 +18,7 @@ from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
 from vllm.model_executor.kernels.linear.mixed_precision.machete import (
     MacheteLinearKernel,
 )
-from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
-    MarlinLinearKernel,
-)
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import MarlinLinearKernel
 from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
     MPLinearKernel,
     MPLinearLayerConfig,

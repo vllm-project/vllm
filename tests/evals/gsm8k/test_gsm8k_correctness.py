@@ -77,12 +77,7 @@ def test_gsm8k_correctness(config_filename):
     server_args = shlex.split(server_args_str) if server_args_str else []
 
     # Add standard server arguments
-    server_args.extend(
-        [
-            "--trust-remote-code",
-            "--disable-uvicorn-access-log",
-        ]
-    )
+    server_args.extend(["--trust-remote-code", "--disable-uvicorn-access-log"])
 
     env_dict = eval_config.get("env", None)
 

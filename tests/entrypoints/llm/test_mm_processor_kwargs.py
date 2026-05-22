@@ -171,9 +171,7 @@ def test_add_completion_requests_forwards_mm_processor_kwargs() -> None:
 
     assert request_ids == ["req-0"]
     llm._preprocess_cmpl_one.assert_called_once_with(
-        "prompt",
-        None,
-        mm_processor_kwargs=mm_processor_kwargs,
+        "prompt", None, mm_processor_kwargs=mm_processor_kwargs
     )
     assert captured_prompts == [{"prompt_token_ids": [1]}]
 
@@ -196,10 +194,7 @@ def test_preprocess_cmpl_applies_mm_processor_kwargs_to_renderer(
         lambda _model_config, parsed_prompt: parsed_prompt,
     )
 
-    outputs = llm._preprocess_cmpl(
-        [prompt],
-        mm_processor_kwargs=mm_processor_kwargs,
-    )
+    outputs = llm._preprocess_cmpl([prompt], mm_processor_kwargs=mm_processor_kwargs)
 
     assert outputs == ["engine-input"]
     renderer.render_cmpl.assert_called_once_with(
@@ -234,9 +229,7 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
 
     assert outputs == ["engine-input"]
     renderer.render_cmpl.assert_called_once_with(
-        [prompt],
-        "tok-params",
-        prompt_extras=None,
+        [prompt], "tok-params", prompt_extras=None
     )
 
 
@@ -252,10 +245,7 @@ def test_preprocess_chat_applies_mm_processor_kwargs_to_renderer() -> None:
     renderer.render_chat.return_value = (messages, ["engine-input"])
     llm.renderer = renderer
 
-    outputs = llm._preprocess_chat(
-        messages,
-        mm_processor_kwargs=mm_processor_kwargs,
-    )
+    outputs = llm._preprocess_chat(messages, mm_processor_kwargs=mm_processor_kwargs)
 
     assert outputs == ["engine-input"]
     call_args = renderer.render_chat.call_args

@@ -87,14 +87,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
-                group=self.cpu_group,
-                device=self.device,
+                group=self.cpu_group, device=self.device
             )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
-                group=self.cpu_group,
-                device=self.device,
+                group=self.cpu_group, device=self.device
             )
 
         if use_custom_allreduce and self.world_size > 1:
@@ -475,10 +473,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
-            hidden_states,
-            router_logits,
-            is_sequence_parallel,
-            extra_tensors,
+            hidden_states, router_logits, is_sequence_parallel, extra_tensors
         )
 
     def dispatch(
@@ -513,10 +508,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
-        )
+        return self.all2all_manager.combine(hidden_states, is_sequence_parallel)
 
     def batch_isend_irecv(self, p2p_ops: list):
         pynccl_comm = self.pynccl_comm

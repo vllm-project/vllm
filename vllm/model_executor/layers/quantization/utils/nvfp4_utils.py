@@ -3,9 +3,7 @@
 
 import torch
 
-from vllm._custom_ops import (
-    cutlass_scaled_mm_supports_fp4,
-)
+from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -62,8 +60,7 @@ def cutlass_fp4_supported() -> bool:
 
 
 def pad_nvfp4_weight_for_cutlass(
-    weight: torch.Tensor,
-    alignment: int = 32,
+    weight: torch.Tensor, alignment: int = 32
 ) -> tuple[torch.Tensor, int]:
     """
     Pad packed NVFP4 weights so that both N (rows) and K (columns) satisfy
@@ -99,8 +96,7 @@ def pad_nvfp4_weight_for_cutlass(
 
 
 def pad_nvfp4_activation_for_cutlass(
-    x_fp4: torch.Tensor,
-    weights_padding_bytes: int,
+    x_fp4: torch.Tensor, weights_padding_bytes: int
 ) -> torch.Tensor:
     """
     Pad packed FP4 activations to match the K-dimension padding applied to weights.
@@ -111,10 +107,7 @@ def pad_nvfp4_activation_for_cutlass(
     return x_fp4
 
 
-def slice_nvfp4_output(
-    out: torch.Tensor,
-    output_size: int,
-) -> torch.Tensor:
+def slice_nvfp4_output(out: torch.Tensor, output_size: int) -> torch.Tensor:
     """
     Slice the output tensor to remove padding in N dimension if weight was padded.
     """

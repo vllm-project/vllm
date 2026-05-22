@@ -62,8 +62,7 @@ def _make_runner(**overrides: Any) -> Any:
         eplb_config=SimpleNamespace(log_balancedness=True),
     )
     runner.vllm_config = SimpleNamespace(
-        load_config=runner.load_config,
-        model_config=runner.model_config,
+        load_config=runner.load_config, model_config=runner.model_config
     )
     runner.lora_config = None
     runner.use_aux_hidden_state_outputs = False

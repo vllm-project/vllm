@@ -80,11 +80,7 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
         image = image.convert("RGB")
     video_path = f"{tmp_path}/test_RGB_video.{ext}"
     create_video_from_image(
-        image_path,
-        video_path,
-        num_frames=2,
-        is_color=is_color,
-        fourcc=fourcc,
+        image_path, video_path, num_frames=2, is_color=is_color, fourcc=fourcc
     )
 
     frames = video_to_ndarrays(video_path)

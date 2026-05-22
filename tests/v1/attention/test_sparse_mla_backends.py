@@ -266,8 +266,7 @@ def test_sparse_backend_decode_correctness(
     )
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads,
-        model_config,
+        lambda self, parallel_config: num_heads, model_config
     )
     model_config.get_num_kv_heads = MethodType(
         lambda self, parallel_config: 1, model_config
@@ -506,12 +505,7 @@ def test_sparse_backend_decode_correctness(
 
     with torch.inference_mode():
         backend_output = mock_layer.forward_impl(
-            query_vllm,
-            kv_c_vllm,
-            k_pe_vllm,
-            kv_cache,
-            metadata,
-            out_buffer,
+            query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, out_buffer
         )
 
     assert backend_output.shape == sdpa_reference.shape
@@ -625,11 +619,7 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     )
 
     reference_result = _triton_convert_reference_impl(
-        req_id,
-        block_table,
-        token_indices,
-        block_size,
-        num_topk_tokens,
+        req_id, block_table, token_indices, block_size, num_topk_tokens
     )
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
@@ -773,10 +763,7 @@ def test_split_indexer_prefill_chunks(
     seq_lens, query_lens, workspace_size, max_logits_bytes, expected
 ):
     out = split_indexer_prefill_chunks(
-        seq_lens,
-        query_lens,
-        workspace_size,
-        max_logits_bytes,
+        seq_lens, query_lens, workspace_size, max_logits_bytes
     )
     assert out == expected
 

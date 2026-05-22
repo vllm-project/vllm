@@ -32,9 +32,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         super().__init__(*args, **kwargs)
 
         io_processor = get_io_processor(
-            self.vllm_config,
-            self.renderer,
-            self.model_config.io_processor_plugin,
+            self.vllm_config, self.renderer, self.model_config.io_processor_plugin
         )
 
         assert io_processor is not None
@@ -78,13 +76,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             pooling_params.task = "plugin"
         ctx.pooling_params = pooling_params
 
-    def post_process_online(
-        self,
-        ctx: PoolingServeContext,
-    ):
+    def post_process_online(self, ctx: PoolingServeContext):
         output = self.io_processor.post_process(
-            ctx.final_res_batch,
-            request_id=ctx.request_id,
+            ctx.final_res_batch, request_id=ctx.request_id
         )
 
         if callable(
@@ -94,7 +88,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
                 "`IOProcessor.output_to_response` is deprecated. To ensure "
                 "consistency between offline and online APIs, "
                 "`IOProcessorResponse` will become a transparent wrapper "
-                "around output data from v0.19 onwards.",
+                "around output data from v0.19 onwards."
             )
 
             if hasattr(output, "request_id") and output.request_id is None:
@@ -128,10 +122,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
 
         params_seq: list[PoolingParams] = [
             self.io_processor.merge_pooling_params(param)
-            for param in self._params_to_seq(
-                ctx.pooling_params,
-                len(prompts_seq),
-            )
+            for param in self._params_to_seq(ctx.pooling_params, len(prompts_seq))
         ]
         for p in params_seq:
             if p.task is None:
@@ -142,8 +133,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         return super().pre_process_offline(ctx)
 
     def post_process_offline(
-        self,
-        ctx: OfflineOutputsContext,
+        self, ctx: OfflineOutputsContext
     ) -> list[PoolingRequestOutput]:
         processed_outputs = self.io_processor.post_process(ctx.outputs)
 

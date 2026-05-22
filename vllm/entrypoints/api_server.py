@@ -103,8 +103,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 
 async def init_app(
-    args: Namespace,
-    llm_engine: AsyncLLMEngine | None = None,
+    args: Namespace, llm_engine: AsyncLLMEngine | None = None
 ) -> FastAPI:
     app = build_app(args)
 

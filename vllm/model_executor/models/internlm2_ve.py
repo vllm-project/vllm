@@ -71,10 +71,7 @@ class InternLM2VEDecoderLayer(nn.Module):
             hidden_states = self.attention_norm(hidden_states)
         else:
             hidden_states, residual = self.attention_norm(hidden_states, residual)
-        hidden_states = self.attention(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.attention(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
@@ -119,10 +116,7 @@ class InternLM2VEModel(InternLM2Model):
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                visual_token_mask=visual_token_mask,
+                positions, hidden_states, residual, visual_token_mask=visual_token_mask
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

@@ -11,9 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -23,11 +21,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -59,8 +53,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         """Supports only unquantized inputs."""
         return weight_key is None and activation_key is None
@@ -83,9 +76,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         ]
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """Monolithic kernel so only use with naive DP/EP and TP."""
         return (
             not moe_parallel_config.use_all2all_kernels
@@ -94,8 +85,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 

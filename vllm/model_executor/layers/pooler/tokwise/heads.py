@@ -24,9 +24,7 @@ class TokenPoolerHead(nn.Module, ABC):
 
     @abstractmethod
     def forward_chunk(
-        self,
-        pooled_data: TokenPoolingMethodOutputItem,
-        pooling_param: PoolingParams,
+        self, pooled_data: TokenPoolingMethodOutputItem, pooling_param: PoolingParams
     ) -> TokenPoolerHeadOutputItem:
         raise NotImplementedError
 
@@ -58,9 +56,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         return {"token_embed"}
 
     def forward_chunk(
-        self,
-        pooled_data: TokenPoolingMethodOutputItem,
-        pooling_param: PoolingParams,
+        self, pooled_data: TokenPoolingMethodOutputItem, pooling_param: PoolingParams
     ) -> TokenPoolerHeadOutputItem:
         # for unfinished chunked prefill
         if pooled_data is None:
@@ -110,9 +106,7 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         return {"token_classify"}
 
     def forward_chunk(
-        self,
-        pooled_data: TokenPoolingMethodOutputItem,
-        pooling_param: PoolingParams,
+        self, pooled_data: TokenPoolingMethodOutputItem, pooling_param: PoolingParams
     ) -> TokenPoolerHeadOutputItem:
         # for unfinished chunked prefill
         if pooled_data is None:

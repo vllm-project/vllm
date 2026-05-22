@@ -137,19 +137,12 @@ class ConfigSet:
                 count += 1
 
         if count > 0:
-            logger.debug(
-                "Loaded %d configs for kernel '%s'",
-                count,
-                kernel_name,
-            )
+            logger.debug("Loaded %d configs for kernel '%s'", count, kernel_name)
 
         return config_set
 
     def set_config(
-        self,
-        platform: str,
-        config_key: CaseKey,
-        config: helion.Config,
+        self, platform: str, config_key: CaseKey, config: helion.Config
     ) -> None:
         platform = platform.lower()
         if platform not in self._configs:
@@ -270,11 +263,7 @@ class ConfigManager:
                     platform_data = json.load(f)
                 data[platform] = platform_data
             except (json.JSONDecodeError, OSError) as e:
-                logger.error(
-                    "Failed to load config file %s: %s",
-                    platform_file,
-                    e,
-                )
+                logger.error("Failed to load config file %s: %s", platform_file, e)
 
         return ConfigSet.from_dict(kernel_name, data)
 
@@ -305,15 +294,11 @@ class ConfigManager:
         return kernel_dir
 
     def save_configs(
-        self,
-        kernel_name: str,
-        platform: str,
-        configs: dict[CaseKey, helion.Config],
+        self, kernel_name: str, platform: str, configs: dict[CaseKey, helion.Config]
     ) -> Path:
         """Save configs for a kernel/platform, merging with existing."""
         config_set = ConfigSet.from_dict(
-            kernel_name,
-            {platform: self._load_platform_file(kernel_name, platform)},
+            kernel_name, {platform: self._load_platform_file(kernel_name, platform)}
         )
         for key, config in configs.items():
             config_set.set_config(platform, key, config)
@@ -329,10 +314,7 @@ class ConfigManager:
         return platform_path
 
     def config_exists(
-        self,
-        kernel_name: str,
-        platform: str,
-        config_key: CaseKey,
+        self, kernel_name: str, platform: str, config_key: CaseKey
     ) -> bool:
         platform_data = self._load_platform_file(kernel_name, platform)
         if not platform_data:

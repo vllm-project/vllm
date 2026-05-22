@@ -102,11 +102,7 @@ def generate_timeline_plot(
     )
 
     fig.update_yaxes(autorange="reversed")
-    fig.update_layout(
-        xaxis_title="Time",
-        yaxis_title="Request ID",
-        showlegend=True,
-    )
+    fig.update_layout(xaxis_title="Time", yaxis_title="Request ID", showlegend=True)
 
     # Save to HTML
     pio.write_html(fig, str(output_path))
@@ -114,9 +110,7 @@ def generate_timeline_plot(
 
 
 def construct_timeline_data(
-    requests_data: list[dict[str, Any]],
-    itl_thresholds: list[float],
-    labels: list[str],
+    requests_data: list[dict[str, Any]], itl_thresholds: list[float], labels: list[str]
 ) -> list[dict[str, Any]]:
     """
     Construct timeline data from request results.
@@ -226,8 +220,7 @@ def construct_timeline_data(
 
 
 def generate_dataset_stats_plot(
-    results: list[dict[str, Any]],
-    output_path: Path,
+    results: list[dict[str, Any]], output_path: Path
 ) -> None:
     """
     Generate a matplotlib figure with dataset statistics.

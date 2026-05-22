@@ -64,9 +64,7 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     k: kwargs[k] for k in ("truncation", "max_length") if k in kwargs
                 }
                 return self.encode(
-                    prompt_str,
-                    add_special_tokens=False,
-                    **tokenizer_kwargs,
+                    prompt_str, add_special_tokens=False, **tokenizer_kwargs
                 )
 
             return prompt_str

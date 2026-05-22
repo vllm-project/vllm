@@ -27,10 +27,7 @@ def test_sanitize_message():
             StreamOptions(include_usage=False, continuous_usage_stats=False),
             (True, True),
         ),
-        (
-            StreamOptions(include_usage=True, continuous_usage_stats=False),
-            (True, True),
-        ),
+        (StreamOptions(include_usage=True, continuous_usage_stats=False), (True, True)),
     ],
 )
 def test_should_include_usage_force_enables_continuous_usage(stream_options, expected):

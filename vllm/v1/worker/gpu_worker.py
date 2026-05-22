@@ -31,11 +31,7 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.parallel_state import (
-    Handle,
-    get_pp_group,
-    get_tp_group,
-)
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -50,11 +46,7 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (
-    AsyncModelRunnerOutput,
-    DraftTokenIds,
-    ModelRunnerOutput,
-)
+from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -386,8 +378,7 @@ class Worker(WorkerBase):
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
+            self.init_snapshot, weights_memory=int(self.model_runner.model_memory_usage)
         ) as profile_result:
             self.model_runner.profile_run()
 
@@ -470,10 +461,7 @@ class Worker(WorkerBase):
             cg_util_delta = cudagraph_memory_estimate / total_mem
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - cg_util_delta, 4)
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
+                suggested_util = min(round(current_util + cg_util_delta, 4), 1.0)
                 logger.info(
                     "CUDA graph memory profiling is enabled (default since "
                     "v0.21.0). The current --gpu-memory-utilization=%.4f is "
@@ -487,10 +475,7 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
             else:
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
+                suggested_util = min(round(current_util + cg_util_delta, 4), 1.0)
                 logger.warning(
                     "CUDA graph memory profiling is disabled "
                     "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
@@ -798,8 +783,7 @@ class Worker(WorkerBase):
             # currently only supported by V1 GPUModelRunner
             assert not self.use_v2_model_runner
             num_scheduled_tokens_np = np.array(
-                list(scheduler_output.num_scheduled_tokens.values()),
-                dtype=np.int32,
+                list(scheduler_output.num_scheduled_tokens.values()), dtype=np.int32
             )
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
@@ -941,18 +925,12 @@ class Worker(WorkerBase):
         return
 
     def save_sharded_state(
-        self,
-        path: str,
-        pattern: str | None = None,
-        max_size: int | None = None,
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         from vllm.model_executor.model_loader import ShardedStateLoader
 
         ShardedStateLoader.save_model(
-            self.model_runner.model,
-            path,
-            pattern=pattern,
-            max_size=max_size,
+            self.model_runner.model, path, pattern=pattern, max_size=max_size
         )
 
     def save_tensorized_model(self, tensorizer_config: "TensorizerConfig") -> None:
@@ -1043,8 +1021,7 @@ class Worker(WorkerBase):
         with torch.device(self.device):
             if self._is_checkpoint_format:
                 self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
+                    typed_update_info, load_weights=model.load_weights
                 )
             else:
                 # Weights are already in kernel format, copy directly
@@ -1056,8 +1033,7 @@ class Worker(WorkerBase):
                         param.copy_(weight)
 
                 self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=load_weights_direct,
+                    typed_update_info, load_weights=load_weights_direct
                 )
 
         # NCCL broadcast/packed path are asynchronous.
@@ -1134,12 +1110,7 @@ def init_worker_distributed_environment(
         timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
 
     init_distributed_environment(
-        parallel_config.world_size,
-        rank,
-        init_method,
-        local_rank,
-        backend,
-        timeout,
+        parallel_config.world_size, rank, init_method, local_rank, backend, timeout
     )
 
     ensure_model_parallel_initialized(

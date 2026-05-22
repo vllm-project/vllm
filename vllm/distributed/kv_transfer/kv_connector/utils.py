@@ -146,10 +146,7 @@ class KVOutputAggregator:
                 # Use the first worker's kv_cache events as start event list.
                 combined_kv_cache_events = kv_output.kv_cache_events
             elif kv_cache_events := kv_output.kv_cache_events:
-                assert isinstance(
-                    combined_kv_cache_events,
-                    type(kv_cache_events),
-                )
+                assert isinstance(combined_kv_cache_events, type(kv_cache_events))
                 worker_kv_cache_events = kv_cache_events.get_all_events()
                 combined_kv_cache_events.add_events(worker_kv_cache_events)
                 combined_kv_cache_events.increment_workers(1)
@@ -414,10 +411,7 @@ class TransferTopology:
         if not self.is_mamba:
             _MOCK_BLOCK_SIZE = 16
             kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1,
-                block_size=_MOCK_BLOCK_SIZE,
-                num_kv_heads=1,
-                head_size=1,
+                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
@@ -451,9 +445,7 @@ class TransferTopology:
     # ============================================================
 
     def register_remote_engine(
-        self,
-        remote_engine_id: EngineId,
-        info: EngineTransferInfo,
+        self, remote_engine_id: EngineId, info: EngineTransferInfo
     ) -> EngineTransferInfo:
         """Register a remote engine, unifying worker dicts state.
 

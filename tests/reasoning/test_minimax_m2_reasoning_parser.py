@@ -76,12 +76,7 @@ SHORTEST_REASONING_STREAMING = {
 }
 
 # Case: empty output
-EMPTY = {
-    "output": "",
-    "reasoning": "",
-    "content": None,
-    "is_reasoning_end": False,
-}
+EMPTY = {"output": "", "reasoning": "", "content": None, "is_reasoning_end": False}
 
 # Case: empty streaming
 EMPTY_STREAMING = {
@@ -109,95 +104,27 @@ CODE_IN_REASONING = {
 
 TEST_CASES = [
     # Core cases: no start token (MiniMax M2 actual behavior)
-    pytest.param(
-        False,
-        SIMPLE_REASONING,
-        id="simple_reasoning",
-    ),
-    pytest.param(
-        True,
-        SIMPLE_REASONING,
-        id="simple_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        NO_END_TOKEN,
-        id="no_end_token",
-    ),
-    pytest.param(
-        True,
-        NO_END_TOKEN,
-        id="no_end_token_streaming",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
-    ),
-    pytest.param(
-        True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
-    ),
-    pytest.param(
-        False,
-        SHORTEST_REASONING_NO_STREAMING,
-        id="shortest_reasoning",
-    ),
-    pytest.param(
-        True,
-        SHORTEST_REASONING_STREAMING,
-        id="shortest_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        EMPTY,
-        id="empty",
-    ),
-    pytest.param(
-        True,
-        EMPTY_STREAMING,
-        id="empty_streaming",
-    ),
-    pytest.param(
-        False,
-        SPECIAL_CHARS,
-        id="special_chars",
-    ),
-    pytest.param(
-        True,
-        SPECIAL_CHARS,
-        id="special_chars_streaming",
-    ),
-    pytest.param(
-        False,
-        CODE_IN_REASONING,
-        id="code_in_reasoning",
-    ),
-    pytest.param(
-        True,
-        CODE_IN_REASONING,
-        id="code_in_reasoning_streaming",
-    ),
+    pytest.param(False, SIMPLE_REASONING, id="simple_reasoning"),
+    pytest.param(True, SIMPLE_REASONING, id="simple_reasoning_streaming"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_streaming"),
+    pytest.param(False, NO_END_TOKEN, id="no_end_token"),
+    pytest.param(True, NO_END_TOKEN, id="no_end_token_streaming"),
+    pytest.param(False, MULTIPLE_LINES, id="multiple_lines"),
+    pytest.param(True, MULTIPLE_LINES, id="multiple_lines_streaming"),
+    pytest.param(False, SHORTEST_REASONING_NO_STREAMING, id="shortest_reasoning"),
+    pytest.param(True, SHORTEST_REASONING_STREAMING, id="shortest_reasoning_streaming"),
+    pytest.param(False, EMPTY, id="empty"),
+    pytest.param(True, EMPTY_STREAMING, id="empty_streaming"),
+    pytest.param(False, SPECIAL_CHARS, id="special_chars"),
+    pytest.param(True, SPECIAL_CHARS, id="special_chars_streaming"),
+    pytest.param(False, CODE_IN_REASONING, id="code_in_reasoning"),
+    pytest.param(True, CODE_IN_REASONING, id="code_in_reasoning_streaming"),
 ]
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    minimax_m2_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, minimax_m2_tokenizer):
     output = minimax_m2_tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [

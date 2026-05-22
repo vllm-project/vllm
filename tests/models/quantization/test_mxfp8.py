@@ -39,10 +39,7 @@ NUM_LOG_PROBS = 8
 @pytest.mark.quant_model
 @pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
 def test_mxfp8_logprobs(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner, example_prompts, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Compare BF16 baseline logprobs against online MXFP8-quantized model.
 
@@ -55,19 +52,14 @@ def test_mxfp8_logprobs(
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 
         with vllm_runner(
-            model,
-            max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
+            model, max_model_len=MAX_MODEL_LEN, enforce_eager=True
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, MAX_TOKENS, NUM_LOG_PROBS
             )
 
         with vllm_runner(
-            model,
-            max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
-            quantization="mxfp8",
+            model, max_model_len=MAX_MODEL_LEN, enforce_eager=True, quantization="mxfp8"
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, MAX_TOKENS, NUM_LOG_PROBS
@@ -91,10 +83,7 @@ def test_mxfp8_generation(vllm_runner, model: str) -> None:
     """Smoke test: verify online MXFP8 model generates coherent text."""
     prompt = "1 2 3 4 5"
     with vllm_runner(
-        model,
-        enforce_eager=True,
-        quantization="mxfp8",
-        max_model_len=MAX_MODEL_LEN,
+        model, enforce_eager=True, quantization="mxfp8", max_model_len=MAX_MODEL_LEN
     ) as vllm_model:
         output = vllm_model.generate_greedy([prompt], max_tokens=5)
 

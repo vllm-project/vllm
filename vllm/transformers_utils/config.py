@@ -34,12 +34,7 @@ from vllm.transformers_utils.utils import (
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
-from .gguf_utils import (
-    check_gguf_file,
-    is_gguf,
-    is_remote_gguf,
-    split_remote_gguf,
-)
+from .gguf_utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 from .repo_utils import (
     file_or_path_exists,
     get_hf_file_to_dict,
@@ -138,9 +133,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
-_CONFIG_ATTRS_MAPPING: dict[str, str] = {
-    "llm_config": "text_config",
-}
+_CONFIG_ATTRS_MAPPING: dict[str, str] = {"llm_config": "text_config"}
 
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
@@ -183,10 +176,7 @@ class HFConfigParser(ConfigParserBase):
         trust_remote_code |= kwargs.get("trust_remote_code", False)
         kwargs = without_trust_remote_code(kwargs)
         config_dict, _ = PretrainedConfig.get_config_dict(
-            model,
-            revision=revision,
-            code_revision=code_revision,
-            **kwargs,
+            model, revision=revision, code_revision=code_revision, **kwargs
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
@@ -328,11 +318,7 @@ _CONFIG_FORMAT_TO_CONFIG_PARSER: dict[str, type[ConfigParserBase]] = {
     "mistral": MistralConfigParser,
 }
 
-ConfigFormat = Literal[
-    "auto",
-    "hf",
-    "mistral",
-]
+ConfigFormat = Literal["auto", "hf", "mistral"]
 
 
 def get_config_parser(config_format: str) -> ConfigParserBase:
@@ -840,8 +826,7 @@ def get_config(
 
 @cache
 def get_pooling_config(
-    model: str,
-    revision: str | None = "main",
+    model: str, revision: str | None = "main"
 ) -> dict[str, Any] | None:
     """
     This function gets the pooling and normalize
@@ -1118,9 +1103,7 @@ def try_get_generation_config(
 
     try:
         return GenerationConfig.from_pretrained(
-            model,
-            revision=revision,
-            token=hf_token,
+            model, revision=revision, token=hf_token
         )
     except OSError:  # Not found
         try:
@@ -1136,11 +1119,7 @@ def try_get_generation_config(
             return None
 
 
-def try_get_safetensors_metadata(
-    model: str,
-    *,
-    revision: str | None = None,
-):
+def try_get_safetensors_metadata(model: str, *, revision: str | None = None):
     get_safetensors_metadata_partial = partial(
         get_safetensors_metadata, model, revision=revision
     )
@@ -1170,8 +1149,7 @@ def try_get_tokenizer_config(
 
 @cache
 def try_get_dense_modules(
-    model: str | Path,
-    revision: str | None = None,
+    model: str | Path, revision: str | None = None
 ) -> list[dict[str, Any]] | None:
     try:
         modules = get_hf_file_to_dict("modules.json", model, revision)
@@ -1214,9 +1192,7 @@ def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
 
 
 def get_safetensors_params_metadata(
-    model: str,
-    *,
-    revision: str | None = None,
+    model: str, *, revision: str | None = None
 ) -> dict[str, Any]:
     """
     Get the safetensors parameters metadata for remote/local model repository.

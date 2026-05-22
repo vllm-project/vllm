@@ -107,10 +107,7 @@ class TestSiluMulFp8ConfigPicker:
         args = (input_tensor, scale)
 
         selected_key = pick_silu_mul_fp8_config(args, config_keys)
-        assert selected_key == {
-            "intermediate": intermediate_size,
-            "numtokens": 256,
-        }
+        assert selected_key == {"intermediate": intermediate_size, "numtokens": 256}
 
     def test_config_picker_numtokens_ceiling(self):
         config_keys = [

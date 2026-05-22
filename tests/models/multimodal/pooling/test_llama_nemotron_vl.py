@@ -91,8 +91,7 @@ def _run_test(
                     if image is not None:
                         # Image document - pass image to encode_documents
                         embedding = hf_model.model.encode_documents(
-                            images=[image],
-                            texts=[passage_text],
+                            images=[image], texts=[passage_text]
                         )
                     else:
                         # Text-only document
@@ -117,11 +116,7 @@ def _run_test(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, image_assets, model: str, dtype: str
 ) -> None:
     """Test text-only embedding."""
     input_texts_images = [(text, None) for text in HF_TEXT_PROMPTS]
@@ -141,11 +136,7 @@ def test_models_text(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_image(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, image_assets, model: str, dtype: str
 ) -> None:
     """Test image embedding."""
     input_texts_images = [
@@ -154,14 +145,7 @@ def test_models_image(
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
 
-    _run_test(
-        hf_runner,
-        vllm_runner,
-        input_texts,
-        input_images,
-        model,
-        dtype=dtype,
-    )
+    _run_test(hf_runner, vllm_runner, input_texts, input_images, model, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +181,7 @@ def _pil_to_data_uri(image) -> str:
 
 
 def _run_hf_reranker(
-    hf_runner: type[HfRunner],
-    model: str,
-    dtype: str,
-    query: str,
-    docs: list,
+    hf_runner: type[HfRunner], model: str, dtype: str, query: str, docs: list
 ) -> list[float]:
     """Run HF reranker inference; docs is a list of (doc_text, doc_image|None)."""
     with hf_runner(
@@ -239,11 +219,7 @@ def _run_hf_reranker(
 
 
 def _run_vllm_reranker(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    dtype: str,
-    query: str,
-    docs: list,
+    vllm_runner: type[VllmRunner], model: str, dtype: str, query: str, docs: list
 ) -> list[float]:
     """Run vLLM reranker inference; docs is a list of (doc_text, doc_image|None)."""
     with vllm_runner(
@@ -262,19 +238,14 @@ def _run_vllm_reranker(
             queries = [query] * len(docs)
             doc_texts = [doc_text for doc_text, _ in docs]
             outputs = vllm_model.score(
-                queries,
-                doc_texts,
-                chat_template=_RERANKER_SCORE_TEMPLATE,
+                queries, doc_texts, chat_template=_RERANKER_SCORE_TEMPLATE
             )
         else:
             # Multimodal path: build ScoreMultiModalParam for each pair.
             query_params = [
                 ScoreMultiModalParam(
                     content=[
-                        ChatCompletionContentPartTextParam(
-                            type="text",
-                            text=query,
-                        )
+                        ChatCompletionContentPartTextParam(type="text", text=query)
                     ]
                 )
             ] * len(docs)
@@ -291,17 +262,12 @@ def _run_vllm_reranker(
                     )
                 if doc_text:
                     content.append(
-                        ChatCompletionContentPartTextParam(
-                            type="text",
-                            text=doc_text,
-                        )
+                        ChatCompletionContentPartTextParam(type="text", text=doc_text)
                     )
                 doc_params.append(ScoreMultiModalParam(content=content))
 
             raw_outputs = vllm_model.llm.score(
-                query_params,
-                doc_params,
-                chat_template=_RERANKER_SCORE_TEMPLATE,
+                query_params, doc_params, chat_template=_RERANKER_SCORE_TEMPLATE
             )
             outputs = [o.outputs.score for o in raw_outputs]
 
@@ -337,12 +303,7 @@ def _run_reranker_test(
 
 @pytest.mark.parametrize("model", RERANKER_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-def test_reranker_text(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_reranker_text(hf_runner, vllm_runner, model: str, dtype: str) -> None:
     """Test reranking with text-only query and text documents."""
     docs = [(text, None) for text in RERANKER_TEXT_DOCS]
     _run_reranker_test(hf_runner, vllm_runner, model, dtype, RERANKER_TEXT_QUERY, docs)
@@ -351,11 +312,7 @@ def test_reranker_text(
 @pytest.mark.parametrize("model", RERANKER_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_reranker_image_doc(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, image_assets, model: str, dtype: str
 ) -> None:
     """Test reranking with text query against image documents."""
     docs = [(None, asset.pil_image) for asset in image_assets]

@@ -109,10 +109,7 @@ def create_mock_vllm_config(
 def test_base_config_parser():
     """Test BaseConfigParser extracts base model attributes correctly."""
     hf_config = Qwen3Config(
-        vocab_size=50000,
-        hidden_size=2048,
-        num_attention_heads=16,
-        num_hidden_layers=24,
+        vocab_size=50000, hidden_size=2048, num_attention_heads=16, num_hidden_layers=24
     )
     vllm_config = create_mock_vllm_config(hf_config, model_dtype="float16")
 
@@ -167,9 +164,7 @@ def test_base_attention_config_parser_without_gqa():
 def test_base_ffn_config_parser_dense():
     """Test BaseFfnConfigParser for dense FFN."""
     hf_config = Qwen3Config(
-        hidden_size=4096,
-        intermediate_size=11008,
-        num_hidden_layers=32,
+        hidden_size=4096, intermediate_size=11008, num_hidden_layers=32
     )
     vllm_config = create_mock_vllm_config(hf_config)
 
@@ -212,7 +207,7 @@ def test_interleave_moe_layer_step_parser():
             num_hidden_layers=32,
             num_local_experts=64,
             interleave_moe_layer_step=4,  # Every 4th layer is MoE
-        ),
+        )
     )
 
     vllm_config = create_mock_vllm_config(hf_config)
@@ -324,9 +319,7 @@ def test_attention_metrics_grouped_query():
 def test_ffn_metrics_scaling():
     """Test FFN metrics scale proportionally with model dimensions."""
     base_hf_config = Qwen3Config(
-        hidden_size=2048,
-        intermediate_size=8192,
-        num_hidden_layers=12,
+        hidden_size=2048, intermediate_size=8192, num_hidden_layers=12
     )
     base_vllm_config = create_mock_vllm_config(base_hf_config)
     base_metrics = FfnMetrics.from_vllm_config(base_vllm_config)
@@ -353,9 +346,7 @@ def test_ffn_metrics_scaling():
 def test_moe_metrics_vs_dense():
     """Test MoE metrics versus dense metrics."""
     dense_hf_config = Qwen3Config(
-        hidden_size=2048,
-        intermediate_size=8192,
-        num_hidden_layers=12,
+        hidden_size=2048, intermediate_size=8192, num_hidden_layers=12
     )
     dense_config = create_mock_vllm_config(dense_hf_config)
 
@@ -387,10 +378,7 @@ def test_moe_metrics_vs_dense():
 
 def test_unembed_metrics_scaling():
     """Test unembedding metrics scale with vocab size."""
-    small_vocab_hf_config = Qwen3Config(
-        hidden_size=2048,
-        vocab_size=32000,
-    )
+    small_vocab_hf_config = Qwen3Config(hidden_size=2048, vocab_size=32000)
     small_vocab_config = create_mock_vllm_config(small_vocab_hf_config)
 
     large_vocab_hf_config = Qwen3Config(
@@ -616,9 +604,7 @@ def test_attention_per_gpu_with_tensor_parallelism():
 def test_attention_per_gpu_with_pipeline_parallelism():
     """Test attention metrics with pipeline parallelism - per_gpu vs global."""
     hf_config = Qwen3Config(
-        hidden_size=2048,
-        num_attention_heads=16,
-        num_hidden_layers=32,
+        hidden_size=2048, num_attention_heads=16, num_hidden_layers=32
     )
 
     # Test with PP=4
@@ -644,16 +630,12 @@ def test_attention_per_gpu_with_pipeline_parallelism():
 def test_ffn_per_gpu_with_tensor_parallelism():
     """Test FFN metrics with tensor parallelism - per_gpu vs global."""
     hf_config = Qwen3Config(
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=32,
+        hidden_size=4096, intermediate_size=14336, num_hidden_layers=32
     )
 
     # Test with DP=2, TP=4 (ffn_tp_size will be 8)
     vllm_config = create_mock_vllm_config(
-        hf_config,
-        data_parallel_size=2,
-        tensor_parallel_size=4,
+        hf_config, data_parallel_size=2, tensor_parallel_size=4
     )
     metrics = FfnMetrics.from_vllm_config(vllm_config)
 
@@ -675,9 +657,7 @@ def test_ffn_per_gpu_with_tensor_parallelism():
 def test_ffn_per_gpu_with_pipeline_parallelism():
     """Test FFN metrics with pipeline parallelism - per_gpu vs global."""
     hf_config = Qwen3Config(
-        hidden_size=2048,
-        intermediate_size=8192,
-        num_hidden_layers=24,
+        hidden_size=2048, intermediate_size=8192, num_hidden_layers=24
     )
 
     # Test with PP=6
@@ -770,9 +750,7 @@ def test_moe_per_gpu_expert_activation_accounting():
 
     # Test with EP=8
     vllm_config = create_mock_vllm_config(
-        hf_config,
-        data_parallel_size=8,
-        enable_expert_parallel=True,
+        hf_config, data_parallel_size=8, enable_expert_parallel=True
     )
     metrics = FfnMetrics.from_vllm_config(vllm_config)
 
@@ -811,10 +789,7 @@ def test_moe_per_gpu_expert_activation_accounting():
 
 def test_unembed_per_gpu_with_tensor_parallelism():
     """Test unembed metrics with tensor parallelism - per_gpu vs global."""
-    hf_config = Qwen3Config(
-        hidden_size=4096,
-        vocab_size=128000,
-    )
+    hf_config = Qwen3Config(hidden_size=4096, vocab_size=128000)
 
     # Test with TP=8
     vllm_config = create_mock_vllm_config(hf_config, tensor_parallel_size=8)
@@ -854,9 +829,7 @@ def test_model_metrics_per_gpu_aggregation():
 
     # Test with mixed parallelism: TP=2, PP=2
     vllm_config = create_mock_vllm_config(
-        hf_config,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
+        hf_config, tensor_parallel_size=2, pipeline_parallel_size=2
     )
 
     model_metrics = ModelMetrics(vllm_config)

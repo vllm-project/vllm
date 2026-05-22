@@ -19,9 +19,7 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
-BASE_MODEL_PATHS = [
-    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
-]
+BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
@@ -60,8 +58,7 @@ class MockModelConfig:
 
 def _build_serving_tokenization(engine: AsyncLLM) -> OpenAIServingTokenization:
     models = OpenAIServingModels(
-        engine_client=engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
     )
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
@@ -98,8 +95,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     )
 
     request = TokenizeChatRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Test prompt"}],
+        model=MODEL_NAME, messages=[{"role": "user", "content": "Test prompt"}]
     )
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
@@ -124,10 +120,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
-    request = TokenizeCompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-    )
+    request = TokenizeCompletionRequest(model=MODEL_NAME, prompt="Test prompt")
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 

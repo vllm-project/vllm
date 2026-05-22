@@ -115,8 +115,7 @@ def maybe_create_ubatch_slices(
 
 
 def slice_query_start_locs(
-    query_start_loc: torch.Tensor,
-    request_slice: slice,
+    query_start_loc: torch.Tensor, request_slice: slice
 ) -> torch.Tensor:
     """
     Creates a new query_start_loc that corresponds to the requests in
@@ -249,8 +248,7 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UBatchSlice],
-    common_attn_metadata: CommonAttentionMetadata,
+    ubatch_slices: list[UBatchSlice], common_attn_metadata: CommonAttentionMetadata
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the

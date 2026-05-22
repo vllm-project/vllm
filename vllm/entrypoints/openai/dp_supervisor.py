@@ -275,8 +275,7 @@ class DPSupervisor:
         )
         supervisor_server = uvicorn.Server(config)
         supervisor_server_task = asyncio.create_task(
-            supervisor_server.serve(),
-            name="dp-supervisor",
+            supervisor_server.serve(), name="dp-supervisor"
         )
         supervisor_server_task.add_done_callback(
             lambda _task: self._shutdown_event.set()
@@ -316,8 +315,7 @@ class DPSupervisor:
 
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
-            "DPSupervisor received %s, shutting down.",
-            self._shutdown_signal.name,
+            "DPSupervisor received %s, shutting down.", self._shutdown_signal.name
         )
 
         self._shutdown_event.set()
@@ -453,8 +451,7 @@ class DPSupervisor:
 
         try:
             logger.info(
-                "DPSupervisor forwarding %s to DP Servers.",
-                self._shutdown_signal.name,
+                "DPSupervisor forwarding %s to DP Servers.", self._shutdown_signal.name
             )
             for process in self._processes:
                 pid = process.pid

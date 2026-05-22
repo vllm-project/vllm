@@ -30,14 +30,12 @@ from .utils import create_vllm_config
 
 
 def _make_vllm_config(
-    kv_connector: str = "FlexKVConnectorV1",
-    kv_role: str = "kv_both",
+    kv_connector: str = "FlexKVConnectorV1", kv_role: str = "kv_both"
 ) -> VllmConfig:
     """Return a minimal VllmConfig with a KVTransferConfig attached."""
     vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
     vllm_config.kv_transfer_config = KVTransferConfig(
-        kv_connector=kv_connector,
-        kv_role=kv_role,
+        kv_connector=kv_connector, kv_role=kv_role
     )
     return vllm_config
 

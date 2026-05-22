@@ -4,13 +4,8 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.config import (
-    VllmConfig,
-    get_current_vllm_config,
-)
-from vllm.distributed import (
-    divide,
-)
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import divide
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fla.ops import (
@@ -32,9 +27,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    sharded_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -65,12 +58,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.num_spec,
         )
 
-    def __init__(
-        self,
-        config,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, config, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(config, vllm_config, prefix=prefix)
 
         assert getattr(config, "linear_use_gate", True), (
@@ -133,14 +121,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             },
         )
 
-        self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
-        )
-        self.A_log = nn.Parameter(
-            torch.empty(
-                divide(self.num_v_heads, self.tp_size),
-            )
-        )
+        self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads // self.tp_size))
+        self.A_log = nn.Parameter(torch.empty(divide(self.num_v_heads, self.tp_size)))
 
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
@@ -203,11 +185,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query.contiguous(), key.contiguous(), value.contiguous()
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         # NOTE: We wrap the ENTIRE linear attention forward (projections +
         # core recurrence + output norm + output projection) in a single
         # custom op, rather than just wrapping the recurrent core like
@@ -233,17 +211,9 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         # the MLP and transformer attention layers that are NOT wrapped
         # in custom ops -- their small precision differences propagate
         # as inputs to the GDN layers from outside.
-        torch.ops.vllm.olmo_hybrid_gdn_full_forward(
-            hidden_states,
-            output,
-            self.prefix,
-        )
+        torch.ops.vllm.olmo_hybrid_gdn_full_forward(hidden_states, output, self.prefix)
 
-    def _full_forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def _full_forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         num_tokens = hidden_states.size(0)
 
         # ============================================================
@@ -266,12 +236,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        self._forward_core(
-            mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
-            core_attn_out=core_attn_out,
-        )
+        self._forward_core(mixed_qkv=mixed_qkv, b=b, a=a, core_attn_out=core_attn_out)
 
         # ============================================================
         # Part 3: Output Projection
@@ -449,10 +414,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert non_spec_query_start_loc is not None
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_gated_delta_rule(
+            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -525,9 +487,7 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
 
 
 def olmo_hybrid_gdn_full_forward(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     """Full linear attention forward wrapped as a custom op.
 
@@ -537,16 +497,11 @@ def olmo_hybrid_gdn_full_forward(
     """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._full_forward(
-        hidden_states=hidden_states,
-        output=output,
-    )
+    self._full_forward(hidden_states=hidden_states, output=output)
 
 
 def olmo_hybrid_gdn_full_forward_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     """Fake implementation for torch.compile."""
     return

@@ -54,9 +54,7 @@ class NoBadWordsLogitsProcessor:
         self.word_bias: torch.FloatTensor = None
 
     def __call__(
-        self,
-        past_tokens_ids: Sequence[int],
-        logits: torch.FloatTensor,
+        self, past_tokens_ids: Sequence[int], logits: torch.FloatTensor
     ) -> torch.Tensor:
         if self.word_bias is None:
             self._init_word_bias(logits=logits)

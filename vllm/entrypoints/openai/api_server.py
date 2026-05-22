@@ -43,9 +43,7 @@ from vllm.entrypoints.openai.server_utils import (
     validation_exception_handler,
 )
 from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
-)
+from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
@@ -98,9 +96,7 @@ async def build_async_engine_client(
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
     async with build_async_engine_client_from_engine_args(
-        engine_args,
-        usage_context=usage_context,
-        client_config=client_config,
+        engine_args, usage_context=usage_context, client_config=client_config
     ) as engine:
         yield engine
 
@@ -431,9 +427,7 @@ async def init_app_state(
 
 
 async def init_render_app_state(
-    vllm_config: VllmConfig,
-    state: State,
-    args: Namespace,
+    vllm_config: VllmConfig, state: State, args: Namespace
 ) -> None:
     """Initialise FastAPI app state for a CPU-only render server.
 
@@ -690,8 +684,7 @@ async def run_server_worker(
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     async with build_async_engine_client(
-        args,
-        client_config=client_config,
+        args, client_config=client_config
     ) as engine_client:
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, **uvicorn_kwargs

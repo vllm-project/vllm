@@ -8,9 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 
 # TODO(mooncake-stats): add MooncakePromMetrics (mirror NixlPromMetrics)
 # and wire it via MooncakeConnector.build_prom_metrics in a follow-up PR.

@@ -109,19 +109,14 @@ def test_beam_search_with_concurrency_limit(
     assert len(example_prompts) > concurrency_limit
     with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
         outputs_with_limit = vllm_model.generate_beam_search(
-            example_prompts,
-            beam_width,
-            max_tokens,
-            concurrency_limit=concurrency_limit,
+            example_prompts, beam_width, max_tokens, concurrency_limit=concurrency_limit
         )
         outputs_without_limit = []
 
         for i in range(0, len(example_prompts), concurrency_limit):
             outputs_without_limit.extend(
                 vllm_model.generate_beam_search(
-                    example_prompts[i : i + concurrency_limit],
-                    beam_width,
-                    max_tokens,
+                    example_prompts[i : i + concurrency_limit], beam_width, max_tokens
                 )
             )
 
@@ -151,12 +146,7 @@ def test_beam_search_with_concurrency_limit(
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
 @pytest.mark.parametrize("beam_width", MM_BEAM_WIDTHS)
 def test_beam_search_passes_multimodal_data(
-    monkeypatch,
-    hf_runner,
-    vllm_runner,
-    dtype: str,
-    max_tokens: int,
-    beam_width: int,
+    monkeypatch, hf_runner, vllm_runner, dtype: str, max_tokens: int, beam_width: int
 ) -> None:
     """Ensure that beam search passes multimodal data through correctly."""
     if current_platform.is_rocm():
@@ -176,18 +166,12 @@ def test_beam_search_passes_multimodal_data(
         audio_token_id = hf_model.config.audio_token_index
         eos_token_id = hf_model.tokenizer.eos_token_id  # <|im_end|>
         hf_outputs = hf_model.generate_beam_search(
-            prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-            audios=audios,
+            prompts, beam_width=beam_width, max_tokens=max_tokens, audios=audios
         )
 
     with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
         vllm_outputs = vllm_model.generate_beam_search(
-            prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-            audios=audios,
+            prompts, beam_width=beam_width, max_tokens=max_tokens, audios=audios
         )
 
     seq_with_no_audio_toks = lambda seq: [tok for tok in seq if tok != audio_token_id]

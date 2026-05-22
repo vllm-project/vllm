@@ -83,11 +83,8 @@ class ConvLayerBase(CustomOp):
 
         self.weight = nn.Parameter(
             torch.empty(
-                out_channels,
-                in_channels // groups,
-                *kernel_size,
-                dtype=params_dtype,
-            ),
+                out_channels, in_channels // groups, *kernel_size, dtype=params_dtype
+            )
         )
 
         if bias:
@@ -121,11 +118,7 @@ class Conv2dLayer(ConvLayerBase):
         H, W = H // K1, W // K2
         x = x.unfold(2, K1, K1).unfold(3, K2, K2)
         x = x.permute(0, 2, 3, 1, 4, 5).reshape(-1, self.input_size)
-        x = F.linear(
-            x,
-            self.weight.view(self.out_channels, self.input_size),
-            self.bias,
-        )
+        x = F.linear(x, self.weight.view(self.out_channels, self.input_size), self.bias)
         x = x.view(B, H, W, self.out_channels).permute(0, 3, 1, 2)
         return x
 
@@ -198,10 +191,7 @@ class CausalConv2dLayer(Conv2dLayer):
             params_dtype=params_dtype,
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, pad=(self._left_padding, self._right_padding, 0, 0))
         x = super().forward(x)
         return x
@@ -223,11 +213,7 @@ class Conv3dLayer(ConvLayerBase):
         T, H, W = T // K1, H // K2, W // K3
         x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
         x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, self.input_size)
-        x = F.linear(
-            x,
-            self.weight.view(self.out_channels, self.input_size),
-            self.bias,
-        )
+        x = F.linear(x, self.weight.view(self.out_channels, self.input_size), self.bias)
         x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
         return x
 

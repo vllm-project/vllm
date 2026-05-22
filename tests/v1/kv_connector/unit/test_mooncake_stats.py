@@ -114,9 +114,7 @@ def test_concurrent_writers_keep_row_lengths_aligned():
         i = 0
         while not stop.is_set():
             stats.record_transfer(
-                duration_s=0.001 + i * 1e-9,
-                total_bytes=1024 + i,
-                num_descs=1 + (i % 8),
+                duration_s=0.001 + i * 1e-9, total_bytes=1024 + i, num_descs=1 + (i % 8)
             )
             i += 1
 
@@ -270,7 +268,7 @@ def test_expired_request_bumps_counter():
             ready=asyncio.Event(),
             expire_time=-1.0,  # Already expired.
             sending=0,
-        ),
+        )
     }
     worker.finished_sending_reqs = set()
 

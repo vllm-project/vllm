@@ -37,13 +37,9 @@ if TYPE_CHECKING:
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-)
+from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -157,9 +153,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             and layer_idx % moe_layer_freq == 0
         ):
             self.mlp = Glm4MoeLite(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
         else:
             self.mlp = Glm4MoeLiteMLP(
@@ -189,10 +183,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        attn_kwargs = {
-            "positions": positions,
-            "hidden_states": hidden_states,
-        }
+        attn_kwargs = {"positions": positions, "hidden_states": hidden_states}
         attn_kwargs["llama_4_scaling"] = llama_4_scaling
         hidden_states = self.self_attn(**attn_kwargs)
 
@@ -517,9 +508,7 @@ class Glm4MoeLiteModel(nn.Module):
 class Glm4MoeLiteForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, Glm4LiteMixtureOfExperts
 ):
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -608,10 +597,7 @@ class Glm4MoeLiteForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

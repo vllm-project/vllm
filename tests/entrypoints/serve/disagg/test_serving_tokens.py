@@ -19,11 +19,7 @@ GEN_ENDPOINT = "/inference/v1/generate"
 
 
 def get_vocab_size(model_name):
-    config = ModelConfig(
-        model=model_name,
-        seed=0,
-        dtype="bfloat16",
-    )
+    config = ModelConfig(model=model_name, seed=0, dtype="bfloat16")
     return config.get_vocab_size()
 
 
@@ -92,10 +88,7 @@ async def client(server: RemoteOpenAIServer):
     transport = httpx.AsyncHTTPTransport(uds=server.uds) if server.uds else None
     headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
     async with httpx.AsyncClient(
-        transport=transport,
-        base_url=server.url_root,
-        timeout=600,
-        headers=headers,
+        transport=transport, base_url=server.url_root, timeout=600, headers=headers
     ) as c:
         yield c
 
@@ -126,10 +119,7 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
     payload = {
         "model": MODEL_NAME,
         "token_ids": [1, 2, 3],
-        "sampling_params": {
-            "temperature": 0.0,
-            "ignore_eos": True,
-        },
+        "sampling_params": {"temperature": 0.0, "ignore_eos": True},
         "stream": False,
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
@@ -397,11 +387,7 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     payload = {
         "model": "Alice",
         "token_ids": token_ids,
-        "sampling_params": {
-            "max_tokens": 24,
-            "temperature": 0.0,
-            "detokenize": False,
-        },
+        "sampling_params": {"max_tokens": 24, "temperature": 0.0, "detokenize": False},
         "stream": False,
     }
     generate_resp = await client.post(GEN_ENDPOINT, json=payload)

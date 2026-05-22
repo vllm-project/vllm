@@ -14,19 +14,14 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("model_id", ["meta-llama/Llama-Guard-4-12B"])
 @pytest.mark.parametrize("max_model_len", [4096, 8192, 25600, 131072])
 def test_profiling(model_id: str, max_model_len: int):
-    model_config_kwargs = {
-        "max_model_len": max_model_len,
-    }
+    model_config_kwargs = {"max_model_len": max_model_len}
     mm_counts = {"image": 1}
     ctx = build_model_context(
-        model_id,
-        model_config_kwargs=model_config_kwargs,
-        limit_mm_per_prompt=mm_counts,
+        model_id, model_config_kwargs=model_config_kwargs, limit_mm_per_prompt=mm_counts
     )
 
     mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
-        ctx.model_config,
-        mm_counts=mm_counts,
+        ctx.model_config, mm_counts=mm_counts
     )
 
     hf_config = ctx.get_hf_config(Llama4Config)

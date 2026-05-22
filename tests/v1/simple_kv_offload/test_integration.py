@@ -14,16 +14,10 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 # Small models for default CI / local runs (accuracy only).
-SMALL_MODELS = [
-    "meta-llama/Llama-3.2-1B-Instruct",
-    "google/gemma-3-1b-it",
-]
+SMALL_MODELS = ["meta-llama/Llama-3.2-1B-Instruct", "google/gemma-3-1b-it"]
 
 # Large models for optional perf runs only (slow to load and execute).
-PERF_MODELS = [
-    "meta-llama/Llama-3.1-8B",
-    "openai/gpt-oss-20b",
-]
+PERF_MODELS = ["meta-llama/Llama-3.1-8B", "openai/gpt-oss-20b"]
 
 
 def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:

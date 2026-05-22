@@ -17,10 +17,7 @@ async def test_store(client: openai.AsyncOpenAI):
     assert response.status == "completed"
 
     # Test store=False.
-    response = await client.responses.create(
-        input="Hello!",
-        store=False,
-    )
+    response = await client.responses.create(input="Hello!", store=False)
     assert response.status == "completed"
 
     # The response should not be found.
@@ -32,10 +29,7 @@ async def test_store(client: openai.AsyncOpenAI):
 async def test_background(client: openai.AsyncOpenAI):
     # NOTE: This query should be easy enough for the model to answer
     # within the 10 seconds.
-    response = await client.responses.create(
-        input="Hello!",
-        background=True,
-    )
+    response = await client.responses.create(input="Hello!", background=True)
     assert response.status == "queued"
 
     max_retries = 10
@@ -55,17 +49,14 @@ async def test_background_error(client: openai.AsyncOpenAI):
         openai.BadRequestError, match="background can only be used when `store` is true"
     ):
         _ = await client.responses.create(
-            input="What is 13 * 24?",
-            background=True,
-            store=False,
+            input="What is 13 * 24?", background=True, store=False
         )
 
 
 @pytest.mark.asyncio
 async def test_background_cancel(client: openai.AsyncOpenAI):
     response = await client.responses.create(
-        input="Write a long story about a cat.",
-        background=True,
+        input="Write a long story about a cat.", background=True
     )
     assert response.status == "queued"
 

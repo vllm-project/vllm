@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 RangeRatio = float | dict[str, float]
 
 
-def _resolve_range_ratios(
-    range_ratio: RangeRatio,
-) -> tuple[float, float]:
+def _resolve_range_ratios(range_ratio: RangeRatio) -> tuple[float, float]:
     """Return ``(input_range_ratio, output_range_ratio)`` from *range_ratio*.
 
     *range_ratio* is either a single float (used for both input and output)

@@ -21,9 +21,7 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -69,7 +67,7 @@ VISION_ENCODER_TO_PROCESSING_CONFIG = {
         "vit_image_size": 448,
         "vit_patch_size": 14,
         "token_compression_factor": 2,
-    },
+    }
 }
 
 
@@ -472,18 +470,13 @@ class Phi4MMImagePixelInputs(TensorSchema):
     ]
 
     image_sizes: Annotated[
-        torch.Tensor,
-        TensorShape("bn", 2),  # (height, width)
+        torch.Tensor, TensorShape("bn", 2)  # (height, width)
     ]
 
-    num_img_tokens: Annotated[
-        list[int],
-        TensorShape("bn"),
-    ]
+    num_img_tokens: Annotated[list[int], TensorShape("bn")]
 
     image_attention_mask: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "nc", 32, 32),  # H_mask, W_mask
+        torch.Tensor, TensorShape("bn", "nc", 32, 32)  # H_mask, W_mask
     ]
 
 
@@ -512,10 +505,7 @@ class Phi4MMAudioEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["audio_embeds"]
-    data: Annotated[
-        NestedTensors,
-        TensorShape("b", "n", "f", "h"),
-    ]
+    data: Annotated[NestedTensors, TensorShape("b", "n", "f", "h")]
 
 
 Phi4MMAudioInputs: TypeAlias = Phi4MMAudioFeatureInputs | Phi4MMAudioEmbeddingInputs
@@ -556,10 +546,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def audio_tokens(self) -> list[str]:
         return [f"<|audio_{i + 1}|>" for i in range(100)]
 
-    def get_dynamic_hd(
-        self,
-        processor: ProcessorMixin,
-    ) -> int:
+    def get_dynamic_hd(self, processor: ProcessorMixin) -> int:
         image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
@@ -603,11 +590,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             # find the closest aspect ratio to the target
             image_processor = self.get_hf_processor().image_processor
             target_aspect_ratio = image_processor.find_closest_aspect_ratio(
-                aspect_ratio,
-                target_ratios,
-                orig_width,
-                orig_height,
-                image_size,
+                aspect_ratio, target_ratios, orig_width, orig_height, image_size
             )
 
             # calculate the target width and height
@@ -709,11 +692,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         )
 
     def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: ProcessorMixin,
+        self, *, image_width: int, image_height: int, processor: ProcessorMixin
     ) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_name = hf_config.img_processor
@@ -892,9 +871,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_image_embeds=MultiModalFieldConfig.batched("image"),
@@ -957,13 +934,10 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         ]
 
     def _recompute_cached_prompt_update(
-        self,
-        cached_update: ResolvedPromptUpdate,
-        new_item_idx: int,
+        self, cached_update: ResolvedPromptUpdate, new_item_idx: int
     ) -> ResolvedPromptUpdate:
         new_update = super()._recompute_cached_prompt_update(
-            cached_update,
-            new_item_idx,
+            cached_update, new_item_idx
         )
 
         if cached_update.modality == "image":
@@ -987,18 +961,12 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
 
     packed_modules_mapping = {
-        "qkv_proj": [
-            "qkv_proj",
-        ],
-        "gate_up_proj": [
-            "gate_up_proj",
-        ],
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            "base_layer.": "",
-        },
+        orig_to_new_substr={"base_layer.": ""},
         orig_to_new_prefix={
             "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
             "model.embed_tokens_extend.audio_embed.audio_projection.speech.": "embed_tokens_extend.audio_projection.",  # noqa: E501
@@ -1089,8 +1057,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         if audio_features is not None:
             return Phi4MMAudioFeatureInputs(
-                type="audio_features",
-                audio_features=audio_features,
+                type="audio_features", audio_features=audio_features
             )
 
         if audio_embeds is not None:
@@ -1122,8 +1089,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         dtype = next(self.embed_tokens_extend.parameters()).dtype
         audio_embeds = [
             self.embed_tokens_extend(
-                features.to(dtype),
-                audio_projection_mode=audio_projection_mode,
+                features.to(dtype), audio_projection_mode=audio_projection_mode
             )
             for features in audio_features
         ]
@@ -1224,18 +1190,12 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             inputs_embeds = None
 
         hidden_states = self.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

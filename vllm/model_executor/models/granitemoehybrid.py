@@ -110,10 +110,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **kwargs,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None, **kwargs
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -194,10 +191,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         residual = hidden_states
@@ -291,9 +285,7 @@ class GraniteMoeHybridAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         query, key, value = qkv.split(
@@ -336,10 +328,7 @@ class GraniteMoeHybridModel(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
         self.embedding_multiplier = config.embedding_multiplier
 
         def get_layer(prefix: str):
@@ -589,11 +578,7 @@ class GraniteMoeHybridForCausalLM(
     SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "conv1d": ["conv1d"],
         "in_proj": ["in_proj"],
         "input_linear": ["input_linear"],
@@ -605,8 +590,7 @@ class GraniteMoeHybridForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -616,8 +600,7 @@ class GraniteMoeHybridForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -671,9 +654,7 @@ class GraniteMoeHybridForCausalLM(
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(
-            config.vocab_size,
-            config.vocab_size,
-            scale=1 / self.config.logits_scaling,
+            config.vocab_size, config.vocab_size, scale=1 / self.config.logits_scaling
         )
 
         self.make_empty_intermediate_tensors = (
@@ -697,10 +678,7 @@ class GraniteMoeHybridForCausalLM(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

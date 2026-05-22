@@ -32,19 +32,13 @@ def _single_chat_message(item):
 
 
 def make_output_message(
-    text: str,
-    *,
-    id: str = "msg_1",
-    status: str = "completed",
+    text: str, *, id: str = "msg_1", status: str = "completed"
 ) -> ResponseOutputMessage:
     return ResponseOutputMessage(
         id=id,
         content=[
             ResponseOutputText(
-                annotations=[],
-                text=text,
-                type="output_text",
-                logprobs=None,
+                annotations=[], text=text, type="output_text", logprobs=None
             )
         ],
         role="assistant",
@@ -100,11 +94,7 @@ def make_function_call(
 
 
 def make_function_call_output(
-    *,
-    call_id: str,
-    output: str = "42",
-    id: str = "output_1",
-    status: str = "completed",
+    *, call_id: str, output: str = "42", id: str = "output_1", status: str = "completed"
 ) -> ResponseFunctionToolCallOutputItem:
     return ResponseFunctionToolCallOutputItem(
         id=id,
@@ -144,12 +134,7 @@ class TestResponsesUtils:
             id="lol",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Leroy Jenkins",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Leroy Jenkins", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -179,12 +164,7 @@ class TestResponsesUtils:
             id="lol",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Leroy Jenkins",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Leroy Jenkins", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -226,11 +206,7 @@ class TestResponsesUtils:
         assert formatted_item["tool_call_id"] == "temp"
 
         formatted_item = _single_chat_message(
-            {
-                "type": "function_call_output",
-                "call_id": "temp_dict",
-                "output": "5678",
-            }
+            {"type": "function_call_output", "call_id": "temp_dict", "output": "5678"}
         )
         assert formatted_item["role"] == "tool"
         assert formatted_item["content"] == "5678"
@@ -251,10 +227,7 @@ class TestResponsesUtils:
             id="msg_bf585bbbe3d500e0",
             content=[
                 ResponseOutputText(
-                    annotations=[],
-                    text="dongyi",
-                    type="output_text",
-                    logprobs=None,
+                    annotations=[], text="dongyi", type="output_text", logprobs=None
                 )
             ],
             role="assistant",
@@ -274,19 +247,9 @@ class TestReasoningItemContentPriority:
         """When both content and summary are present, content should win."""
         item = ResponseReasoningItem(
             id="reasoning_1",
-            summary=[
-                Summary(
-                    text="This is a summary",
-                    type="summary_text",
-                )
-            ],
+            summary=[Summary(text="This is a summary", type="summary_text")],
             type="reasoning",
-            content=[
-                Content(
-                    text="This is the actual content",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="This is the actual content", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -299,12 +262,7 @@ class TestReasoningItemContentPriority:
             id="reasoning_2",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Content without summary",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Content without summary", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -316,12 +274,7 @@ class TestReasoningItemContentPriority:
         """When content is absent, summary is used as fallback with warning."""
         item = ResponseReasoningItem(
             id="reasoning_3",
-            summary=[
-                Summary(
-                    text="Fallback summary text",
-                    type="summary_text",
-                )
-            ],
+            summary=[Summary(text="Fallback summary text", type="summary_text")],
             type="reasoning",
             content=None,
             encrypted_content=None,
@@ -339,12 +292,7 @@ class TestReasoningItemContentPriority:
         """When content is an empty list, summary is used as fallback."""
         item = ResponseReasoningItem(
             id="reasoning_4",
-            summary=[
-                Summary(
-                    text="Summary when content empty",
-                    type="summary_text",
-                )
-            ],
+            summary=[Summary(text="Summary when content empty", type="summary_text")],
             type="reasoning",
             content=[],
             encrypted_content=None,
@@ -374,19 +322,9 @@ class TestReasoningItemContentPriority:
         """Encrypted content should still raise ValueError."""
         item = ResponseReasoningItem(
             id="reasoning_6",
-            summary=[
-                Summary(
-                    text="Some summary",
-                    type="summary_text",
-                )
-            ],
+            summary=[Summary(text="Some summary", type="summary_text")],
             type="reasoning",
-            content=[
-                Content(
-                    text="Some content",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Some content", type="reasoning_text")],
             encrypted_content="ENCRYPTED",
             status=None,
         )
@@ -399,14 +337,8 @@ class TestReasoningItemContentPriority:
         item = ResponseReasoningItem(
             id="reasoning_7",
             summary=[
-                Summary(
-                    text="First summary",
-                    type="summary_text",
-                ),
-                Summary(
-                    text="Second summary",
-                    type="summary_text",
-                ),
+                Summary(text="First summary", type="summary_text"),
+                Summary(text="Second summary", type="summary_text"),
             ],
             type="reasoning",
             content=None,
@@ -425,19 +357,9 @@ class TestReasoningItemContentPriority:
         """No warning should be emitted when content is available."""
         item = ResponseReasoningItem(
             id="reasoning_8",
-            summary=[
-                Summary(
-                    text="Summary text",
-                    type="summary_text",
-                )
-            ],
+            summary=[Summary(text="Summary text", type="summary_text")],
             type="reasoning",
-            content=[
-                Content(
-                    text="Content text",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Content text", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -508,10 +430,7 @@ class TestShouldContinueFinalMessage:
             id="msg_123",
             content=[
                 ResponseOutputText(
-                    annotations=[],
-                    text="The answer",
-                    type="output_text",
-                    logprobs=None,
+                    annotations=[], text="The answer", type="output_text", logprobs=None
                 )
             ],
             role="assistant",
@@ -526,12 +445,7 @@ class TestShouldContinueFinalMessage:
             id="reasoning_123",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Let me think about this...",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Let me think about this...", type="reasoning_text")],
             encrypted_content=None,
             status="in_progress",
         )
@@ -543,12 +457,7 @@ class TestShouldContinueFinalMessage:
             id="reasoning_123",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Let me think",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Let me think", type="reasoning_text")],
             encrypted_content=None,
             status="incomplete",
         )
@@ -569,12 +478,7 @@ class TestShouldContinueFinalMessage:
             id="reasoning_123",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="I have thought about this.",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="I have thought about this.", type="reasoning_text")],
             encrypted_content=None,
             status="completed",
         )
@@ -586,12 +490,7 @@ class TestShouldContinueFinalMessage:
             id="reasoning_123",
             summary=[],
             type="reasoning",
-            content=[
-                Content(
-                    text="Some reasoning",
-                    type="reasoning_text",
-                )
-            ],
+            content=[Content(text="Some reasoning", type="reasoning_text")],
             encrypted_content=None,
             status=None,
         )
@@ -761,10 +660,7 @@ class TestConstructChatMessagesCombinePolicy:
                 id="reasoning-tool-call",
             ),
             pytest.param(
-                [
-                    make_output_message("Hello"),
-                    make_function_call(call_id="call_123"),
-                ],
+                [make_output_message("Hello"), make_function_call(call_id="call_123")],
                 "Hello",
                 None,
                 ["call_123"],
@@ -785,11 +681,7 @@ class TestConstructChatMessagesCombinePolicy:
         ],
     )
     def test_assistant_side_items_merge_until_tool_output(
-        self,
-        items,
-        expected_content,
-        expected_reasoning,
-        expected_tool_call_ids,
+        self, items, expected_content, expected_reasoning, expected_tool_call_ids
     ):
         messages = construct_chat_messages_with_tool_call(items)
 
@@ -814,10 +706,7 @@ class TestConstructChatMessagesCombinePolicy:
         ("items", "num_expected_messages"),
         [
             pytest.param(
-                [
-                    make_output_message("Hello"),
-                    make_output_message("World"),
-                ],
+                [make_output_message("Hello"), make_output_message("World")],
                 2,
                 id="consecutive-output-messages",
             ),
@@ -875,9 +764,7 @@ class TestConstructInputMessagesInstructionsLeak:
             {"role": "assistant", "content": "Hello"},
         ]
         msgs = construct_input_messages(
-            request_instructions=None,
-            request_input="What is 3+3?",
-            prev_msg=prev,
+            request_instructions=None, request_input="What is 3+3?", prev_msg=prev
         )
         system_msgs = [m for m in msgs if m.get("role") == "system"]
         assert len(system_msgs) == 0
@@ -904,9 +791,7 @@ class TestConstructInputMessagesInstructionsLeak:
     def test_no_prev_msg(self):
         """Baseline: when there's no prev_msg, instructions work normally."""
         msgs = construct_input_messages(
-            request_instructions="be helpful",
-            request_input="hello",
-            prev_msg=None,
+            request_instructions="be helpful", request_input="hello", prev_msg=None
         )
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}

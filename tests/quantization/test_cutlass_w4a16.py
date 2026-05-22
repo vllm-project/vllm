@@ -15,18 +15,13 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(90) or current_platform.is_rocm():
-    pytest.skip(
-        "Machete W4A16 requires Hopper (sm_90).",
-        allow_module_level=True,
-    )
+    pytest.skip("Machete W4A16 requires Hopper (sm_90).", allow_module_level=True)
 
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.mixed_precision import (
-    MacheteLinearKernel,
-)
+from vllm.model_executor.kernels.linear.mixed_precision import MacheteLinearKernel
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod,
     CompressedTensorsWNA16,
@@ -48,12 +43,7 @@ def enable_pickle(monkeypatch):
         (torch.float16, scalar_types.uint4, 128, True),
         (torch.float16, scalar_types.uint4b8, -1, False),
     ],
-    ids=[
-        "fp16-gptq-g128",
-        "bf16-gptq-g128",
-        "fp16-awq-g128",
-        "fp16-channelwise",
-    ],
+    ids=["fp16-gptq-g128", "bf16-gptq-g128", "fp16-awq-g128", "fp16-channelwise"],
 )
 def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points):
     """Verify choose_mp_linear_kernel picks MacheteLinearKernel."""
@@ -162,10 +152,7 @@ def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
     prompt = "The capital of France is"
 
     with vllm_runner(
-        model_name,
-        enforce_eager=True,
-        dtype="bfloat16",
-        gpu_memory_utilization=0.5,
+        model_name, enforce_eager=True, dtype="bfloat16", gpu_memory_utilization=0.5
     ) as llm:
 
         def check_kernel_type(model):

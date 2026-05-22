@@ -21,9 +21,7 @@ async def test_raise_if_error_raises_generation_error():
     mock_models = MagicMock()
 
     serving = OpenAIServing(
-        engine_client=mock_engine,
-        models=mock_models,
-        request_logger=None,
+        engine_client=mock_engine, models=mock_models, request_logger=None
     )
 
     # test that error finish_reason raises GenerationError
@@ -48,9 +46,7 @@ async def test_convert_generation_error_to_streaming_response():
     mock_models = MagicMock()
 
     serving = OpenAIServing(
-        engine_client=mock_engine,
-        models=mock_models,
-        request_logger=None,
+        engine_client=mock_engine, models=mock_models, request_logger=None
     )
 
     # create a GenerationError
@@ -78,9 +74,7 @@ def test_is_model_supported_skip_name_validation_env(
     mock_models.is_base_model.return_value = False
 
     serving = OpenAIServing(
-        engine_client=mock_engine,
-        models=mock_models,
-        request_logger=None,
+        engine_client=mock_engine, models=mock_models, request_logger=None
     )
 
     assert serving._is_model_supported("not-a-registered-model") is False

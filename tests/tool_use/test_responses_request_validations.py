@@ -17,10 +17,7 @@ SAMPLE_TOOL = {
     },
 }
 
-NAMED_TOOL_CHOICE = {
-    "type": "function",
-    "name": "get_weather",
-}
+NAMED_TOOL_CHOICE = {"type": "function", "name": "get_weather"}
 
 
 def test_responses_request_with_no_tools():
@@ -63,11 +60,7 @@ def test_responses_request_required_without_tools(tools):
 def test_responses_request_named_tool_choice_without_tools():
     with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
-            {
-                "input": "Hello",
-                "model": "test-model",
-                "tool_choice": NAMED_TOOL_CHOICE,
-            }
+            {"input": "Hello", "model": "test-model", "tool_choice": NAMED_TOOL_CHOICE}
         )
 
 
@@ -154,11 +147,7 @@ def test_responses_request_empty_tools_tool_choice_auto():
 
 
 @pytest.mark.parametrize(
-    "tool_choice",
-    [
-        {"type": "function"},
-        {"type": "function", "name": ""},
-    ],
+    "tool_choice", [{"type": "function"}, {"type": "function", "name": ""}]
 )
 def test_responses_request_named_tool_choice_missing_name(tool_choice):
     with pytest.raises(ValidationError, match="not found in 'tools' parameter"):

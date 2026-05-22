@@ -24,9 +24,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExpert
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    OCP_MX_Scheme,
-)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 
 logger = init_logger(__name__)
 
@@ -39,11 +37,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     have native support for these dtypes.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
             "Using OCP_MXQuantizationEmulationTritonExperts MOE backend. This"
@@ -68,9 +62,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-        }:
+        if self.ocp_mx_scheme in {OCP_MX_Scheme.w_mxfp4_a_mxfp4}:
             # Weight has to be dequantized for mxfp4 emulation.
             self._quant_dtype = "mxfp4"
         elif self.ocp_mx_scheme in [
@@ -96,19 +88,13 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         return True
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key,
-        activation_key,
-    ) -> bool:
+    def _supports_quant_scheme(weight_key, activation_key) -> bool:
         # This class is used for emulation only - the oracle selects it
         # directly rather than via quant scheme matching.
         return True
 
     def _dequantize_weights(
-        self,
-        w: torch.Tensor,
-        w_scale: torch.Tensor,
-        dtype: torch.dtype,
+        self, w: torch.Tensor, w_scale: torch.Tensor, dtype: torch.dtype
     ) -> torch.Tensor:
         """Dequantize weights based on the OCP MX scheme."""
         if self.ocp_mx_scheme.startswith("w_mxfp4"):  # type: ignore[union-attr]

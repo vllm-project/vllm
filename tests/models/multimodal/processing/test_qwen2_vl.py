@@ -17,16 +17,7 @@ from ...utils import build_model_context
     [
         ({}, 1426, (5704, 1176)),
         ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
-        (
-            {
-                "size": {
-                    "shortest_edge": 64**2,
-                    "longest_edge": 512**2,
-                },
-            },
-            330,
-            (1320, 1176),
-        ),
+        ({"size": {"shortest_edge": 64**2, "longest_edge": 512**2}}, 330, (1320, 1176)),
     ],
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
@@ -88,9 +79,7 @@ def test_processor_override(
     ],
 )
 def test_get_image_size_with_most_features(
-    image_assets: ImageTestAssets,
-    model_id: str,
-    mm_processor_kwargs: dict[str, object],
+    image_assets: ImageTestAssets, model_id: str, mm_processor_kwargs: dict[str, object]
 ):
     if (
         Version(TRANSFORMERS_VERSION) < Version("5.2.0")

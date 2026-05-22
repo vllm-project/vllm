@@ -13,10 +13,7 @@ from mteb.models import ModelMeta
 from torch.utils.data import DataLoader
 
 from tests.conftest import HfRunner
-from tests.models.utils import (
-    RerankModelInfo,
-    get_vllm_extra_kwargs,
-)
+from tests.models.utils import RerankModelInfo, get_vllm_extra_kwargs
 
 # See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
@@ -208,17 +205,11 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
         second_stage_tasks = []
         for task in mteb_tasks:
             second_stage_tasks.append(
-                task.convert_to_reranking(
-                    prediction_folder,
-                    top_k=10,
-                )
+                task.convert_to_reranking(prediction_folder, top_k=10)
             )
 
         results = mteb.evaluate(
-            cross_encoder,
-            second_stage_tasks,
-            show_progress_bar=False,
-            cache=None,
+            cross_encoder, second_stage_tasks, show_progress_bar=False, cache=None
         )
         main_score = results[0].scores["test"][0]["main_score"]
     return main_score
@@ -292,9 +283,7 @@ def mteb_test_rerank_models(
         ) as hf_model:
             hf_model.chat_template = chat_template
             st_main_score = run_mteb_rerank(
-                hf_model,
-                tasks=MTEB_RERANK_TASKS,
-                languages=MTEB_RERANK_LANGS,
+                hf_model, tasks=MTEB_RERANK_TASKS, languages=MTEB_RERANK_LANGS
             )
             st_dtype = next(hf_model.model.model.parameters()).dtype
     else:

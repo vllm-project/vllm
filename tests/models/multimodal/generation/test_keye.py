@@ -30,13 +30,7 @@ def test_keye_vl(image_assets, question: str):
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
+        {"role": "user", "content": [*placeholders, {"type": "text", "text": question}]}
     ]
 
     processor = AutoProcessor.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -59,10 +53,7 @@ def test_keye_vl(image_assets, question: str):
     )
 
     outputs = llm.generate(
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": images},
-        },
+        {"prompt": prompt, "multi_modal_data": {"image": images}},
         sampling_params=sampling_params,
     )
 

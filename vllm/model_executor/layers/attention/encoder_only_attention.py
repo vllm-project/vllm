@@ -70,10 +70,7 @@ class EncoderOnlyAttention(Attention):
             kv_cache_dtype = "auto"
 
         underlying_attn_backend = get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            attn_type=AttentionType.ENCODER_ONLY,
+            head_size, dtype, kv_cache_dtype, attn_type=AttentionType.ENCODER_ONLY
         )
 
         attn_backend = create_encoder_only_attention_backend(underlying_attn_backend)

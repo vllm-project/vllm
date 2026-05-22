@@ -231,9 +231,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             reduce_final_map_size, dtype=reduce_final_map_type, device=device
         )
         self._mla_reduce_partial_map = torch.empty(
-            reduce_partial_map_size,
-            dtype=reduce_partial_map_type,
-            device=device,
+            reduce_partial_map_size, dtype=reduce_partial_map_type, device=device
         )
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
@@ -254,10 +252,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
 
     def _init_fp8_prefill_ps_buffers(
-        self,
-        max_num_reqs: int,
-        max_prefill_qlen: int,
-        device: torch.device,
+        self, max_num_reqs: int, max_prefill_qlen: int, device: torch.device
     ) -> None:
         """Pre-allocate persistent buffers for FP8 MLA prefill PS metadata.
 
@@ -313,9 +308,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             *reduce_final_map_size, dtype=reduce_final_map_dtype, device=device
         )
         self.fp8_ps_reduce_partial_map = torch.empty(
-            reduce_partial_map_size,
-            dtype=reduce_partial_map_dtype,
-            device=device,
+            reduce_partial_map_size, dtype=reduce_partial_map_dtype, device=device
         )
 
         logger.info(
@@ -327,9 +320,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
 
     def _build_fp8_prefill_ps_metadata(
-        self,
-        metadata: AiterMLAMetadata,
-        common_attn_metadata: CommonAttentionMetadata,
+        self, metadata: AiterMLAMetadata, common_attn_metadata: CommonAttentionMetadata
     ) -> None:
         """Build per-batch FP8 MLA prefill PS metadata and attach to *metadata*.
 
@@ -591,11 +582,7 @@ def _expand_page_indices_kernel(
         # Compute flat index in the flattened kv_buffer
         flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
 
-        tl.store(
-            page_indices + start_idx + token_offsets,
-            flat_indices,
-            mask=mask,
-        )
+        tl.store(page_indices + start_idx + token_offsets, flat_indices, mask=mask)
 
 
 class AiterMLAHelper:
@@ -895,10 +882,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # when it was successfully computed (qseqlen=1 decode steps).
         # For multi-token verification steps (spec-dec), the kernel falls
         # back to computing metadata internally.
-        mla_kwargs = dict(
-            q_scale=layer._q_scale,
-            kv_scale=layer._k_scale,
-        )
+        mla_kwargs = dict(q_scale=layer._q_scale, kv_scale=layer._k_scale)
         if attn_metadata.work_meta_data is not None:
             mla_kwargs.update(
                 work_meta_data=attn_metadata.work_meta_data,

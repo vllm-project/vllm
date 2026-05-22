@@ -10,12 +10,7 @@ from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
-    CacheConfig,
-    ModelConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -28,9 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3NextRMSNorm,
-)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3NextRMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
@@ -284,10 +277,7 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor
     ):
         qkv, _ = self.qkv_proj(hidden_states)
 
@@ -323,10 +313,7 @@ class Qwen3NextAttention(nn.Module):
 
 class Qwen3NextDecoderLayer(nn.Module):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        layer_type: str,
-        prefix: str = "",
+        self, vllm_config: VllmConfig, layer_type: str, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -364,8 +351,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         ):
             self.mlp = Qwen3NextSparseMoeBlock(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.mlp",
+                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
             )
         else:
             self.mlp = Qwen3NextMLP(
@@ -386,18 +372,10 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.layer_scale = getattr(config, "layer_scale", False)
         if self.layer_scale:
             self.attn_layer_scale = torch.nn.Parameter(
-                torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
-                ),
+                torch.zeros(1, 1, config.hidden_size)
             )
             self.ffn_layer_scale = torch.nn.Parameter(
-                torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
-                ),
+                torch.zeros(1, 1, config.hidden_size)
             )
 
     def forward(
@@ -415,10 +393,7 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         self_attention_output = torch.empty_like(hidden_states)
         if self.layer_type == "linear_attention":
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-            )
+            self.linear_attn(hidden_states=hidden_states, output=self_attention_output)
         elif self.layer_type == "full_attention":
             self.self_attn(
                 hidden_states=hidden_states,
@@ -475,10 +450,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         def get_layer(prefix: str):
             return Qwen3NextDecoderLayer(
@@ -526,9 +498,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             start=self.start_layer,
         ):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
@@ -590,10 +560,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
             # FSE: remap shared_expert weights to the fused expert slot
             if is_fse and "mlp.shared_expert." in name:
-                name = name.replace(
-                    "mlp.shared_expert.",
-                    f"mlp.experts.{num_routed}.",
-                )
+                name = name.replace("mlp.shared_expert.", f"mlp.experts.{num_routed}.")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -664,9 +631,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -715,11 +680,7 @@ class Qwen3NextForCausalLM(
     IsHybrid,
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvz": ["in_proj_qkvz"],
         "in_proj_ba": ["in_proj_ba"],
@@ -778,8 +739,7 @@ class Qwen3NextForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
@@ -813,17 +773,11 @@ class Qwen3NextForCausalLM(
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
         return loader.load_weights(weights)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

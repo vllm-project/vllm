@@ -44,9 +44,7 @@ def naive_recurrent_kda(
         q_i, k_i, v_i, g_i, b_i = q[:, i], k[:, i], v[:, i], g[:, i], beta[:, i]
         S = S * g_i[..., None].exp()
         S = S + torch.einsum(
-            "bhk,bhv->bhkv",
-            b_i[..., None] * k_i,
-            v_i - (k_i[..., None] * S).sum(-2),
+            "bhk,bhv->bhkv", b_i[..., None] * k_i, v_i - (k_i[..., None] * S).sum(-2)
         )
         o[:, i] = torch.einsum("bhk,bhkv->bhv", q_i, S)
     if not output_final_state:
@@ -79,10 +77,7 @@ def assert_close(
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="H{}-D{}-cu{}-{}".format(*test),
-        )
+        pytest.param(*test, id="H{}-D{}-cu{}-{}".format(*test))
         for test in [
             (32, 128, [0, 64], torch.float16),
             (32, 128, [0, 1024], torch.float16),
@@ -96,12 +91,7 @@ def assert_close(
     ],
 )
 @torch.inference_mode()
-def test_chunk_kda(
-    H: int,
-    D: int,
-    cu_seqlens: list[int],
-    dtype: torch.dtype,
-):
+def test_chunk_kda(H: int, D: int, cu_seqlens: list[int], dtype: torch.dtype):
     T = cu_seqlens[-1]
     torch.manual_seed(42)
     B = 1

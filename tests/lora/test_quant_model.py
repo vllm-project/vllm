@@ -25,7 +25,7 @@ if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", quantization="gptq"
-        ),
+        )
     ]
 else:
     MODELS = [
@@ -41,10 +41,7 @@ else:
 def do_sample(
     llm: vllm.LLM, lora_path: str, lora_id: int, max_tokens: int = 256
 ) -> list[str]:
-    raw_prompts = [
-        "Give me an orange-ish brown color",
-        "Give me a neon pink color",
-    ]
+    raw_prompts = ["Give me an orange-ish brown color", "Give me a neon pink color"]
 
     def format_prompt_tuples(prompt):
         return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -85,20 +82,11 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     )
 
     if model.quantization is None:
-        expected_lora_output = [
-            "#ff8050",
-            "#ff8080",
-        ]
+        expected_lora_output = ["#ff8050", "#ff8080"]
     elif model.quantization == "awq":
-        expected_lora_output = [
-            "#f07700: A v",
-            "#f00000: A v",
-        ]
+        expected_lora_output = ["#f07700: A v", "#f00000: A v"]
     elif model.quantization == "gptq":
-        expected_lora_output = [
-            "#f08800: This is",
-            "#f07788 \n#",
-        ]
+        expected_lora_output = ["#f08800: This is", "#f07788 \n#"]
 
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.

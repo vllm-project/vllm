@@ -71,10 +71,7 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
     except UnboundLocalError:
         pass
 
-    wait_for_gpu_memory_to_clear(
-        devices=[0],
-        threshold_ratio=0.1,
-    )
+    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
 
 
 # test cudagraph_mode with different compilation mode.
@@ -127,7 +124,4 @@ def test_cudagraph_compilation_combo(
     except UnboundLocalError:
         pass
     finally:
-        wait_for_gpu_memory_to_clear(
-            devices=[0],
-            threshold_ratio=0.1,
-        )
+        wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)

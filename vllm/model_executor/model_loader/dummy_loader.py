@@ -44,9 +44,7 @@ class DummyModelLoader(BaseModelLoader):
                 initialize_dummy_weights(layer, model_config)
 
     def _process_online_quant_layer(
-        self,
-        layer: nn.Module,
-        info: LayerReloadingInfo,
+        self, layer: nn.Module, info: LayerReloadingInfo
     ) -> None:
         """Materialize, apply dummy weights, and run quantization processing."""
         materialize_layer(layer, info)

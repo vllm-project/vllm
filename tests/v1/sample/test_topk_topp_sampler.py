@@ -123,22 +123,14 @@ def test_flashinfer_sampler():
     )
 
     python_logits = apply_top_k_top_p_pytorch(
-        logits=logits.clone(),
-        k=k_values,
-        p=p_values,
+        logits=logits.clone(), k=k_values, p=p_values
     )
     python_probs = torch.softmax(python_logits, dim=-1)
 
     # FlashInfer only exposed renorm interfaces for probs so convert first
     flashinfer_probs = torch.softmax(logits.clone(), dim=-1)
-    flashinfer_probs = top_k_renorm_probs(
-        probs=flashinfer_probs,
-        top_k=k_values,
-    )
-    flashinfer_probs = top_p_renorm_probs(
-        probs=flashinfer_probs,
-        top_p=p_values,
-    )
+    flashinfer_probs = top_k_renorm_probs(probs=flashinfer_probs, top_k=k_values)
+    flashinfer_probs = top_p_renorm_probs(probs=flashinfer_probs, top_p=p_values)
 
     # Compare the results
     assert torch.allclose(python_probs, flashinfer_probs, atol=2e-2), (
@@ -162,10 +154,7 @@ class TestTritonTopkTopp:
         self.generator = Generator(device=DEVICE_TYPE).manual_seed(42)
 
     def _compare_results(
-        self,
-        logits: torch.Tensor,
-        k: torch.Tensor | None,
-        p: torch.Tensor | None,
+        self, logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
     ):
         """Compare Triton kernel results with PyTorch sorting implementation.
 
@@ -485,10 +474,7 @@ class TestTritonTopkTopp:
             assert kept > 0, f"Row {i}: no tokens kept"
 
     @pytest.mark.parametrize("num_valid", [1, 2, 5, 10, 50])
-    @pytest.mark.parametrize(
-        "mode",
-        ["topk_only", "topp_only", "topk_and_topp"],
-    )
+    @pytest.mark.parametrize("mode", ["topk_only", "topp_only", "topk_and_topp"])
     def test_equal_logits_few_valid(self, num_valid: int, mode: str):
         """Few valid tokens all sharing the same logit value.
 
@@ -636,10 +622,7 @@ class TestFlashInferTopkToppRobustness:
         (rows 1..B-1 stay clean so we can detect cross-row corruption)."""
         logits = (
             torch.randn(
-                self.BATCH,
-                self.VOCAB,
-                generator=self.generator,
-                dtype=torch.float32,
+                self.BATCH, self.VOCAB, generator=self.generator, dtype=torch.float32
             )
             * 5.0
         )
@@ -711,21 +694,13 @@ class TestFlashInferTopkToppRobustness:
 
         logits = self._make_logits(pattern)
         k = (
-            torch.full(
-                (self.BATCH,),
-                self.TOPK,
-                device=DEVICE_TYPE,
-                dtype=torch.int32,
-            )
+            torch.full((self.BATCH,), self.TOPK, device=DEVICE_TYPE, dtype=torch.int32)
             if path in ("topk_only", "topk_topp")
             else None
         )
         p = (
             torch.full(
-                (self.BATCH,),
-                self.TOPP,
-                device=DEVICE_TYPE,
-                dtype=torch.float32,
+                (self.BATCH,), self.TOPP, device=DEVICE_TYPE, dtype=torch.float32
             )
             if path in ("topp_only", "topk_topp")
             else None
@@ -791,13 +766,7 @@ class TestFlashInferDistributionMatch:
         torch.manual_seed(self.SEED)
 
         # Same logits row used for both impls so the comparison is fair.
-        logits_one = (
-            torch.randn(
-                (1, self.VOCAB),
-                dtype=torch.float32,
-            )
-            * 2.0
-        )
+        logits_one = torch.randn((1, self.VOCAB), dtype=torch.float32) * 2.0
 
         # Theoretical expected distribution from PyTorch-native filter.
         k_one = torch.tensor([topk], dtype=torch.int32) if topk is not None else None

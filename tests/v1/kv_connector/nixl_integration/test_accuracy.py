@@ -56,9 +56,7 @@ def test_accuracy():
     )
 
     results = lm_eval.simple_evaluate(
-        model="local-completions",
-        model_args=model_args,
-        tasks=TASK,
+        model="local-completions", model_args=model_args, tasks=TASK
     )
 
     measured_value = results["results"][TASK][FILTER]

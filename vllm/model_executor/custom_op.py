@@ -238,10 +238,7 @@ class CustomOp(nn.Module):
         dynamic_arg_dims = getattr(self.__class__, "_dynamic_arg_dims", None)
         if dynamic_arg_dims is not None:
             compiled_fn = torch.compile(
-                fn,
-                dynamic=False,
-                backend=backend,
-                options=compile_options,
+                fn, dynamic=False, backend=backend, options=compile_options
             )
             sig = inspect.signature(fn)
 
@@ -261,12 +258,7 @@ class CustomOp(nn.Module):
             return wrapper
 
         # dynamic=True to avoid recompilations
-        return torch.compile(
-            fn,
-            dynamic=True,
-            backend=backend,
-            options=compile_options,
-        )
+        return torch.compile(fn, dynamic=True, backend=backend, options=compile_options)
 
     @classmethod
     def enabled(cls) -> bool:
@@ -306,9 +298,7 @@ class CustomOp(nn.Module):
     # Decorator to register custom ops.
     @classmethod
     def register(
-        cls,
-        name: str,
-        dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+        cls, name: str, dynamic_arg_dims: dict[str, int | list[int]] | None = None
     ):
         def decorator(op_cls):
             assert name not in op_registry, f"Duplicate op name: {name}"

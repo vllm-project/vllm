@@ -33,24 +33,14 @@ def server():
         yield remote_server
 
 
-def _cohere_embed(
-    server: RemoteOpenAIServer,
-    texts: list[str],
-) -> list[list[float]]:
-    body = {
-        "model": MODEL_NAME,
-        "texts": texts,
-        "embedding_types": ["float"],
-    }
+def _cohere_embed(server: RemoteOpenAIServer, texts: list[str]) -> list[list[float]]:
+    body = {"model": MODEL_NAME, "texts": texts, "embedding_types": ["float"]}
     resp = requests.post(server.url_for("/v2/embed"), json=body)
     resp.raise_for_status()
     return resp.json()["embeddings"]["float"]
 
 
-def _openai_embed(
-    server: RemoteOpenAIServer,
-    texts: list[str],
-) -> list[list[float]]:
+def _openai_embed(server: RemoteOpenAIServer, texts: list[str]) -> list[list[float]]:
     body = {"model": MODEL_NAME, "input": texts, "encoding_format": "float"}
     resp = requests.post(server.url_for("/v1/embeddings"), json=body)
     resp.raise_for_status()
@@ -77,11 +67,7 @@ def test_single_text_parity(server: RemoteOpenAIServer):
 def test_batch_parity(server: RemoteOpenAIServer):
     """A batch of texts should produce equivalent embeddings via both APIs,
     in the same order."""
-    texts = [
-        "machine learning",
-        "deep learning",
-        "natural language processing",
-    ]
+    texts = ["machine learning", "deep learning", "natural language processing"]
     v2 = _cohere_embed(server, texts)
     v1 = _openai_embed(server, texts)
     assert len(v2) == len(v1) == 3
@@ -104,11 +90,7 @@ def test_token_count_parity(server: RemoteOpenAIServer):
     texts = ["hello world"]
     v2_resp = requests.post(
         server.url_for("/v2/embed"),
-        json={
-            "model": MODEL_NAME,
-            "texts": texts,
-            "embedding_types": ["float"],
-        },
+        json={"model": MODEL_NAME, "texts": texts, "embedding_types": ["float"]},
     )
     v1_resp = requests.post(
         server.url_for("/v1/embeddings"),

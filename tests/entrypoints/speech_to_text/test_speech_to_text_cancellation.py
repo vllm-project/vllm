@@ -67,8 +67,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
         to_sampling_params=Mock(return_value=object()),
     )
     raw_request = SimpleNamespace(
-        headers={"X-Request-Id": "outer-request"},
-        state=SimpleNamespace(),
+        headers={"X-Request-Id": "outer-request"}, state=SimpleNamespace()
     )
 
     task = asyncio.create_task(
@@ -136,8 +135,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
         to_sampling_params=Mock(return_value=object()),
     )
     raw_request = SimpleNamespace(
-        headers={"X-Request-Id": "outer-request"},
-        state=SimpleNamespace(),
+        headers={"X-Request-Id": "outer-request"}, state=SimpleNamespace()
     )
 
     task = asyncio.create_task(
@@ -166,8 +164,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
 @pytest.mark.asyncio
 async def test_language_detection_cancel_aborts_engine_request():
     engine_client = SimpleNamespace(
-        generate=Mock(return_value=_never_finishes()),
-        abort=AsyncMock(),
+        generate=Mock(return_value=_never_finishes()), abort=AsyncMock()
     )
 
     server = OpenAISpeechToText.__new__(OpenAISpeechToText)

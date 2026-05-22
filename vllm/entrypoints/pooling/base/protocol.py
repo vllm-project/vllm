@@ -53,8 +53,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         ),
     )
     mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description="Additional kwargs to pass to the HF processor.",
+        default=None, description="Additional kwargs to pass to the HF processor."
     )
     cache_salt: str | None = Field(
         default=None,
@@ -233,7 +232,7 @@ class ChatRequestMixin(OpenAIBaseModel):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True.",
+                "`add_generation_prompt` to True."
             )
         return data
 

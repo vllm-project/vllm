@@ -190,9 +190,7 @@ def get_inductor_factors() -> list[Any]:
     return factors
 
 
-def is_compile_cache_enabled(
-    vllm_additional_inductor_config: dict[str, Any],
-) -> bool:
+def is_compile_cache_enabled(vllm_additional_inductor_config: dict[str, Any]) -> bool:
     vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
         "force_disable_caches", False
     )
@@ -312,9 +310,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         compile_kwargs = {
             "dynamic_shapes": dynamic_shapes,
-            "options": {
-                "config_patches": current_config,
-            },
+            "options": {"config_patches": current_config},
         }
 
         if is_torch_equal_or_newer("2.13.0.dev"):

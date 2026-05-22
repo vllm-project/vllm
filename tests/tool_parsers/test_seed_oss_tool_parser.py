@@ -11,11 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.seed_oss_tool_parser import SeedOssToolParser
@@ -70,7 +66,7 @@ def sample_tools():
                 },
                 "strict": True,
             },
-        ),
+        )
     ]
 
 
@@ -118,11 +114,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                            },
-                        ),
+                        arguments=json.dumps({"location": "Barcelona, Spain"}),
                     ),
                     type="function",
                 )
@@ -148,11 +140,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
                 ToolCall(
                     function=FunctionCall(
                         name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                            },
-                        ),
+                        arguments=json.dumps({"location": "Barcelona, Spain"}),
                     ),
                     type="function",
                 )
@@ -191,10 +179,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
                     function=FunctionCall(
                         name="get_weather",
                         arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                                "unit": "celsius",
-                            },
+                            {"location": "Barcelona, Spain", "unit": "celsius"}
                         ),
                     ),
                     type="function",
@@ -322,11 +307,7 @@ def stream_delta_message_generator(
                 ToolCall(
                     function=FunctionCall(
                         name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                            },
-                        ),
+                        arguments=json.dumps({"location": "Barcelona, Spain"}),
                     ),
                     type="function",
                 )
@@ -353,11 +334,7 @@ def stream_delta_message_generator(
                 ToolCall(
                     function=FunctionCall(
                         name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                            },
-                        ),
+                        arguments=json.dumps({"location": "Barcelona, Spain"}),
                     ),
                     type="function",
                 )
@@ -396,10 +373,7 @@ def stream_delta_message_generator(
                     function=FunctionCall(
                         name="get_weather",
                         arguments=json.dumps(
-                            {
-                                "location": "Barcelona, Spain",
-                                "unit": "celsius",
-                            },
+                            {"location": "Barcelona, Spain", "unit": "celsius"}
                         ),
                     ),
                     type="function",

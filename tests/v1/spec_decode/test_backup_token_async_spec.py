@@ -34,10 +34,7 @@ class _FakeRequest:
 
 class _FakeInputBatch:
     def __init__(
-        self,
-        req_ids: list[str],
-        num_tokens_no_spec: list[int],
-        vocab_size: int = 32000,
+        self, req_ids: list[str], num_tokens_no_spec: list[int], vocab_size: int = 32000
     ):
         self.req_ids = req_ids
         self.num_reqs = len(req_ids)
@@ -46,9 +43,7 @@ class _FakeInputBatch:
 
 
 def _make_requests(
-    req_ids: list[str],
-    prompt_lens: list[int],
-    output_lens: list[int],
+    req_ids: list[str], prompt_lens: list[int], output_lens: list[int]
 ) -> dict[str, _FakeRequest]:
     requests = {}
     for rid, plen, olen in zip(req_ids, prompt_lens, output_lens):
@@ -69,8 +64,7 @@ def _backup_buggy(
 
 
 def _backup_fixed(
-    requests: dict[str, _FakeRequest],
-    batch: _FakeInputBatch,
+    requests: dict[str, _FakeRequest], batch: _FakeInputBatch
 ) -> list[int]:
     """New logic: uses num_tokens_no_spec - 1 (last committed token)."""
     n = batch.num_reqs

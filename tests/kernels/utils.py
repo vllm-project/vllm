@@ -148,8 +148,7 @@ class PhaseTestParameters(NamedTuple):
 
 
 def maybe_make_int_tensor(
-    _list: list[int] | None,
-    device: torch.device | str,
+    _list: list[int] | None, device: torch.device | str
 ) -> torch.Tensor:
     """
     Convert Python int list to a 1D int torch.Tensor on `device`
@@ -165,8 +164,7 @@ def maybe_make_int_tensor(
 
 
 def maybe_make_long_tensor(
-    _list: list[int] | None,
-    device: torch.device | str,
+    _list: list[int] | None, device: torch.device | str
 ) -> torch.Tensor:
     """
     Convert Python int list to a 1D long torch.Tensor on `device`
@@ -191,10 +189,7 @@ def maybe_max(_list: list | None) -> Number | None:
     return None if _list is None else max(_list)
 
 
-def make_causal_mask(
-    q_max_seq_len: int,
-    kv_max_seq_len: int,
-) -> torch.Tensor:
+def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) -> torch.Tensor:
     """
     Create a q_max_seq_len x kv_max_seq_len causal mask
 
@@ -622,9 +617,7 @@ def make_empty_block_tables_tensor(device: torch.device | str):
 
 
 def split_slot_mapping(
-    slot_mapping_list: torch.Tensor,
-    seq_lens: list[int],
-    device: torch.device | str,
+    slot_mapping_list: torch.Tensor, seq_lens: list[int], device: torch.device | str
 ):
     """
     Split a slot mapping into valid prefill- and decode-phase slot mappings.

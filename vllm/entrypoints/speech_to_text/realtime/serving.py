@@ -35,9 +35,7 @@ class OpenAIServingRealtime(OpenAIServing):
         request_logger: RequestLogger | None,
     ):
         super().__init__(
-            engine_client=engine_client,
-            models=models,
-            request_logger=request_logger,
+            engine_client=engine_client, models=models, request_logger=request_logger
         )
 
         self.task_type: Literal["realtime"] = "realtime"

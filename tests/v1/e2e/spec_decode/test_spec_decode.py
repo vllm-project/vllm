@@ -168,22 +168,14 @@ def reset_torch_dynamo():
             "prompt_lookup_min": 3,
             "num_speculative_tokens": 3,
         },
-        {
-            "method": "suffix",
-            "suffix_decoding_max_spec_factor": 2.0,
-        },
+        {"method": "suffix", "suffix_decoding_max_spec_factor": 2.0},
     ],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
-def test_ngram_and_suffix_correctness(
-    speculative_config: dict,
-    model_name: str,
-):
+def test_ngram_and_suffix_correctness(speculative_config: dict, model_name: str):
     spec_llm = LLM(
-        model=model_name,
-        speculative_config=speculative_config,
-        max_model_len=4096,
+        model=model_name, speculative_config=speculative_config, max_model_len=4096
     )
     evaluate_llm_for_gsm8k(spec_llm)
     del spec_llm
@@ -194,9 +186,7 @@ def test_ngram_and_suffix_correctness(
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
-def test_ngram_gpu_default_with_async_scheduling(
-    async_scheduling: bool,
-):
+def test_ngram_gpu_default_with_async_scheduling(async_scheduling: bool):
     """
     Test ngram_gpu speculative decoding (k=3) correctness with and without
     async scheduling, validated via GSM8K accuracy.
@@ -227,9 +217,7 @@ def test_ngram_gpu_default_with_async_scheduling(
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_suffix_decoding_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    model_name: str,
+    monkeypatch: pytest.MonkeyPatch, sampling_config: SamplingParams, model_name: str
 ):
     """
     Check that suffix decoding caching takes effect and improves acceptance
@@ -512,7 +500,7 @@ def _run_eagle_correctness(
             False,
             "auto",
             0.0,
-        ),
+        )
     ],
     ids=["deepseek_eagle"],
 )
@@ -565,7 +553,7 @@ def test_eagle_correctness_light(
             0.8,
             # TODO(hmellor): figure out why memory usage is so high
             marks=pytest.mark.skip(
-                reason="Feature is experimental and uses too much memory in CI",
+                reason="Feature is experimental and uses too much memory in CI"
             ),
         ),
         pytest.param(
@@ -1043,8 +1031,7 @@ def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
         return replace(
             vllm_config,
             kernel_config=replace(
-                vllm_config.kernel_config,
-                moe_backend=spec_cfg.moe_backend,
+                vllm_config.kernel_config, moe_backend=spec_cfg.moe_backend
             ),
         )
     return vllm_config
@@ -1392,8 +1379,7 @@ def test_synthetic_acceptance_rate():
 
     test_prompts = get_test_prompts(mm_enabled=False, num_prompts=50)
     spec_llm.chat(
-        test_prompts,
-        SamplingParams(temperature=0, max_tokens=64, ignore_eos=True),
+        test_prompts, SamplingParams(temperature=0, max_tokens=64, ignore_eos=True)
     )
 
     metrics = spec_llm.get_metrics()

@@ -24,10 +24,7 @@ openai_api_base = "http://localhost:8000/v1"
 
 
 def main():
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     models = client.models.list()
     model = models.data[0].id
@@ -47,10 +44,7 @@ def main():
     # Round 2
     messages.append({"role": "assistant", "content": content})
     messages.append(
-        {
-            "role": "user",
-            "content": "How many Rs are there in the word 'strawberry'?",
-        }
+        {"role": "user", "content": "How many Rs are there in the word 'strawberry'?"}
     )
     response = client.chat.completions.create(model=model, messages=messages)
 

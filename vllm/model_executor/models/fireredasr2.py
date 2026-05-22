@@ -6,10 +6,7 @@ from typing import Annotated, cast
 
 import torch
 from torch import nn
-from transformers import (
-    BatchFeature,
-    Qwen2Config,
-)
+from transformers import BatchFeature, Qwen2Config
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -17,18 +14,11 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.linear import (
-    ReplicatedLinear,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.whisper_utils import (
-    ISO639_1_SUPPORTED_LANGS,
-)
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -39,9 +29,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.fireredasr2 import (
-    FireRedASR2FeatureExtractor,
-)
+from vllm.transformers_utils.processors.fireredasr2 import FireRedASR2FeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .conformer_encoder import ConformerEncoder
@@ -70,18 +58,9 @@ class FireRedASR2AudioInputs(TensorSchema):
         - t: Time frames (M)
     """
 
-    input_features: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b", "nmb", "t"),
-    ]
-    speech_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
-    fake_token_lengths: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b"),
-    ]
+    input_features: Annotated[list[torch.Tensor] | None, TensorShape("b", "nmb", "t")]
+    speech_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
+    fake_token_lengths: Annotated[list[torch.Tensor] | None, TensorShape("b")]
 
 
 class FireRedASR2Adapter(nn.Module):
@@ -89,15 +68,11 @@ class FireRedASR2Adapter(nn.Module):
         super().__init__()
         self.ds = downsample_rate
         self.linear1 = ReplicatedLinear(
-            input_size=encoder_dim * downsample_rate,
-            output_size=llm_dim,
-            bias=True,
+            input_size=encoder_dim * downsample_rate, output_size=llm_dim, bias=True
         )
         self.relu = _ACTIVATION_REGISTRY["relu"]
         self.linear2 = ReplicatedLinear(
-            input_size=llm_dim,
-            output_size=llm_dim,
-            bias=True,
+            input_size=llm_dim, output_size=llm_dim, bias=True
         )
 
     def forward(self, x, x_lens):
@@ -119,11 +94,7 @@ class FireRedASR2Adapter(nn.Module):
 
 
 class FireRedASR2Encoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig):
         super().__init__()
         self.audio_encoder = ConformerEncoder(
             **vllm_config.model_config.hf_config.audio_encoder_conf
@@ -133,9 +104,7 @@ class FireRedASR2Encoder(nn.Module):
 class FireRedASR2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.encoder = FireRedASR2Encoder(
-            vllm_config=vllm_config,
-        )
+        self.encoder = FireRedASR2Encoder(vllm_config=vllm_config)
         encoder_dim = self.encoder.audio_encoder.odim
         llm_dim = vllm_config.model_config.hf_config.hidden_size
         self.encoder_projector = FireRedASR2Adapter(
@@ -155,9 +124,7 @@ class FireRedASR2Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, positions=positions, inputs_embeds=inputs_embeds
         )
         return decoder_outputs
 
@@ -238,24 +205,16 @@ class FireRedASR2MultiModalProcessor(
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
+            mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
@@ -294,8 +253,7 @@ class FireRedASR2MultiModalProcessor(
             audio_tokens = [audio_token_id] * int(num_features)
 
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
+                audio_tokens, embed_token_id=audio_token_id
             )
 
         return [
@@ -354,10 +312,7 @@ class FireRedASR2ForConditionalGeneration(
         return super().validate_language(language)
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
@@ -370,9 +325,7 @@ class FireRedASR2ForConditionalGeneration(
         prompt_str = "<|im_start|>user\n<|AUDIO|>请转写音频为文字<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
         prompt = {
             "prompt": prompt_str,
-            "multi_modal_data": {
-                "audio": (audio, stt_config.sample_rate),
-            },
+            "multi_modal_data": {"audio": (audio, stt_config.sample_rate)},
         }
         return cast(PromptType, prompt)
 
@@ -411,8 +364,7 @@ class FireRedASR2ForConditionalGeneration(
             tower_targets={"audio": (FireRedASR2Encoder, FireRedASR2Adapter)},
         ):
             self.model = FireRedASR2Model(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
         logit_scale = getattr(config, "logit_scale", 1.0)
@@ -426,9 +378,7 @@ class FireRedASR2ForConditionalGeneration(
         **kwargs,
     ) -> torch.Tensor:
         decoder_outputs = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids, positions=positions, inputs_embeds=inputs_embeds
         )
         return decoder_outputs
 

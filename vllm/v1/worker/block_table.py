@@ -99,11 +99,7 @@ class BlockTable:
             self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
-    def append_row(
-        self,
-        block_ids: list[int],
-        row_idx: int,
-    ) -> None:
+    def append_row(self, block_ids: list[int], row_idx: int) -> None:
         if not block_ids:
             return
 
@@ -139,10 +135,7 @@ class BlockTable:
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
     def compute_slot_mapping(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
+        self, num_reqs: int, query_start_loc: torch.Tensor, positions: torch.Tensor
     ) -> None:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
@@ -301,10 +294,7 @@ class MultiGroupBlockTable:
             block_table.swap_row(src, tgt)
 
     def compute_slot_mapping(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
+        self, num_reqs: int, query_start_loc: torch.Tensor, positions: torch.Tensor
     ) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
@@ -344,11 +334,7 @@ def _compute_slot_mapping_kernel(
         # Pad remaining slots for CUDA graph compatibility.
         for i in range(num_tokens, max_num_tokens, BLOCK_SIZE):
             offsets = i + tl.arange(0, BLOCK_SIZE)
-            tl.store(
-                slot_mapping_ptr + offsets,
-                PAD_ID,
-                mask=offsets < max_num_tokens,
-            )
+            tl.store(slot_mapping_ptr + offsets, PAD_ID, mask=offsets < max_num_tokens)
         return
 
     start_idx = tl.load(query_start_loc_ptr + req_idx).to(tl.int64)

@@ -48,8 +48,7 @@ class BgeM3SparseEmbeddingsProcessor(
         )
 
     def merge_pooling_params(
-        self,
-        params: PoolingParams | None = None,
+        self, params: PoolingParams | None = None
     ) -> PoolingParams:
         if params is None:
             params = PoolingParams()
@@ -125,9 +124,7 @@ class BgeM3SparseEmbeddingsProcessor(
         return self.offline_requests.pop(0)
 
     def _build_sparse_embedding_token_weights(
-        self,
-        sparse_embedding: dict[int, float],
-        return_tokens: bool = False,
+        self, sparse_embedding: dict[int, float], return_tokens: bool = False
     ) -> list[SparseEmbeddingTokenWeight]:
         token_ids = sparse_embedding.keys()
         token_weights = sparse_embedding.values()
@@ -181,8 +178,7 @@ class BgeM3SparseEmbeddingsProcessor(
                         weight, sparse_embedding_dict.get(token_id, 0.0)
                     )
                 sparse_embedding = self._build_sparse_embedding_token_weights(
-                    sparse_embedding_dict,
-                    raw_request.return_tokens,
+                    sparse_embedding_dict, raw_request.return_tokens
                 )
 
             response_data.append(
@@ -195,12 +191,8 @@ class BgeM3SparseEmbeddingsProcessor(
             )
 
         usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
+            prompt_tokens=num_prompt_tokens, total_tokens=num_prompt_tokens
         )
-        resp = SparseEmbeddingResponse(
-            data=response_data,
-            usage=usage,
-        )
+        resp = SparseEmbeddingResponse(data=response_data, usage=usage)
 
         return resp

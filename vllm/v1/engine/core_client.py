@@ -1529,11 +1529,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         ip = parallel_config.data_parallel_master_ip
         store = create_tcp_store(
-            ip,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
+            ip, 0, is_master=True, world_size=-1, wait_for_workers=False
         )
         parallel_config._coord_store_port = store.port
         self._coord_store = store

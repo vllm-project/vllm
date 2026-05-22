@@ -7,10 +7,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
-from vllm.v1.worker.ubatch_utils import (
-    check_ubatch_thresholds,
-    is_last_ubatch_empty,
-)
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, is_last_ubatch_empty
 
 logger = init_logger(__name__)
 
@@ -26,7 +23,7 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
-            "Using CPU all reduce to synchronize DP padding between ranks.",
+            "Using CPU all reduce to synchronize DP padding between ranks."
         )
         device = "cpu"
         group = get_dp_group().cpu_group
@@ -153,10 +150,7 @@ def _synchronize_dp_ranks(
 
     # Pad all DP ranks up to the maximum token count across ranks if
     # should_dp_pad is True
-    num_tokens_after_padding = _post_process_dp_padding(
-        tensor,
-        should_dp_pad,
-    )
+    num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
     return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
@@ -204,9 +198,7 @@ def coordinate_batch_across_dp(
         # Check preconditions for microbatching
         assert uniform_decode is not None
         should_attempt_ubatching = check_ubatch_thresholds(
-            parallel_config,
-            num_tokens_unpadded,
-            uniform_decode=uniform_decode,
+            parallel_config, num_tokens_unpadded, uniform_decode=uniform_decode
         )
 
     if num_tokens_padded is None:

@@ -59,10 +59,7 @@ class MPLinearKernel(ABC):
 
     @abstractmethod
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         raise NotImplementedError
 

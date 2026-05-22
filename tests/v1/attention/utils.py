@@ -140,9 +140,7 @@ def try_get_attention_backend(
         raise AssertionError("unreachable") from None
 
 
-def try_backend_includes_kv_cache_update(
-    backend: AttentionBackendEnum,
-) -> bool:
+def try_backend_includes_kv_cache_update(backend: AttentionBackendEnum) -> bool:
     """Try to get the attention backend class, skipping test if not found."""
     try:
         backend_class = backend.get_class()
@@ -153,8 +151,7 @@ def try_backend_includes_kv_cache_update(
 
 
 def create_standard_kv_cache_spec(
-    vllm_config: VllmConfig,
-    attn_type: AttentionType = AttentionType.DECODER,
+    vllm_config: VllmConfig, attn_type: AttentionType = AttentionType.DECODER
 ) -> FullAttentionSpec | EncoderOnlyAttentionSpec:
     """Create an AttentionSpec from VllmConfig.
 
@@ -205,18 +202,13 @@ def create_vllm_config(
         max_model_len=max_model_len,
     )
 
-    cache_config = CacheConfig(
-        block_size=block_size,
-        cache_dtype="auto",
-    )
+    cache_config = CacheConfig(block_size=block_size, cache_dtype="auto")
     # Set cache blocks for testing
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=tensor_parallel_size,
-    )
+    parallel_config = ParallelConfig(tensor_parallel_size=tensor_parallel_size)
 
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -301,36 +293,28 @@ full_cg_backend_configs = {
             "flash_attn_version": 3,
             "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
-        comp_config={
-            "cudagraph_mode": "FULL",
-        },
+        comp_config={"cudagraph_mode": "FULL"},
         specific_gpu_arch=(9, 0),
     ),
     # FlashMLA on Hopper
     "FlashMLA": BackendConfig(
         name="FlashMLA",
         attention_config={"backend": "FLASHMLA"},
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         specific_gpu_arch=(9, 0),
     ),
     # Cutlass MLA on Blackwell
     "CutlassMLA": BackendConfig(
         name="CutlassMLA",
         attention_config={"backend": "CUTLASS_MLA"},
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         specific_gpu_arch=(10, 0),
     ),
     # FlashInfer MLA on Blackwell
     "FlashInferMLA": BackendConfig(
         name="FlashInferMLA",
         attention_config={"backend": "FLASHINFER_MLA"},
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         specific_gpu_arch=(10, 0),
     ),
     # FlashAttention MLA on Hopper
@@ -340,9 +324,7 @@ full_cg_backend_configs = {
             "backend": "FLASH_ATTN_MLA",
             "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
-        comp_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
+        comp_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         specific_gpu_arch=(9, 0),
     ),
     # FA2
@@ -353,35 +335,24 @@ full_cg_backend_configs = {
             "flash_attn_version": 2,
             "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
     ),
     # Triton Attention
     "TritonAttn": BackendConfig(
         name="TritonAttn",
         attention_config={"backend": "TRITON_ATTN"},
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
     ),
     # FlashInfer
     "FlashInfer": BackendConfig(
         name="FlashInfer",
         attention_config={"backend": "FLASHINFER"},
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-        },
+        comp_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
     ),
     "RocmAttn": BackendConfig(
         name="RocmAttn",
-        attention_config={
-            "backend": "ROCM_ATTN",
-            "use_prefill_decode_attention": True,
-        },
-        comp_config={
-            "cudagraph_mode": "FULL",
-        },
+        attention_config={"backend": "ROCM_ATTN", "use_prefill_decode_attention": True},
+        comp_config={"cudagraph_mode": "FULL"},
     ),
 }
 

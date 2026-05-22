@@ -211,7 +211,7 @@ class TestNormalizeAudio:
         """Torch tensor in (time, channels) format should be transposed."""
         # Create audio in (time, channels) format: 1000 samples, 2 channels
         audio_time_channels = torch.tensor(
-            [[1.0, -1.0]] * 1000,  # 1000 time steps, 2 channels
+            [[1.0, -1.0]] * 1000  # 1000 time steps, 2 channels
         )
         assert audio_time_channels.shape == (1000, 2)  # (time, channels)
 
@@ -285,10 +285,7 @@ class TestMultiModalDataParserChannelNormalization:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser with mono normalization enabled
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Create stereo audio (simulating torchaudio output)
         stereo_audio = np.array(
@@ -311,16 +308,10 @@ class TestMultiModalDataParserChannelNormalization:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser without channel normalization
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=None,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=None)
 
         # Create stereo audio
-        stereo_audio = np.array(
-            [[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]],
-            dtype=np.float32,
-        )
+        stereo_audio = np.array([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]], dtype=np.float32)
 
         # Parse audio data
         result = parser._parse_audio_data((stereo_audio, 16000))
@@ -335,10 +326,7 @@ class TestMultiModalDataParserChannelNormalization:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser with mono normalization enabled
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Create mono audio (already 1D)
         mono_audio = np.random.randn(16000).astype(np.float32)
@@ -356,10 +344,7 @@ class TestMultiModalDataParserChannelNormalization:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser with stereo target
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=2,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=2)
 
         # Create 6-channel audio (5.1 surround)
         surround_audio = np.random.randn(6, 1000).astype(np.float32)
@@ -398,10 +383,7 @@ class TestAudioPipelineE2E:
         assert stereo_torchaudio.shape == (2, 16000)
 
         # Create parser with mono normalization (like Whisper models)
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_torchaudio, 16000))
@@ -427,10 +409,7 @@ class TestAudioPipelineE2E:
         assert stereo_soundfile.shape == (16000, 2)
 
         # Create parser with mono normalization
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Process audio through the parser
         result = parser._parse_audio_data((stereo_soundfile, 16000))
@@ -452,10 +431,7 @@ class TestAudioPipelineE2E:
         assert mono_pyav.shape == (16000,)
 
         # Create parser with mono normalization
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Process audio through the parser
         result = parser._parse_audio_data((mono_pyav, 16000))
@@ -487,10 +463,7 @@ class TestAudioPipelineE2E:
         assert surround_audio.shape == (6, 8000)
 
         # Create parser with mono normalization
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Process audio through the parser
         result = parser._parse_audio_data((surround_audio, 16000))
@@ -517,10 +490,7 @@ class TestAudioPipelineE2E:
         assert stereo_torch.shape == (2, 8000)
 
         # Create parser with mono normalization
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         # Process audio through the parser
         # Note: Parser expects numpy, so we convert first (simulating real usage)
@@ -539,10 +509,7 @@ class TestAudioPipelineE2E:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Stereo audio
-        stereo_audio = np.array(
-            [[1.0] * 8000, [-1.0] * 8000],
-            dtype=np.float32,
-        )
+        stereo_audio = np.array([[1.0] * 8000, [-1.0] * 8000], dtype=np.float32)
 
         # Create parser WITHOUT mono normalization (passthrough)
         parser = MultiModalDataParser(
@@ -588,15 +555,9 @@ class TestAudioPipelineE2E:
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Very short stereo audio (10 samples)
-        short_stereo = np.array(
-            [[1.0] * 10, [-1.0] * 10],
-            dtype=np.float32,
-        )
+        short_stereo = np.array([[1.0] * 10, [-1.0] * 10], dtype=np.float32)
 
-        parser = MultiModalDataParser(
-            target_sr=16000,
-            target_channels=1,
-        )
+        parser = MultiModalDataParser(target_sr=16000, target_channels=1)
 
         result = parser._parse_audio_data((short_stereo, 16000))
         audio_output = result.get(0)
@@ -700,10 +661,7 @@ class TestAudioChunking:
         segment[16000:17600] = 0.01
 
         split_idx = find_split_point(
-            wav=segment,
-            start_idx=0,
-            end_idx=32000,
-            min_energy_window=1600,
+            wav=segment, start_idx=0, end_idx=32000, min_energy_window=1600
         )
 
         # Split should be in or near the quiet region
@@ -716,10 +674,7 @@ class TestAudioChunking:
         segment = np.ones(32000, dtype=np.float32) * 0.5
 
         split_idx = find_split_point(
-            wav=segment,
-            start_idx=0,
-            end_idx=32000,
-            min_energy_window=1600,
+            wav=segment, start_idx=0, end_idx=32000, min_energy_window=1600
         )
 
         assert 0 <= split_idx <= 32000
@@ -734,10 +689,7 @@ class TestAudioChunking:
         segment[20000:21600] = 0.0
 
         split_idx = find_split_point(
-            wav=segment,
-            start_idx=16000,
-            end_idx=28000,
-            min_energy_window=1600,
+            wav=segment, start_idx=16000, end_idx=28000, min_energy_window=1600
         )
 
         # Current implementation evaluates non-overlapping 1600-sample windows

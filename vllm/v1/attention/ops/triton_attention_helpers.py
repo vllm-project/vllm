@@ -131,9 +131,7 @@ def init_softmax_M(
         load_sinks = (not IS_3D) or (segm_idx_or_0 == 0)
         if load_sinks:
             M = tl.load(
-                sink_ptr + query_offset_1,
-                mask=query_mask_1,
-                other=float("-inf"),
+                sink_ptr + query_offset_1, mask=query_mask_1, other=float("-inf")
             ).to(tl.float32)
     return M
 
@@ -197,8 +195,7 @@ def compute_tile_loop_bounds(
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
-            cur_batch_query_len - 1,
+            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv, cur_batch_query_len - 1
         )
         # For sliding window, each query position q can only attend to
         # keys in the range [q_abs - SLIDING_WINDOW + 1, q_abs]
@@ -320,20 +317,13 @@ def compute_kv_seq_mask(
 
 @triton.jit
 def apply_alibi_to_score(
-    S,
-    alibi_slope,
-    seq_offset,
-    context_len,
-    query_pos,
-    USE_ALIBI_SQRT: tl.constexpr,
+    S, alibi_slope, seq_offset, context_len, query_pos, USE_ALIBI_SQRT: tl.constexpr
 ):
     """Add the ALiBi positional bias (linear or sqrt variant) to S in-place."""
     if USE_ALIBI_SQRT:
         relative_pos = seq_offset - (context_len + query_pos[:, None])
         alibi_offset = tl.where(
-            relative_pos <= 0,
-            -tl.sqrt((-relative_pos).to(tl.float32)),
-            0.0,
+            relative_pos <= 0, -tl.sqrt((-relative_pos).to(tl.float32)), 0.0
         )
     else:
         alibi_offset = seq_offset - context_len
@@ -341,19 +331,12 @@ def apply_alibi_to_score(
 
 
 @triton.jit
-def load_qq_bias_tile(
-    qq_bias_row_ptrs,
-    seq_offset,
-    context_len,
-    qq_bias_stride_0,
-):
+def load_qq_bias_tile(qq_bias_row_ptrs, seq_offset, context_len, qq_bias_stride_0):
     """Load the qq-bias slice for keys that correspond to query rows."""
     key_rel_pos = seq_offset - context_len
     is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
     return tl.load(
-        qq_bias_row_ptrs + key_rel_pos[None, :],
-        mask=is_query_key[None, :],
-        other=0.0,
+        qq_bias_row_ptrs + key_rel_pos[None, :], mask=is_query_key[None, :], other=0.0
     )
 
 

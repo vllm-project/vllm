@@ -54,17 +54,12 @@ def _packed_a2a_reference(
     )
     lses = cp_attn_lse.view(B, world_size, h_per_rank).permute(1, 0, 2).contiguous()
     return _lse_weighted_combine(
-        outputs,
-        lses,
-        return_lse=True,
-        is_lse_base_on_e=is_lse_base_on_e,
+        outputs, lses, return_lse=True, is_lse_base_on_e=is_lse_base_on_e
     )
 
 
 def _assert_packed_a2a_close(
-    actual: torch.Tensor,
-    expected: torch.Tensor,
-    dtype: torch.dtype,
+    actual: torch.Tensor, expected: torch.Tensor, dtype: torch.dtype
 ) -> None:
     if dtype == torch.float32:
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
@@ -114,10 +109,7 @@ class TestDCPCommBackendConfig:
         with pytest.raises(
             ValueError, match="requires decode_context_parallel_size > 1"
         ):
-            ParallelConfig(
-                dcp_comm_backend="a2a",
-                decode_context_parallel_size=1,
-            )
+            ParallelConfig(dcp_comm_backend="a2a", decode_context_parallel_size=1)
 
     def test_a2a_with_dcp_valid(self):
         """A2A backend is valid when DCP > 1."""
@@ -131,15 +123,12 @@ class TestDCPCommBackendConfig:
     def test_invalid_backend_rejected(self):
         """Invalid backend values are rejected."""
         with pytest.raises(ValueError, match="must be one of|Input should be"):
-            ParallelConfig(
-                dcp_comm_backend="invalid",
-            )
+            ParallelConfig(dcp_comm_backend="invalid")
 
     def test_ag_rs_with_dcp_1_valid(self):
         """ag_rs backend is valid with DCP=1 (no DCP)."""
         config = ParallelConfig(
-            dcp_comm_backend="ag_rs",
-            decode_context_parallel_size=1,
+            dcp_comm_backend="ag_rs", decode_context_parallel_size=1
         )
         assert config.dcp_comm_backend == "ag_rs"
 
@@ -225,12 +214,7 @@ class TestLSEWeightedCombine:
         """Verify mathematical correctness of LSE combination."""
         from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
 
-        outputs = torch.tensor(
-            [
-                [[[2.0, 4.0]]],
-                [[[6.0, 8.0]]],
-            ]
-        )
+        outputs = torch.tensor([[[[2.0, 4.0]]], [[[6.0, 8.0]]]])
         lses = torch.tensor(
             [
                 [[1.0]],  # exp(1) ≈ 2.718
@@ -251,18 +235,8 @@ class TestLSEWeightedCombine:
         from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
 
         B, H, D = 1, 1, 2
-        outputs = torch.tensor(
-            [
-                [[[1.0, 2.0]]],
-                [[[3.0, 4.0]]],
-            ]
-        )
-        lses = torch.tensor(
-            [
-                [[1.0]],
-                [[2.0]],
-            ]
-        )
+        outputs = torch.tensor([[[[1.0, 2.0]]], [[[3.0, 4.0]]]])
+        lses = torch.tensor([[[1.0]], [[2.0]]])
 
         result, global_lse = _lse_weighted_combine(outputs, lses, return_lse=True)
 
@@ -276,24 +250,11 @@ class TestLSEWeightedCombine:
         """Base-2 LSE mode returns log2-sum-exp2 global LSE."""
         from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
 
-        outputs = torch.tensor(
-            [
-                [[[1.0, 2.0]]],
-                [[[3.0, 4.0]]],
-            ]
-        )
-        lses = torch.tensor(
-            [
-                [[1.0]],
-                [[2.0]],
-            ]
-        )
+        outputs = torch.tensor([[[[1.0, 2.0]]], [[[3.0, 4.0]]]])
+        lses = torch.tensor([[[1.0]], [[2.0]]])
 
         result, global_lse = _lse_weighted_combine(
-            outputs,
-            lses,
-            return_lse=True,
-            is_lse_base_on_e=False,
+            outputs, lses, return_lse=True, is_lse_base_on_e=False
         )
 
         expected_global_lse = math.log2(2**1 + 2**2)
@@ -303,10 +264,7 @@ class TestLSEWeightedCombine:
 
         torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(
-            global_lse,
-            torch.tensor([[expected_global_lse]]),
-            rtol=1e-5,
-            atol=1e-5,
+            global_lse, torch.tensor([[expected_global_lse]]), rtol=1e-5, atol=1e-5
         )
 
     def test_lse_pack_dim(self):
@@ -326,10 +284,7 @@ class TestPackedA2AKernels:
     @pytest.mark.parametrize("return_lse", [False, True])
     @pytest.mark.parametrize("is_lse_base_on_e", [False, True])
     def test_pack_unpack_combine_matches_reference(
-        self,
-        dtype_name: str,
-        return_lse: bool,
-        is_lse_base_on_e: bool,
+        self, dtype_name: str, return_lse: bool, is_lse_base_on_e: bool
     ):
         from vllm.v1.attention.ops.dcp_alltoall import (
             _dcp_a2a_lse_pack_dim,
@@ -346,9 +301,7 @@ class TestPackedA2AKernels:
         cp_attn_lse = torch.randn(B, H, device=device, dtype=torch.float32)
         lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
         send_buffer = torch.empty(
-            (world_size, B, h_per_rank, D + lse_pack_dim),
-            device=device,
-            dtype=dtype,
+            (world_size, B, h_per_rank, D + lse_pack_dim), device=device, dtype=dtype
         )
 
         _dcp_a2a_pack_send(
@@ -399,19 +352,10 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         generator = torch.Generator(device=f"cuda:{local_rank}")
         generator.manual_seed(1234 + rank)
         cp_attn_out = torch.randn(
-            B,
-            H,
-            D,
-            device=f"cuda:{local_rank}",
-            dtype=dtype,
-            generator=generator,
+            B, H, D, device=f"cuda:{local_rank}", dtype=dtype, generator=generator
         )
         cp_attn_lse = torch.randn(
-            B,
-            H,
-            device=f"cuda:{local_rank}",
-            dtype=torch.float32,
-            generator=generator,
+            B, H, device=f"cuda:{local_rank}", dtype=torch.float32, generator=generator
         )
         actual = dcp_a2a_lse_reduce(
             cp_attn_out,
@@ -439,10 +383,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
 
         expected_out, expected_lse = _lse_weighted_combine(
-            outputs,
-            lses,
-            return_lse=True,
-            is_lse_base_on_e=is_lse_base_on_e,
+            outputs, lses, return_lse=True, is_lse_base_on_e=is_lse_base_on_e
         )
 
         if return_lse:
@@ -467,11 +408,7 @@ def test_distributed_packed_a2a_matches_reference(dtype_name: str):
     _distributed_run(
         _distributed_packed_a2a_worker,
         world_size=4,
-        extra_env={
-            "TEST_DTYPE": dtype_name,
-            "RETURN_LSE": "1",
-            "LSE_BASE_E": "1",
-        },
+        extra_env={"TEST_DTYPE": dtype_name, "RETURN_LSE": "1", "LSE_BASE_E": "1"},
     )
 
 

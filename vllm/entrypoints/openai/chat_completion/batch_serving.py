@@ -41,8 +41,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
     """
 
     async def render_batch_chat_request(
-        self,
-        request: BatchChatCompletionRequest,
+        self, request: BatchChatCompletionRequest
     ) -> tuple[list[list[ConversationMessage]], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a batched chat completion request.
 
@@ -102,9 +101,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         return all_conversations, all_engine_prompts
 
     async def create_batch_chat_completion(
-        self,
-        request: BatchChatCompletionRequest,
-        raw_request: Request | None = None,
+        self, request: BatchChatCompletionRequest, raw_request: Request | None = None
     ) -> ChatCompletionResponse | ErrorResponse:
         """Batch Chat Completion endpoint (/v1/chat/completions/batch).
 

@@ -61,10 +61,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
     # ------------------------------------------------------------------ init
 
     def _init_colbert_components(
-        self,
-        hidden_size: int,
-        colbert_dim: int | None,
-        head_dtype: torch.dtype,
+        self, hidden_size: int, colbert_dim: int | None, head_dtype: torch.dtype
     ) -> None:
         """Initialise ColBERT projection layer.
 
@@ -89,10 +86,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         if self.colbert_dim is None:
             raise ValueError("colbert_dim must be set before building the linear layer")
         return nn.Linear(
-            self.hidden_size,
-            self.colbert_dim,
-            bias=False,
-            dtype=self.head_dtype,
+            self.hidden_size, self.colbert_dim, bias=False, dtype=self.head_dtype
         )
 
     # ---------------------------------------------------------------- pooler
@@ -104,10 +98,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         Otherwise ``pooler_for_token_embed`` falls back to auto-loading
         sentence-transformers Dense layers (``1_Dense/`` etc.).
         """
-        return pooler_for_token_embed(
-            pooler_config,
-            projector=self.colbert_linear,
-        )
+        return pooler_for_token_embed(pooler_config, projector=self.colbert_linear)
 
     # --------------------------------------------------------- config helper
 
@@ -280,10 +271,7 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
             head_dtype=vllm_config.model_config.head_dtype,
         )
 
-        self.model = ModernBertModel(
-            vllm_config=vllm_config,
-            prefix=prefix,
-        )
+        self.model = ModernBertModel(vllm_config=vllm_config, prefix=prefix)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -358,10 +346,7 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
             head_dtype=vllm_config.model_config.head_dtype,
         )
 
-        self.model = JinaRobertaModel(
-            vllm_config=vllm_config,
-            prefix=prefix,
-        )
+        self.model = JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -462,10 +447,7 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
             head_dtype=vllm_config.model_config.head_dtype,
         )
 
-        self.model = Lfm2Model(
-            vllm_config=vllm_config,
-            prefix=prefix,
-        )
+        self.model = Lfm2Model(vllm_config=vllm_config, prefix=prefix)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None

@@ -293,10 +293,7 @@ def _fwd_kernel(
         key_range_upper = block_mask * q_len_pad
 
     for start_n in tl.range(
-        0,
-        key_range_upper,
-        BLOCK_N,
-        loop_unroll_factor=num_unroll_request,
+        0, key_range_upper, BLOCK_N, loop_unroll_factor=num_unroll_request
     ):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----

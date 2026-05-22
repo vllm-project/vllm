@@ -171,9 +171,7 @@ class MoeWNA16Config(QuantizationConfig):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             # Avoid circular import
-            from vllm.model_executor.layers.quantization.auto_gptq import (
-                AutoGPTQConfig,
-            )
+            from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
             from vllm.model_executor.layers.quantization.awq import AWQConfig
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,

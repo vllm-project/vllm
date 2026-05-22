@@ -33,13 +33,10 @@ ALL_GRIDS = SQUARE_GRIDS + NON_SQUARE_GRIDS
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
 @pytest.mark.parametrize("dtype", DTYPES, ids=lambda d: str(d).split(".")[-1])
 @pytest.mark.parametrize(
-    "grid_thw",
-    ALL_GRIDS,
-    ids=[f"{t}x{h}x{w}" for t, h, w in ALL_GRIDS],
+    "grid_thw", ALL_GRIDS, ids=[f"{t}x{h}x{w}" for t, h, w in ALL_GRIDS]
 )
 def test_triton_matches_native(
-    grid_thw: tuple[int, int, int],
-    dtype: torch.dtype,
+    grid_thw: tuple[int, int, int], dtype: torch.dtype
 ) -> None:
     """Triton kernel output must match the native PyTorch implementation."""
     t, h, w = grid_thw
@@ -98,22 +95,10 @@ def test_temporal_repeat(dtype: torch.dtype) -> None:
     )
 
     out_single = triton_pos_embed_interpolate(
-        embed_weight,
-        t_single,
-        h,
-        w,
-        NUM_GRID_PER_SIDE,
-        SPATIAL_MERGE_SIZE,
-        dtype,
+        embed_weight, t_single, h, w, NUM_GRID_PER_SIDE, SPATIAL_MERGE_SIZE, dtype
     )
     out_multi = triton_pos_embed_interpolate(
-        embed_weight,
-        t_multi,
-        h,
-        w,
-        NUM_GRID_PER_SIDE,
-        SPATIAL_MERGE_SIZE,
-        dtype,
+        embed_weight, t_multi, h, w, NUM_GRID_PER_SIDE, SPATIAL_MERGE_SIZE, dtype
     )
 
     expected = out_single.repeat(t_multi, 1)

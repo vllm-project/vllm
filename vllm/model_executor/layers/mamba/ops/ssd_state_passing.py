@@ -100,11 +100,7 @@ def _state_passing_fwd_kernel(
 
 
 def _state_passing_fwd(
-    states,
-    dA_cumsum,
-    last_chunk_indices,
-    initial_states=None,
-    out_dtype=None,
+    states, dA_cumsum, last_chunk_indices, initial_states=None, out_dtype=None
 ):
     nchunks, nheads, dim = states.shape
     chunk_size = dA_cumsum.shape[-1]

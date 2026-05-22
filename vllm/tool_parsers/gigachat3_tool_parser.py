@@ -7,9 +7,7 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -26,24 +24,16 @@ from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 logger = init_logger(__name__)
 
 REGEX_FUNCTION_CALL = re.compile(
-    r"(?:function call<\|role_sep\|>\n|<\|function_call\|>)(.*)",
-    re.DOTALL,
+    r"(?:function call<\|role_sep\|>\n|<\|function_call\|>)(.*)", re.DOTALL
 )
 
 REGEX_CONTENT_PATTERN = re.compile(
-    r"^(.*?)(?:<\|message_sep\|>|<\|function_call\|>)",
-    re.DOTALL,
+    r"^(.*?)(?:<\|message_sep\|>|<\|function_call\|>)", re.DOTALL
 )
 
-NAME_REGEX = re.compile(
-    r'"name"\s*:\s*"([^"]*)"',
-    re.DOTALL,
-)
+NAME_REGEX = re.compile(r'"name"\s*:\s*"([^"]*)"', re.DOTALL)
 
-ARGS_REGEX = re.compile(
-    r'"arguments"\s*:\s*(.*)',
-    re.DOTALL,
-)
+ARGS_REGEX = re.compile(r'"arguments"\s*:\s*(.*)', re.DOTALL)
 
 
 class GigaChat3ToolParser(ToolParser):
@@ -65,9 +55,7 @@ class GigaChat3ToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         function_call = None
         content = None
@@ -88,17 +76,13 @@ class GigaChat3ToolParser(ToolParser):
                     function_call = None
             except json.JSONDecodeError:
                 return ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=model_output,
+                    tools_called=False, tool_calls=[], content=model_output
                 )
         m_content = REGEX_CONTENT_PATTERN.search(model_output)
         content = m_content.group(1) if m_content else model_output
         if not function_call:
             return ExtractedToolCallInformation(
-                tools_called=False,
-                tool_calls=[],
-                content=content if content else None,
+                tools_called=False, tool_calls=[], content=content if content else None
             )
         name = function_call["name"]
         args = function_call["arguments"]
@@ -108,11 +92,7 @@ class GigaChat3ToolParser(ToolParser):
             tools_called=True,
             tool_calls=[
                 ToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=name,
-                        arguments=args,
-                    ),
+                    type="function", function=FunctionCall(name=name, arguments=args)
                 )
             ],
             content=content if content else None,
@@ -176,11 +156,11 @@ class GigaChat3ToolParser(ToolParser):
                         index=0,
                         id=self.tool_id,
                         type="function",
-                        function=DeltaFunctionCall(
-                            name=func_name,
-                        ).model_dump(exclude_none=True),
+                        function=DeltaFunctionCall(name=func_name).model_dump(
+                            exclude_none=True
+                        ),
                     )
-                ],
+                ]
             )
         if cur_args is None:
             return None
@@ -206,9 +186,9 @@ class GigaChat3ToolParser(ToolParser):
             tool_calls=[
                 DeltaToolCall(
                     index=0,
-                    function=DeltaFunctionCall(
-                        arguments=delta_args,
-                    ).model_dump(exclude_none=True),
+                    function=DeltaFunctionCall(arguments=delta_args).model_dump(
+                        exclude_none=True
+                    ),
                 )
-            ],
+            ]
         )

@@ -5,10 +5,7 @@ from typing import TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import (
-    BatchFeature,
-    PixtralVisionConfig,
-)
+from transformers import BatchFeature, PixtralVisionConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.mistral3 import (
@@ -47,10 +44,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         # NOTE: LightOnOCR does not use break/end tokens, so we remove them here.
@@ -64,10 +58,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
             end_id = vocab.get(processor.image_end_token)
 
             # create mask to remove break/end tokens
-            keep_mask = ~torch.isin(
-                input_ids,
-                torch.tensor([break_id, end_id]),
-            )
+            keep_mask = ~torch.isin(input_ids, torch.tensor([break_id, end_id]))
 
             processed_outputs["input_ids"] = input_ids[keep_mask].unsqueeze(0)
             if "attention_mask" in processed_outputs:
@@ -87,9 +78,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),

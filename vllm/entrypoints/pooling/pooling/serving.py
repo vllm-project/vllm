@@ -33,12 +33,7 @@ logger = init_logger(__name__)
 class ServingPooling(PoolingServingBase):
     request_id_prefix = "pooling"
 
-    def __init__(
-        self,
-        *args,
-        supported_tasks: tuple[SupportedTask, ...],
-        **kwargs,
-    ):
+    def __init__(self, *args, supported_tasks: tuple[SupportedTask, ...], **kwargs):
         super().__init__(*args, **kwargs)
 
         self.supported_tasks = supported_tasks
@@ -92,10 +87,7 @@ class ServingPooling(PoolingServingBase):
 
         return pooling_task
 
-    def _build_response(
-        self,
-        ctx: PoolingServeContext,
-    ) -> Response:
+    def _build_response(self, ctx: PoolingServeContext) -> Response:
         if ctx.response is not None:
             # for IOProcessorResponse
             return self.json_response_cls(content=ctx.response.model_dump())
@@ -147,10 +139,7 @@ class ServingPooling(PoolingServingBase):
         items: list[PoolingResponseData] = []
 
         for idx, final_res in enumerate(final_res_batch):
-            item = PoolingResponseData(
-                index=idx,
-                data=encode_fn(final_res),
-            )
+            item = PoolingResponseData(index=idx, data=encode_fn(final_res))
 
             items.append(item)
 

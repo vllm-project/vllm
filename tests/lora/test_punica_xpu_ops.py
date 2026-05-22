@@ -91,14 +91,7 @@ def check_bgmv_shrink(
     """
     seq_length = 1
     data: PunicaTensors = generate_data(
-        batches,
-        hidden_size,
-        num_loras,
-        rank,
-        seq_length,
-        dtype,
-        "shrink",
-        device,
+        batches, hidden_size, num_loras, rank, seq_length, dtype, "shrink", device
     )
 
     bgmv_shrink(
@@ -135,14 +128,7 @@ def check_bgmv_expand(
     """
     seq_length = 1
     data: PunicaTensors = generate_data(
-        batches,
-        hidden_size,
-        num_loras,
-        rank,
-        seq_length,
-        dtype,
-        "expand",
-        device,
+        batches, hidden_size, num_loras, rank, seq_length, dtype, "expand", device
     )
 
     bgmv_expand(
@@ -177,14 +163,7 @@ def check_bgmv_expand_slice(
     """
     seq_length = 1
     data: PunicaTensors = generate_data_for_expand_nslices(
-        batches,
-        hidden_size,
-        num_loras,
-        rank,
-        seq_length,
-        dtype,
-        nslices,
-        device,
+        batches, hidden_size, num_loras, rank, seq_length, dtype, nslices, device
     )
 
     slice_offset = 0

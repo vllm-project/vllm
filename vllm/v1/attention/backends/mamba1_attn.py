@@ -50,9 +50,7 @@ class Mamba1AttentionMetadataBuilder(
         ):
             cu_chunk_seqlen_p, _, last_chunk_indices_p = (
                 self._build_chunk_metadata_tensors(
-                    self.kv_cache_spec.block_size,
-                    common,
-                    common_attn_metadata,
+                    self.kv_cache_spec.block_size, common, common_attn_metadata
                 )
             )
             return replace(

@@ -10,10 +10,7 @@ Run with: pytest tests/multimodal/test_embedding_shape_validation_unit.py -v
 import pytest
 import torch
 
-from vllm.multimodal.parse import (
-    AudioEmbeddingItems,
-    ImageEmbeddingItems,
-)
+from vllm.multimodal.parse import AudioEmbeddingItems, ImageEmbeddingItems
 
 
 class TestImageEmbedBasicValidation:

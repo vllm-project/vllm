@@ -8,10 +8,7 @@ from tests.models.utils import check_embeddings_close
 from vllm.config import PoolerConfig
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["BAAI/bge-m3"],
-)
+@pytest.mark.parametrize("model", ["BAAI/bge-m3"])
 @pytest.mark.parametrize("dtype", ["half"])
 @torch.inference_mode
 def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype: str):
@@ -23,10 +20,7 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(example_prompts)
 
-    with hf_runner(
-        model,
-        auto_cls=AutoModel,
-    ) as hf_model:
+    with hf_runner(model, auto_cls=AutoModel) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
         for prompt in example_prompts:

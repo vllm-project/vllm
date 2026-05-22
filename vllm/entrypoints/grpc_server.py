@@ -70,7 +70,7 @@ async def serve_grpc(args: argparse.Namespace):
 
     # Build vLLM config
     vllm_config = engine_args.create_engine_config(
-        usage_context=UsageContext.OPENAI_API_SERVER,
+        usage_context=UsageContext.OPENAI_API_SERVER
     )
 
     # Create AsyncLLM
@@ -94,7 +94,7 @@ async def serve_grpc(args: argparse.Namespace):
             # during generation)
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
             ("grpc.keepalive_permit_without_calls", True),
-        ],
+        ]
     )
 
     # Add servicer to server
@@ -167,22 +167,14 @@ async def serve_grpc(args: argparse.Namespace):
 
 def main():
     """Main entry point for python -m vllm.entrypoints.grpc_server."""
-    parser = FlexibleArgumentParser(
-        description="vLLM gRPC Server",
-    )
+    parser = FlexibleArgumentParser(description="vLLM gRPC Server")
 
     # Server args
     parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Host to bind gRPC server to",
+        "--host", type=str, default="0.0.0.0", help="Host to bind gRPC server to"
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=50051,
-        help="Port to bind gRPC server to",
+        "--port", type=int, default=50051, help="Port to bind gRPC server to"
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
 

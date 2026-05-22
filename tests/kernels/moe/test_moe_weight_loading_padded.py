@@ -272,16 +272,12 @@ class TestWeightLoadingWithPaddedHiddenSize:
         shard_dim = 1
         hidden_dim = FusedMoE._get_hidden_dim(shard_dim=shard_dim, ndim=2)
         expert_data = FusedMoE._narrow_expert_data_for_padding(
-            expert_data_full,
-            loaded_weight,
-            hidden_dim=hidden_dim,
-            shard_dim=shard_dim,
+            expert_data_full, loaded_weight, hidden_dim=hidden_dim, shard_dim=shard_dim
         )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(
-            expert_data_full[:original_hidden, :original_intermediate],
-            loaded_weight,
+            expert_data_full[:original_hidden, :original_intermediate], loaded_weight
         )
         assert torch.equal(
             expert_data_full[original_hidden:, :],
@@ -318,10 +314,5 @@ class TestWeightLoadingWithPaddedHiddenSize:
         # Call the real weight_loader (unbound) with our mock as self.
         with pytest.raises(ValueError, match="BitsAndBytes"):
             FusedMoE.weight_loader(
-                moe,
-                param,
-                loaded_weight,
-                weight_name="w2",
-                shard_id="w2",
-                expert_id=0,
+                moe, param, loaded_weight, weight_name="w2", shard_id="w2", expert_id=0
             )

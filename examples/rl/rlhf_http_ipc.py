@@ -63,10 +63,7 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
     results = []
     for prompt in prompts:
         response = client.completions.create(
-            model=model,
-            prompt=prompt,
-            max_tokens=32,
-            temperature=0,
+            model=model, prompt=prompt, max_tokens=32, temperature=0
         )
         results.append(response.choices[0].text)
     return results
@@ -80,10 +77,7 @@ def init_weight_transfer_engine(base_url: str) -> None:
     response.raise_for_status()
 
 
-def start_weight_update(
-    base_url: str,
-    is_checkpoint_format: bool = True,
-) -> None:
+def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
     """Start a weight update via HTTP endpoint."""
     url = f"{base_url}/start_weight_update"
     payload = {"is_checkpoint_format": is_checkpoint_format}
@@ -175,8 +169,7 @@ def main():
     print("Broadcasting weights via CUDA IPC (HTTP)...")
     trainer_args = IPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
     IPCWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
+        iterator=train_model.named_parameters(), trainer_args=trainer_args
     )
 
     finish_weight_update(BASE_URL)

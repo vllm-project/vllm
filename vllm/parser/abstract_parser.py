@@ -205,9 +205,7 @@ class Parser:
 
     @abstractmethod
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -269,9 +267,7 @@ class Parser:
 
     @abstractmethod
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from a complete model-generated string.
@@ -341,9 +337,7 @@ class DelegatingParser(Parser):
     """
 
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
@@ -364,9 +358,7 @@ class DelegatingParser(Parser):
 
         # Then parse tool calls from the content
         tool_calls, content = self._parse_tool_calls(
-            request=request,
-            content=content,
-            enable_auto_tools=enable_auto_tools,
+            request=request, content=content, enable_auto_tools=enable_auto_tools
         )
 
         # Build output items
@@ -388,10 +380,7 @@ class DelegatingParser(Parser):
         # Add message item if there's content
         if content:
             res_text_part = ResponseOutputText(
-                text=content,
-                annotations=[],
-                type="output_text",
-                logprobs=logprobs,
+                text=content, annotations=[], type="output_text", logprobs=logprobs
             )
             message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
@@ -438,10 +427,7 @@ class DelegatingParser(Parser):
         raise ValueError("Invalid tool_choice for function name extraction.")
 
     def _parse_tool_calls(
-        self,
-        request: ResponsesRequest,
-        content: str | None,
-        enable_auto_tools: bool,
+        self, request: ResponsesRequest, content: str | None, enable_auto_tools: bool
     ) -> tuple[list[FunctionCall], str | None]:
         """
         TODO(qandrew): merge _parse_tool_calls_from_content
@@ -540,9 +526,7 @@ class DelegatingParser(Parser):
         )
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         if self._tool_parser is None:
             return ExtractedToolCallInformation(

@@ -52,10 +52,7 @@ def _get_attention_backend_params() -> list[str | None]:
 
 # Aiter backends need VLLM_ROCM_USE_AITER=1 (and MHA=1 for ROCM_AITER_FA)
 # to be enabled in the server subprocess.
-_AITER_ENV = {
-    "VLLM_ROCM_USE_AITER": "1",
-    "VLLM_ROCM_USE_AITER_MHA": "1",
-}
+_AITER_ENV = {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"}
 
 _ATTN_BACKENDS = _get_attention_backend_params()
 _ATTN_IDS = [b or "default" for b in _ATTN_BACKENDS]
@@ -165,9 +162,7 @@ async def test_invalid_audio_file(whisper_client):
 
     with pytest.raises(openai.BadRequestError) as exc_info:
         await whisper_client.audio.transcriptions.create(
-            model=MODEL_NAME,
-            file=invalid_audio,
-            language="en",
+            model=MODEL_NAME, file=invalid_audio, language="en"
         )
 
     assert exc_info.value.status_code == 400
@@ -379,17 +374,11 @@ async def test_whisper_beam_search_single_beam(mary_had_lamb, whisper_client):
         language="en",
         response_format="text",
         temperature=0.0,
-        extra_body=dict(
-            use_beam_search=True,
-            n=1,
-        ),
+        extra_body=dict(use_beam_search=True, n=1),
     )
 
     greedy_transcription = await whisper_client.audio.transcriptions.create(
-        model=MODEL_NAME,
-        file=mary_had_lamb,
-        response_format="text",
-        temperature=0.0,
+        model=MODEL_NAME, file=mary_had_lamb, response_format="text", temperature=0.0
     )
 
     greedy_res = json.loads(greedy_transcription)["text"]
@@ -406,10 +395,7 @@ async def test_whisper_beam_search_multibeam(mary_had_lamb, whisper_client):
         language="en",
         response_format="text",
         temperature=0.0,
-        extra_body=dict(
-            use_beam_search=True,
-            n=2,
-        ),
+        extra_body=dict(use_beam_search=True, n=2),
     )
 
     result = json.loads(transcription)
@@ -430,8 +416,5 @@ async def test_stream_with_beams_raises(winning_call, whisper_client):
             file=winning_call,
             language="en",
             stream=True,
-            extra_body=dict(
-                use_beam_search=True,
-                n=2,
-            ),
+            extra_body=dict(use_beam_search=True, n=2),
         )

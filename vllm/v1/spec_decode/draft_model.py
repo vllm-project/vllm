@@ -15,12 +15,7 @@ logger = init_logger(__name__)
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        runner=None,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         super().__init__(
             vllm_config=vllm_config,
             device=device,
@@ -59,8 +54,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             base,
             quant_config=None,
             parallel_config=replace(
-                spec.draft_parallel_config,
-                rank=self.vllm_config.parallel_config.rank,
+                spec.draft_parallel_config, rank=self.vllm_config.parallel_config.rank
             ),
             model_config=spec.draft_model_config,
         )
@@ -71,10 +65,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
         draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("draft_model"):
-            model = get_model(
-                vllm_config=draft_vllm_config,
-                prefix="draft_model",
-            )
+            model = get_model(vllm_config=draft_vllm_config, prefix="draft_model")
         return model
 
     @override

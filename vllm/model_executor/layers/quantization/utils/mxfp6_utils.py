@@ -7,9 +7,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def _quant_dequant_mxfp6(
-    x: torch.Tensor,
-    quant_dtype: str,
-    scale_calculation_mode: str = "even",
+    x: torch.Tensor, quant_dtype: str, scale_calculation_mode: str = "even"
 ) -> torch.Tensor:
     try:
         from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
@@ -50,9 +48,7 @@ def _quant_dequant_mxfp6(
 
 
 def _quant_dequant_mxfp6_fake(
-    x: torch.Tensor,
-    quant_dtype: str,
-    scale_calculation_mode: str = "even",
+    x: torch.Tensor, quant_dtype: str, scale_calculation_mode: str = "even"
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
@@ -118,9 +114,7 @@ except AttributeError as error:
 
 # Expose keyword arguments.
 def quant_dequant_mxfp6(
-    x: torch.Tensor,
-    quant_dtype: str,
-    scale_calculation_mode: str = "even",
+    x: torch.Tensor, quant_dtype: str, scale_calculation_mode: str = "even"
 ) -> torch.Tensor:
     return torch.ops.vllm.quant_dequant_mxfp6(x, quant_dtype, scale_calculation_mode)
 

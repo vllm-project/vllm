@@ -183,15 +183,10 @@ def _dequantize_and_gather_k_cache_reference(
 
 @pytest.mark.parametrize(
     ("seq_lens_host", "gather_lens_host", "offset"),
-    [
-        ([9, 23, 7], None, 0),
-        ([19, 8, 257], [6, 8, 129], 5),
-    ],
+    [([9, 23, 7], None, 0), ([19, 8, 257], [6, 8, 129], 5)],
 )
 def test_dequantize_and_gather_k_cache(
-    seq_lens_host: list[int],
-    gather_lens_host: list[int] | None,
-    offset: int,
+    seq_lens_host: list[int], gather_lens_host: list[int] | None, offset: int
 ):
     block_size = 64
     head_dim = 512

@@ -345,9 +345,7 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput],
-    dur_s: float,
-    selected_percentiles: list[float],
+    outputs: list[RequestFuncOutput], dur_s: float, selected_percentiles: list[float]
 ) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
@@ -692,10 +690,7 @@ async def benchmark(
 
     if ready_check_timeout_sec > 0:
         test_output = await wait_for_endpoint(
-            request_func,
-            test_input,
-            session,
-            timeout_seconds=ready_check_timeout_sec,
+            request_func, test_input, session, timeout_seconds=ready_check_timeout_sec
         )
         if not test_output.success:
             raise ValueError(
@@ -810,10 +805,7 @@ async def benchmark(
     if ramp_up_strategy is not None and ramp_up_start_rps is not None:
         last_int_rps = ramp_up_start_rps
         rps_change_events.append(
-            {
-                "rps": last_int_rps,
-                "timestamp": datetime.now().isoformat(),
-            }
+            {"rps": last_int_rps, "timestamp": datetime.now().isoformat()}
         )
 
     async for request, current_request_rate in get_request(
@@ -1201,10 +1193,7 @@ def save_to_pytorch_benchmark_format(
 
 
 def compute_result_filename(
-    args: argparse.Namespace,
-    model_id: str,
-    label: str,
-    current_dt: str,
+    args: argparse.Namespace, model_id: str, label: str, current_dt: str
 ) -> str | None:
     """Compute the result filename based on benchmark configuration.
 
@@ -1269,10 +1258,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--endpoint",
-        type=str,
-        default="/v1/completions",
-        help="API endpoint.",
+        "--endpoint", type=str, default="/v1/completions", help="API endpoint."
     )
     parser.add_argument(
         "--header",
@@ -1380,10 +1366,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify to disable tqdm progress bar.",
     )
     parser.add_argument(
-        "--num-warmups",
-        type=int,
-        default=0,
-        help="Number of warmup requests.",
+        "--num-warmups", type=int, default=0, help="Number of warmup requests."
     )
     parser.add_argument(
         "--profile",
@@ -1949,10 +1932,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             if input_lens and output_lens:
                 for req_input_len, req_output_len in zip(input_lens, output_lens):
                     per_request_data.append(
-                        {
-                            "prompt_len": req_input_len,
-                            "output_tokens": req_output_len,
-                        }
+                        {"prompt_len": req_input_len, "output_tokens": req_output_len}
                     )
 
                 stats_path = Path(file_name).with_suffix(".dataset_stats.png")

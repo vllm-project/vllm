@@ -141,10 +141,7 @@ def _run_vllm_requests(
         if prequeue_requests:
             try:
                 llm.enqueue(
-                    prompts,
-                    sampling_params,
-                    lora_request=lora_requests,
-                    use_tqdm=True,
+                    prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
                 )
             finally:
                 llm.wake_up(tags=["scheduling"])
@@ -169,11 +166,7 @@ def _run_vllm_requests(
             llm.start_profile()
         llm.beam_search(
             beam_prompts,
-            BeamSearchParams(
-                beam_width=n,
-                max_tokens=output_len,
-                ignore_eos=True,
-            ),
+            BeamSearchParams(beam_width=n, max_tokens=output_len, ignore_eos=True),
         )
         if do_profile:
             llm.stop_profile()
@@ -289,9 +282,7 @@ async def run_vllm_async(
         build_async_engine_client_from_engine_args,
     )
 
-    async with build_async_engine_client_from_engine_args(
-        engine_args,
-    ) as llm:
+    async with build_async_engine_client_from_engine_args(engine_args) as llm:
         model_config = llm.model_config
         all_requests = list(warmup_requests or []) + requests
         assert all(
@@ -408,12 +399,7 @@ def run_hf(
     if warmup_requests:
         print(f"Warming up with {len(warmup_requests)} requests...")
         _run_hf_requests(
-            llm,
-            tokenizer,
-            warmup_requests,
-            n,
-            max_batch_size,
-            disable_detokenize,
+            llm, tokenizer, warmup_requests, n, max_batch_size, disable_detokenize
         )
 
     elapsed_time, _ = _run_hf_requests(
@@ -500,10 +486,7 @@ def save_to_pytorch_benchmark_format(
 
 def get_requests(args, tokenizer):
     # Common parameters for all dataset types.
-    common_kwargs = {
-        "dataset_path": args.dataset_path,
-        "random_seed": args.seed,
-    }
+    common_kwargs = {"dataset_path": args.dataset_path, "random_seed": args.seed}
     sample_kwargs = {
         "tokenizer": tokenizer,
         "lora_path": args.lora_path,
@@ -1008,16 +991,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
     # hf dataset
     parser.add_argument(
-        "--hf-subset",
-        type=str,
-        default=None,
-        help="Subset of the HF dataset.",
+        "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
     )
     parser.add_argument(
-        "--hf-split",
-        type=str,
-        default=None,
-        help="Split of the HF dataset.",
+        "--hf-split", type=str, default=None, help="Split of the HF dataset."
     )
     parser.add_argument(
         "--hf-name",

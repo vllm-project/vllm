@@ -23,10 +23,7 @@ PAUSE_DURATION = 3.0  # seconds
 
 async def main():
     # Create engine with a small model
-    engine_args = AsyncEngineArgs(
-        model="facebook/opt-125m",
-        enforce_eager=True,
-    )
+    engine_args = AsyncEngineArgs(model="facebook/opt-125m", enforce_eager=True)
     engine = AsyncLLM.from_engine_args(engine_args)
 
     prompt = "Write a story about a dragon. Once upon a time"
@@ -41,9 +38,7 @@ async def main():
     async def generator_task():
         """Generate tokens and record timestamps."""
         async for output in engine.generate(
-            request_id="test-req",
-            prompt=prompt,
-            sampling_params=sampling_params,
+            request_id="test-req", prompt=prompt, sampling_params=sampling_params
         ):
             token_count = len(output.outputs[0].token_ids)
             token_times.append((token_count, time.monotonic()))

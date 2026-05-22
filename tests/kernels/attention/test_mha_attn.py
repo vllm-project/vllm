@@ -47,30 +47,28 @@ def test_mha_attn_platform(default_vllm_config, device: str):
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
-        ):
+        with patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
+        with patch(
+            "vllm.model_executor.models.vision.current_platform", RocmPlatform()
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
+        with patch(
+            "vllm.model_executor.models.vision.current_platform", CudaPlatform()
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
         # - should use vLLM's FlashAttention
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
+        with patch(
+            "vllm.model_executor.models.vision.current_platform", CudaPlatform()
         ):
             attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
@@ -100,10 +98,7 @@ def test_mha_attn_platform(default_vllm_config, device: str):
 
 
 def ref_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, scale: float
 ) -> torch.Tensor:
     """
     Native implementation of scaled dot product attention without mask:
@@ -119,10 +114,7 @@ def ref_attention(
 
 BATCH_SIZES = [1, 16]
 SEQ_LENS = [1]
-VAR_SEQ_LENS = [
-    [2, 2],
-    [2, 3, 4],
-]
+VAR_SEQ_LENS = [[2, 2], [2, 3, 4]]
 NUM_HEADS = [1, 16]
 NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
@@ -174,12 +166,9 @@ def test_mha_attn_forward(
         k = torch.repeat_interleave(k, num_queries_per_kv, dim=2)
         v = torch.repeat_interleave(v, num_queries_per_kv, dim=2)
 
-    ref_output = ref_attention(
-        q,
-        k,
-        v,
-        scale=scale,
-    ).reshape(batch_size, seq_len, num_heads * head_size)
+    ref_output = ref_attention(q, k, v, scale=scale).reshape(
+        batch_size, seq_len, num_heads * head_size
+    )
     tol_kwargs = (
         dict(rtol=1e-3, atol=1e-3)
         if attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
@@ -233,28 +222,17 @@ def test_mha_attn_varlen_forward(
         torch.split(k, var_seq_len, dim=1),
         torch.split(v, var_seq_len, dim=1),
     ):
-        output_i = ref_attention(
-            q_i,
-            k_i,
-            v_i,
-            scale=scale,
-        )
+        output_i = ref_attention(q_i, k_i, v_i, scale=scale)
         ref_output.append(output_i)
     ref_output = torch.cat(ref_output, dim=1)
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
-@pytest.mark.parametrize(
-    "dtype",
-    [torch.bfloat16, torch.half],
-)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_mha_attn_varlen_forward_flashinfer(
-    default_vllm_config,
-    var_seq_len: list[int],
-    dtype: torch.dtype,
-    device: str,
+    default_vllm_config, var_seq_len: list[int], dtype: torch.dtype, device: str
 ):
     """Test MMEncoderAttention varlen forward with FLASHINFER backend (head_size=72).
 
@@ -280,7 +258,7 @@ def test_mha_attn_varlen_forward_flashinfer(
         {
             "multimodal_config": MultiModalConfig(
                 mm_encoder_attn_backend=AttentionBackendEnum.FLASHINFER
-            ),
+            )
         },
     )()
     vllm_config.model_config = minimal_model_config
@@ -298,9 +276,7 @@ def test_mha_attn_varlen_forward_flashinfer(
         tp_size = 1
 
         sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            AttentionBackendEnum.FLASHINFER,
-            cu_seqlens_np,
-            device,
+            AttentionBackendEnum.FLASHINFER, cu_seqlens_np, device
         )
 
         max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
@@ -309,19 +285,12 @@ def test_mha_attn_varlen_forward_flashinfer(
         max_seqlen = torch.tensor(max_seqlen_val, device=device, dtype=torch.int32)
 
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            AttentionBackendEnum.FLASHINFER,
-            cu_seqlens_np,
-            hidden_size,
-            tp_size,
-            device,
+            AttentionBackendEnum.FLASHINFER, cu_seqlens_np, hidden_size, tp_size, device
         )
 
         scale = 1.0 / head_size**0.5
         attn = MMEncoderAttention(
-            num_heads,
-            head_size,
-            scale=scale,
-            num_kv_heads=num_heads,
+            num_heads, head_size, scale=scale, num_kv_heads=num_heads
         )
         assert attn.attn_backend == AttentionBackendEnum.FLASHINFER
 

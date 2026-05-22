@@ -150,9 +150,7 @@ class BailingAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split(
@@ -243,10 +241,7 @@ class BailingMoE(nn.Module):
             self.router_dtype = torch.bfloat16
 
         self.gate = nn.Linear(
-            self.hidden_size,
-            self.num_experts,
-            bias=False,
-            dtype=self.router_dtype,
+            self.hidden_size, self.num_experts, bias=False, dtype=self.router_dtype
         )
 
         if getattr(config, "moe_router_enable_expert_bias", False):
@@ -363,8 +358,7 @@ class BailingMoeBlock(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.attention(
-            hidden_states=hidden_states,
-            position_ids=position_ids,
+            hidden_states=hidden_states, position_ids=position_ids
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -374,12 +368,7 @@ class BailingMoeBlock(nn.Module):
 
 @support_torch_compile
 class BailingMoeModel(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -446,11 +435,7 @@ class BailingMoeModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                hidden_states,
-                position_ids,
-                residual,
-            )
+            hidden_states, residual = layer(hidden_states, position_ids, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -551,18 +536,10 @@ class BailingMoeModel(nn.Module):
 class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config.get_text_config()
@@ -610,17 +587,13 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
+            self, skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None)
         )
         return loader.load_weights(weights)
 

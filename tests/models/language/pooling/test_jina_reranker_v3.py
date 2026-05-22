@@ -139,11 +139,7 @@ def _test_offline_token_embed_illegal_inputs(llm):
 def _get_scores(server, query, document):
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": model_name,
-            "queries": query,
-            "documents": document,
-        },
+        json={"model": model_name, "queries": query, "documents": document},
     )
 
     score_response.raise_for_status()
@@ -261,12 +257,7 @@ def _test_online_token_embed_illegal_inputs(server):
         json={
             "model": model_name,
             "task": "token_embed",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "The cat sat on the mat.",
-                }
-            ],
+            "messages": [{"role": "user", "content": "The cat sat on the mat."}],
             "encoding_format": "float",
         },
     )

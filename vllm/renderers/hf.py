@@ -115,9 +115,7 @@ def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
     if len(ids) != 1:
         raise RuntimeError(
             _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_ERROR.format(
-                token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-                num_ids=len(ids),
-                ids=ids,
+                token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN, num_ids=len(ids), ids=ids
             )
         )
 
@@ -127,8 +125,7 @@ def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
 
 
 def _build_prompt_embeds_updates(
-    prompt_embeds_tensors: Sequence[torch.Tensor],
-    placeholder_token_id: int,
+    prompt_embeds_tensors: Sequence[torch.Tensor], placeholder_token_id: int
 ) -> MultiModalPromptUpdates:
     """Build `MultiModalPromptUpdates` for `prompt_embeds` expansion.
 
@@ -148,8 +145,7 @@ def _build_prompt_embeds_updates(
 
 
 def _expand_prompt_embeds_placeholders(
-    token_ids: list[int],
-    mm_prompt_updates: MultiModalPromptUpdates,
+    token_ids: list[int], mm_prompt_updates: MultiModalPromptUpdates
 ) -> list[int]:
     """Expand each 1-token `prompt_embeds` sentinel into an N-token span.
 
@@ -162,9 +158,7 @@ def _expand_prompt_embeds_placeholders(
 
 
 def _build_prompt_embeds_positions(
-    token_ids: list[int],
-    num_tensors: int,
-    mm_prompt_updates: MultiModalPromptUpdates,
+    token_ids: list[int], num_tensors: int, mm_prompt_updates: MultiModalPromptUpdates
 ) -> list[tuple[int, int]]:
     """Locate each prompt_embeds placeholder span in `token_ids`.
 
@@ -172,17 +166,14 @@ def _build_prompt_embeds_positions(
     Returns `[(start_idx, length), ...]` aligned with the tensors.
     """
     placeholders = find_mm_placeholders(
-        prompt=token_ids,
-        mm_prompt_updates=mm_prompt_updates,
-        tokenizer=None,
+        prompt=token_ids, mm_prompt_updates=mm_prompt_updates, tokenizer=None
     )
     features = placeholders.get("prompt_embeds", [])
 
     if len(features) != num_tensors:
         raise ValueError(
             _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR.format(
-                expected=num_tensors,
-                actual=len(features),
+                expected=num_tensors, actual=len(features)
             )
         )
 
@@ -220,9 +211,7 @@ This is needed because `lru_cache` does not cache when an exception happens.
 
 
 def _try_get_processor_chat_template(
-    tokenizer: HfTokenizer,
-    *,
-    trust_remote_code: bool,
+    tokenizer: HfTokenizer, *, trust_remote_code: bool
 ) -> str | None:
     cache_key = (tokenizer.name_or_path, trust_remote_code)
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
@@ -278,8 +267,7 @@ def resolve_chat_template(
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         chat_template = _try_get_processor_chat_template(
-            tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
+            tokenizer, trust_remote_code=model_config.trust_remote_code
         )
         if chat_template is not None:
             return chat_template
@@ -336,9 +324,7 @@ def _is_attr_access(node: jinja2.nodes.Node, varname: str, key: str) -> bool:
 
 
 def _is_var_or_elems_access(
-    node: jinja2.nodes.Node,
-    varname: str,
-    key: str | None = None,
+    node: jinja2.nodes.Node, varname: str, key: str | None = None
 ) -> bool:
     if isinstance(node, jinja2.nodes.Filter):
         return node.node is not None and _is_var_or_elems_access(
@@ -431,9 +417,7 @@ def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
 
 @lru_cache(maxsize=32)
 def _detect_content_format(
-    chat_template: str,
-    *,
-    default: ChatTemplateContentFormat,
+    chat_template: str, *, default: ChatTemplateContentFormat
 ) -> ChatTemplateContentFormat:
     jinja_ast = _try_extract_ast(chat_template)
     if jinja_ast is None:
@@ -458,10 +442,7 @@ def _resolve_chat_template_content_format(
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
     resolved_chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=chat_template,
-        tools=tools,
-        model_config=model_config,
+        tokenizer, chat_template=chat_template, tools=tools, model_config=model_config
     )
 
     jinja_text = (
@@ -515,16 +496,11 @@ def resolve_chat_template_content_format(
         return given_format
 
     detected_format = _resolve_chat_template_content_format(
-        chat_template,
-        tools,
-        tokenizer,
-        model_config=model_config,
+        chat_template, tools, tokenizer, model_config=model_config
     )
 
     _log_chat_template_content_format(
-        chat_template,
-        given_format=given_format,
-        detected_format=detected_format,
+        chat_template, given_format=given_format, detected_format=detected_format
     )
 
     return detected_format
@@ -642,10 +618,7 @@ def safe_apply_chat_template(
     **kwargs,
 ) -> str | list[int]:
     chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=chat_template,
-        tools=tools,
-        model_config=model_config,
+        tokenizer, chat_template=chat_template, tools=tools, model_config=model_config
     )
     if chat_template is None:
         raise ChatTemplateResolutionError(
@@ -655,9 +628,7 @@ def safe_apply_chat_template(
         )
 
     resolved_kwargs = resolve_chat_template_kwargs(
-        tokenizer=tokenizer,
-        chat_template=chat_template,
-        chat_template_kwargs=kwargs,
+        tokenizer=tokenizer, chat_template=chat_template, chat_template_kwargs=kwargs
     )
 
     # transformers v5 changed the default of `return_dict` to True, which
@@ -688,8 +659,7 @@ def safe_apply_chat_template(
 
 
 def rebuild_mm_uuids_from_mm_data(
-    mm_uuids: MultiModalUUIDDict,
-    mm_data: MultiModalDataDict,
+    mm_uuids: MultiModalUUIDDict, mm_data: MultiModalDataDict
 ) -> MultiModalUUIDDict:
     """Rebuild mm_uuids after vision_chunk processing.
 
@@ -722,9 +692,7 @@ def rebuild_mm_uuids_from_mm_data(
     return mm_uuids
 
 
-def build_video_prompts_from_mm_data(
-    mm_data: MultiModalDataDict,
-) -> list[str]:
+def build_video_prompts_from_mm_data(mm_data: MultiModalDataDict) -> list[str]:
     """Build video prompts from vision_chunk data.
 
     Collects prompts from video chunks and groups them by video_idx.
@@ -786,11 +754,7 @@ def replace_vision_chunk_video_placeholder(
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer: HfTokenizer | None,
-    ) -> None:
+    def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         # Ensure the og tokenizer is never modified by maybe_make_thread_pool
         tokenizer = copy.copy(tokenizer)
         if (
@@ -815,9 +779,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
     def render_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -862,10 +824,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             chat_template_kwargs["tokenize"] = True
 
         prompt_raw = safe_apply_chat_template(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
+            model_config, tokenizer, conversation, **chat_template_kwargs
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -884,9 +843,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt_raw = cast(
                 list[int],
                 replace_vision_chunk_video_placeholder(
-                    prompt_raw,
-                    mm_data,
-                    video_placeholder,
+                    prompt_raw, mm_data, video_placeholder
                 ),
             )
 
@@ -909,9 +866,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             # Pure mode: no other MM data, mutate prompt to EmbedsPrompt shape.
             assert prompt_embeds_placeholder_token_id is not None
             self._apply_prompt_embeds_to_prompt(
-                prompt,
-                prompt_embeds_tensors,
-                prompt_embeds_placeholder_token_id,
+                prompt, prompt_embeds_tensors, prompt_embeds_placeholder_token_id
             )
 
         if mm_data is not None:
@@ -922,9 +877,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         return conversation, prompt
 
     async def render_messages_async(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -966,10 +919,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             chat_template_kwargs["tokenize"] = True
 
         prompt_raw = await self._apply_chat_template_async(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
+            model_config, tokenizer, conversation, **chat_template_kwargs
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
@@ -986,9 +936,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt_raw = cast(
                 list[int],
                 replace_vision_chunk_video_placeholder(
-                    prompt_raw,
-                    mm_data,
-                    video_placeholder,
+                    prompt_raw, mm_data, video_placeholder
                 ),
             )
 
@@ -1006,9 +954,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         elif prompt_embeds_tensors:
             assert prompt_embeds_placeholder_token_id is not None
             self._apply_prompt_embeds_to_prompt(
-                prompt,
-                prompt_embeds_tensors,
-                prompt_embeds_placeholder_token_id,
+                prompt, prompt_embeds_tensors, prompt_embeds_placeholder_token_id
             )
 
         if mm_data is not None:
@@ -1020,10 +966,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
     @override
     def _process_tokens(
-        self,
-        prompt: TokensPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokensPrompt, *, skip_mm_cache: bool = False
     ) -> TokensInput | MultiModalInput:
         """Pre-expand `prompt_embeds` sentinels before delegating to the MM
         processor, then attach `prompt_embeds` modality data to the result.
@@ -1046,18 +989,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         if prompt_embeds_info is not None:
             tensors, _ = prompt_embeds_info
             self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
+                cast(MultiModalInput, engine_input), tensors, mm_updates
             )
         return engine_input
 
     @override
     async def _process_tokens_async(
-        self,
-        prompt: TokensPrompt,
-        *,
-        skip_mm_cache: bool = False,
+        self, prompt: TokensPrompt, *, skip_mm_cache: bool = False
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
@@ -1073,9 +1011,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         if prompt_embeds_info is not None:
             tensors, _ = prompt_embeds_info
             self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
+                cast(MultiModalInput, engine_input), tensors, mm_updates
             )
         return engine_input
 
@@ -1153,8 +1089,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 MultiModalKwargsItem(
                     {
                         "embedding": MultiModalFieldElem(
-                            data=tensor,
-                            field=MultiModalSharedField(batch_size=1),
+                            data=tensor, field=MultiModalSharedField(batch_size=1)
                         )
                     }
                 )

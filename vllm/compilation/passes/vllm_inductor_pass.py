@@ -109,8 +109,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
         """Replace <OpOverload(..., ...)> with nicer formulations"""
         return str(
             self._OP_OVERLOAD_PATTERN.sub(
-                lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
-                string,
+                lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}", string
             )
         )
 
@@ -305,18 +304,13 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def register(self, pr: VllmPatternReplacement) -> None:
         pm.register_replacement(
-            pr.pattern,
-            pr.replacement,
-            pr.get_inputs(),
-            self._trace_fn,
-            self.pm_pass,
+            pr.pattern, pr.replacement, pr.get_inputs(), self._trace_fn, self.pm_pass
         )
         self._pattern_replacements.append(pr)
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(
-            type(self),
-            *[type(pr) for pr in self._pattern_replacements],
+            type(self), *[type(pr) for pr in self._pattern_replacements]
         )
 
     @staticmethod

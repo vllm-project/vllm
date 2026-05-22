@@ -57,10 +57,7 @@ def is_remote_gguf(model: str | Path) -> bool:
         if is_valid_gguf_quant_type(quant_type):
             return True
         if is_nonstandard_gguf_quant_type(quant_type):
-            logger.warning(
-                "Non-standard GGUF quant type '%s' detected.",
-                quant_type,
-            )
+            logger.warning("Non-standard GGUF quant type '%s' detected.", quant_type)
             return True
     return False
 
@@ -119,7 +116,7 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
         f"- Valid base quant types: {GGMLQuantizationType._member_names_}\n"
         f"- Extended suffixes also supported: {_GGUF_QUANT_SUFFIXES}\n"
         "- Non-standard GGUF quant types also supported: "
-        "dash-separated prefixes (e.g. UD-Q4_K_XL, Custom-Q8_0)",
+        "dash-separated prefixes (e.g. UD-Q4_K_XL, Custom-Q8_0)"
     )
 
 
@@ -222,8 +219,7 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
         field = reader.get_field(gguf_key)
         if field is None:
             logger.warning(
-                "Missing required vision config field '%s' in mmproj.gguf",
-                gguf_key,
+                "Missing required vision config field '%s' in mmproj.gguf", gguf_key
             )
             return None
         # Extract scalar value from GGUF field and convert to target type
@@ -256,8 +252,7 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
 
 
 def maybe_patch_hf_config_from_gguf(
-    model: str,
-    hf_config: PretrainedConfig,
+    model: str, hf_config: PretrainedConfig
 ) -> PretrainedConfig:
     """Patch HF config for GGUF models.
 
@@ -296,9 +291,7 @@ def maybe_patch_hf_config_from_gguf(
 
 
 def get_gguf_file_path_from_hf(
-    repo_id: str | Path,
-    quant_type: str,
-    revision: str | None = None,
+    repo_id: str | Path, quant_type: str, revision: str | None = None
 ) -> str:
     """Get the GGUF file path from HuggingFace Hub based on repo_id and quant_type.
 
@@ -318,9 +311,7 @@ def get_gguf_file_path_from_hf(
         f"*/*-{quant_type}-*.gguf",
     ]
     matching_files = list_filtered_repo_files(
-        repo_id,
-        allow_patterns=gguf_patterns,
-        revision=revision,
+        repo_id, allow_patterns=gguf_patterns, revision=revision
     )
 
     if len(matching_files) == 0:

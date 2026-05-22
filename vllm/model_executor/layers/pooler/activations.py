@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 
 def get_act_fn(
-    config: PretrainedConfig,
-    static_num_labels: bool = True,
+    config: PretrainedConfig, static_num_labels: bool = True
 ) -> "PoolerActivation":
     # get classification act_fn
     # Implement alignment with transformers ForSequenceClassificationLoss

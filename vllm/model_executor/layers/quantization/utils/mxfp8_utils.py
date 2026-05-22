@@ -36,8 +36,7 @@ def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
 
 
 def _mxfp8_e4m3_quantize_torch(
-    x: torch.Tensor,
-    is_sf_swizzled_layout: bool = False,
+    x: torch.Tensor, is_sf_swizzled_layout: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Naive MXFP8 quantization.
     For each block of 32 elements along the last dimension, compute a
@@ -85,9 +84,7 @@ def _mxfp8_e4m3_quantize_torch(
 
 
 def _mxfp8_e4m3_quantize_impl(
-    x: torch.Tensor,
-    is_sf_swizzled_layout: bool = False,
-    alignment: int = 0,
+    x: torch.Tensor, is_sf_swizzled_layout: bool = False, alignment: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
 
@@ -107,9 +104,7 @@ def _mxfp8_e4m3_quantize_impl(
 
 
 def mxfp8_e4m3_quantize(
-    x: torch.Tensor,
-    is_sf_swizzled_layout: bool = False,
-    alignment: int = 0,
+    x: torch.Tensor, is_sf_swizzled_layout: bool = False, alignment: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
@@ -131,9 +126,7 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
 
 
 def mxfp8_e4m3_quantize_fake(
-    x: torch.Tensor,
-    is_sf_swizzled_layout: bool = False,
-    alignment: int = 0,
+    x: torch.Tensor, is_sf_swizzled_layout: bool = False, alignment: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
     fp_data = torch.empty_like(x, dtype=MXFP8_VALUE_DTYPE)

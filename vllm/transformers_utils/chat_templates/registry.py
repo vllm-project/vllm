@@ -48,8 +48,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
 
 
 def register_chat_template_fallback_path(
-    model_type: str,
-    chat_template: ChatTemplatePath,
+    model_type: str, chat_template: ChatTemplatePath
 ) -> None:
     if model_type in _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK:
         logger.warning(
@@ -63,8 +62,7 @@ def register_chat_template_fallback_path(
 
 
 def get_chat_template_fallback_path(
-    model_type: str,
-    tokenizer_name_or_path: str,
+    model_type: str, tokenizer_name_or_path: str
 ) -> Path | None:
     chat_template = _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK.get(model_type)
     if callable(chat_template):

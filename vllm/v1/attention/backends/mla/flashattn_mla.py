@@ -139,8 +139,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
             # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
             max_batch_size = max(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.max_cudagraph_size or 0,
+                vllm_config.scheduler_config.max_num_seqs, self.max_cudagraph_size or 0
             )
             self.scheduler_metadata = torch.zeros(
                 1 + round_up(max_batch_size, 4) * 4,

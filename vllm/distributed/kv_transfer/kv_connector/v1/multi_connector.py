@@ -361,9 +361,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
@@ -482,19 +480,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return async_saves > 0, kv_txfer_params
 
     def request_finished(
-        self,
-        request: "Request",
-        blocks: list[int],
+        self, request: "Request", blocks: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         return self._aggregate_request_finished(
-            request,
-            lambda c: c.request_finished(request, blocks),
+            request, lambda c: c.request_finished(request, blocks)
         )
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         if not self._all_support_hma:
             assert len(block_ids) == 1, (
@@ -626,11 +619,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if connector_prom is not None:
                 prom_metrics[connector_cls.__name__] = connector_prom
         return MultiKVConnectorPromMetrics(
-            vllm_config,
-            metric_types,
-            labelnames,
-            per_engine_labelvalues,
-            prom_metrics,
+            vllm_config, metric_types, labelnames, per_engine_labelvalues, prom_metrics
         )
 
     def reset_cache(self) -> bool:

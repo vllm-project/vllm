@@ -13,18 +13,14 @@ LATE_INTERACTION_MODE_SCORE_DOC = "score_doc"
 
 
 def get_late_interaction_engine_index(
-    pooling_params: PoolingParams | None,
-    num_engines: int,
+    pooling_params: PoolingParams | None, num_engines: int
 ) -> int | None:
     if pooling_params is None or pooling_params.late_interaction_params is None:
         return None
 
     late_interaction_params = pooling_params.late_interaction_params
     mode = late_interaction_params.mode
-    if mode not in (
-        LATE_INTERACTION_MODE_CACHE_QUERY,
-        LATE_INTERACTION_MODE_SCORE_DOC,
-    ):
+    if mode not in (LATE_INTERACTION_MODE_CACHE_QUERY, LATE_INTERACTION_MODE_SCORE_DOC):
         return None
 
     query_key = late_interaction_params.query_key
@@ -37,8 +33,7 @@ def get_late_interaction_engine_index(
 
 
 def build_late_interaction_query_params(
-    query_key: str,
-    query_uses: int,
+    query_key: str, query_uses: int
 ) -> LateInteractionParams:
     return LateInteractionParams(
         mode=LATE_INTERACTION_MODE_CACHE_QUERY,
@@ -47,12 +42,9 @@ def build_late_interaction_query_params(
     )
 
 
-def build_late_interaction_doc_params(
-    query_key: str,
-) -> LateInteractionParams:
+def build_late_interaction_doc_params(query_key: str) -> LateInteractionParams:
     return LateInteractionParams(
-        mode=LATE_INTERACTION_MODE_SCORE_DOC,
-        query_key=query_key,
+        mode=LATE_INTERACTION_MODE_SCORE_DOC, query_key=query_key
     )
 
 

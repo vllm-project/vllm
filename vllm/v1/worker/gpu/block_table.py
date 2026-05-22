@@ -44,15 +44,12 @@ class BlockTables:
         for i in range(self.num_kv_cache_groups):
             max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
             block_table = StagedWriteTensor(
-                (self.max_num_reqs, max_num_blocks),
-                dtype=torch.int32,
-                device=device,
+                (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
             )
             self.block_tables.append(block_table)
 
         self.num_blocks = UvaBackedTensor(
-            (self.num_kv_cache_groups, self.max_num_reqs),
-            dtype=torch.int32,
+            (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
         )
 
         # Block tables used for model's forward pass.
@@ -96,10 +93,7 @@ class BlockTables:
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
-        self,
-        req_index: int,
-        new_block_ids: tuple[list[int], ...],
-        overwrite: bool,
+        self, req_index: int, new_block_ids: tuple[list[int], ...], overwrite: bool
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
@@ -118,9 +112,7 @@ class BlockTables:
         self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
-        self,
-        idx_mapping: torch.Tensor,
-        num_reqs_padded: int,
+        self, idx_mapping: torch.Tensor, num_reqs_padded: int
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.

@@ -65,10 +65,7 @@ class CheersTextConfig(PretrainedConfig):
                 for i in range(self.num_hidden_layers)
             ]
 
-        super().__init__(
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
 
 class CheersConfig(PretrainedConfig):

@@ -78,7 +78,7 @@ class EPTestSettings:
     ):
         return EPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False)
             ],
             distributed_backends=["mp"],
             runner=runner,
@@ -123,17 +123,8 @@ def _compare_tp(
     *,
     method: Literal["generate"],
 ):
-    (
-        tp_size,
-        eager_mode,
-        chunked_prefill,
-    ) = parallel_setup
-    (
-        trust_remote_code,
-        tokenizer_mode,
-        load_format,
-        hf_overrides,
-    ) = test_options
+    (tp_size, eager_mode, chunked_prefill) = parallel_setup
+    (trust_remote_code, tokenizer_mode, load_format, hf_overrides) = test_options
 
     if num_gpus_available < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs")
@@ -164,9 +155,7 @@ def _compare_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
 
-    ep_env = {
-        "VLLM_TEST_ENABLE_EP": "1",
-    }
+    ep_env = {"VLLM_TEST_ENABLE_EP": "1"}
 
     ep_args = [
         *common_args,
@@ -177,9 +166,7 @@ def _compare_tp(
     ]
 
     # compare without expert parallelism
-    tp_env = {
-        "VLLM_TEST_ENABLE_EP": "0",
-    }
+    tp_env = {"VLLM_TEST_ENABLE_EP": "0"}
 
     tp_args = [
         *common_args,

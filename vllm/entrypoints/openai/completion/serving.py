@@ -83,8 +83,7 @@ class OpenAIServingCompletion(OpenAIServing):
         )
 
     async def render_completion_request(
-        self,
-        request: CompletionRequest,
+        self, request: CompletionRequest
     ) -> list[EngineInput] | ErrorResponse:
         """
         Validate the model and preprocess a completion request.
@@ -108,9 +107,7 @@ class OpenAIServingCompletion(OpenAIServing):
         return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(
-        self,
-        request: CompletionRequest,
-        raw_request: Request | None = None,
+        self, request: CompletionRequest, raw_request: Request | None = None
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         """Completion API similar to OpenAI's API.
 
@@ -126,9 +123,7 @@ class OpenAIServingCompletion(OpenAIServing):
         )
 
     async def _create_completion(
-        self,
-        request: CompletionRequest,
-        raw_request: Request | None = None,
+        self, request: CompletionRequest, raw_request: Request | None = None
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if request.stream and request.use_beam_search:
             return self.create_error_response(
@@ -173,8 +168,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
             else:
                 sampling_params = request.to_sampling_params(
-                    max_tokens,
-                    self.default_sampling_params,
+                    max_tokens, self.default_sampling_params
                 )
 
             request_id_item = f"{request_id}-{i}"
@@ -344,10 +338,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
-                            delta_token_ids = [
-                                *prompt_token_ids,
-                                *output.token_ids,
-                            ]
+                            delta_token_ids = [*prompt_token_ids, *output.token_ids]
                             out_logprobs = [
                                 *(prompt_logprobs or []),
                                 *(output.logprobs or []),
@@ -518,10 +509,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         else:
                             assert prompt_logprobs is not None
                             assert output.logprobs is not None
-                            out_logprobs = [
-                                *prompt_logprobs,
-                                *output.logprobs,
-                            ]
+                            out_logprobs = [*prompt_logprobs, *output.logprobs]
 
                         output_text = prompt_text + output.text
                 else:

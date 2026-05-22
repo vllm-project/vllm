@@ -43,9 +43,7 @@ class LoadRecoveryExampleConnector(ExampleConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config,
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
         self._async_load = vllm_config.kv_transfer_config.get_from_extra_config(
             "async_load", False
@@ -104,9 +102,7 @@ class LoadRecoveryExampleConnector(ExampleConnector):
         return self._invalid_block_ids
 
     def get_num_new_matched_tokens(
-        self,
-        request: Request,
-        num_computed_tokens: int,
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         if request.request_id in self._seen_requests:
             return 0, False
@@ -131,8 +127,7 @@ class LoadRecoveryExampleConnector(ExampleConnector):
             self._req_to_block_ids[request.request_id] = blocks.get_block_ids()[0]
 
     def build_connector_meta(
-        self,
-        scheduler_output: "SchedulerOutput",
+        self, scheduler_output: "SchedulerOutput"
     ) -> KVConnectorMetadata:
         if not self._async_load:
             base = super().build_connector_meta(scheduler_output)

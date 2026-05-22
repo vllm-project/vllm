@@ -9,10 +9,7 @@ from tests.models.language.pooling.embed_utils import (
     correctness_test_embed_models,
     matryoshka_fy,
 )
-from tests.models.utils import (
-    EmbedModelInfo,
-    RerankModelInfo,
-)
+from tests.models.utils import EmbedModelInfo, RerankModelInfo
 from vllm import PoolingParams
 
 from .mteb_embed_utils import mteb_test_embed_models
@@ -118,9 +115,7 @@ def test_matryoshka(
     task = "retrieval" if "v5" in model_info.name else "text-matching"
 
     with hf_runner(
-        model_info.name,
-        dtype=dtype,
-        is_sentence_transformer=True,
+        model_info.name, dtype=dtype, is_sentence_transformer=True
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts, task=task)
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)

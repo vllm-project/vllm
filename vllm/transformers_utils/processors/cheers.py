@@ -10,11 +10,7 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 
 class CheersProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
-    _defaults = {
-        "images_kwargs": {
-            "return_tensors": "pt",
-        },
-    }
+    _defaults = {"images_kwargs": {"return_tensors": "pt"}}
 
 
 class CheersProcessor(ProcessorMixin):
@@ -53,9 +49,7 @@ class CheersProcessor(ProcessorMixin):
                     all_pv.append(result["pixel_values"])
                     if "grid_hws" in result:
                         all_ghw.append(result["grid_hws"])
-                pixel_values = {
-                    "pixel_values": torch.cat(all_pv, dim=0),
-                }
+                pixel_values = {"pixel_values": torch.cat(all_pv, dim=0)}
                 if all_ghw:
                     pixel_values["grid_hws"] = torch.cat(all_ghw, dim=0)
             else:

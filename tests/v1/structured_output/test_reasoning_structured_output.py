@@ -96,9 +96,7 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_fill_bitmask_without_enable_in_reasoning(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_fill_bitmask when enable_in_reasoning is False."""
         # Keep enable_in_reasoning as False (default)
@@ -157,9 +155,7 @@ class TestReasoningStructuredOutput:
         )
 
     def test_should_advance_with_enable_in_reasoning(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_advance when enable_in_reasoning is True."""
         # Enable enable_in_reasoning
@@ -172,9 +168,7 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_advance_reasoning_not_ended(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_advance when reasoning has not ended."""
         # Set reasoning as not ended
@@ -190,9 +184,7 @@ class TestReasoningStructuredOutput:
         assert result is False
 
     def test_should_advance_reasoning_just_ended(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_advance when reasoning ends in current step."""
         # Set reasoning as not ended initially, but ends in this step
@@ -216,9 +208,7 @@ class TestReasoningStructuredOutput:
         assert result is False
 
     def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """When reasoning ends this step, advance immediately for structural
         tags with speculative decoding."""
@@ -242,9 +232,7 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_advance_reasoning_already_ended(
-        self,
-        manager_with_reasoner,
-        mock_request_with_structured_output,
+        self, manager_with_reasoner, mock_request_with_structured_output
     ):
         """Test should_advance when reasoning has already ended."""
         # Set reasoning as already ended

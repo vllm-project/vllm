@@ -109,14 +109,10 @@ def _fwd_diag_kernel(
 
         # Load key and value
         k_trans = tl.load(
-            K_trans_block_ptr,
-            mask=block_offset + kv_index[None, :] < n,
-            other=0.0,
+            K_trans_block_ptr, mask=block_offset + kv_index[None, :] < n, other=0.0
         ).to(tl.float32)
         v = tl.load(
-            V_block_ptr,
-            mask=block_offset + kv_index[:, None] < n,
-            other=0.0,
+            V_block_ptr, mask=block_offset + kv_index[:, None] < n, other=0.0
         ).to(tl.float32)
 
         # Compute attention scores and apply decay

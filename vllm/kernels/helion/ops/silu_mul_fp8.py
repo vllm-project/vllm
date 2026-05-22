@@ -35,10 +35,7 @@ def generate_silu_mul_fp8_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     for num_tokens in num_tokens_list:
         for intermediate_size in intermediate_sizes:
             input_tensor = torch.randn(
-                num_tokens,
-                2 * intermediate_size,
-                device="cuda",
-                dtype=torch.bfloat16,
+                num_tokens, 2 * intermediate_size, device="cuda", dtype=torch.bfloat16
             )
             scale = torch.tensor([1.0], device="cuda", dtype=torch.float32)
 
@@ -94,8 +91,7 @@ def pick_silu_mul_fp8_config(
 
 
 @register_kernel(
-    config_picker=pick_silu_mul_fp8_config,
-    input_generator=generate_silu_mul_fp8_inputs,
+    config_picker=pick_silu_mul_fp8_config, input_generator=generate_silu_mul_fp8_inputs
 )
 def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     original_shape = input.shape

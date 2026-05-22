@@ -37,10 +37,7 @@ def mhc_pre_tilelang(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
-    from vllm._tilelang_ops import (
-        compute_num_split,
-        mhc_pre_big_fuse_tilelang,
-    )
+    from vllm._tilelang_ops import compute_num_split, mhc_pre_big_fuse_tilelang
     from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
@@ -139,24 +136,13 @@ def _mhc_pre_tilelang_fake(
 
     # Create empty tensors with correct shapes for meta device / shape inference
     post_mix = torch.empty(
-        *outer_shape,
-        hc_mult,
-        1,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, 1, dtype=torch.float32, device=residual.device
     )
     comb_mix = torch.empty(
-        *outer_shape,
-        hc_mult,
-        hc_mult,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
     )
     layer_input = torch.empty(
-        *outer_shape,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=residual.device,
+        *outer_shape, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
     return post_mix, comb_mix, layer_input
@@ -233,10 +219,7 @@ def mhc_fused_post_pre_tilelang(
     outer_shape = residual.shape[:-2]
 
     assert x.shape == (*outer_shape, hidden_size)
-    assert post_layer_mix.shape in (
-        (*outer_shape, hc_mult, 1),
-        (*outer_shape, hc_mult),
-    )
+    assert post_layer_mix.shape in ((*outer_shape, hc_mult, 1), (*outer_shape, hc_mult))
     assert comb_res_mix.shape == (*outer_shape, hc_mult, hc_mult)
     assert fn.shape == (hc_mult3, hc_hidden_size)
     assert hc_scale.shape == (3,)
@@ -263,36 +246,20 @@ def mhc_fused_post_pre_tilelang(
         n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
 
     gemm_out_mul = torch.empty(
-        n_splits,
-        num_tokens,
-        hc_mult3,
-        dtype=torch.float32,
-        device=residual.device,
+        n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
     )
     gemm_out_sqrsum = torch.empty(
-        n_splits,
-        num_tokens,
-        dtype=torch.float32,
-        device=residual.device,
+        n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
     residual_cur = torch.empty_like(residual_flat)
     post_mix_cur = torch.empty(
-        num_tokens,
-        hc_mult,
-        dtype=torch.float32,
-        device=residual.device,
+        num_tokens, hc_mult, dtype=torch.float32, device=residual.device
     )
     comb_mix_cur = torch.empty(
-        num_tokens,
-        hc_mult2,
-        dtype=torch.float32,
-        device=residual.device,
+        num_tokens, hc_mult2, dtype=torch.float32, device=residual.device
     )
     layer_input_cur = torch.empty(
-        num_tokens,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=residual.device,
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
     if num_tokens <= fma_token_threshold:
@@ -380,24 +347,13 @@ def _mhc_fused_post_pre_tilelang_fake(
 
     residual_cur = torch.empty_like(residual)
     post_mix_cur = torch.empty(
-        *outer_shape,
-        hc_mult,
-        1,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, 1, dtype=torch.float32, device=residual.device
     )
     comb_mix_cur = torch.empty(
-        *outer_shape,
-        hc_mult,
-        hc_mult,
-        dtype=torch.float32,
-        device=residual.device,
+        *outer_shape, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
     )
     layer_input_cur = torch.empty(
-        *outer_shape,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=residual.device,
+        *outer_shape, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
     return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
@@ -429,15 +385,7 @@ def _hc_head_fused_kernel_tilelang(
     from vllm._tilelang_ops import hc_head_fuse_tilelang
 
     hc_head_fuse_tilelang(
-        hs_flat,
-        fn,
-        hc_scale,
-        hc_base,
-        out,
-        hidden_size,
-        rms_eps,
-        hc_eps,
-        hc_mult,
+        hs_flat, fn, hc_scale, hc_base, out, hidden_size, rms_eps, hc_eps, hc_mult
     )
 
 

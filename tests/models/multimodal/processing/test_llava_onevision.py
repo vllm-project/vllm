@@ -38,9 +38,7 @@ def _validate_image_max_tokens_one(
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 def test_processor_max_tokens(model_id):
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs=None,
-        limit_mm_per_prompt={"image": 1},
+        model_id, mm_processor_kwargs=None, limit_mm_per_prompt={"image": 1}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     info = processor.info
@@ -108,10 +106,7 @@ def _validate_image_prompt_replacements_one(
 
 
 def _test_image_prompt_replacements(
-    processor,
-    *,
-    num_imgs: int,
-    image_sizes: list[ImageSize],
+    processor, *, num_imgs: int, image_sizes: list[ImageSize]
 ) -> None:
     """
     Ensure LlavaOnevisionMultiModalProcessor
@@ -120,10 +115,7 @@ def _test_image_prompt_replacements(
     failed_size_excs = list[tuple[ImageSize, Exception]]()
 
     validate_one = partial(
-        _validate_image_prompt_replacements_one,
-        processor,
-        num_imgs,
-        failed_size_excs,
+        _validate_image_prompt_replacements_one, processor, num_imgs, failed_size_excs
     )
     pqdm(image_sizes, validate_one, n_jobs=8, desc="Validating image sizes")
 
@@ -138,9 +130,7 @@ def _test_image_prompt_replacements(
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs=None,
-        limit_mm_per_prompt={"image": num_imgs},
+        model_id, mm_processor_kwargs=None, limit_mm_per_prompt={"image": num_imgs}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
@@ -158,9 +148,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ]
 
     _test_image_prompt_replacements(
-        processor,
-        num_imgs=num_imgs,
-        image_sizes=image_sizes,
+        processor, num_imgs=num_imgs, image_sizes=image_sizes
     )
 
 
@@ -171,9 +159,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
 @pytest.mark.parametrize("num_imgs", [1])
 def test_processor_prompt_replacements_all(model_id, num_imgs):
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs=None,
-        limit_mm_per_prompt={"image": num_imgs},
+        model_id, mm_processor_kwargs=None, limit_mm_per_prompt={"image": num_imgs}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
@@ -190,7 +176,5 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
             seen_aspect_ratios.add(aspect_ratio)
 
     _test_image_prompt_replacements(
-        processor,
-        num_imgs=num_imgs,
-        image_sizes=image_sizes,
+        processor, num_imgs=num_imgs, image_sizes=image_sizes
     )

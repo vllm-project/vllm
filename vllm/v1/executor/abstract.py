@@ -92,10 +92,7 @@ class Executor(ABC):
         return executor_class
 
     @instrument(span_name="Executor init")
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -261,10 +258,7 @@ class Executor(ABC):
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
-        self,
-        path: str,
-        pattern: str | None = None,
-        max_size: int | None = None,
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.collective_rpc(
             "save_sharded_state",

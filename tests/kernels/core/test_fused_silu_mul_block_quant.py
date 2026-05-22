@@ -32,9 +32,7 @@ CUDA_DEVICES = [i for i in range(1 if torch.accelerator.device_count() == 1 else
 
 
 def ref_silu_and_mul_per_block_quant(
-    x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    group_size: int,
+    x: torch.Tensor, quant_dtype: torch.dtype, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation: unfused SiLU+Mul then group quantization."""
     hidden = x.shape[-1] // 2

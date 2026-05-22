@@ -32,9 +32,7 @@ def vision_server():
     env_overrides: dict[str, str] = {}
 
     with RemoteOpenAIServer(
-        VISION_MODEL_NAME,
-        args,
-        env_dict=env_overrides,
+        VISION_MODEL_NAME, args, env_dict=env_overrides
     ) as remote_server:
         yield remote_server
 
@@ -49,8 +47,7 @@ async def vision_client(vision_server):
 
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_base64_image_url(
-    vision_client,
-    local_asset_server,
+    vision_client, local_asset_server
 ):
     """Render a multimodal chat request and verify tokens are returned."""
 
@@ -113,8 +110,7 @@ async def test_chat_completion_render_with_base64_image_url(
 
 @pytest.mark.asyncio
 async def test_tokenize_matches_render_for_multimodal_input(
-    vision_client,
-    local_asset_server,
+    vision_client, local_asset_server
 ):
     """`/tokenize` should match `/v1/chat/completions/render` token output."""
 
@@ -133,20 +129,13 @@ async def test_tokenize_matches_render_for_multimodal_input(
 
     render_response = await vision_client.post(
         "/v1/chat/completions/render",
-        json={
-            "model": VISION_MODEL_NAME,
-            "messages": messages,
-        },
+        json={"model": VISION_MODEL_NAME, "messages": messages},
     )
     assert render_response.status_code == 200
     render_data = render_response.json()
 
     tokenize_response = await vision_client.post(
-        "/tokenize",
-        json={
-            "model": VISION_MODEL_NAME,
-            "messages": messages,
-        },
+        "/tokenize", json={"model": VISION_MODEL_NAME, "messages": messages}
     )
     assert tokenize_response.status_code == 200
     tokenize_data = tokenize_response.json()

@@ -64,9 +64,7 @@ def make_expert_weights(
 
 
 def make_fused_moe_layer(
-    rank: int,
-    layer_idx: int,
-    test_config: TestConfig,
+    rank: int, layer_idx: int, test_config: TestConfig
 ) -> FusedMoE:
     fml = FusedMoE(
         num_experts=test_config.num_experts,
@@ -214,11 +212,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
         rearrange_expert_weights_inplace(
-            indices,
-            shuffled_indices,
-            rank_expert_weights,
-            ep_group,
-            is_profile=False,
+            indices, shuffled_indices, rank_expert_weights, ep_group, is_profile=False
         )
 
         num_local_experts = test_config.num_local_experts
@@ -278,8 +272,4 @@ def test_eplb_fml(
         column_major_scales=column_major_scales,
     )
 
-    distributed_run(
-        _test_eplb_fml,
-        world_size,
-        test_config,
-    )
+    distributed_run(_test_eplb_fml, world_size, test_config)

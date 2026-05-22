@@ -151,9 +151,7 @@ def may_pad_loaded_weight(param, loaded_weight):
     for x in pad_shape[::-1][: loaded_weight.ndim]:
         padding += [0, x]
     loaded_weight = torch.nn.functional.pad(
-        input=loaded_weight,
-        pad=padding,
-        value=value,
+        input=loaded_weight, pad=padding, value=value
     )
     return loaded_weight
 
@@ -458,8 +456,7 @@ class HummingLinearMethod(LinearMethodBase):
 
             # weight processing logic for specific quantization schema
             loaded_weight = self.weight_schema.process_loaded_weight(
-                tensor=loaded_weight,
-                name=name,
+                tensor=loaded_weight, name=name
             )
             if shard_id is not None:
                 return weight_loader(param, loaded_weight, shard_id)
@@ -605,16 +602,11 @@ class HummingLinearMethod(LinearMethodBase):
         self.compute_config = json.dumps(compute_config)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
-            layer=layer,
-            inputs=flatten_inputs,
-            compute_config=self.compute_config,
+            layer=layer, inputs=flatten_inputs, compute_config=self.compute_config
         )
         output = output.view(*x.shape[:-1], output.size(-1))
         return output
@@ -682,8 +674,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
             # weight processing logic for specific quantization schema
             loaded_weight = self.weight_schema.process_loaded_weight(
-                tensor=loaded_weight,
-                name=name,
+                tensor=loaded_weight, name=name
             )
             return weight_loader(
                 param,
@@ -872,11 +863,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             experts = HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
         self.experts = experts
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: torch.nn.Module,
-    ):
+    def select_gemm_impl(self, prepare_finalize, layer: torch.nn.Module):
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 
         activation_format = prepare_finalize.activation_format
@@ -904,9 +891,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         workspace1, workspace2, output = self.experts.make_workspaces(
-            M=topk_ids.size(0),
-            topk=topk_ids.size(1),
-            activation=layer.activation,
+            M=topk_ids.size(0), topk=topk_ids.size(1), activation=layer.activation
         )
 
         assert workspace1.data_ptr() == output.data_ptr()

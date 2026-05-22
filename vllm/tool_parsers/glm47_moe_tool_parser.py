@@ -35,6 +35,5 @@ class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
             r"<tool_call>\s*(\S+?)\s*(<arg_key>.*)?</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
-            re.DOTALL,
+            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
         )

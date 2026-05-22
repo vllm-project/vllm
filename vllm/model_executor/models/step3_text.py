@@ -11,16 +11,11 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -292,10 +287,7 @@ class Step3TextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
@@ -323,8 +315,7 @@ class Step3TextModel(nn.Module):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size,
-                config.hidden_size,
+                self.vocab_size, config.hidden_size
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -374,10 +365,7 @@ class Step3TextModel(nn.Module):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
+                {"hidden_states": hidden_states, "residual": residual}
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -508,12 +496,7 @@ class Step3TextModel(nn.Module):
 
 
 class Step3TextForCausalLM(nn.Module, SupportsPP):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
 

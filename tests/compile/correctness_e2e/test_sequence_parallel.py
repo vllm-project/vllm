@@ -152,13 +152,7 @@ class SPTestSettings:
 
         for parallel_setup in self.parallel_setups:
             for backend in self.distributed_backends:
-                yield (
-                    model_id,
-                    parallel_setup,
-                    backend,
-                    self.runner,
-                    opts,
-                )
+                yield (model_id, parallel_setup, backend, self.runner, opts)
 
 
 def _compare_sp(
@@ -176,14 +170,9 @@ def _compare_sp(
     is_multimodal: bool,
     dtype: str = "float16",
 ):
-    (
-        tp_size,
-        pp_size,
-        fuse_norm_quant,
-        fuse_act_quant,
-        eager_mode,
-        chunked_prefill,
-    ) = parallel_setup
+    (tp_size, pp_size, fuse_norm_quant, fuse_act_quant, eager_mode, chunked_prefill) = (
+        parallel_setup
+    )
 
     multi_node_only = test_options.multi_node_only
     load_format = test_options.load_format
@@ -248,11 +237,7 @@ def _compare_sp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
     if require_embed_inputs:
         common_args.extend(
-            [
-                "--skip-tokenizer-init",
-                "--enable-prompt-embeds",
-                "--enable-mm-embeds",
-            ]
+            ["--skip-tokenizer-init", "--enable-prompt-embeds", "--enable-mm-embeds"]
         )
     elif enable_prompt_embeds:
         common_args.append("--enable-prompt-embeds")
@@ -312,13 +297,7 @@ SP_TEST_MODELS = [
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "runner",
-        "test_options",
-    ),
+    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
         params
         for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
@@ -428,9 +407,7 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         "mp",
         "auto",
         SPTestOptions(
-            multi_node_only=False,
-            load_format="dummy",
-            model_info=NVFP4_MODEL_INFO,
+            multi_node_only=False, load_format="dummy", model_info=NVFP4_MODEL_INFO
         ),
         num_gpus_available,
         use_inductor_graph_partition=False,

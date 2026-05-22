@@ -5,10 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.v1.core.kv_cache_metrics import (
-    BlockMetricsState,
-    KVCacheMetricsCollector,
-)
+from vllm.v1.core.kv_cache_metrics import BlockMetricsState, KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
 

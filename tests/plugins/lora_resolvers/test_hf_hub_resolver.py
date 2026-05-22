@@ -86,8 +86,7 @@ async def test_invalid_repo():
     assert hf_resolver is not None
 
     invalid_repo_req = await hf_resolver.resolve_lora(
-        INVALID_REPO_NAME,
-        f"{INVALID_REPO_NAME}/foo",
+        INVALID_REPO_NAME, f"{INVALID_REPO_NAME}/foo"
     )
     assert invalid_repo_req is None
 
@@ -97,10 +96,7 @@ async def test_trailing_slash():
     hf_resolver = HfHubResolver([LORA_LIB])
     assert hf_resolver is not None
 
-    lora_request = await hf_resolver.resolve_lora(
-        LORA_LIB_MODEL_NAME,
-        f"{LORA_NAME}/",
-    )
+    lora_request = await hf_resolver.resolve_lora(LORA_LIB_MODEL_NAME, f"{LORA_NAME}/")
     assert lora_request is not None
     assert lora_request.lora_name == f"{LORA_NAME}/"
     assert LIB_DOWNLOAD_DIR in lora_request.lora_path

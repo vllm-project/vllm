@@ -216,14 +216,12 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         device=vllm_encoder.conv1.weight.device,
     )
     vllm_hidden_states = vllm_encoder(
-        input_features,
-        attention_mask=vllm_attention_mask,
+        input_features, attention_mask=vllm_attention_mask
     )
     cos, sin = vllm_rope(rote_timestamps, seq_len=vllm_hidden_states.shape[-2])
     vllm_hidden_states = apply_rotary_time_emb(vllm_hidden_states, cos, sin)
     vllm_output, _ = _flatten_valid_audio_embeddings(
-        vllm_projector(vllm_hidden_states),
-        feature_attention_mask,
+        vllm_projector(vllm_hidden_states), feature_attention_mask
     )
 
     torch.testing.assert_close(vllm_output, hf_output)

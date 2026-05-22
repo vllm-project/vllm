@@ -91,9 +91,7 @@ class SupportsHMA(ABC):
 
     @abstractmethod
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished for all kv cache groups,
@@ -452,9 +450,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
@@ -540,9 +536,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished, before its blocks are

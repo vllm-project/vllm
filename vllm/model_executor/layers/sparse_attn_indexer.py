@@ -23,9 +23,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -38,10 +36,7 @@ MXFP4_BLOCK_SIZE = 32
 
 
 def _gather_workspace_shapes(
-    total_seq_lens: int,
-    head_dim: int,
-    fp8_dtype: torch.dtype,
-    use_fp4_cache: bool,
+    total_seq_lens: int, head_dim: int, fp8_dtype: torch.dtype, use_fp4_cache: bool
 ) -> tuple[tuple[tuple[int, int], torch.dtype], tuple[tuple[int, int], torch.dtype]]:
     """Return ((values_shape, values_dtype), (scales_shape, scales_dtype)) for
     the K-gather workspace. FP8 path: (T, head_dim) fp8 + (T, 4) uint8 fp32
@@ -52,16 +47,11 @@ def _gather_workspace_shapes(
             ((total_seq_lens, head_dim // 2), torch.uint8),
             ((total_seq_lens, head_dim // MXFP4_BLOCK_SIZE), torch.uint8),
         )
-    return (
-        ((total_seq_lens, head_dim), fp8_dtype),
-        ((total_seq_lens, 4), torch.uint8),
-    )
+    return (((total_seq_lens, head_dim), fp8_dtype), ((total_seq_lens, 4), torch.uint8))
 
 
 def kv_cache_as_quant_view(
-    kv_cache: torch.Tensor,
-    head_dim: int,
-    use_fp4_cache: bool,
+    kv_cache: torch.Tensor, head_dim: int, use_fp4_cache: bool
 ) -> torch.Tensor:
     """4D ``[num_blocks, block_size, 1, head_width]`` view expected by
     DeepGEMM, from the 3D indexer kv-cache allocation."""
@@ -109,9 +99,7 @@ def sparse_attn_indexer(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         current_workspace_manager().get_simultaneous(
-            values_spec,
-            scales_spec,
-            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            values_spec, scales_spec, ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8)
         )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
@@ -165,11 +153,7 @@ def sparse_attn_indexer(
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         ops.indexer_k_quant_and_cache(
-            k,
-            kv_cache,
-            slot_mapping,
-            quant_block_size,
-            scale_fmt,
+            k, kv_cache, slot_mapping, quant_block_size, scale_fmt
         )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
@@ -186,8 +170,7 @@ def sparse_attn_indexer(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
-            values_spec,
-            scales_spec,
+            values_spec, scales_spec
         )
         for chunk in prefill_metadata.chunks:
             k_quant = k_quant_full[: chunk.total_seq_lens]
@@ -195,11 +178,7 @@ def sparse_attn_indexer(
 
             if not chunk.skip_kv_gather:
                 ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
+                    kv_cache, k_quant, k_scale, chunk.block_table, chunk.cu_seq_lens
                 )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
@@ -337,7 +316,7 @@ def sparse_attn_indexer(
         if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8)
             )
             torch.ops._C.persistent_topk(
                 logits,

@@ -21,10 +21,7 @@ from transformers.models.qwen2_vl import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
@@ -33,23 +30,15 @@ from vllm.multimodal.processing import (
 )
 from vllm.tokenizers import TokenizerLike
 
-from .qwen2_5_vl import (
-    Qwen2_5_VisionTransformer as OpenCUAVisionTransformer,
-)
-from .qwen2_5_vl import (
-    Qwen2_5_VLForConditionalGeneration,
-)
+from .qwen2_5_vl import Qwen2_5_VisionTransformer as OpenCUAVisionTransformer
+from .qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
     Qwen2VLMultiModalDataParser,
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
-from .utils import (
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
 
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
@@ -70,9 +59,7 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
         tokenizer = self.get_tokenizer()
         vision_config = self.ctx.get_hf_image_processor_config()
         return OpenCUAProcessor(
-            vision_config=vision_config,
-            tokenizer=tokenizer,
-            **kwargs,
+            vision_config=vision_config, tokenizer=tokenizer, **kwargs
         )
 
 
@@ -82,12 +69,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             return
         return super().check_argument_for_proper_class(attribute_name, arg)
 
-    def __init__(
-        self,
-        vision_config: dict,
-        tokenizer: TokenizerLike,
-        **kwargs,
-    ):
+    def __init__(self, vision_config: dict, tokenizer: TokenizerLike, **kwargs):
         image_processor = Qwen2VLImageProcessor(**vision_config)
         video_processor = Qwen2VLVideoProcessor(**vision_config)
         chat_template = kwargs.pop("chat_template", None)
@@ -102,13 +84,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
 
         self.image_token = "<|media_placeholder|>"
 
-    def __call__(
-        self,
-        text=None,
-        images=None,
-        return_tensors=None,
-        **kwargs,
-    ):
+    def __call__(self, text=None, images=None, return_tensors=None, **kwargs):
         if text is not None:
             if not isinstance(text, list):
                 text = [text]
@@ -132,9 +108,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
 
 class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo]):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
@@ -164,8 +138,7 @@ class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo])
 
         image_token_str = getattr(hf_processor, "image_token", "<|media_placeholder|>")
         image_token_id = vocab.get(
-            image_token_str,
-            getattr(hf_config, "media_placeholder_token_id", 151664),
+            image_token_str, getattr(hf_config, "media_placeholder_token_id", 151664)
         )
 
         merge_length = image_processor.merge_size**2

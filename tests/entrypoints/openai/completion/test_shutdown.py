@@ -37,8 +37,7 @@ def _get_child_pids(parent_pid: int) -> list[int]:
 
 
 async def _assert_children_cleaned_up(
-    child_pids: list[int],
-    timeout: float = _CHILD_CLEANUP_TIMEOUT,
+    child_pids: list[int], timeout: float = _CHILD_CLEANUP_TIMEOUT
 ):
     """Wait for child processes to exit and fail if any remain."""
     if not child_pids:
@@ -87,9 +86,7 @@ async def _concurrent_request_loop(
         while not state.stop_requesting:
             try:
                 response = await client.completions.create(
-                    model=MODEL_NAME,
-                    prompt="Write a story: ",
-                    max_tokens=200,
+                    model=MODEL_NAME, prompt="Write a story: ", max_tokens=200
                 )
                 if sigterm_sent is not None and sigterm_sent.is_set():
                     state.requests_after_sigterm += 1
@@ -289,9 +286,7 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
             # Send requests to ensure engine is fully initialized
             for _ in range(2):
                 await client.completions.create(
-                    model=MODEL_NAME,
-                    prompt="Test request: ",
-                    max_tokens=10,
+                    model=MODEL_NAME, prompt="Test request: ", max_tokens=10
                 )
             # Wait for engine to become idle
             await asyncio.sleep(wait_for_engine_idle)

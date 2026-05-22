@@ -182,10 +182,7 @@ def get_max_tokens(
 ) -> int:
     if truncate_prompt_tokens is not None:
         limit = truncate_prompt_tokens
-        input_length = min(
-            input_length,
-            max_model_len if limit == -1 else limit,
-        )
+        input_length = min(input_length, max_model_len if limit == -1 else limit)
     if max_model_len < input_length:
         raise ValueError(
             f"Input length ({input_length}) exceeds model's maximum "
@@ -261,9 +258,7 @@ def _jsonify_arg_value(value: Any) -> Any:
 
 
 def jsonify_non_default_args(
-    args: Namespace | EngineArgs,
-    *,
-    exclude: set[str] | None = None,
+    args: Namespace | EngineArgs, *, exclude: set[str] | None = None
 ) -> dict[str, Any]:
     non_default_args = get_non_default_args(args)
     if exclude is not None:
@@ -301,10 +296,7 @@ def process_lora_modules(
     lora_modules = args_lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
-            LoRAModulePath(
-                name=modality,
-                path=lora_path,
-            )
+            LoRAModulePath(name=modality, path=lora_path)
             for modality, lora_path in default_mm_loras.items()
         ]
         if args_lora_modules is None:

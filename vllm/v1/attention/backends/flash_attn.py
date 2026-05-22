@@ -57,9 +57,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -256,9 +254,7 @@ class FlashAttentionMetadata:
     causal: bool = True
 
 
-def _get_sliding_window_configs(
-    vllm_config: VllmConfig,
-) -> set[tuple[int, int] | None]:
+def _get_sliding_window_configs(vllm_config: VllmConfig) -> set[tuple[int, int] | None]:
     """Get the set of all sliding window configs used in the model.
 
     Only inspects FlashAttentionImpl layers. Other backends (e.g.
@@ -301,9 +297,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
     @classmethod
     def get_cudagraph_support(
-        cls,
-        vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        cls, vllm_config: "VllmConfig", kv_cache_spec: "AttentionSpec"
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
 
@@ -358,8 +352,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
             # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
             max_batch_size = max(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.max_cudagraph_size or 0,
+                vllm_config.scheduler_config.max_num_seqs, self.max_cudagraph_size or 0
             )
             self.scheduler_metadata = torch.zeros(
                 1 + round_up(max_batch_size, 4) * 4,
@@ -376,9 +369,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self._dcp_context_kv_lens = torch.zeros(
-                max_num_reqs,
-                dtype=torch.int32,
-                device=self.device,
+                max_num_reqs, dtype=torch.int32, device=self.device
             )
 
         # Sliding window size to be used with the AOT scheduler will be
@@ -630,12 +621,10 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
-            requires_alibi=alibi_slopes is not None,
-            head_size=head_size,
+            requires_alibi=alibi_slopes is not None, head_size=head_size
         )
         logger.info_once(
-            "Using FlashAttention version %s",
-            self.vllm_flash_attn_version,
+            "Using FlashAttention version %s", self.vllm_flash_attn_version
         )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
@@ -910,10 +899,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
         n = query_across_dcp.shape[0]
         (dcp_context_out,) = current_workspace_manager().get_simultaneous(
-            (
-                (n, self.num_heads * self.dcp_world_size, self.head_size),
-                self._dcp_dtype,
-            ),
+            ((n, self.num_heads * self.dcp_world_size, self.head_size), self._dcp_dtype)
         )
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query_across_dcp,
@@ -948,7 +934,7 @@ class FlashAttentionImpl(AttentionImpl):
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         (dcp_query_out,) = current_workspace_manager().get_simultaneous(
-            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype),
+            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype)
         )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
@@ -974,11 +960,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
-            output,
-            context_attn_out_cor,
-            context_lse_cor,
-            query_attn_out,
-            query_lse,
+            output, context_attn_out_cor, context_lse_cor, query_attn_out, query_lse
         )
 
     def _forward_encoder_attention(

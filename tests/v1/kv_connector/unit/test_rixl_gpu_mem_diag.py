@@ -15,8 +15,7 @@ import torch
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm platform required",
+    not current_platform.is_rocm(), reason="ROCm platform required"
 )
 
 
@@ -74,8 +73,7 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
         "enforce_eager": True,
         "gpu_memory_utilization": 0.5,
         "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector",
-            kv_role="kv_both",
+            kv_connector="NixlConnector", kv_role="kv_both"
         ),
         "max_model_len": 2048,
         "disable_hybrid_kv_cache_manager": False,

@@ -9,10 +9,7 @@ import pytest
 import torch
 from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, PretrainedConfig
 
-from tests.v1.attention.utils import (
-    BatchSpec,
-    create_common_attn_metadata,
-)
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -37,8 +34,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def _create_proposer(
-    num_speculative_tokens: int = 1,
-    layer_ids: list[int] | None = None,
+    num_speculative_tokens: int = 1, layer_ids: list[int] | None = None
 ) -> ExtractHiddenStatesProposer:
     """Create an ExtractHiddenStatesProposer for testing."""
     if layer_ids is None:
@@ -52,9 +48,7 @@ def _create_proposer(
         method="extract_hidden_states",
         num_speculative_tokens=num_speculative_tokens,
         draft_model_config={
-            "hf_config": {
-                "eagle_aux_hidden_state_layer_ids": layer_ids,
-            }
+            "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
         },
     )
 
@@ -86,11 +80,7 @@ def test_proposer_initialization():
     assert proposer.vllm_config.speculative_config.num_speculative_tokens == 1
 
     # Verify the hidden states buffer is correctly shaped
-    expected_shape = (
-        proposer.max_num_tokens,
-        len(layer_ids),
-        proposer.hidden_size,
-    )
+    expected_shape = (proposer.max_num_tokens, len(layer_ids), proposer.hidden_size)
     assert proposer.hidden_states.shape == expected_shape
 
 
@@ -185,10 +175,7 @@ def test_prepare_next_token_ids_padded():
     )
 
     next_token_ids, valid_sampled_tokens_count = proposer.prepare_next_token_ids_padded(
-        sampled_token_ids,
-        mock_requests,
-        mock_input_batch,
-        discarded_req_mask,
+        sampled_token_ids, mock_requests, mock_input_batch, discarded_req_mask
     )
 
     assert torch.equal(next_token_ids, expected_next_token_ids_tensor)
@@ -230,15 +217,10 @@ def test_propose():
     proposer.attn_metadata_builder = mock_attn_metadata_builder
 
     # Create input tensors
-    batch_spec = BatchSpec(
-        seq_lens=[3, 2],
-        query_lens=[3, 2],
-    )
+    batch_spec = BatchSpec(seq_lens=[3, 2], query_lens=[3, 2])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=16,
-        device=device,
+        batch_spec, block_size=16, device=device
     )
 
     # Create target hidden states: list of tensors, one per layer
@@ -299,15 +281,10 @@ def test_propose_different_layer_counts(num_hidden_layers):
     mock_attn_metadata_builder.build_for_drafting.return_value = mock.MagicMock()
     proposer.attn_metadata_builder = mock_attn_metadata_builder
 
-    batch_spec = BatchSpec(
-        seq_lens=[3, 2],
-        query_lens=[3, 2],
-    )
+    batch_spec = BatchSpec(seq_lens=[3, 2], query_lens=[3, 2])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=16,
-        device=device,
+        batch_spec, block_size=16, device=device
     )
 
     # Create target hidden states
@@ -364,9 +341,7 @@ def test_extract_hidden_states_text_only_config_regression():
         method="extract_hidden_states",
         num_speculative_tokens=1,
         draft_model_config={
-            "hf_config": {
-                "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],
-            }
+            "hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4]}
         },
     )
 
@@ -390,17 +365,13 @@ def test_extract_hidden_states_config_preserves_vlm_text_config():
         num_hidden_layers=2,
         num_attention_heads=8,
     )
-    vlm_config = LlavaConfig(
-        vision_config=CLIPVisionConfig(),
-        text_config=text_config,
-    )
+    vlm_config = LlavaConfig(vision_config=CLIPVisionConfig(), text_config=text_config)
 
     # Precondition: to_dict() flattens the nested config to a plain dict.
     assert isinstance(vlm_config.to_dict()["text_config"], dict)
 
     extract_config = ExtractHiddenStatesConfig(
-        vlm_config,
-        eagle_aux_hidden_state_layer_ids=[1, 2],
+        vlm_config, eagle_aux_hidden_state_layer_ids=[1, 2]
     )
 
     # The fix: text_config is still a PretrainedConfig, not a dict.
@@ -435,14 +406,10 @@ def test_extract_hidden_states_speculative_config_vlm():
     )
 
     target_model_config = ModelConfig(
-        model=model_dir,
-        runner="generate",
-        max_model_len=100,
+        model=model_dir, runner="generate", max_model_len=100
     )
     # Replace the real text-only config with our composite VLM config.
-    target_model_config.hf_config = _DummyVLMConfig(
-        text_config=nested_text_config,
-    )
+    target_model_config.hf_config = _DummyVLMConfig(text_config=nested_text_config)
     target_model_config.hf_text_config = nested_text_config
 
     speculative_config = SpeculativeConfig(
@@ -450,17 +417,12 @@ def test_extract_hidden_states_speculative_config_vlm():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={
-            "hf_config": {
-                "eagle_aux_hidden_state_layer_ids": [1, 2],
-            }
-        },
+        draft_model_config={"hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2]}},
     )
 
     assert speculative_config.draft_model_config is not None
     assert isinstance(
-        speculative_config.draft_model_config.hf_config.text_config,
-        LlamaConfig,
+        speculative_config.draft_model_config.hf_config.text_config, LlamaConfig
     )
     assert speculative_config.draft_model_config.hf_text_config is (
         speculative_config.draft_model_config.hf_config.text_config
@@ -477,8 +439,7 @@ def test_extract_hidden_states_config_invalid_text_config():
     vlm_config = _DummyVLMConfig(text_config=broken_text_config)
 
     extract_config = ExtractHiddenStatesConfig(
-        vlm_config,
-        eagle_aux_hidden_state_layer_ids=[1],
+        vlm_config, eagle_aux_hidden_state_layer_ids=[1]
     )
 
     # The object is preserved (not flattened), …

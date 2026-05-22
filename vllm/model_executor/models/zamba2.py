@@ -96,10 +96,7 @@ class Zamba2LoRA(nn.Module):
             prefix=f"{prefix}.B",
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         lora_output, _ = self.A(hidden_states)
         lora_output, _ = self.B(lora_output)
         return lora_output
@@ -244,10 +241,7 @@ class Zamba2Attention(nn.Module):
             )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        block_idx: int,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, block_idx: int, position_ids: torch.Tensor
     ) -> torch.Tensor:
         """Forward pass through the attention layer.
 
@@ -477,9 +471,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
 
         # Self attention
         hidden_states = self.self_attn(
-            hidden_states,
-            position_ids=positions,
-            block_idx=block_idx,
+            hidden_states, position_ids=positions, block_idx=block_idx
         )
 
         # Layer norm before feed-forward
@@ -659,8 +651,7 @@ class Zamba2HybridLayer(nn.Module):
 
         # Process through Mamba pathway with transformer injection
         layer_outputs = self.mamba_decoder(
-            hidden_states,
-            transformer_hidden_states=transformer_hidden_states,
+            hidden_states, transformer_hidden_states=transformer_hidden_states
         )
 
         return layer_outputs
@@ -697,10 +688,7 @@ class Zamba2Model(nn.Module):
         self.vocab_size = config.vocab_size
 
         # Initialize token embeddings
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         # Map hybrid layer indices to block indices
         layer2block_map = {
@@ -854,8 +842,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -865,8 +852,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -964,18 +950,11 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             Output hidden states
         """
         # Forward pass through model
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            inputs_embeds,
-        )
+        hidden_states = self.model(input_ids, positions, inputs_embeds)
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         """Compute logits for next token prediction.
 
         Args:

@@ -49,10 +49,7 @@ class ParentRequest:
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
 
-    def _get_child_sampling_params(
-        self,
-        index: int,
-    ) -> SamplingParams:
+    def _get_child_sampling_params(self, index: int) -> SamplingParams:
         """Efficiently obtain child `sampling_params`
 
         If `sampling_params.seed` is not `None` then
@@ -98,9 +95,7 @@ class ParentRequest:
         return self.sampling_params.n
 
     def get_outputs(
-        self,
-        child_request_id: str,
-        completion_output: CompletionOutput,
+        self, child_request_id: str, completion_output: CompletionOutput
     ) -> tuple[list[CompletionOutput], bool]:
         already_finished_and_returned: bool = False
         if completion_output.finished():

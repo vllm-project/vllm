@@ -28,14 +28,10 @@ from vllm.config import VllmConfig
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMultiTokenPredictor,
@@ -86,8 +82,7 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -114,18 +109,12 @@ class OpenPanguMTP(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids,
-            positions,
-            hidden_states,
-            inputs_embeds,
-            spec_step_idx,
+            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 

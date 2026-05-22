@@ -40,9 +40,7 @@ class VoyageQwen3BidirectionalEmbedModel(nn.Module):
 
         # Embedding head (hidden_size -> num_labels, bias=False)
         self.linear = nn.Linear(
-            self.config.hidden_size,
-            self.config.num_labels,
-            bias=False,
+            self.config.hidden_size, self.config.num_labels, bias=False
         )
 
         self.make_empty_intermediate_tensors = (

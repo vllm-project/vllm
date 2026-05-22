@@ -135,15 +135,9 @@ def _test_accuracy_once(
     flashinfer_scale = flashinfer_scale.view(torch.float8_e4m3fn)
 
     # Compare outputs
-    torch.testing.assert_close(
-        vllm_fp4,
-        flashinfer_fp4,
-    )
+    torch.testing.assert_close(vllm_fp4, flashinfer_fp4)
     # Compare scales
-    torch.testing.assert_close(
-        vllm_scale,
-        flashinfer_scale,
-    )
+    torch.testing.assert_close(vllm_scale, flashinfer_scale)
     print(
         f"M={M}, K={K}, dtype={dtype}, is_sf_swizzled_layout={is_sf_swizzled_layout}: PASSED"  # noqa: E501
     )
@@ -183,16 +177,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
     parser.add_argument(
-        "--save-path",
-        type=str,
-        default=None,
-        help="Path to save benchmark results",
+        "--save-path", type=str, default=None, help="Path to save benchmark results"
     )
-    parser.add_argument(
-        "--accuracy",
-        action="store_true",
-        help="Run accuracy tests",
-    )
+    parser.add_argument("--accuracy", action="store_true", help="Run accuracy tests")
     args = parser.parse_args()
 
     if args.accuracy:
@@ -200,11 +187,6 @@ if __name__ == "__main__":
 
     for K, N, model in prepare_shapes(args):
         print(f"\n{model}, N={N} K={K}")
-        benchmark.run(
-            print_data=True,
-            save_path=args.save_path,
-            N=N,
-            K=K,
-        )
+        benchmark.run(print_data=True, save_path=args.save_path, N=N, K=K)
 
     print("\nBenchmark finished!")

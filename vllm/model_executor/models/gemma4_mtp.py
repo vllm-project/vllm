@@ -33,10 +33,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -48,12 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .gemma4 import Gemma4MLP, _get_text_config
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    extract_layer_index,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, WeightsMapper, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -86,14 +78,11 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
 
         self.centroids = nn.Linear(hidden_size, num_centroids, bias=False)
         self.register_buffer(
-            "token_ordering",
-            torch.empty(vocab_size, dtype=torch.long),
+            "token_ordering", torch.empty(vocab_size, dtype=torch.long)
         )
 
     def _select_and_score(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
+        self, hidden_states: torch.Tensor, lm_head_weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Centroid selection + sparse dot product.
 
@@ -103,27 +92,20 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         """
         num_tokens = hidden_states.shape[0]
         _, top_k_indices = torch.topk(
-            self.centroids(hidden_states),
-            k=self.centroid_intermediate_top_k,
-            dim=-1,
+            self.centroids(hidden_states), k=self.centroid_intermediate_top_k, dim=-1
         )
         clusters = self.token_ordering.view(
-            self.num_centroids,
-            self.vocab_size_per_centroid,
+            self.num_centroids, self.vocab_size_per_centroid
         )
         selected = clusters[top_k_indices]
         embeddings = lm_head_weight[selected.reshape(-1)].view(
-            num_tokens,
-            self.num_selected,
-            self.hidden_size,
+            num_tokens, self.num_selected, self.hidden_size
         )
         logits = torch.einsum("td,tsd->ts", hidden_states, embeddings)
         return logits, selected.view(num_tokens, -1)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
+        self, hidden_states: torch.Tensor, lm_head_weight: torch.Tensor
     ) -> torch.Tensor:
         """Full-vocab logits with non-selected positions masked to -inf."""
         logits, indices = self._select_and_score(hidden_states, lm_head_weight)
@@ -136,9 +118,7 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         return output.scatter_(-1, indices, logits)
 
     def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head_weight: torch.Tensor,
+        self, hidden_states: torch.Tensor, lm_head_weight: torch.Tensor
     ) -> torch.Tensor:
         """Sparse argmax — returns vocab token IDs without full-vocab tensor."""
         logits, indices = self._select_and_score(hidden_states, lm_head_weight)
@@ -232,10 +212,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
@@ -325,9 +302,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(residual)
 
         hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            **kwargs,
+            positions=positions, hidden_states=hidden_states, **kwargs
         )
 
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -359,10 +334,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
         self.vocab_size = text_config.vocab_size
         self.num_mtp_layers = text_config.num_hidden_layers
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            self.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, self.hidden_size)
 
         self.pre_projection = ColumnParallelLinear(
             2 * self.backbone_hidden_size,
@@ -396,9 +368,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
         # target model's backbone-dim embedding.  Scale by
         # sqrt(backbone_hidden_size) to match the target's convention.
         self.register_buffer(
-            "normalizer",
-            torch.tensor(self.backbone_hidden_size**0.5),
-            persistent=False,
+            "normalizer", torch.tensor(self.backbone_hidden_size**0.5), persistent=False
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -466,9 +436,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
 
         draft_hidden_states = self.norm(hidden_states)
@@ -493,7 +461,7 @@ class Gemma4MTP(nn.Module):
         orig_to_new_prefix={
             "pre_projection.": "model.pre_projection.",
             "post_projection.": "model.post_projection.",
-        },
+        }
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -503,8 +471,7 @@ class Gemma4MTP(nn.Module):
         self.config = config
 
         self.model = Gemma4MultiTokenPredictor(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "draft_model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "draft_model")
         )
 
         # lm_head operates in draft-dim.  Tied to embed_tokens at init
@@ -570,32 +537,20 @@ class Gemma4MTP(nn.Module):
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1:
-            lm_head_weight = tensor_model_parallel_all_gather(
-                lm_head_weight,
-                dim=0,
-            )
+            lm_head_weight = tensor_model_parallel_all_gather(lm_head_weight, dim=0)
         return lm_head_weight[: self.masked_embedding.vocab_size]
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         if self.masked_embedding is not None:
-            return self.masked_embedding(
-                hidden_states,
-                self._get_full_lm_head_weight(),
-            )
+            return self.masked_embedding(hidden_states, self._get_full_lm_head_weight())
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Sparse argmax via centroids masking. Returns token IDs directly."""
         return self.masked_embedding.get_top_tokens(
-            hidden_states,
-            self._get_full_lm_head_weight(),
+            hidden_states, self._get_full_lm_head_weight()
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

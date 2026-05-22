@@ -111,9 +111,7 @@ def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
     _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
 
 
-def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
-    monkeypatch,
-):
+def test_kv_connector_allows_expandable_segments_with_cumem_allocator(monkeypatch):
     """Manual CuMem allocation must also bypass expandable_segments."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
@@ -138,9 +136,9 @@ def test_kv_offloading_size_only_uses_native_default():
     """Test that setting only kv_offloading_size enables native offloading."""
     vllm_config = VllmConfig(
         cache_config=CacheConfig(
-            kv_offloading_size=4.0,
+            kv_offloading_size=4.0
             # kv_offloading_backend not set, should default to "native"
-        ),
+        )
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config

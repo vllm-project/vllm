@@ -126,10 +126,7 @@ def mock_image_processor():
 
 
 def test_qwen3_omni_get_updates_use_audio_in_video(
-    mock_qwen3_omni_config,
-    mock_processor,
-    mock_tokenizer,
-    mock_image_processor,
+    mock_qwen3_omni_config, mock_processor, mock_tokenizer, mock_image_processor
 ):
     """Test the get_updates_use_audio_in_video method directly."""
 

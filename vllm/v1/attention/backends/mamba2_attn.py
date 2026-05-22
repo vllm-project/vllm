@@ -7,10 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
@@ -19,8 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def compute_varlen_chunk_metadata(
-    query_start_loc: torch.Tensor,
-    chunk_size: int,
+    query_start_loc: torch.Tensor, chunk_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Build chunk-aligned, variable-length metadata used by Mamba2 SSD kernels.
@@ -157,9 +153,7 @@ class Mamba2AttentionMetadataBuilder(
 
             cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
                 self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
-                    common_attn_metadata,
+                    self.chunk_size, common, common_attn_metadata
                 )
             )
 

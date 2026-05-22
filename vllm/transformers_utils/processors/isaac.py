@@ -161,8 +161,7 @@ _STD_TENSOR = torch.tensor(VISION_STD, dtype=torch.float32).view(1, 1, 1, -1)
 
 
 def prepare_image_tensor(
-    image: torch.Tensor,
-    scale: float = VISION_SCALE,
+    image: torch.Tensor, scale: float = VISION_SCALE
 ) -> torch.Tensor:
     r"""Standardize RGB images prior to patch extraction via rescaling and whitening.
 
@@ -281,10 +280,7 @@ def process_vision_for_patches(
 
     # Resize
     images = F.interpolate(
-        images,
-        size=(target_height, target_width),
-        mode="bilinear",
-        align_corners=False,
+        images, size=(target_height, target_width), mode="bilinear", align_corners=False
     )
 
     # Back to channel last
@@ -316,10 +312,7 @@ class IsaacImagesKwargs(TypedDict, total=False):
 
 class IsaacProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
     images_kwargs: IsaacImagesKwargs
-    _defaults = {
-        "text_kwargs": {"padding": False},
-        "images_kwargs": {},
-    }
+    _defaults = {"text_kwargs": {"padding": False}, "images_kwargs": {}}
 
 
 class IsaacImageProcessor:
@@ -456,8 +449,7 @@ class IsaacProcessor(ProcessorMixin):
             text_inputs = {}
 
         return BatchFeature(
-            data={**text_inputs, **image_inputs},
-            tensor_type=return_tensors,
+            data={**text_inputs, **image_inputs}, tensor_type=return_tensors
         )
 
     def apply_chat_template(

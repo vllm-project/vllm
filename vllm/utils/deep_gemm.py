@@ -16,9 +16,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
@@ -374,12 +372,7 @@ def fp8_fp4_mqa_logits(
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
     return _fp8_fp4_mqa_logits_impl(
-        q,
-        kv,
-        weights,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        clean_logits=clean_logits,
+        q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=clean_logits
     )
 
 
@@ -474,13 +467,7 @@ def tf32_hc_prenorm_gemm(
     _lazy_init()
     if _tf32_hc_prenorm_gemm_impl is None:
         return _missing()
-    return _tf32_hc_prenorm_gemm_impl(
-        x,
-        fn,
-        out,
-        sqrsum,
-        num_split,
-    )
+    return _tf32_hc_prenorm_gemm_impl(x, fn, out, sqrsum, num_split)
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):

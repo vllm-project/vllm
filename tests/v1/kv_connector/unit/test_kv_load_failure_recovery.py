@@ -18,8 +18,7 @@ from .utils import (
 
 
 def _make_get_num_new_matched_tokens(
-    req_num_new_matched_tokens: dict[str, int],
-    async_load,
+    req_num_new_matched_tokens: dict[str, int], async_load
 ) -> Callable[[Request, int], tuple[int, bool]]:
     def get_num_new_matched_tokens(request: Request, _: int) -> tuple[int, bool]:
         value = req_num_new_matched_tokens.get(request.request_id, 0)
@@ -36,11 +35,7 @@ def scheduler():
 
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
-    [
-        (100, 99, {0, 98}),
-        (100, 99, {50, 98}),
-        (100, 99, {98}),
-    ],
+    [(100, 99, {0, 98}), (100, 99, {50, 98}), (100, 99, {98})],
 )
 def test_async_load_failure(
     scheduler: Scheduler,
@@ -113,11 +108,7 @@ def test_async_load_failure(
 
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
-    [
-        (100, 99, {0, 98}),
-        (100, 99, {50, 98}),
-        (100, 99, {98}),
-    ],
+    [(100, 99, {0, 98}), (100, 99, {50, 98}), (100, 99, {98})],
 )
 def test_sync_load_failure(
     scheduler: Scheduler,
@@ -192,11 +183,7 @@ def test_sync_load_failure(
     "num_external_computed_blocks,"
     "num_common_prefix_blocks,"
     "invalid_block_idxs",
-    [
-        (100, 99, 50, {0, 49}),
-        (100, 99, 50, {25, 49}),
-        (100, 99, 50, {49}),
-    ],
+    [(100, 99, 50, {0, 49}), (100, 99, 50, {25, 49}), (100, 99, 50, {49})],
 )
 def test_sync_load_failure_with_shared_blocks(
     scheduler: Scheduler,
@@ -222,9 +209,7 @@ def test_sync_load_failure_with_shared_blocks(
 
     # Mock KV connector method.
     # req_id -> num_external_computed_tokens
-    req_num_new_matched_tokens = {
-        request1.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request1.request_id: num_external_computed_tokens}
 
     scheduler.connector = Mock()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
@@ -272,10 +257,7 @@ def test_sync_load_failure_with_shared_blocks(
 
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
-    [
-        (100, 99, {0, 50, 98}),
-        (100, 99, {98, 50, 0}),
-    ],
+    [(100, 99, {0, 50, 98}), (100, 99, {98, 50, 0})],
 )
 def test_async_progressive_load_failure(
     scheduler: Scheduler,
@@ -293,9 +275,7 @@ def test_async_progressive_load_failure(
 
     # Mock KV connector method.
     # req_id -> num_external_computed_tokens
-    req_num_new_matched_tokens = {
-        request.request_id: num_external_computed_tokens,
-    }
+    req_num_new_matched_tokens = {request.request_id: num_external_computed_tokens}
 
     scheduler.connector = Mock()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (

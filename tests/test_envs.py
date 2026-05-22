@@ -28,9 +28,7 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
-def test_nixl_side_channel_host_is_not_compile_factor(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_nixl_side_channel_host_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "10.0.0.15")
 
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
@@ -495,10 +493,7 @@ class TestVllmMaxNSequences:
 
         assert envs.VLLM_MAX_N_SEQUENCES == 128
 
-    def test_sampling_params_respects_limit(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
+    def test_sampling_params_respects_limit(self, monkeypatch: pytest.MonkeyPatch):
         """Test that SamplingParams rejects n above the limit."""
         from vllm.sampling_params import SamplingParams
 
@@ -513,8 +508,7 @@ class TestVllmMaxNSequences:
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         """Test that SamplingParams uses the overridden env var limit."""
         from vllm.sampling_params import SamplingParams

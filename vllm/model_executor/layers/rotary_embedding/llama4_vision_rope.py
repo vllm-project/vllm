@@ -53,9 +53,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbeddingBase):
         return cache
 
     def forward_native(  # type: ignore[override]
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
+        self, query: torch.Tensor, key: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert key is not None
         # self.cos_sin_cache here is complex tensor so we cannot cast into
@@ -76,8 +74,6 @@ class Llama4VisionRotaryEmbedding(RotaryEmbeddingBase):
         return query_out.type_as(query), key_out.type_as(key)
 
     def forward_cuda(  # type: ignore[override]
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
+        self, query: torch.Tensor, key: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(query, key)

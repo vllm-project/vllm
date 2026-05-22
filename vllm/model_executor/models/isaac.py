@@ -25,9 +25,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -239,9 +237,7 @@ def create_pixel_shuffle_index_map(
 
 
 def pixel_shuffle_varlen(
-    x: torch.Tensor,
-    token_grids: torch.Tensor,
-    scale_factor: int = 1,
+    x: torch.Tensor, token_grids: torch.Tensor, scale_factor: int = 1
 ) -> torch.Tensor:
     r"""Apply pixel shuffle to a packed vision sequence without unpacking per image.
 
@@ -284,10 +280,7 @@ def pixel_shuffle_varlen(
 
     # Build index map and gather in one go
     gather_idx = create_pixel_shuffle_index_map(
-        seq_sizes=seq_sizes,
-        token_grids=token_grids,
-        scale_factor=r,
-        device=x_.device,
+        seq_sizes=seq_sizes, token_grids=token_grids, scale_factor=r, device=x_.device
     )  # (new_seq, r²)
 
     # Gather → (new_seq, r², embed_dim)
@@ -362,9 +355,7 @@ class IsaacProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         num_vision_tokens = hf_config.vision_max_num_patches // (
@@ -399,7 +390,7 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -418,22 +409,14 @@ class IsaacImagePixelInputs(TensorSchema):
           where 3 represents [T, H, W]
     """
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", "d"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "d")]
 
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class IsaacMultiModalProcessor(BaseMultiModalProcessor):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         # Configure multimodal fields for Isaac model
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
@@ -468,9 +451,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
 
         return [
             PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement_isaac,
+                modality="image", target="<image>", replacement=get_replacement_isaac
             )
         ]
 
@@ -552,11 +533,7 @@ class Siglip2VisionAttention(nn.Module):
         q, k, v = (rearrange(t, "s b h d -> b s h d") for t in (q, k, v))
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -577,16 +554,10 @@ class Siglip2EncoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = Siglip2VisionAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = SiglipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -599,9 +570,7 @@ class Siglip2EncoderLayer(nn.Module):
 
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            hidden_states=hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         hidden_states = residual + hidden_states
 
@@ -644,9 +613,7 @@ class Siglip2Encoder(nn.Module):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
+                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
             )
         return hidden_states
 
@@ -666,15 +633,12 @@ class Siglip2VisionTransformer(nn.Module):
         self.embeddings = Siglip2VariableSequenceEmbeddings(config)
         self.pixel_shuffle_scale_factor = config.pixel_shuffle_scale_factor
         self.encoder = Siglip2Encoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
+            config, quant_config=quant_config, prefix=f"{prefix}.encoder"
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
     def forward(
-        self,
-        packed_seq_patches: tuple[torch.Tensor, torch.Tensor],
+        self, packed_seq_patches: tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
@@ -696,9 +660,7 @@ class Siglip2VisionTransformer(nn.Module):
         )
 
         hidden_states = self.encoder(
-            inputs_embeds=hidden_states,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            inputs_embeds=hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         hidden_states = self.post_layernorm(hidden_states)
 
@@ -759,9 +721,7 @@ class IsaacVisionEmbedding(nn.Module):
     ):
         super().__init__()
         self.transformer = Siglip2VisionTransformer(
-            vision_cfg,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "0"),
+            vision_cfg, quant_config=quant_config, prefix=maybe_prefix(prefix, "0")
         )
         self.linear_fc1 = ColumnParallelLinear(
             hidden_dim,
@@ -800,15 +760,8 @@ class IsaacForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     supports_encoder_tp_data = True
@@ -921,9 +874,7 @@ class IsaacForConditionalGeneration(
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list = []
         st = 0
@@ -963,13 +914,11 @@ class IsaacForConditionalGeneration(
 
         # TensorSchema will automatically validate shapes on initialization
         return IsaacImagePixelInputs(
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
+            pixel_values=pixel_values, image_grid_thw=image_grid_thw
         )
 
     def _process_image_input(
-        self,
-        image_input: IsaacImagePixelInputs,
+        self, image_input: IsaacImagePixelInputs
     ) -> tuple[torch.Tensor, ...]:
         pixel_values = image_input["pixel_values"]
         image_grid_thw = image_input["image_grid_thw"]

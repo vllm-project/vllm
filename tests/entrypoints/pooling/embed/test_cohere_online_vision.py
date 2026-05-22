@@ -81,11 +81,7 @@ def _cohere_embed(
 
 def test_image_embed(server: RemoteOpenAIServer):
     img_uri = _make_tiny_png(255, 0, 0)
-    r = _cohere_embed(
-        server,
-        images=[img_uri],
-        embedding_types=["float"],
-    )
+    r = _cohere_embed(server, images=[img_uri], embedding_types=["float"])
     assert "embeddings" in r
     assert len(r["embeddings"]["float"]) == 1
     assert len(r["embeddings"]["float"][0]) > 0
@@ -96,21 +92,13 @@ def test_image_embed(server: RemoteOpenAIServer):
 def test_image_batch(server: RemoteOpenAIServer):
     red = _make_tiny_png(255, 0, 0)
     blue = _make_tiny_png(0, 0, 255)
-    r = _cohere_embed(
-        server,
-        images=[red, blue],
-        embedding_types=["float"],
-    )
+    r = _cohere_embed(server, images=[red, blue], embedding_types=["float"])
     assert len(r["embeddings"]["float"]) == 2
 
 
 def test_image_l2_normalized(server: RemoteOpenAIServer):
     img_uri = _make_tiny_png(0, 255, 0)
-    r = _cohere_embed(
-        server,
-        images=[img_uri],
-        embedding_types=["float"],
-    )
+    r = _cohere_embed(server, images=[img_uri], embedding_types=["float"])
     emb = np.array(r["embeddings"]["float"][0])
     assert abs(float(np.linalg.norm(emb)) - 1.0) < 0.01
 
@@ -118,9 +106,7 @@ def test_image_l2_normalized(server: RemoteOpenAIServer):
 def test_image_embedding_types(server: RemoteOpenAIServer):
     img_uri = _make_tiny_png(128, 128, 128)
     r = _cohere_embed(
-        server,
-        images=[img_uri],
-        embedding_types=["float", "binary", "ubinary"],
+        server, images=[img_uri], embedding_types=["float", "binary", "ubinary"]
     )
     dim = len(r["embeddings"]["float"][0])
     assert len(r["embeddings"]["binary"][0]) == dim // 8

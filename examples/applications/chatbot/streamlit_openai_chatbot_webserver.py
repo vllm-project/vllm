@@ -258,9 +258,7 @@ def server_supports_reasoning():
         bool: True if the model supports reasoning, False otherwise
     """
     resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": "Hi"}],
-        stream=False,
+        model=model, messages=[{"role": "user", "content": "Hi"}], stream=False
     )
     return hasattr(resp.choices[0].message, "reasoning") and bool(
         resp.choices[0].message.reasoning

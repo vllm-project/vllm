@@ -48,10 +48,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -122,10 +119,7 @@ class AudioPatchEmbed(nn.Module):
         self.flatten = flatten
 
         self.proj = Conv2dLayer(
-            in_chans,
-            embed_dim,
-            kernel_size=self.patch_size,
-            stride=self.patch_stride,
+            in_chans, embed_dim, kernel_size=self.patch_size, stride=self.patch_stride
         )
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
@@ -237,10 +231,7 @@ class DashengAttention(nn.Module):
         q, k, v = qkv.unbind(0)
 
         x = scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask[:, None, None, :] if mask is not None else None,
+            q, k, v, attn_mask=mask[:, None, None, :] if mask is not None else None
         )
 
         x = x.transpose(1, 2).reshape(B, N, C)
@@ -285,9 +276,7 @@ class DashengBlock(nn.Module):
 
     # Kwargs usually has a mask parameter that is passed to Attention
     def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         x = x + self.ls1(self.attn(self.norm1(x), mask))
         x = x + self.ls2(self.mlp(self.norm2(x)))
@@ -300,11 +289,7 @@ class DashengFrontend(nn.Module):
         self.config = config
 
         spectrogram_window = torch.hann_window(self.config.win_length)
-        self.register_buffer(
-            "spectrogram_window",
-            spectrogram_window,
-            persistent=False,
-        )
+        self.register_buffer("spectrogram_window", spectrogram_window, persistent=False)
         self.spectrogram_window: torch.Tensor
 
         melscale_fbanks = F.melscale_fbanks(
@@ -393,9 +378,7 @@ class DashengAudioTransformer(nn.Module):
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
 
     def forward_features(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         t = x.shape[-1]
         x = x + self.time_pos_embed[:, :, :, :t]
@@ -418,9 +401,7 @@ class DashengAudioTransformer(nn.Module):
         return mask
 
     def forward(
-        self,
-        x: torch.Tensor,
-        x_length: torch.Tensor | None = None,
+        self, x: torch.Tensor, x_length: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         x = self.front_end(x)
         x = x.to(self.time_pos_embed.dtype)
@@ -614,21 +595,14 @@ class MiDashengLMMultiModalProcessor(
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        mm_kwargs = dict(
-            **mm_kwargs,
-        )
+        mm_kwargs = dict(**mm_kwargs)
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_values=MultiModalFieldConfig.batched("audio"),
@@ -668,8 +642,7 @@ class MiDashengLMMultiModalProcessor(
             audio_tokens = [audio_token_id] * num_features
 
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
+                audio_tokens, embed_token_id=audio_token_id
             )
 
         return [
@@ -688,15 +661,8 @@ class MiDashengLMMultiModalProcessor(
 )
 class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
@@ -750,18 +716,15 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         if isinstance(input_values, list):
             input_values = torch.nn.utils.rnn.pad_sequence(
-                input_values,
-                batch_first=True,
+                input_values, batch_first=True
             )
 
         return MiDashengLMAudioInputs(
-            input_values=input_values,
-            audio_length=audio_length,
+            input_values=input_values, audio_length=audio_length
         )
 
     def _process_audio_input(
-        self,
-        audio_input: MiDashengLMAudioInputs,
+        self, audio_input: MiDashengLMAudioInputs
     ) -> tuple[torch.Tensor, ...]:
         # Process audio through encoder and projector
         input_values = audio_input["input_values"]
@@ -777,8 +740,7 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             for length in audio_length.tolist()
         ]
         audio_output_lengths = torch.tensor(
-            audio_output_lengths,
-            device=audio_embeddings.device,
+            audio_output_lengths, device=audio_embeddings.device
         )
 
         audio_feature_mask = torch.arange(
@@ -810,16 +772,10 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
 
         return self.decoder.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.decoder.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

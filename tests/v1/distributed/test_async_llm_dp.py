@@ -63,18 +63,10 @@ async def generate(
 
 
 @pytest.mark.parametrize(
-    "model",
-    [
-        "ibm-research/PowerMoE-3b",
-        "hmellor/tiny-random-LlamaForCausalLM",
-    ],
+    "model", ["ibm-research/PowerMoE-3b", "hmellor/tiny-random-LlamaForCausalLM"]
 )
 @pytest.mark.parametrize(
-    "output_kind",
-    [
-        RequestOutputKind.DELTA,
-        RequestOutputKind.FINAL_ONLY,
-    ],
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.parametrize("data_parallel_backend", ["mp", "ray"])
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -254,9 +246,7 @@ async def test_dp_pause_abort(expert_parallel: bool):
             out_list: list[RequestOutput] = []
             outputs_by_id[rid] = out_list
             async for out in engine.generate(
-                request_id=rid,
-                prompt=DP_PAUSE_PROMPT,
-                sampling_params=sampling_params,
+                request_id=rid, prompt=DP_PAUSE_PROMPT, sampling_params=sampling_params
             ):
                 out_list.append(out)
             return out_list[-1] if out_list else None
@@ -377,9 +367,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
             async def consume_gen(req_id: str) -> None:
                 async for _ in engine.generate(
-                    request_id=req_id,
-                    prompt=DP_PAUSE_PROMPT,
-                    sampling_params=sp,
+                    request_id=req_id, prompt=DP_PAUSE_PROMPT, sampling_params=sp
                 ):
                     pass
 
@@ -466,9 +454,7 @@ async def test_dp_pause_barrier_request_deadlock():
 
             async def consume_gen(req_id: str) -> None:
                 async for _ in engine.generate(
-                    request_id=req_id,
-                    prompt=DP_PAUSE_PROMPT,
-                    sampling_params=sp,
+                    request_id=req_id, prompt=DP_PAUSE_PROMPT, sampling_params=sp
                 ):
                     pass
 

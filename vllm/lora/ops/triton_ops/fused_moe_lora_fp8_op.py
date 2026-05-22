@@ -240,12 +240,7 @@ def _fused_moe_lora_kernel_fp8(
 
     # Get expert_id
     expert_id = _get_expert_id(
-        expert_ids_ptr,
-        lora_id,
-        pid_m,
-        stride_el,
-        max_loras,
-        naive_block_assignment,
+        expert_ids_ptr, lora_id, pid_m, stride_el, max_loras, naive_block_assignment
     )
     if expert_id == -1:
         return
@@ -766,9 +761,7 @@ def _fused_moe_lora_fp8(
     )
 
     a_intermediate_cache1 = torch.zeros(
-        (num_slices, M, top_k_num, max_lora_rank),
-        dtype=output.dtype,
-        device=device,
+        (num_slices, M, top_k_num, max_lora_rank), dtype=output.dtype, device=device
     )
 
     use_gdc = supports_pdl(device) and not fully_sharded

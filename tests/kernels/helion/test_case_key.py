@@ -45,10 +45,7 @@ class TestCaseKey:
         assert a != CaseKey({"intermediate": 4096})
         assert CaseKey.default() == CaseKey.default()
 
-        configs = {
-            CaseKey.default(): "default_config",
-            a: "a_config",
-        }
+        configs = {CaseKey.default(): "default_config", a: "a_config"}
         assert configs[b] == "a_config"
         assert configs[CaseKey.default()] == "default_config"
 

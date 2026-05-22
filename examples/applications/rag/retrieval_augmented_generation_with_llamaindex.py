@@ -89,8 +89,7 @@ def setup_models(config: dict[str, Any]):
 
     Settings.transformations = [
         SentenceSplitter(
-            chunk_size=config["chunk_size"],
-            chunk_overlap=config["chunk_overlap"],
+            chunk_size=config["chunk_size"], chunk_overlap=config["chunk_overlap"]
         )
     ]
 
@@ -105,10 +104,7 @@ def setup_vector_store(db_path: str) -> MilvusVectorStore:
 def create_index(documents: list, vector_store: MilvusVectorStore):
     """Create document index"""
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    return VectorStoreIndex.from_documents(
-        documents,
-        storage_context=storage_context,
-    )
+    return VectorStoreIndex.from_documents(documents, storage_context=storage_context)
 
 
 def query_document(index: VectorStoreIndex, question: str, top_k: int):

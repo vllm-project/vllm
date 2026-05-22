@@ -158,9 +158,7 @@ class PersimmonAttention(nn.Module):
         return x.view(seq_length, self.num_heads * self.head_dim)
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # [seq_length, 3 x hidden_size]
         qkv, _ = self.query_key_value(hidden_states)
@@ -200,9 +198,7 @@ class PersimmonDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = PersimmonMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
+            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
@@ -212,9 +208,7 @@ class PersimmonDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -222,8 +216,7 @@ class PersimmonDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(
-            position_ids=position_ids,
-            hidden_states=hidden_states,
+            position_ids=position_ids, hidden_states=hidden_states
         )
         hidden_states = residual + hidden_states
 
@@ -361,10 +354,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

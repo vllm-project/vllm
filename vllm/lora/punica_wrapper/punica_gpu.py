@@ -345,16 +345,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         read from `self.token_mapping_meta`. This is how EP+LoRA injects the
         per-rank-local token→LoRA map after all-to-all dispatch.
         """
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            _,
-        ) = self.token_mapping_meta.meta_args(
-            num_tokens, self.lora_config.specialize_active_lora
+        (token_lora_mapping_meta, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            )
         )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
@@ -439,16 +433,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            num_active_loras,
-        ) = self.token_mapping_meta.meta_args(
-            x.size(0), self.lora_config.specialize_active_lora
+        (token_lora_mapping_meta, _, _, _, lora_ids, _, num_active_loras) = (
+            self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            )
         )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta

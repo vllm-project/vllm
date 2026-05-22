@@ -287,9 +287,7 @@ class HelionKernelWrapper:
             self._disabled = True
             self._disabled_reason = str(e)
             logger.warning(
-                "Helion kernel '%s' is disabled: %s",
-                op_name,
-                self._disabled_reason,
+                "Helion kernel '%s' is disabled: %s", op_name, self._disabled_reason
             )
 
     def __call__(self, *args, **kwargs):
@@ -319,9 +317,7 @@ class HelionKernelWrapper:
         return self._input_generator()
 
     def run_autotune(
-        self,
-        inputs: tuple[Any, ...],
-        autotune_effort: str = "quick",
+        self, inputs: tuple[Any, ...], autotune_effort: str = "quick"
     ) -> Config:
         """Run autotuning for a single input configuration."""
         extra_kwargs = {
@@ -377,8 +373,7 @@ def get_kernel_by_name(kernel_name: str) -> HelionKernelWrapper | None:
 
 
 def infer_fake_impl(
-    kernel_func: Callable,
-    helion_settings: helion.Settings | None = None,
+    kernel_func: Callable, helion_settings: helion.Settings | None = None
 ) -> Callable:
     def helion_fake_kernel(*args, **kwargs):
         kernel_kwargs = {}
@@ -446,8 +441,7 @@ def register_kernel(
         if final_fake_impl is None:
             final_fake_impl = infer_fake_impl(kernel_func, helion_settings)
             logger.debug(
-                "Auto-generated fake_impl for Helion kernel '%s'",
-                kernel_func.__name__,
+                "Auto-generated fake_impl for Helion kernel '%s'", kernel_func.__name__
             )
 
         kernel_wrapper = HelionKernelWrapper(
@@ -462,8 +456,7 @@ def register_kernel(
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper
 
         logger.info(
-            "Registered Helion kernel '%s' as HelionKernelWrapper",
-            kernel_func.__name__,
+            "Registered Helion kernel '%s' as HelionKernelWrapper", kernel_func.__name__
         )
 
         return kernel_wrapper

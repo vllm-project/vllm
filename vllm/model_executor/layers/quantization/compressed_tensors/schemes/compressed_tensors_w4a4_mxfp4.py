@@ -9,10 +9,7 @@ from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.parameter import (
-    GroupQuantScaleParameter,
-    ModelWeightParameter,
-)
+from vllm.model_executor.parameter import GroupQuantScaleParameter, ModelWeightParameter
 
 __all__ = ["CompressedTensorsW4A4Mxfp4"]
 
@@ -88,9 +85,6 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)

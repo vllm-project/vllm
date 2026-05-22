@@ -18,9 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
@@ -30,9 +28,8 @@ DEVICE_TYPE = current_platform.device_type
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
     pytest.mark.skipif(
-        current_platform.is_cpu(),
-        reason="Per-token-head KV cache tests require GPU.",
-    ),
+        current_platform.is_cpu(), reason="Per-token-head KV cache tests require GPU."
+    )
 ]
 
 # ---------------------------------------------------------------------------
@@ -190,13 +187,7 @@ def test_reshape_and_cache_per_token_head(
     )
 
     triton_reshape_and_cache_flash_per_token_head_quant(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        k_scale_cache,
-        v_scale_cache,
-        slot_mapping,
+        key, value, key_cache, value_cache, k_scale_cache, v_scale_cache, slot_mapping
     )
 
     # Reference
@@ -214,21 +205,11 @@ def test_reshape_and_cache_per_token_head(
         actual_k_scale = k_scale_cache[blk, off]  # [num_heads]
         k_deq = key_cache[blk, off].float() * actual_k_scale[:, None]
         k_ref_deq = key[i].float()
-        torch.testing.assert_close(
-            k_deq,
-            k_ref_deq,
-            atol=0.1,
-            rtol=0.1,
-        )
+        torch.testing.assert_close(k_deq, k_ref_deq, atol=0.1, rtol=0.1)
         actual_v_scale = v_scale_cache[blk, off]  # [num_heads]
         v_deq = value_cache[blk, off].float() * actual_v_scale[:, None]
         v_ref_deq = value[i].float()
-        torch.testing.assert_close(
-            v_deq,
-            v_ref_deq,
-            atol=0.1,
-            rtol=0.1,
-        )
+        torch.testing.assert_close(v_deq, v_ref_deq, atol=0.1, rtol=0.1)
         # Per-head scales: [num_heads]
         torch.testing.assert_close(
             k_scale_cache[blk, off], ref_k_scales[i], atol=1e-4, rtol=1e-3
@@ -247,11 +228,7 @@ def test_reshape_and_cache_per_token_head(
 @pytest.mark.parametrize("block_size", [16])
 @torch.inference_mode()
 def test_per_token_head_round_trip_accuracy(
-    qcfg: QuantConfig,
-    num_tokens: int,
-    num_heads: int,
-    head_size: int,
-    block_size: int,
+    qcfg: QuantConfig, num_tokens: int, num_heads: int, head_size: int, block_size: int
 ):
     """Verify per-token-head round-trip: kernel dequant matches reference.
 
@@ -282,13 +259,7 @@ def test_per_token_head_round_trip_accuracy(
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
     triton_reshape_and_cache_flash_per_token_head_quant(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        k_scale_cache,
-        v_scale_cache,
-        slot_mapping,
+        key, value, key_cache, value_cache, k_scale_cache, v_scale_cache, slot_mapping
     )
 
     for i in range(num_tokens):
@@ -307,12 +278,7 @@ def test_per_token_head_round_trip_accuracy(
                 actual_deq = actual_q.float() * actual_sc
 
                 # Round-trip: dequantized should be close to original
-                torch.testing.assert_close(
-                    actual_deq,
-                    orig,
-                    atol=0.1,
-                    rtol=0.1,
-                )
+                torch.testing.assert_close(actual_deq, orig, atol=0.1, rtol=0.1)
 
 
 # ===========================================================================
@@ -350,13 +316,7 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
     val_cache_before = value_cache.clone()
 
     triton_reshape_and_cache_flash_per_token_head_quant(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        k_scale_cache,
-        v_scale_cache,
-        slot_mapping,
+        key, value, key_cache, value_cache, k_scale_cache, v_scale_cache, slot_mapping
     )
 
     # Slots 0 and 1 should have been written (tokens 0 and 2)
@@ -379,9 +339,7 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token-head should set _k_scale=1.0, _v_scale=1.0
     and delete checkpoint attrs."""
-    from vllm.model_executor.layers.quantization.kv_cache import (
-        BaseKVCacheMethod,
-    )
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 
     layer = MagicMock()
     layer.kv_cache_dtype = kv_cache_dtype
@@ -410,13 +368,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 # ===========================================================================
 # 6. Triton unified_attention -- per-token-head scale cache (INT8 and FP8)
 # ===========================================================================
-@pytest.mark.parametrize(
-    "seq_lens",
-    [
-        [(1, 128)],
-        [(1, 64), (1, 32)],
-    ],
-)
+@pytest.mark.parametrize("seq_lens", [[(1, 128)], [(1, 64), (1, 32)]])
 @pytest.mark.parametrize("num_heads", [(4, 4)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])

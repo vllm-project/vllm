@@ -21,10 +21,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -54,8 +51,7 @@ VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
 # Based on combine_frames_into_images in
 # https://huggingface.co/naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B/blob/main/processing_hyperclovax.py
 def get_num_combined_frames(
-    num_frames: int,
-    max_grid_shape: tuple[int, int] = (3, 3),
+    num_frames: int, max_grid_shape: tuple[int, int] = (3, 3)
 ) -> int:
     max_num_grids = max_grid_shape[0] * max_grid_shape[1]
 
@@ -114,21 +110,13 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        vision_query_length: int | list[int],
-    ) -> int:
+    def get_num_image_tokens(self, *, vision_query_length: int | list[int]) -> int:
         if isinstance(vision_query_length, int):
             return vision_query_length
         else:
             return sum(vision_query_length)
 
-    def get_num_video_tokens(
-        self,
-        *,
-        vision_query_length: int | list[int],
-    ) -> int:
+    def get_num_video_tokens(self, *, vision_query_length: int | list[int]) -> int:
         if isinstance(vision_query_length, int):
             return vision_query_length
         else:
@@ -143,16 +131,12 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_width, image_height=target_height
         )
 
 
 class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo]):
-    def get_dummy_text(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> str:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         dummy_text = IMAGE_TOKEN * mm_counts.get(
             "image", 0
         ) + VIDEO_TOKEN * mm_counts.get("video", 0)
@@ -204,11 +188,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
 
         processed_outputs = self.info.ctx.call_hf_processor(
             hf_processor=self.info.get_hf_processor(**mm_kwargs),
-            data=dict(
-                text=prompt,
-                images=None,
-                videos=None,
-            ),
+            data=dict(text=prompt, images=None, videos=None),
         )  # text-only
 
         if len(mm_data) > 0:
@@ -286,9 +266,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         }
 
         def get_replacement_hyperclovax(
-            item_idx: int,
-            modality: str,
-            out_mm_kwargs: MultiModalKwargsItems,
+            item_idx: int, modality: str, out_mm_kwargs: MultiModalKwargsItems
         ):
             out_item = out_mm_kwargs[modality][item_idx]
 
@@ -306,9 +284,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         return [
             PromptReplacement(
                 modality=modality,
-                target=[
-                    placeholder[modality],
-                ],
+                target=[placeholder[modality]],
                 replacement=partial(
                     get_replacement_hyperclovax,
                     modality=modality,
@@ -319,9 +295,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
@@ -527,34 +501,17 @@ class HCXVisionCAbstractor(nn.Module):
 
         # RegBlock = ResBlock + SE
         RegBlock = partial(
-            RegStage,
-            stride=1,
-            dilation=1,
-            act_layer=nn.SiLU,
-            norm_layer=LayerNorm2d,
+            RegStage, stride=1, dilation=1, act_layer=nn.SiLU, norm_layer=LayerNorm2d
         )
 
-        s1 = RegBlock(
-            depth,
-            encoder_hidden_size,
-            hidden_size,
-        )
+        s1 = RegBlock(depth, encoder_hidden_size, hidden_size)
         sampler = nn.AdaptiveAvgPool2d((hw, hw))
-        s2 = RegBlock(
-            depth,
-            hidden_size,
-            hidden_size,
-        )
+        s2 = RegBlock(depth, hidden_size, hidden_size)
 
         self.net = nn.Sequential(s1, sampler, s2)
         self.readout = self.build_mlp(mlp_depth, hidden_size, output_hidden_size)
 
-    def build_mlp(
-        self,
-        depth: int,
-        hidden_size: int,
-        output_hidden_size: int,
-    ):
+    def build_mlp(self, depth: int, hidden_size: int, output_hidden_size: int):
         layers = [nn.Linear(hidden_size, output_hidden_size)]
         for _ in range(1, depth):
             layers.append(nn.SiLU())
@@ -582,12 +539,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         # init configs
@@ -653,8 +605,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         raise ValueError("Only image or video modality is supported")
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> HCXVisionImageInputs | None:
         pixel_values_images = kwargs.pop("pixel_values_images", None)
 
@@ -669,21 +620,17 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _parse_and_validate_video_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> HCXVisionVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
 
         if pixel_values_videos is None:
             return None
 
-        return HCXVisionVideoPixelInputs(
-            pixel_values_videos=pixel_values_videos,
-        )
+        return HCXVisionVideoPixelInputs(pixel_values_videos=pixel_values_videos)
 
     def _process_image_input(
-        self,
-        image_input: HCXVisionImageInputs,
+        self, image_input: HCXVisionImageInputs
     ) -> tuple[torch.Tensor, ...]:
         return self.forward_images(
             pixel_values_images=image_input["pixel_values_images"],
@@ -691,11 +638,10 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _process_video_input(
-        self,
-        video_input: HCXVisionVideoInputs,
+        self, video_input: HCXVisionVideoInputs
     ) -> tuple[torch.Tensor, ...]:
         return self.forward_videos(
-            pixel_values_videos=video_input["pixel_values_videos"],
+            pixel_values_videos=video_input["pixel_values_videos"]
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -711,10 +657,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def embed_multimodal(
-        self,
-        **kwargs: object,
-    ) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -754,9 +697,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return hidden_states
 
     def forward_images(
-        self,
-        pixel_values_images: list[torch.Tensor],
-        image_sizes_images: torch.Tensor,
+        self, pixel_values_images: list[torch.Tensor], image_sizes_images: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         pixel_values_image_flat = flatten_bn(pixel_values_images, concat=True)
 
@@ -786,12 +727,10 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return tuple(image_features)
 
     def forward_videos(
-        self,
-        pixel_values_videos: list[list[torch.Tensor]],
+        self, pixel_values_videos: list[list[torch.Tensor]]
     ) -> tuple[torch.Tensor, ...]:
         pixel_values_videos_flat = flatten_bn(
-            [frame for frames in pixel_values_videos for frame in frames],
-            concat=True,
+            [frame for frames in pixel_values_videos for frame in frames], concat=True
         )
 
         visual_token_idx = 0 if "siglip" in self.vision_config.model_type else 1
@@ -917,29 +856,17 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                         output["is_videos"].append(list())
                     _v = list(torch.unbind(_v, dim=0))
                     output[new_k][_sample_idx] += _v
-                    output["is_videos"][_sample_idx] += [
-                        is_video,
-                    ] * len(_v)
+                    output["is_videos"][_sample_idx] += [is_video] * len(_v)
         return dict(output)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
-    def _init_possible_resolutions(
-        self,
-        config,
-        vision_config,
-    ):
+    def _init_possible_resolutions(self, config, vision_config):
         if not getattr(config, "possible_resolutions", []):
             possible_resolutions = []
             if config.anyres:
@@ -959,12 +886,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             return config.possible_resolutions
 
-    def _init_mm_projector(
-        self,
-        config,
-        text_config,
-        vision_config,
-    ):
+    def _init_mm_projector(self, config, text_config, vision_config):
         input_hidden_size = vision_config.hidden_size
         if config.mm_projector_type == "linear":
             mm_projector = nn.Linear(input_hidden_size, text_config.hidden_size)

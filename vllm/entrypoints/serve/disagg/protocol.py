@@ -2,13 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import (
-    BaseModel,
-    Field,
-    PrivateAttr,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
@@ -148,10 +142,7 @@ class GenerateRequest(BaseModel):
         return name in self._sampling_params_provided_keys
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        return TokenizeParams(
-            max_total_tokens=None,
-            max_output_tokens=0,
-        )
+        return TokenizeParams(max_total_tokens=None, max_output_tokens=0)
 
 
 class GenerateResponseChoice(BaseModel):

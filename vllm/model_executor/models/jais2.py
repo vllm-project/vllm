@@ -33,10 +33,7 @@ from transformers import Jais2Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -197,9 +194,7 @@ class Jais2Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -211,10 +206,7 @@ class Jais2Attention(nn.Module):
 
 class Jais2DecoderLayer(nn.Module):
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: Jais2Config,
-        prefix: str = "",
+        self, vllm_config: VllmConfig, config: Jais2Config, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -272,10 +264,7 @@ class Jais2DecoderLayer(nn.Module):
                 self.input_layernorm(hidden_states + residual),
                 hidden_states + residual,
             )
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
         hidden_states, residual = (
@@ -322,9 +311,7 @@ class Jais2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: layer_type(
-                config=config,
-                vllm_config=vllm_config,
-                prefix=prefix,
+                config=config, vllm_config=vllm_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
         )
@@ -435,9 +422,7 @@ class Jais2Model(nn.Module):
 
 
 class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -492,10 +477,7 @@ class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return model_output
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

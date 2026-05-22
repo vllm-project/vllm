@@ -15,10 +15,7 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import (
-    init_distributed_environment,
-    initialize_model_parallel,
-)
+from vllm.distributed import init_distributed_environment, initialize_model_parallel
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     DistributionBasedRouting,
     RoutingSimulator,
@@ -36,11 +33,7 @@ def device():
 @pytest.mark.parametrize("num_experts", [16, 128])
 @pytest.mark.parametrize("top_k", [1, 4])
 def test_basic_functionality(
-    num_tokens: int,
-    hidden_size: int,
-    num_experts: int,
-    top_k: int,
-    device,
+    num_tokens: int, hidden_size: int, num_experts: int, top_k: int, device
 ):
     """Test basic functionality of the routing simulator."""
     # Test each routing strategy
@@ -59,14 +52,10 @@ def test_basic_functionality(
         )
 
         # Check output shapes
-        assert topk_weights.shape == (
-            num_tokens,
-            top_k,
-        ), f"Wrong weights shape for {strategy}"
-        assert topk_ids.shape == (
-            num_tokens,
-            top_k,
-        ), f"Wrong ids shape for {strategy}"
+        assert topk_weights.shape == (num_tokens, top_k), (
+            f"Wrong weights shape for {strategy}"
+        )
+        assert topk_ids.shape == (num_tokens, top_k), f"Wrong ids shape for {strategy}"
 
         # Check that expert IDs are valid
         assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
@@ -106,8 +95,7 @@ def test_routing_strategy_integration(monkeypatch, device):
             distributed_init_method=f"file://{temp_file}",
         )
         initialize_model_parallel(
-            tensor_model_parallel_size=1,
-            pipeline_model_parallel_size=1,
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
         )
 
         for strategy in strategies:
@@ -130,15 +118,12 @@ def test_routing_strategy_integration(monkeypatch, device):
             # default. Use monkeypatch.setitem so the original lambda is
             # restored automatically at teardown.
             monkeypatch.setitem(
-                envs.environment_variables,
-                env_name,
-                lambda s=strategy: s,
+                envs.environment_variables, env_name, lambda s=strategy: s
             )
 
             # Test the select_experts method
             topk_weights, topk_ids = fused_moe.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
+                hidden_states=hidden_states, router_logits=router_logits
             )
 
             # Verify output shapes

@@ -73,10 +73,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     all_block_ids = torch.randperm(total_blocks_needed)
 
     block_id = 0
-    block_tables = torch.zeros(
-        (bs, max_num_blocks_per_seq),
-        dtype=torch.int32,
-    )
+    block_tables = torch.zeros((bs, max_num_blocks_per_seq), dtype=torch.int32)
 
     # Populate block tables and track block assignments
     block_id = 0
@@ -94,9 +91,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     ref_mla(out_ref, q, kv_cache, scale, block_tables, seq_lens_tensor)
 
     workspace_buffer = torch.zeros(
-        FLASHINFER_WORKSPACE_BUFFER_SIZE,
-        dtype=torch.uint8,
-        device=q.device,
+        FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=q.device
     )
     # Flashinfer MLA expects the query to be of shape
     # (bs, q_len_per_request, num_heads, qk_head_dim),

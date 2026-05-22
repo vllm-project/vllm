@@ -45,10 +45,7 @@ def test_nixl_and_nixl_ep_imports() -> None:
 
     extension_file = extension_files[0]
     completed = subprocess.run(
-        ["ldd", str(extension_file)],
-        capture_output=True,
-        check=False,
-        text=True,
+        ["ldd", str(extension_file)], capture_output=True, check=False, text=True
     )
     print(completed.stdout)
     if completed.stderr:

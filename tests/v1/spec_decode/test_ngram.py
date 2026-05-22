@@ -2,11 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 
-from vllm.config import (
-    ModelConfig,
-    SpeculativeConfig,
-    VllmConfig,
-)
+from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.v1.spec_decode.ngram_proposer import (
     NgramProposer,
     _find_longest_matched_ngram_and_propose_tokens,

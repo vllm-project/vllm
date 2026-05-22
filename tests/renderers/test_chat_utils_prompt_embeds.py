@@ -146,19 +146,11 @@ def test_parse_chat_messages_openai_format():
             ],
         }
     ]
-    conv, mm_data, _ = parse_chat_messages(
-        messages,
-        mc,
-        content_format="openai",
-    )
+    conv, mm_data, _ = parse_chat_messages(messages, mc, content_format="openai")
     # The middle content part is rewritten to a single placeholder-token
     # sentinel.
     texts = [p["text"] for p in conv[0]["content"]]
-    assert texts == [
-        "Hello ",
-        PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-        " world",
-    ]
+    assert texts == ["Hello ", PROMPT_EMBEDS_PLACEHOLDER_TOKEN, " world"]
     assert mm_data is not None and "prompt_embeds" in mm_data
     assert torch.equal(mm_data["prompt_embeds"][0], t)
 
@@ -240,11 +232,7 @@ def test_parse_chat_messages_string_format_preserves_position(
             expected_parts.append(PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     messages = [{"role": "user", "content": content}]
-    conv, mm_data, _ = parse_chat_messages(
-        messages,
-        mc,
-        content_format="string",
-    )
+    conv, mm_data, _ = parse_chat_messages(messages, mc, content_format="string")
 
     assert conv[0]["content"] == "\n".join(expected_parts)
     assert mm_data is not None and "prompt_embeds" in mm_data
@@ -258,18 +246,9 @@ def test_parse_chat_messages_requires_flag():
     b64 = _encode_tensor(t)
     mc = _make_mock_model_config(enable_prompt_embeds=False)
 
-    messages = [
-        {
-            "role": "user",
-            "content": [{"type": "prompt_embeds", "data": b64}],
-        }
-    ]
+    messages = [{"role": "user", "content": [{"type": "prompt_embeds", "data": b64}]}]
     with pytest.raises(ValueError, match=_ENABLE_PROMPT_EMBEDS_ERROR):
-        parse_chat_messages(
-            messages,
-            mc,
-            content_format="openai",
-        )
+        parse_chat_messages(messages, mc, content_format="openai")
 
 
 def test_parse_chat_messages_rejects_missing_data():
@@ -284,11 +263,7 @@ def test_parse_chat_messages_rejects_missing_data():
         }
     ]
     with pytest.raises(ValueError, match=_PROMPT_EMBEDS_MISSING_DATA_ERROR):
-        parse_chat_messages(
-            messages,
-            mc,
-            content_format="openai",
-        )
+        parse_chat_messages(messages, mc, content_format="openai")
 
 
 # Reserved placeholder guard: when `enable_prompt_embeds=True` the tokenizer is

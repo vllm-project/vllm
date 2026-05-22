@@ -12,9 +12,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
-)
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
@@ -27,9 +25,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     SparseMLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-    AiterMLAHelper,
-)
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -205,16 +201,9 @@ def generate_sparse_seqlen_triton(
     out = torch.zeros([num_tokens], dtype=torch.int32, device=query_lens.device)
     block_size = 64
     num_block_per_row = triton.cdiv(max_query_len, block_size)
-    grid = (
-        num_seqs,
-        num_block_per_row,
-    )
+    grid = (num_seqs, num_block_per_row)
     generate_sparse_seqlen_kernel[grid](
-        seq_lens,
-        cu_query_lens,
-        out,
-        topk_token,
-        block_size,
+        seq_lens, cu_query_lens, out, topk_token, block_size
     )
     return out
 
@@ -252,10 +241,7 @@ def fetch_id_to_ragged_triton(
     num_tokens = in_tensor.size(0)
     block_size = 64
     num_block_per_row = triton.cdiv(topk, block_size)
-    grid = (
-        num_tokens,
-        num_block_per_row,
-    )
+    grid = (num_tokens, num_block_per_row)
     fetch_id_to_ragged_kernel[grid](
         in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
     )
@@ -453,9 +439,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             reduce_final_map_size, dtype=reduce_final_map_type, device=device
         )
         self._mla_reduce_partial_map = torch.empty(
-            reduce_partial_map_size,
-            dtype=reduce_partial_map_type,
-            device=device,
+            reduce_partial_map_size, dtype=reduce_partial_map_type, device=device
         )
 
     def build(
@@ -630,10 +614,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         # Build kwargs and forward the persistent MLA metadata when it has
         # been computed. The aiter mla_decode_fwd switches to its
         # work-stealing persistent kernel path when work_meta_data is given.
-        mla_kwargs: dict = dict(
-            q_scale=layer._q_scale,
-            kv_scale=layer._k_scale,
-        )
+        mla_kwargs: dict = dict(q_scale=layer._q_scale, kv_scale=layer._k_scale)
         if attn_metadata.work_meta_data is not None:
             mla_kwargs.update(
                 work_meta_data=attn_metadata.work_meta_data,

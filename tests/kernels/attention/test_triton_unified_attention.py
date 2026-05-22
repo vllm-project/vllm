@@ -628,9 +628,7 @@ def test_triton_unified_attn_use_td(
 # the (num_heads, seq_threshold_3D=0) combinations needed to cover it.
 @pytest.mark.parametrize("num_heads", [(4, 4), (5, 1)])
 @torch.inference_mode()
-def test_triton_unified_attn_use_td_tile_clamp(
-    num_heads: tuple[int, int],
-) -> None:
+def test_triton_unified_attn_use_td_tile_clamp(num_heads: tuple[int, int]) -> None:
     """Regression guard: ``USE_TD`` needs ``BLOCK_SIZE % TILE_SIZE == 0``.
 
     With ``block_size=16`` and ``head_size=128`` (non-Gemma3),

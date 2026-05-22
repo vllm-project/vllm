@@ -54,11 +54,7 @@ class TestSetCudaContext:
     @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
     @pytest.mark.parametrize(
         argnames="device_input,expected_device_id",
-        argvalues=[
-            (0, 0),
-            (torch.device("cuda:0"), 0),
-            ("cuda:0", 0),
-        ],
+        argvalues=[(0, 0), (torch.device("cuda:0"), 0), ("cuda:0", 0)],
         ids=["int", "torch_device", "string"],
     )
     def test_set_cuda_context_parametrized(self, device_input, expected_device_id):

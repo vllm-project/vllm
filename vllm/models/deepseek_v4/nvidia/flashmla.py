@@ -21,16 +21,11 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     FlashMLASparseMetadata,
 )
-from vllm.v1.attention.ops.flashmla import (
-    flash_mla_sparse_fwd,
-    flash_mla_with_kvcache,
-)
+from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd, flash_mla_with_kvcache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.nvidia.ops.attention import (
-        DeepseekV4MLAAttention,
-    )
+    from vllm.models.deepseek_v4.nvidia.ops.attention import DeepseekV4MLAAttention
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
@@ -137,7 +132,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             )
             M = N + layer.window_size + layer.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
-                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
             )
             output.zero_()
             return
@@ -338,7 +333,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
+            ((chunk_size_const, M, q.shape[-1]), torch.bfloat16)
         )[0]
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size_const

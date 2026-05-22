@@ -63,14 +63,10 @@ class LlamaMLP(nn.Module):
     def __init__(self, config: LlamaConfig) -> None:
         super().__init__()
         self.gate_up_projection = nn.Linear(
-            in_features=config.hidden_size,
-            out_features=config.mlp_size * 2,
-            bias=False,
+            in_features=config.hidden_size, out_features=config.mlp_size * 2, bias=False
         )
         self.down_projection = nn.Linear(
-            in_features=config.mlp_size,
-            out_features=config.hidden_size,
-            bias=False,
+            in_features=config.mlp_size, out_features=config.hidden_size, bias=False
         )
 
         if config.tractable_init:
@@ -108,9 +104,7 @@ class LlamaAttention(nn.Module):
         )
 
         self.output_projection = nn.Linear(
-            in_features=config.hidden_size,
-            out_features=config.hidden_size,
-            bias=False,
+            in_features=config.hidden_size, out_features=config.hidden_size, bias=False
         )
 
         if config.tractable_init:
@@ -135,9 +129,7 @@ class LlamaAttention(nn.Module):
             )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # for tractable_init, this is:
         # output = (hidden_states * 3 + positions * 2)
@@ -208,8 +200,7 @@ class LlamaModel(nn.Module):
     ) -> None:
         super().__init__()
         self.embedding_tokens = nn.Embedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
+            num_embeddings=config.vocab_size, embedding_dim=config.hidden_size
         )
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for _ in range(config.num_layers)]
@@ -219,9 +210,7 @@ class LlamaModel(nn.Module):
         self.embedding_tokens.weight.data.fill_(config.init_value)
 
     def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
+        self, input_ids: torch.Tensor | None, positions: torch.Tensor
     ) -> torch.Tensor:
         hidden_states = self.embedding_tokens(input_ids)
         residual = None
@@ -288,18 +277,14 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             model(input_ids[:2], positions[:2])
         with set_forward_context(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=1,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=1),
         ):
             model(input_ids[:1], positions[:1])
 
@@ -309,9 +294,7 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             output = model(input_ids[:2], positions[:2])
 
@@ -359,9 +342,7 @@ def test_toy_llama(
     )
 
     compile_config_no_compile = CompilationConfig(
-        mode=CompilationMode.NONE,
-        cudagraph_mode=CUDAGraphMode.NONE,
-        backend="eager",
+        mode=CompilationMode.NONE, cudagraph_mode=CUDAGraphMode.NONE, backend="eager"
     )
 
     compile_config_no_split = CompilationConfig(

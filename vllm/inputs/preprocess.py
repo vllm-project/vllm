@@ -66,9 +66,7 @@ class InputPreprocessor:
         return self.renderer.get_tokenizer()
 
     def _tokenize_prompt(
-        self,
-        prompt: str,
-        tokenization_kwargs: dict[str, Any] | None = None,
+        self, prompt: str, tokenization_kwargs: dict[str, Any] | None = None
     ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
@@ -81,8 +79,7 @@ class InputPreprocessor:
         )
 
         tok_prompt = renderer._tokenize_singleton_prompt(
-            TextPrompt(prompt=prompt),
-            tok_params,
+            TextPrompt(prompt=prompt), tok_params
         )
 
         return tok_prompt["prompt_token_ids"]
@@ -108,10 +105,7 @@ class InputPreprocessor:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-    def _process_embeds(
-        self,
-        parsed_content: EmbedsPrompt,
-    ) -> EmbedsInput:
+    def _process_embeds(self, parsed_content: EmbedsPrompt) -> EmbedsInput:
         return self.renderer._process_embeds(parsed_content)
 
     def _truncate_inputs(
@@ -124,8 +118,7 @@ class InputPreprocessor:
         )
 
         tok_prompt = renderer._tokenize_singleton_prompt(
-            TokensPrompt(prompt_token_ids=inputs),
-            tok_params,
+            TokensPrompt(prompt_token_ids=inputs), tok_params
         )
 
         return tok_prompt["prompt_token_ids"]
@@ -175,8 +168,7 @@ class InputPreprocessor:
             )
         else:
             prompt_token_ids = self._tokenize_prompt(
-                prompt_text,
-                tokenization_kwargs=tokenization_kwargs,
+                prompt_text, tokenization_kwargs=tokenization_kwargs
             )
             inputs = tokens_input(prompt_token_ids)
 
@@ -246,15 +238,13 @@ class InputPreprocessor:
 
         return build_enc_dec_input(
             encoder_input=self._prompt_to_llm_inputs(
-                encoder_prompt,
-                tokenization_kwargs=tokenization_kwargs,
+                encoder_prompt, tokenization_kwargs=tokenization_kwargs
             ),
             decoder_input=(
                 None
                 if decoder_prompt is None
                 else self._prompt_to_llm_inputs(
-                    decoder_prompt,
-                    tokenization_kwargs=tokenization_kwargs,
+                    decoder_prompt, tokenization_kwargs=tokenization_kwargs
                 )
             ),
             decoder_start_token_id=self.renderer.get_dec_start_token_id(),
@@ -267,25 +257,20 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> DecoderOnlyEngineInput:
         return self._prompt_to_llm_inputs(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
+            prompt, tokenization_kwargs=tokenization_kwargs
         )
 
     def preprocess(
-        self,
-        prompt: PromptType,
-        tokenization_kwargs: dict[str, Any] | None = None,
+        self, prompt: PromptType, tokenization_kwargs: dict[str, Any] | None = None
     ) -> EngineInput:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
             return self._process_encoder_decoder_prompt(
-                parse_enc_dec_prompt(prompt),
-                tokenization_kwargs,
+                parse_enc_dec_prompt(prompt), tokenization_kwargs
             )
 
         return self._process_decoder_only_prompt(
-            parse_dec_only_prompt(prompt),
-            tokenization_kwargs=tokenization_kwargs,
+            parse_dec_only_prompt(prompt), tokenization_kwargs=tokenization_kwargs
         )

@@ -9,9 +9,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.tool_parsers.minimax_m2_tool_parser import (
-    MinimaxM2ToolParser,
-)
+from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 
 pytestmark = pytest.mark.cpu_test
 
@@ -94,11 +92,7 @@ def _collect_tool_calls(results):
     for r in results:
         for tc in r.tool_calls or []:
             if tc.index not in tool_calls:
-                tool_calls[tc.index] = {
-                    "id": None,
-                    "name": "",
-                    "arguments": "",
-                }
+                tool_calls[tc.index] = {"id": None, "name": "", "arguments": ""}
             if tc.id:
                 tool_calls[tc.index]["id"] = tc.id
             if tc.function:
@@ -175,7 +169,7 @@ class TestSingleInvoke:
             [
                 '<minimax:tool_call><invoke name="get_weather">'
                 '<parameter name="city">Seattle</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -195,10 +189,7 @@ class TestSingleInvoke:
             ],
         )
         tc = _collect_tool_calls(results)
-        assert json.loads(tc[0]["arguments"]) == {
-            "city": "Seattle",
-            "days": "5",
-        }
+        assert json.loads(tc[0]["arguments"]) == {"city": "Seattle", "days": "5"}
 
 
 class TestMultipleInvokes:
@@ -276,7 +267,7 @@ class TestInternalState:
             [
                 '<minimax:tool_call><invoke name="fn">'
                 '<parameter name="a">1</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         assert len(parser.prev_tool_call_arr) == 1
@@ -316,7 +307,7 @@ class TestDeltaMessageFormat:
             [
                 '<minimax:tool_call><invoke name="fn">'
                 '<parameter name="k">v</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
@@ -427,14 +418,7 @@ class TestLargeChunks:
             "</invoke></minimax:tool_call>"
         )
 
-        results = _feed(
-            parser,
-            [
-                chunk1,
-                chunk2,
-                ("", [EOS_ID]),
-            ],
-        )
+        results = _feed(parser, [chunk1, chunk2, ("", [EOS_ID])])
 
         tc = _collect_tool_calls(results)
         assert len(tc) == 1
@@ -461,11 +445,11 @@ class TestAnyOfNullableParam:
                         "type": "object",
                         "properties": {
                             "nickname": {
-                                "anyOf": [{"type": "string"}, {"type": "null"}],
-                            },
+                                "anyOf": [{"type": "string"}, {"type": "null"}]
+                            }
                         },
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -475,7 +459,7 @@ class TestAnyOfNullableParam:
             [
                 '<minimax:tool_call><invoke name="update_profile">'
                 '<parameter name="nickname">Alice</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -493,11 +477,11 @@ class TestAnyOfNullableParam:
                         "type": "object",
                         "properties": {
                             "nickname": {
-                                "anyOf": [{"type": "string"}, {"type": "null"}],
-                            },
+                                "anyOf": [{"type": "string"}, {"type": "null"}]
+                            }
                         },
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -507,7 +491,7 @@ class TestAnyOfNullableParam:
             [
                 '<minimax:tool_call><invoke name="update_profile">'
                 '<parameter name="nickname">null</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -524,12 +508,10 @@ class TestAnyOfNullableParam:
                     parameters={
                         "type": "object",
                         "properties": {
-                            "config": {
-                                "anyOf": [{"type": "object"}, {"type": "null"}],
-                            },
+                            "config": {"anyOf": [{"type": "object"}, {"type": "null"}]}
                         },
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -540,7 +522,7 @@ class TestAnyOfNullableParam:
                 '<minimax:tool_call><invoke name="update_settings">'
                 '<parameter name="config">{"theme": "dark", "fontSize": 14}'
                 "</parameter>"
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -565,10 +547,10 @@ class TestNoneStringPreservation:
                             "theme": {
                                 "type": "string",
                                 "enum": ["dark", "light", "none"],
-                            },
+                            }
                         },
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -578,7 +560,7 @@ class TestNoneStringPreservation:
             [
                 '<minimax:tool_call><invoke name="set_theme">'
                 '<parameter name="theme">none</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -595,11 +577,9 @@ class TestNoneStringPreservation:
                     name="echo",
                     parameters={
                         "type": "object",
-                        "properties": {
-                            "message": {"type": "string"},
-                        },
+                        "properties": {"message": {"type": "string"}},
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -609,7 +589,7 @@ class TestNoneStringPreservation:
             [
                 '<minimax:tool_call><invoke name="echo">'
                 '<parameter name="message">none</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -627,11 +607,11 @@ class TestNoneStringPreservation:
                         "type": "object",
                         "properties": {
                             "nickname": {
-                                "anyOf": [{"type": "string"}, {"type": "null"}],
-                            },
+                                "anyOf": [{"type": "string"}, {"type": "null"}]
+                            }
                         },
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -641,7 +621,7 @@ class TestNoneStringPreservation:
             [
                 '<minimax:tool_call><invoke name="update_profile">'
                 '<parameter name="nickname">null</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)
@@ -657,11 +637,9 @@ class TestNoneStringPreservation:
                     name="echo",
                     parameters={
                         "type": "object",
-                        "properties": {
-                            "value": {"type": "string"},
-                        },
+                        "properties": {"value": {"type": "string"}},
                     },
-                ),
+                )
             )
         ]
         parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
@@ -671,7 +649,7 @@ class TestNoneStringPreservation:
             [
                 '<minimax:tool_call><invoke name="echo">'
                 '<parameter name="value">nil</parameter>'
-                "</invoke></minimax:tool_call>",
+                "</invoke></minimax:tool_call>"
             ],
         )
         tc = _collect_tool_calls(results)

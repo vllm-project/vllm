@@ -47,21 +47,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.embeddings_weights = None
 
         self.lora_a_stacked = torch.zeros(
-            (
-                max_loras,
-                self.base_layer.org_vocab_size,
-                lora_config.max_lora_rank,
-            ),
+            (max_loras, self.base_layer.org_vocab_size, lora_config.max_lora_rank),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
         )
         self.lora_b_stacked = torch.zeros(
-            (
-                max_loras,
-                1,
-                self.base_layer.embedding_dim,
-                lora_config.max_lora_rank,
-            ),
+            (max_loras, 1, self.base_layer.embedding_dim, lora_config.max_lora_rank),
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
         )
@@ -99,10 +90,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         num_tokens = x.shape[0]
         indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens]
 
-        full_lora_a_embeddings = F.embedding(
-            x + indices_1,
-            self.lora_a_stacked_2d,
-        )
+        full_lora_a_embeddings = F.embedding(x + indices_1, self.lora_a_stacked_2d)
         full_output = self.base_layer.forward(x)
 
         full_output_org = full_output
@@ -112,8 +100,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             )
         if full_lora_a_embeddings.ndim == 3:
             full_lora_a_embeddings = full_lora_a_embeddings.view(
-                full_lora_a_embeddings.shape[0] * full_lora_a_embeddings.shape[1],
-                -1,
+                full_lora_a_embeddings.shape[0] * full_lora_a_embeddings.shape[1], -1
             )
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_embedding(

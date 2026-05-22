@@ -119,11 +119,9 @@ class DPCoordinator:
         )
         self.proc.start()
         child_zmq_addr_pipe.close()
-        (
-            front_publish_address,
-            back_output_address,
-            back_publish_address,
-        ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
+        (front_publish_address, back_output_address, back_publish_address) = (
+            self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
+        )
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address

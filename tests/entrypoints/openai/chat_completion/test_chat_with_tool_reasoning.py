@@ -108,11 +108,7 @@ def extract_reasoning_and_calls(chunks: list):
 @pytest.mark.asyncio
 async def test_chat_streaming_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES,
-        tools=TOOLS,
-        temperature=0.0,
-        stream=True,
+        model=MODEL_NAME, messages=MESSAGES, tools=TOOLS, temperature=0.0, stream=True
     )
 
     chunks = []
@@ -129,11 +125,7 @@ async def test_chat_streaming_of_tool_and_reasoning(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     tool_calls = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES,
-        tools=TOOLS,
-        temperature=0.0,
-        stream=False,
+        model=MODEL_NAME, messages=MESSAGES, tools=TOOLS, temperature=0.0, stream=False
     )
 
     assert len(tool_calls.choices[0].message.reasoning) > 0

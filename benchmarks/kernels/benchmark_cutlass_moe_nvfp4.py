@@ -22,23 +22,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    CutlassExpertsFp4,
-)
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.scalar_type import scalar_types
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
 
-WEIGHT_SHAPES_MOE = {
-    "nvidia/DeepSeek-R1-FP4": [
-        [256, 8, 2048, 7168],
-    ],
-}
+WEIGHT_SHAPES_MOE = {"nvidia/DeepSeek-R1-FP4": [[256, 8, 2048, 7168]]}
 
-DEFAULT_MODELS = [
-    "nvidia/DeepSeek-R1-FP4",
-]
+DEFAULT_MODELS = ["nvidia/DeepSeek-R1-FP4"]
 
 DEFAULT_BATCH_SIZES = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 DEFAULT_TP_SIZES = [1]
@@ -153,20 +145,11 @@ def bench_run(
         num_repeats: int,
     ):
         quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a_fp8_scale,
+            w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a_fp8_scale
         )
 
         for _ in range(num_repeats):
-            fused_experts(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
-            )
+            fused_experts(a, w1, w2, topk_weights, topk_ids, quant_config=quant_config)
 
     def run_cutlass_moe_fp4(
         a: torch.Tensor,
@@ -209,10 +192,7 @@ def bench_run(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp4(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            CutlassExpertsFp4(moe_config=moe_config, quant_config=quant_config),
         )
 
         for _ in range(num_repeats):
@@ -260,10 +240,7 @@ def bench_run(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp4(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            CutlassExpertsFp4(moe_config=moe_config, quant_config=quant_config),
         )
 
         with set_current_vllm_config(
@@ -291,17 +268,10 @@ def bench_run(
             VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
         ):
             quant_config = fp8_w8a8_moe_quant_config(
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a_fp8_scale,
+                w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a_fp8_scale
             )
             return fused_experts(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                quant_config=quant_config,
+                a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
             )
 
     def replay_graph(graph, num_repeats):

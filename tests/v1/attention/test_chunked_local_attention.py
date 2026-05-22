@@ -29,10 +29,7 @@ test_data_list = [
     # Same as example in docstring of make_local_attention_virtual_batches
     # except block table has 9 columns instead of 10
     LocalAttentionTestData(
-        batch_spec=BatchSpec(
-            query_lens=[4, 10, 5],
-            seq_lens=[6, 17, 9],
-        ),
+        batch_spec=BatchSpec(query_lens=[4, 10, 5], seq_lens=[6, 17, 9]),
         attn_chunk_size=4,
         block_size=2,
         expected_q_seqlens=[2, 2, 1, 4, 4, 1, 4, 1],
@@ -53,18 +50,12 @@ test_data_list = [
     # Case where block indices are not clipped to block table ncols-1
     # because tokens_in_last_block == attn_chunk_size
     LocalAttentionTestData(
-        batch_spec=BatchSpec(
-            query_lens=[8],
-            seq_lens=[12],
-        ),
+        batch_spec=BatchSpec(query_lens=[8], seq_lens=[12]),
         attn_chunk_size=4,
         block_size=2,
         expected_q_seqlens=[4, 4],
         expected_k_seqlens=[4, 4],
-        expected_local_block_table=[
-            [2, 3],
-            [4, 5],
-        ],
+        expected_local_block_table=[[2, 3], [4, 5]],
     ),
     # Case where all kv_seq positions are involved in attn
     LocalAttentionTestData(
@@ -77,19 +68,12 @@ test_data_list = [
         block_size=2,
         expected_q_seqlens=[1, 4, 2],
         expected_k_seqlens=[4, 4, 2],
-        expected_local_block_table=[
-            [0, 1],
-            [2, 3],
-            [4, 4],
-        ],
+        expected_local_block_table=[[0, 1], [2, 3], [4, 4]],
     ),
     # Case where attn_chunk_size > kv_seq_len
     # so no extra mini virtual batches are created
     LocalAttentionTestData(
-        batch_spec=BatchSpec(
-            query_lens=[4],
-            seq_lens=[6],
-        ),
+        batch_spec=BatchSpec(query_lens=[4], seq_lens=[6]),
         # Larger than kv_seq_len
         attn_chunk_size=10,
         block_size=2,
@@ -101,17 +85,12 @@ test_data_list = [
         # But we need to pad it to 5 pages per local batch
         # because currently the pages_per_local_batch
         # is calculated as (attn_chunk_size // block_size)
-        expected_local_block_table=[
-            [0, 1, 2, 2, 2],
-        ],
+        expected_local_block_table=[[0, 1, 2, 2, 2]],
     ),
     # Block size equal to chunk size
     # Expect single page per batch in local batch table
     LocalAttentionTestData(
-        batch_spec=BatchSpec(
-            query_lens=[6, 6],
-            seq_lens=[8, 8],
-        ),
+        batch_spec=BatchSpec(query_lens=[6, 6], seq_lens=[8, 8]),
         attn_chunk_size=4,
         block_size=4,
         expected_q_seqlens=[2, 4, 2, 4],
@@ -137,17 +116,12 @@ test_data_list = [
     #         4 |         1
     #  where tokens 0,1,2,3 have been pre-computed
     LocalAttentionTestData(
-        batch_spec=BatchSpec(
-            query_lens=[1],
-            seq_lens=[5],
-        ),
+        batch_spec=BatchSpec(query_lens=[1], seq_lens=[5]),
         attn_chunk_size=4,
         block_size=2,
         expected_q_seqlens=[1],
         expected_k_seqlens=[1],
-        expected_local_block_table=[
-            [2, 2],
-        ],
+        expected_local_block_table=[[2, 2]],
     ),
 ]
 

@@ -25,9 +25,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.fused_moe import MoEActivation, fused_experts
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.linear import (
@@ -45,10 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -66,11 +61,7 @@ from vllm.transformers_utils.configs.moondream3 import (
 )
 from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsPP,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -260,9 +251,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         # Patch embedding
         self.patch_emb = nn.Linear(
-            config.enc_patch_size * config.enc_patch_size * 3,
-            config.enc_dim,
-            bias=True,
+            config.enc_patch_size * config.enc_patch_size * 3, config.enc_dim, bias=True
         )
 
         # Position embeddings (27x27 = 729 patches for 378x378 / 14)
@@ -478,9 +467,7 @@ class Moondream3TextMoE(nn.Module):
         # Preserve Moondream3's exact GeGLU variant (gelu(h) * (g + 1)) by
         # adding +1 bias to the second half of the fused fc1 activations.
         fused_w1_bias = torch.zeros(
-            self.num_local_experts,
-            expert_inner_dim * 2,
-            dtype=torch.float32,
+            self.num_local_experts, expert_inner_dim * 2, dtype=torch.float32
         )
         fused_w1_bias[:, expert_inner_dim:] = 1.0
         self.register_buffer("_fused_w1_bias", fused_w1_bias, persistent=False)
@@ -642,9 +629,7 @@ class Moondream3Attention(nn.Module):
         self.tp_size = tp_size
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
 
@@ -674,9 +659,7 @@ class Moondream3Attention(nn.Module):
             q_local_dim = q.shape[-1]
             kv_local_dim = k.shape[-1]
             qkv_full_sharded = qkv_full_sharded.view(
-                qkv.shape[0],
-                self.tp_size,
-                q_local_dim + 2 * kv_local_dim,
+                qkv.shape[0], self.tp_size, q_local_dim + 2 * kv_local_dim
             )
             q_full = qkv_full_sharded[:, :, :q_local_dim].reshape(qkv.shape[0], -1)
             k_full = qkv_full_sharded[
@@ -780,9 +763,7 @@ class Moondream3DecoderLayer(nn.Module):
             )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Pre-norm architecture
         normed = self.ln(hidden_states)
@@ -806,9 +787,7 @@ class Moondream3TextModel(nn.Module):
         self.config = config
 
         self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            config.dim,
-            prefix=f"{prefix}.wte",
+            config.vocab_size, config.dim, prefix=f"{prefix}.wte"
         )
 
         blocks_prefix = maybe_prefix(prefix, "blocks")
@@ -886,12 +865,7 @@ class Moondream3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         # HF pre-fills BOS together with the fixed 27x27 vision grid under
         # the same bidirectional prefix mask: 1 BOS + 729 image embeddings.
         return 730
@@ -903,9 +877,7 @@ class Moondream3ProcessingInfo(BaseProcessingInfo):
         return 730
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
@@ -929,9 +901,7 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
         num_images = mm_counts.get("image", 0)
         return {
             "image": self._get_dummy_images(
-                width=378,
-                height=378,
-                num_images=num_images,
+                width=378, height=378, num_images=num_images
             )
         }
 
@@ -957,8 +927,7 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     def bos_image_placeholder_tokens(self) -> list[int]:
         tokenizer = self.info.get_tokenizer()
         token_ids = tokenizer.encode(
-            self.bos_image_placeholder,
-            add_special_tokens=False,
+            self.bos_image_placeholder, add_special_tokens=False
         )
         if len(token_ids) < 2:
             raise ValueError(
@@ -968,9 +937,7 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
         return token_ids
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
@@ -997,8 +964,7 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     ) -> list[PromptUpdate]:
         image_size = self.info.get_image_size_with_most_features()
         num_image_tokens = self.info.get_num_image_tokens(
-            image_width=image_size.width,
-            image_height=image_size.height,
+            image_width=image_size.width, image_height=image_size.height
         )
         placeholder_tokens = self.bos_image_placeholder_tokens
         bos_token = placeholder_tokens[0]
@@ -1008,9 +974,9 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
                 modality="image",
                 target=placeholder_tokens,
                 replacement=PromptUpdateDetails(
-                    full=[bos_token] + [image_token] * (num_image_tokens - 1),
+                    full=[bos_token] + [image_token] * (num_image_tokens - 1)
                 ),
-            ),
+            )
         ]
 
 
@@ -1033,16 +999,9 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     """
 
     supports_multimodal = True
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         hf_config = vllm_config.model_config.hf_config
@@ -1094,9 +1053,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.logits_processor = LogitsProcessor(self.config.text_config.vocab_size)
         self.make_empty_intermediate_tensors = self.text.make_empty_intermediate_tensors
         self._answer_id = getattr(
-            self.config,
-            "answer_token_id",
-            getattr(hf_config, "answer_token_id", 3),
+            self.config, "answer_token_id", getattr(hf_config, "answer_token_id", 3)
         )
 
     @classmethod
@@ -1114,10 +1071,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         return num_vision_tokens
 
-    def _split_pixel_values(
-        self,
-        pixel_values: object,
-    ) -> list[torch.Tensor]:
+    def _split_pixel_values(self, pixel_values: object) -> list[torch.Tensor]:
         # The processor should standardize image inputs into:
         # - torch.Tensor [num_images, num_crops, C, H, W], or
         # - list[torch.Tensor[num_crops, C, H, W]] for ragged crops.
@@ -1151,9 +1105,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _split_tilings(
-        self,
-        tilings: object,
-        expected: int,
+        self, tilings: object, expected: int
     ) -> list[tuple[int, int] | None]:
         if tilings is None:
             return [None] * expected
@@ -1306,10 +1258,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None:
             logits[:, self._answer_id] = float("-inf")

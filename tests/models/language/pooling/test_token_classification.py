@@ -21,21 +21,13 @@ def seed_everything():
 
 
 @pytest.mark.parametrize(
-    "model",
-    [
-        "boltuix/NeuroBERT-NER",
-        "gyr66/Ernie-3.0-base-chinese-finetuned-ner",
-    ],
+    "model", ["boltuix/NeuroBERT-NER", "gyr66/Ernie-3.0-base-chinese-finetuned-ner"]
 )
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
 def test_bert_like_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
@@ -72,11 +64,7 @@ def test_bert_like_models(
 @pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_modernbert_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     # NOTE: https://github.com/vllm-project/vllm/pull/32403
     # `disham993/electrical-ner-ModernBERT-base` is a randomly initialized
@@ -121,11 +109,7 @@ def test_modernbert_models(
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
 def test_auto_conversion(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)

@@ -267,22 +267,14 @@ def save_results(
     all_summary_rows: list[dict[str, str]],
     metadata: dict[str, str],
 ):
-    write_csv(
-        os.path.join(save_dir, f"{op_name}_detail.csv"),
-        detail_rows,
-        header_cols,
-    )
+    write_csv(os.path.join(save_dir, f"{op_name}_detail.csv"), detail_rows, header_cols)
     if all_summary_rows:
         write_csv(
             os.path.join(save_dir, "summary.csv"),
             all_summary_rows,
             list(all_summary_rows[0].keys()),
         )
-    write_csv(
-        os.path.join(save_dir, "metadata.csv"),
-        [metadata],
-        list(metadata.keys()),
-    )
+    write_csv(os.path.join(save_dir, "metadata.csv"), [metadata], list(metadata.keys()))
 
 
 def parse_args():
@@ -323,9 +315,7 @@ def parse_args():
 def main():
     args = parse_args()
     cfg = BenchConfig(
-        use_cuda_graph=not args.no_cuda_graph,
-        warmup=args.warmup,
-        rep=args.rep,
+        use_cuda_graph=not args.no_cuda_graph, warmup=args.warmup, rep=args.rep
     )
 
     torch.set_default_device(current_platform.device_type)
@@ -363,12 +353,7 @@ def main():
         all_summary_rows.extend(summary_rows)
 
         save_results(
-            save_dir,
-            op.name,
-            detail_rows,
-            header_cols,
-            all_summary_rows,
-            metadata,
+            save_dir, op.name, detail_rows, header_cols, all_summary_rows, metadata
         )
 
     print(f"\nResults saved to: {save_dir}")

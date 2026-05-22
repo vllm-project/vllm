@@ -25,16 +25,8 @@ from vllm.model_executor.models.exaone_moe_mtp import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    _require_is_multimodal,
-)
-from .utils import (
-    AutoWeightsLoader,
-    _merge_multimodal_embeddings,
-    maybe_prefix,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, _require_is_multimodal
+from .utils import AutoWeightsLoader, _merge_multimodal_embeddings, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -81,9 +73,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         )
         self.layers = nn.ModuleList(
             Exaone4DecoderLayer(
-                text_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layers.{idx}",
+                text_config, quant_config=quant_config, prefix=f"{prefix}.layers.{idx}"
             )
             for idx in range(self.num_mtp_layers)
         )
@@ -124,9 +114,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
 
         if not get_pp_group().is_last_rank:
@@ -172,9 +160,7 @@ class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.model.embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, self.model.embed_input_ids, is_multimodal=is_multimodal
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

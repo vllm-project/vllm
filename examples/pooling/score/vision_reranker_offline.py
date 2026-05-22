@@ -29,22 +29,13 @@ document = (
 image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
 video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
 documents = [
-    {
-        "type": "text",
-        "text": document,
-    },
-    {
-        "type": "image_url",
-        "image_url": {"url": image_url},
-    },
+    {"type": "text", "text": document},
+    {"type": "image_url", "image_url": {"url": image_url}},
     {
         "type": "image_url",
         "image_url": {"url": encode_image_url(fetch_image(image_url))},
     },
-    {
-        "type": "video_url",
-        "video_url": {"url": video_url},
-    },
+    {"type": "video_url", "video_url": {"url": video_url}},
 ]
 
 
@@ -60,10 +51,7 @@ def run_jinavl_reranker() -> RerankModelData:
         runner="pooling",
         max_model_len=32768,
         trust_remote_code=True,
-        mm_processor_kwargs={
-            "min_pixels": 3136,
-            "max_pixels": 602112,
-        },
+        mm_processor_kwargs={"min_pixels": 3136, "max_pixels": 602112},
     )
     return RerankModelData(engine_args=engine_args, modality={"image"})
 

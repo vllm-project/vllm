@@ -222,16 +222,11 @@ def serialize_guidance_grammar(
     disable_any_whitespace: bool = False,
     disable_additional_properties: bool = False,
 ) -> str:
-    def _process_schema(
-        grammar_spec: str | dict[str, Any],
-    ) -> str:
+    def _process_schema(grammar_spec: str | dict[str, Any]) -> str:
         if disable_additional_properties:
             grammar_spec = process_for_additional_properties(grammar_spec)
         return llguidance.LLMatcher.grammar_from_json_schema(
-            grammar_spec,
-            defaults={
-                "whitespace_flexible": not disable_any_whitespace,
-            },
+            grammar_spec, defaults={"whitespace_flexible": not disable_any_whitespace}
         )
 
     if request_type == StructuredOutputOptions.JSON:
@@ -239,9 +234,7 @@ def serialize_guidance_grammar(
     elif request_type == StructuredOutputOptions.JSON_OBJECT:
         return llguidance.LLMatcher.grammar_from_json_schema(
             '{"type": "object"}',
-            defaults={
-                "whitespace_flexible": not disable_any_whitespace,
-            },
+            defaults={"whitespace_flexible": not disable_any_whitespace},
         )
     else:
         if request_type == StructuredOutputOptions.REGEX:

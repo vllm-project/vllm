@@ -12,8 +12,7 @@ logger = init_logger(__name__)
 
 
 def adapt_config_dict(
-    config_dict: dict[str, Any],
-    defaults: dict[str, Any],
+    config_dict: dict[str, Any], defaults: dict[str, Any]
 ) -> PretrainedConfig:
     config_dict = _remap_general_mistral_args(config_dict)
     config_dict = _remap_mistral_sliding_window(config_dict)
@@ -123,10 +122,7 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     }
 
     yarn_config = config.get("yarn") or {}
-    config["rope_parameters"] = {
-        "rope_type": "yarn",
-        "mscale_all_dim": 1,
-    }
+    config["rope_parameters"] = {"rope_type": "yarn", "mscale_all_dim": 1}
 
     if rope_theta := config.pop("rope_theta", None):
         config["rope_parameters"]["rope_theta"] = rope_theta

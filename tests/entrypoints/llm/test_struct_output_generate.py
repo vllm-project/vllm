@@ -19,10 +19,7 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
-from vllm.sampling_params import (
-    SamplingParams,
-    StructuredOutputsParams,
-)
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 SAMPLE_REGEX = (
     r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
@@ -35,12 +32,7 @@ SAMPLE_JSON_SCHEMA = {
     "properties": {
         "name": {"type": "string"},
         "age": {"type": "integer"},
-        "skills": {
-            "type": "array",
-            "items": {
-                "type": "string",
-            },
-        },
+        "skills": {"type": "array", "items": {"type": "string"}},
         "grade": {
             "type": "string",
             "pattern": "^[A-D]$",  # Regex pattern
@@ -90,9 +82,7 @@ UNSUPPORTED_JSON_SCHEMA = {
     },
     "required": ["score", "tags"],
     "additionalProperties": False,
-    "patternProperties": {
-        "^score$": {"type": "integer"},
-    },
+    "patternProperties": {"^score$": {"type": "integer"}},
 }
 
 SAMPLE_STRUCTURED_OUTPUTS_CHOICES = [
@@ -257,11 +247,7 @@ def test_structured_output(
         "schema. Make the response as short as possible. Schema: "
         f"{sample_json_schema}"
     )
-    outputs = llm.generate(
-        [prompt] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
+    outputs = llm.generate([prompt] * 2, sampling_params=sampling_params, use_tqdm=True)
 
     assert outputs is not None
 
@@ -338,22 +324,14 @@ def test_structured_output(
                 f"fits this schema: {unsupported_json_schema}. "
                 f"Make the response as short as possible."
             )
-            llm.generate(
-                [prompt] * 2,
-                sampling_params=sampling_params,
-                use_tqdm=True,
-            )
+            llm.generate([prompt] * 2, sampling_params=sampling_params, use_tqdm=True)
     else:
         prompt = (
             f"Give an example JSON object for a grade that "
             f"fits this schema: {unsupported_json_schema}. "
             f"Make the response as short as possible."
         )
-        outputs = llm.generate(
-            prompt,
-            sampling_params=sampling_params,
-            use_tqdm=True,
-        )
+        outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
         assert outputs is not None
         for output in outputs:
             assert output is not None
@@ -476,11 +454,7 @@ def test_structured_output(
         f"Give an example IPv4 address with this regex: {sample_regex}. "
         f"Make the response as short as possible."
     )
-    outputs = llm.generate(
-        [prompt] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
+    outputs = llm.generate([prompt] * 2, sampling_params=sampling_params, use_tqdm=True)
 
     assert outputs is not None
     for output in outputs:
@@ -779,9 +753,7 @@ def test_structured_output_with_reasoning_matrices(
         structured_outputs=StructuredOutputsParams(json=reasoning_schema),
     )
     outputs = llm.generate(
-        [reasoning_prompt],
-        sampling_params=sampling_params,
-        use_tqdm=True,
+        [reasoning_prompt], sampling_params=sampling_params, use_tqdm=True
     )
 
     assert outputs is not None
@@ -803,10 +775,7 @@ def test_structured_output_with_reasoning_matrices(
 
 
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
-def test_structured_output_auto_mode(
-    model_name: str,
-    tokenizer_mode: str,
-):
+def test_structured_output_auto_mode(model_name: str, tokenizer_mode: str):
     unsupported_json_schema = UNSUPPORTED_JSON_SCHEMA
     llm = LLM(
         model=model_name,
@@ -909,9 +878,7 @@ def test_guidance_no_additional_properties():
 
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
-def test_structured_output_batched_with_non_structured_outputs_requests(
-    backend: str,
-):
+def test_structured_output_batched_with_non_structured_outputs_requests(backend: str):
     sample_json_schema = SAMPLE_JSON_SCHEMA
     # Don't use eager execution on TPUs because we want to test for no
     # recompilation at runtime
@@ -922,8 +889,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
         enforce_eager=enforce_eager,
         max_model_len=1024,
         structured_outputs_config=StructuredOutputsConfig(
-            backend=backend,
-            disable_any_whitespace=backend in {"xgrammar", "guidance"},
+            backend=backend, disable_any_whitespace=backend in {"xgrammar", "guidance"}
         ),
     )
 
@@ -943,11 +909,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
             structured_outputs=StructuredOutputsParams(json=sample_json_schema),
         ),
         # No max tokens, temp=0 to assert on contents
-        SamplingParams(
-            seed=42,
-            temperature=0,
-            top_p=1.0,
-        ),
+        SamplingParams(seed=42, temperature=0, top_p=1.0),
     ]
 
     outputs = llm.generate(

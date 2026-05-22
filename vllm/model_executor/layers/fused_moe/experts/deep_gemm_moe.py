@@ -144,12 +144,9 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-        ]
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -218,9 +215,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             )
             self.activation(activation, act_out, input)
             a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
-                act_out,
-                block_k,
-                out_q=output,
+                act_out, block_k, out_q=output
             )
             return a2q, a2q_scale
 
@@ -369,12 +364,9 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, kFp8Dynamic128Sym),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, kFp8Dynamic128Sym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod

@@ -18,16 +18,10 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -120,9 +114,7 @@ class PositionEmbedding(nn.Module):
         # Create learnable 2D position embeddings (frozen sin-cos)
         pos_embed = self._get_2d_sincos_pos_embed(hidden_size, max_num_patch_per_side)
         self.register_buffer(
-            "pos_embed",
-            torch.from_numpy(pos_embed).float(),
-            persistent=False,
+            "pos_embed", torch.from_numpy(pos_embed).float(), persistent=False
         )
 
     @staticmethod
@@ -202,18 +194,14 @@ class BagelProcessingInfo(BaseProcessingInfo):
         tokenizer = self.get_tokenizer()
 
         return BagelProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            **kwargs,
+            image_processor=image_processor, tokenizer=tokenizer, **kwargs
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         # Calculate max tokens per image
@@ -221,12 +209,7 @@ class BagelProcessingInfo(BaseProcessingInfo):
         max_num_patches = hf_config.vit_max_num_patch_per_side**2
         return {"image": max_num_patches}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         vit_config = hf_config.vit_config
         patch_size = vit_config.patch_size
@@ -265,7 +248,7 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
                 height=image_size,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -313,13 +296,9 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: Any,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: Any, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return {
-            "pixel_values": MultiModalFieldConfig.batched("image"),
-        }
+        return {"pixel_values": MultiModalFieldConfig.batched("image")}
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -442,10 +421,7 @@ class BagelForConditionalGeneration(
         if pixel_values is None:
             return None
 
-        return BagelImagePixelInputs(
-            type="pixel_values",
-            pixel_values=pixel_values,
-        )
+        return BagelImagePixelInputs(type="pixel_values", pixel_values=pixel_values)
 
     def _process_image_input(
         self, image_input: BagelImageInputs
@@ -532,10 +508,7 @@ class BagelForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

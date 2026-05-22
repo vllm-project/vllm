@@ -19,10 +19,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -115,17 +112,12 @@ class ColModernVBertProcessingInfo(BaseProcessingInfo):
         size = config.vision_config.image_size
         return ImageSize(width=size, height=size)
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         return self.get_hf_config().image_seq_len
 
 
 class ColModernVBertDummyInputsBuilder(
-    BaseDummyInputsBuilder[ColModernVBertProcessingInfo],
+    BaseDummyInputsBuilder[ColModernVBertProcessingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
@@ -151,7 +143,7 @@ class ColModernVBertDummyInputsBuilder(
 
 
 class ColModernVBertMultiModalProcessor(
-    BaseMultiModalProcessor[ColModernVBertProcessingInfo],
+    BaseMultiModalProcessor[ColModernVBertProcessingInfo]
 ):
     def _call_hf_processor(
         self,
@@ -161,11 +153,7 @@ class ColModernVBertMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
-        text_encoding = tokenizer(
-            prompt,
-            return_tensors="pt",
-            **tok_kwargs,
-        )
+        text_encoding = tokenizer(prompt, return_tensors="pt", **tok_kwargs)
         result = BatchFeature(data=dict(text_encoding))
 
         images = mm_data.get("images")
@@ -177,9 +165,7 @@ class ColModernVBertMultiModalProcessor(
                 revision=self.info.ctx.model_config.revision,
             )
             image_outputs = image_processor(
-                images=images,
-                do_image_splitting=False,
-                return_tensors="pt",
+                images=images, do_image_splitting=False, return_tensors="pt"
             )
             result.update(image_outputs)
 
@@ -195,13 +181,9 @@ class ColModernVBertMultiModalProcessor(
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-        )
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
     def _get_prompt_updates(
         self,
@@ -221,7 +203,7 @@ class ColModernVBertMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.start(),
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -279,9 +261,7 @@ class ColModernVBertForRetrieval(
         self.text_layers = nn.ModuleList(
             [
                 ModernBertLayer(
-                    config=text_config,
-                    layer_id=i,
-                    prefix=f"{prefix}.text_layers.{i}",
+                    config=text_config, layer_id=i, prefix=f"{prefix}.text_layers.{i}"
                 )
                 for i in range(text_config.num_hidden_layers)
             ]
@@ -304,23 +284,19 @@ class ColModernVBertForRetrieval(
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler = pooler_for_token_embed(
-            pooler_config,
-            projector=self.custom_text_proj,
+            pooler_config, projector=self.custom_text_proj
         )
 
     # ---- multimodal ---------------------------------------------------------
 
-    def _get_image_features(
-        self,
-        pixel_values: torch.Tensor,
-    ) -> torch.Tensor:
+    def _get_image_features(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # Idefics3ImageProcessor may return (batch, tiles, C, H, W);
         # flatten to (batch*tiles, C, H, W) for SiglipVisionModel.
         if pixel_values.dim() == 5:
             b, t, c, h, w = pixel_values.shape
             pixel_values = pixel_values.reshape(b * t, c, h, w)
         vision_outputs = self.vision_model(
-            pixel_values.to(dtype=self.vision_model.dtype),
+            pixel_values.to(dtype=self.vision_model.dtype)
         )
         return self.connector(vision_outputs)
 
@@ -361,18 +337,12 @@ class ColModernVBertForRetrieval(
             "model.custom_text_proj.": "custom_text_proj.",
             "model.vision_model.vision_model.": "vision_model.vision_model.",
             "model.": "",
-        },
+        }
     )
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(
-            weights,
-            mapper=self.hf_to_vllm_mapper,
-        )
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         # The pooler wraps ``custom_text_proj`` as its head projector.
         # Mark those params as loaded under the pooler path too.

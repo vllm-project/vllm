@@ -104,16 +104,13 @@ class ChatParams:
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
             chat_template_kwargs=merge_kwargs(
-                default_chat_template_kwargs,
-                self.chat_template_kwargs,
+                default_chat_template_kwargs, self.chat_template_kwargs
             ),
             media_io_kwargs=merge_media_io_kwargs(
-                default_media_io_kwargs,
-                self.media_io_kwargs,
+                default_media_io_kwargs, self.media_io_kwargs
             ),
             mm_processor_kwargs=recursively_merge_kwargs(
-                default_mm_processor_kwargs,
-                self.mm_processor_kwargs,
+                default_mm_processor_kwargs, self.mm_processor_kwargs
             ),
         )
 
@@ -310,10 +307,7 @@ class TokenizeParams:
         # tokenizer-level truncation because generation tokenizers default to
         # left truncation while callers may request right truncation.
         if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
-            return dict(
-                truncation=False,
-                add_special_tokens=self.add_special_tokens,
-            )
+            return dict(truncation=False, add_special_tokens=self.add_special_tokens)
 
         return dict(
             truncation=max_length is not None,
@@ -354,18 +348,13 @@ class TokenizeParams:
 
     def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
-        for validator in (
-            self._text_len_check,
-            self._text_lowercase,
-        ):
+        for validator in (self._text_len_check, self._text_lowercase):
             text = validator(tokenizer, text)
 
         return text
 
     def apply_pre_tokenization(
-        self,
-        tokenizer: TokenizerLike | None,
-        prompt: TextPrompt,
+        self, tokenizer: TokenizerLike | None, prompt: TextPrompt
     ) -> TextPrompt:
         """
         Ensure that the prompt meets the requirements set out by this config.
@@ -451,9 +440,7 @@ class TokenizeParams:
         return tokens
 
     def apply_post_tokenization(
-        self,
-        tokenizer: TokenizerLike | None,
-        prompt: TokensPrompt | EmbedsPrompt,
+        self, tokenizer: TokenizerLike | None, prompt: TokensPrompt | EmbedsPrompt
     ) -> TokensPrompt | EmbedsPrompt:
         """
         Ensure that the prompt meets the requirements set out by this config.

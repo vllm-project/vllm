@@ -18,10 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 
-__all__ = [
-    "AiterW4A8ExpertsMonolithic",
-    "aiter_triton_kernel_w4a8_moe_forward",
-]
+__all__ = ["AiterW4A8ExpertsMonolithic", "aiter_triton_kernel_w4a8_moe_forward"]
 
 
 def aiter_triton_kernel_w4a8_moe_forward(
@@ -175,11 +172,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     Activation: Static FP8 quantization
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         self.topk = moe_config.experts_per_token
         self.renormalize = moe_config.routing_method in (
@@ -206,13 +199,10 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         # W4A8: MXFP4 weights with static FP8 activations
-        SUPPORTED_W_A = [
-            (kMxfp4Static, kFp8StaticTensorSym),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, kFp8StaticTensorSym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -221,9 +211,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
@@ -243,8 +231,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 

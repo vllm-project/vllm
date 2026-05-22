@@ -38,9 +38,7 @@ def test_get_numactl_args_with_node_binding():
 
 def test_get_numactl_args_with_cpu_binding():
     vllm_config = _make_config(
-        numa_bind=True,
-        numa_bind_nodes=[0, 1],
-        numa_bind_cpus=["0-3", "4-7"],
+        numa_bind=True, numa_bind_nodes=[0, 1], numa_bind_cpus=["0-3", "4-7"]
     )
     assert (
         numa_utils._get_numactl_args(vllm_config, local_rank=1)
@@ -85,9 +83,7 @@ def test_log_numactl_show(monkeypatch):
     )
 
     assert numa_utils._log_numactl_show("Worker_0") is True
-    assert log_lines == [
-        "Worker_0 affinity: policy: bind, physcpubind: 0 1 2 3",
-    ]
+    assert log_lines == ["Worker_0 affinity: policy: bind, physcpubind: 0 1 2 3"]
 
 
 def test_get_numactl_executable_points_to_fixed_wrapper(monkeypatch):

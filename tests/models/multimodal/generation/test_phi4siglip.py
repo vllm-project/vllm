@@ -12,12 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm.logprobs import SampleLogprobs
 from vllm.multimodal.image import rescale_image_size
 
-from ....conftest import (
-    IMAGE_ASSETS,
-    HfRunner,
-    PromptImageInput,
-    VllmRunner,
-)
+from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
@@ -84,9 +79,7 @@ def _build_single_image_inputs(
     return all_inputs
 
 
-def _build_multi_image_inputs(
-    image_assets,
-) -> list[tuple[list[str], PromptImageInput]]:
+def _build_multi_image_inputs(image_assets) -> list[tuple[list[str], PromptImageInput]]:
     """Build multi-image inputs for all size_factors at once."""
     images = [asset.pil_image for asset in image_assets]
     all_inputs: list[tuple[list[str], PromptImageInput]] = []
@@ -131,10 +124,7 @@ def _run_and_compare(
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
-                prompts,
-                MAX_TOKENS,
-                num_logprobs=NUM_LOGPROBS,
-                images=images,
+                prompts, MAX_TOKENS, num_logprobs=NUM_LOGPROBS, images=images
             )
             for prompts, images in all_inputs
         ]
@@ -149,10 +139,7 @@ def _run_and_compare(
     ) as hf_model:
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(
-                prompts,
-                MAX_TOKENS,
-                num_logprobs=NUM_LOGPROBS,
-                images=images,
+                prompts, MAX_TOKENS, num_logprobs=NUM_LOGPROBS, images=images
             )
             for prompts, images in all_inputs
         ]

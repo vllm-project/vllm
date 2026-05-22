@@ -34,9 +34,7 @@ def _capturer_with_buffer(
     c.dp_rank = dp_rank
     c.tp_size = tp_size
     c.device_buffer = torch.full(
-        (max_tokens, num_layers, num_experts_per_tok),
-        -1,
-        dtype=torch.int32,
+        (max_tokens, num_layers, num_experts_per_tok), -1, dtype=torch.int32
     )
     return c
 
@@ -60,10 +58,7 @@ class DummyRouter(BaseRouter):
 
 def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
     return DummyRouter(
-        top_k=2,
-        global_num_experts=16,
-        eplb_state=eplb_state,
-        indices_type_getter=None,
+        top_k=2, global_num_experts=16, eplb_state=eplb_state, indices_type_getter=None
     )
 
 
@@ -76,8 +71,7 @@ def test_base_router_capture_pre_eplb_mapping():
 
     router.set_capture_fn(capture_fn)
     topk_weights, topk_ids = router.select_experts(
-        hidden_states=torch.empty(1),
-        router_logits=torch.empty(1),
+        hidden_states=torch.empty(1), router_logits=torch.empty(1)
     )
 
     assert topk_weights.shape == topk_ids.shape
@@ -101,8 +95,7 @@ def test_base_router_capture_with_eplb_enabled():
 
     router.set_capture_fn(capture_fn)
     _, topk_ids = router.select_experts(
-        hidden_states=torch.empty(1),
-        router_logits=torch.empty(1),
+        hidden_states=torch.empty(1), router_logits=torch.empty(1)
     )
 
     assert len(captured) == 1

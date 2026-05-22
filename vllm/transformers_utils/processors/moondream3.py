@@ -23,9 +23,7 @@ __all__ = ["Moondream3Processor"]
 
 class Moondream3ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
     _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
+        "text_kwargs": {"padding": False},
         "images_kwargs": {
             "max_crops": 12,
             "overlap_margin": 4,
@@ -184,11 +182,7 @@ class Moondream3Processor(ProcessorMixin):
         super().__init__(tokenizer, chat_template=chat_template)
 
     @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path,
-        **kwargs,
-    ):
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         """
         Load the processor, using a separate tokenizer repo.
 
@@ -200,9 +194,7 @@ class Moondream3Processor(ProcessorMixin):
 
         tokenizer = kwargs.pop("tokenizer", None)
 
-        tokenizer_kwargs = {
-            "trust_remote_code": kwargs.get("trust_remote_code", False),
-        }
+        tokenizer_kwargs = {"trust_remote_code": kwargs.get("trust_remote_code", False)}
         for key in (
             "cache_dir",
             "force_download",
@@ -233,13 +225,10 @@ class Moondream3Processor(ProcessorMixin):
                 return AutoTokenizer.from_pretrained(repo_or_path, **tokenizer_kwargs)
             except Exception:
                 tokenizer_file = cached_file(
-                    repo_or_path,
-                    "tokenizer.json",
-                    **cached_file_kwargs,
+                    repo_or_path, "tokenizer.json", **cached_file_kwargs
                 )
                 return PreTrainedTokenizerFast(
-                    tokenizer_file=tokenizer_file,
-                    clean_up_tokenization_spaces=False,
+                    tokenizer_file=tokenizer_file, clean_up_tokenization_spaces=False
                 )
 
         if isinstance(tokenizer, str):
@@ -341,10 +330,7 @@ class Moondream3Processor(ProcessorMixin):
 
             # Tokenize text
             tokenized = self.tokenizer(
-                text,
-                add_special_tokens=True,
-                return_tensors="pt",
-                **text_kwargs,
+                text, add_special_tokens=True, return_tensors="pt", **text_kwargs
             )
 
             output = BatchFeature(data=dict(tokenized))

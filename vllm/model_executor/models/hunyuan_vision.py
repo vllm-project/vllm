@@ -116,15 +116,9 @@ class HunYuanVLImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("np", "cps"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
 
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class HunYuanVLImageEmbeddingInputs(TensorSchema):
@@ -137,15 +131,9 @@ class HunYuanVLImageEmbeddingInputs(TensorSchema):
 
     type: Literal["image_embeds"]
 
-    image_embeds: Annotated[
-        torch.Tensor,
-        TensorShape("nf", "hs"),
-    ]
+    image_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
 
-    image_grid_thw: Annotated[
-        torch.Tensor,
-        TensorShape("ni", 3),
-    ]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 HunYuanVLImageInputs: TypeAlias = (
@@ -242,10 +230,7 @@ class HunYuanVisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
         out = self.attn(q, k, v)
@@ -285,10 +270,7 @@ class HunYuanVisionBlock(nn.Module):
             prefix=f"{prefix}.mlp",
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.self_attn(self.input_layernorm(x))
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
@@ -484,11 +466,7 @@ class HunYuanVisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.embeddings.patch_embedding.weight.device
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        grid_thw: list[list[int]],
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, grid_thw: list[list[int]]) -> torch.Tensor:
         # patchify
         seq_len = x.size(0)
         cu_seqlens: list = [0]
@@ -568,8 +546,7 @@ def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 class HunYuanVLMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -586,34 +563,24 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(HunYuanVLConfig)
 
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ) -> HunYuanVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> HunYuanVLProcessor:
         return self.ctx.get_hf_processor(
-            HunYuanVLProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            HunYuanVLProcessor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
-    def get_image_processor(
-        self,
-        **kwargs: object,
-    ) -> HunYuanVLImageProcessor:
+    def get_image_processor(self, **kwargs: object) -> HunYuanVLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
         return HunYuanVLMultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
+            expected_hidden_size=self._get_expected_hidden_size()
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
         # TODO: support video
@@ -728,7 +695,7 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         return {
             "image": self._get_dummy_images(
                 width=target_width, height=target_height, num_images=num_images
-            ),
+            )
         }
 
 
@@ -755,9 +722,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
 
-        placeholder = {
-            "image": hf_processor.image_token_id,
-        }
+        placeholder = {"image": hf_processor.image_token_id}
 
         merge_size = image_processor.merge_size
 
@@ -782,9 +747,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _hunyuan_vl_field_config(hf_inputs)
 
@@ -817,14 +780,9 @@ class HunYuanVLForConditionalGeneration(
     supports_encoder_tp_data = True
 
     def get_xdrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> torch.Tensor:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw"},
-        )
+        kwargs = MultiModalFeatureSpec.gather_kwargs(mm_features, {"image_grid_thw"})
         image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
 
         hf_config = self.config
@@ -897,10 +855,7 @@ class HunYuanVLForConditionalGeneration(
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model.model"),
-                architectures=[
-                    "HunYuanDenseV1ForCausalLM",
-                    "HunYuanMoEV1ForCausalLM",
-                ],
+                architectures=["HunYuanDenseV1ForCausalLM", "HunYuanMoEV1ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
@@ -1008,10 +963,7 @@ class HunYuanVLForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

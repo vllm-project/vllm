@@ -18,10 +18,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
@@ -107,10 +104,7 @@ class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
 
     type: Literal["image_embeds"] = "image_embeds"
 
-    data: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "ifs", "hs"),
-    ]
+    data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
 LlavaOnevisionImageInputs: TypeAlias = (
@@ -182,12 +176,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         # NOTE: This hardcoded value is found via processor tests
         return ImageSize(width=1153, height=944)
 
-    def _get_num_frame_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def _get_num_frame_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
 
@@ -198,15 +187,10 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return pooled_grid_length * pooled_grid_length
 
     def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
+        self, *, image_width: int, image_height: int, num_frames: int
     ) -> int:
         num_frame_tokens = self._get_num_frame_tokens(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
         return num_frame_tokens * num_frames + 1  # Newline token
@@ -232,9 +216,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return num_frames
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_videos = mm_counts.get("video", 0)
 
@@ -245,11 +227,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
@@ -310,9 +288,7 @@ class LlavaOnevisionMultiModalProcessor(
     BaseLlavaNextMultiModalProcessor[LlavaOnevisionProcessingInfo]
 ):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -349,10 +325,7 @@ class LlavaOnevisionMultiModalProcessor(
         video_token = processor.video_token
 
         text_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data={},
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data={}, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         images = mm_data.pop("images", [])
@@ -385,11 +358,7 @@ class LlavaOnevisionMultiModalProcessor(
 
         video_outputs = {"pixel_values_videos": pixel_values_videos}
 
-        combined_outputs = dict(
-            text_outputs,
-            **image_outputs,
-            **video_outputs,
-        )
+        combined_outputs = dict(text_outputs, **image_outputs, **video_outputs)
         return BatchFeature(combined_outputs)
 
     def _hf_processor_applies_updates(
@@ -555,8 +524,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         if image_embeds is not None:
             return LlavaOnevisionImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -727,8 +695,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 
     def _process_image_pixels(
-        self,
-        inputs: LlavaOnevisionImagePixelInputs,
+        self, inputs: LlavaOnevisionImagePixelInputs
     ) -> torch.Tensor | list[torch.Tensor]:
         pixel_values = inputs["pixel_values"]
 
@@ -760,8 +727,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         ]
 
     def _process_image_input(
-        self,
-        image_input: LlavaOnevisionImageInputs,
+        self, image_input: LlavaOnevisionImageInputs
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -840,8 +806,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 dim=1,
             )
             for num_frame, embeds in zip(
-                frames_per_video,
-                torch.split(embeddings_flat, frames_per_video),
+                frames_per_video, torch.split(embeddings_flat, frames_per_video)
             )
         ]
 
@@ -907,10 +872,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

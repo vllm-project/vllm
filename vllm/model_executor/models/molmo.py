@@ -13,11 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import (
-    BaseImageProcessor,
-    BatchFeature,
-    PretrainedConfig,
-)
+from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -49,10 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -277,13 +270,9 @@ class ResidualAttentionBlock(nn.Module):
             config, quant_config, prefix=f"{prefix}.feed_forward"
         )
         self.attention_norm = nn.LayerNorm(
-            config.image_emb_dim,
-            eps=config.image_norm_eps,
+            config.image_emb_dim, eps=config.image_norm_eps
         )
-        self.ffn_norm = nn.LayerNorm(
-            config.image_emb_dim,
-            eps=config.image_norm_eps,
-        )
+        self.ffn_norm = nn.LayerNorm(config.image_emb_dim, eps=config.image_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attention(self.attention_norm(x))
@@ -341,9 +330,7 @@ class VisionTransformer(nn.Module):
         )
         image_patch_size = config.image_patch_size
         self.patch_embedding = nn.Linear(
-            image_patch_size * image_patch_size * 3,
-            config.image_emb_dim,
-            bias=False,
+            image_patch_size * image_patch_size * 3, config.image_emb_dim, bias=False
         )
         self.pre_ln = nn.LayerNorm(config.image_emb_dim, eps=config.image_norm_eps)
         self.transformer = BlockCollection(
@@ -497,9 +484,7 @@ class MolmoAttention(nn.Module):
         return q, k
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -543,10 +528,7 @@ class LanguageModelMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -586,10 +568,7 @@ class ImageProjectorMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.merged_linear(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -634,10 +613,7 @@ class MolmoDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -653,10 +629,7 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Self Attention
         residual = hidden_states
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = hidden_states + residual
@@ -744,11 +717,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
 
         return image_features
 
-    def forward(
-        self,
-        images: torch.Tensor,
-        image_masks: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, image_masks: torch.Tensor) -> torch.Tensor:
         # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim) # noqa: E501
         batch_size, num_image = images.shape[:2]
         images = images.to(device=self.device, dtype=self.dtype)
@@ -770,14 +739,13 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         image_features = image_features.to(og_dtype)
 
         image_features = image_features.reshape(
-            (batch_size, num_image) + self.image_num_patch + (-1,),
+            (batch_size, num_image) + self.image_num_patch + (-1,)
         )
 
         if missing_w := self.image_num_patch[0] % POOLING_SIZE:
             # Padding for image pooling (see below)
             image_features = F.pad(
-                image_features,
-                (0, 0, 0, missing_w, 0, missing_w, 0, 0, 0, 0),
+                image_features, (0, 0, 0, missing_w, 0, missing_w, 0, 0, 0, 0)
             )
 
         # image pooling
@@ -848,9 +816,7 @@ class MolmoModel(nn.Module, SupportsQuant):
         self.embedding_size = config.embedding_size or config.vocab_size
         self.embedding_size += ADDITIONAL_VOCAB_SIZE
         self.embed_tokens = VocabParallelEmbedding(
-            self.embedding_size,
-            config.hidden_size,
-            quant_config=quant_config,
+            self.embedding_size, config.hidden_size, quant_config=quant_config
         )
 
         decoder_layer = (
@@ -894,11 +860,7 @@ class MolmoModel(nn.Module, SupportsQuant):
 
         # Apply blocks one-by-one.
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -944,16 +906,11 @@ def get_num_patches(
     crop_window_patches = crop_patches - (left_margin + right_margin)
 
     left_num = _lowest_multiple(
-        crop_window_patches + left_margin + pooling_size - 1,
-        pooling_size,
+        crop_window_patches + left_margin + pooling_size - 1, pooling_size
     )
-    middle_num = _lowest_multiple(
-        crop_window_patches + pooling_size - 1,
-        pooling_size,
-    )
+    middle_num = _lowest_multiple(crop_window_patches + pooling_size - 1, pooling_size)
     right_num = _lowest_multiple(
-        crop_window_patches + right_margin + pooling_size - 1,
-        pooling_size,
+        crop_window_patches + right_margin + pooling_size - 1, pooling_size
     )
 
     return left_num + (num_tiles - 2) * middle_num + right_num
@@ -996,13 +953,7 @@ def get_candidate_tilings(max_num: int) -> list[tuple[int, int]]:
     return sorted(tilings, key=lambda x: x[0] * x[1])
 
 
-def select_tiling(
-    *,
-    height: int,
-    width: int,
-    patch_size: int,
-    max_num_patches: int,
-):
+def select_tiling(*, height: int, width: int, patch_size: int, max_num_patches: int):
     tilings = get_candidate_tilings(max_num_patches)
     candidate_tilings = np.array(tilings, dtype=np.int32)
     candidate_resolutions = candidate_tilings * patch_size
@@ -1120,9 +1071,7 @@ class MolmoProcessingInfo(BaseProcessingInfo):
             width, height = base_w * wr, base_h * hr
 
             feat_size = self.get_num_image_tokens(
-                image_width=width,
-                image_height=height,
-                image_processor=image_processor,
+                image_width=width, image_height=height, image_processor=image_processor
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -1208,10 +1157,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         return processed_outputs
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _apply_hf_processor_tokens_only(self, prompt_tokens: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
 
         # The chat template is already applied to the prompt tokens
@@ -1225,8 +1171,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         # Prepend a BOS token id to the tokens
         processed_data = self.info.ctx.call_hf_processor(
-            processor.process,
-            dict(tokens=tokens),
+            processor.process, dict(tokens=tokens)
         )
         prompt_ids = processed_data.pop("input_ids").tolist()
         print(prompt_ids, len(prompt_ids))
@@ -1234,9 +1179,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         return prompt_ids
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_crops = hf_inputs.get("num_crops", torch.empty(0))
         num_images = len(num_crops)
@@ -1289,8 +1232,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             )
 
             return PromptUpdateDetails.select_token_id(
-                extra_joint + joint,
-                embed_token_id=img_patch_id,
+                extra_joint + joint, embed_token_id=img_patch_id
             )
 
         return [
@@ -1396,8 +1338,7 @@ class MolmoForCausalLM(
         )
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> MolmoImageInputs | None:
         images = kwargs.pop("images", None)
         image_masks = kwargs.pop("image_masks", None)
@@ -1421,10 +1362,7 @@ class MolmoForCausalLM(
             num_crops=num_crops,
         )
 
-    def _process_image_input(
-        self,
-        image_input: MolmoImageInputs,
-    ) -> list[torch.Tensor]:
+    def _process_image_input(self, image_input: MolmoImageInputs) -> list[torch.Tensor]:
         images = image_input["images"]
         image_masks = image_input["image_masks"]
         image_input_idx = image_input["image_input_idx"]
@@ -1441,8 +1379,7 @@ class MolmoForCausalLM(
         results = []
         num_crops_list = num_crops.tolist()
         for feats, img_idx in zip(
-            image_features.split(num_crops_list),
-            image_input_idx.split(num_crops_list),
+            image_features.split(num_crops_list), image_input_idx.split(num_crops_list)
         ):
             is_valid = img_idx >= 0
             valid_img_idx = img_idx[is_valid]
@@ -1508,7 +1445,6 @@ def _get_weights_with_merged_embedding(
     # this is compatible with most of quantization,
     # because they won't quantize embed_tokens
     embedding_weights = torch.cat(
-        [embedding_weights["embedding"], embedding_weights["new_embedding"]],
-        dim=0,
+        [embedding_weights["embedding"], embedding_weights["new_embedding"]], dim=0
     )
     yield ("model.embed_tokens.weight", embedding_weights)

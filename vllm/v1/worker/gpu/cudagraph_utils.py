@@ -68,9 +68,7 @@ def _is_compatible(
 
 
 def get_uniform_token_count(
-    num_reqs: int,
-    num_tokens: int,
-    max_query_len: int,
+    num_reqs: int, num_tokens: int, max_query_len: int
 ) -> int | None:
     """
     Return the uniform token count if batch is uniform, else None.
@@ -158,9 +156,7 @@ class CudaGraphManager:
                     else None
                 )
                 desc = BatchExecutionDescriptor(
-                    cg_mode=mixed_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=num_reqs,
+                    cg_mode=mixed_mode, num_tokens=num_tokens, num_reqs=num_reqs
                 )
                 descs_by_mode[mixed_mode].append(desc)
                 descs_by_token_count[num_tokens].append(desc)
@@ -254,10 +250,7 @@ class CudaGraphManager:
         return captured_attn_states
 
     def dispatch(
-        self,
-        num_reqs: int,
-        num_tokens: int,
-        uniform_token_count: int | None,
+        self, num_reqs: int, num_tokens: int, uniform_token_count: int | None
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
         if self._graphs_captured and 0 < num_tokens < len(self._candidates):
@@ -319,10 +312,7 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[
-            Callable[[CUDAGraphMode], None],
-            CapturedAttentionState,
-        ]:
+        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (

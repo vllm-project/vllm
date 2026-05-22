@@ -4,9 +4,7 @@
 import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 # Using mistral tokenizer as a generic mock since the actual model is not on HF
@@ -80,12 +78,7 @@ CHANNEL_NO_END = {
     "content": None,
     "is_reasoning_end": False,
 }
-EMPTY = {
-    "output": "",
-    "reasoning": None,
-    "content": "",
-    "is_reasoning_end": False,
-}
+EMPTY = {"output": "", "reasoning": None, "content": "", "is_reasoning_end": False}
 NEW_LINE_NONSTREAMING = {
     "output": (
         "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
@@ -221,11 +214,7 @@ def gemma4_encode_output(generic_tokenizer, output: str) -> list[int]:
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_gemma4_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    generic_tokenizer,
-):
+def test_gemma4_reasoning(streaming: bool, param_dict: dict, generic_tokenizer):
     output = param_dict["output"]
     output_tokens = gemma4_encode_output(generic_tokenizer, output)
 

@@ -24,7 +24,7 @@ SINGLE_CONVERSATION = [
                 "type": "audio_url",
                 "audio_url": {
                     "url": "https://huggingface.co/datasets/nvidia/AudioSkills/"
-                    "resolve/main/assets/song_1.mp3",
+                    "resolve/main/assets/song_1.mp3"
                 },
             },
         ],
@@ -44,7 +44,7 @@ BATCHED_CONVERSATIONS = [
                     "type": "audio_url",
                     "audio_url": {
                         "url": "https://huggingface.co/datasets/nvidia/"
-                        "AudioSkills/resolve/main/assets/song_2.mp3",
+                        "AudioSkills/resolve/main/assets/song_2.mp3"
                     },
                 },
             ],
@@ -101,9 +101,7 @@ def test_single_generation(llm):
     )
 
     assert_output_matches(
-        outputs[0],
-        expected["transcriptions"][0],
-        expected["token_ids"][0],
+        outputs[0], expected["transcriptions"][0], expected["token_ids"][0]
     )
 
 
@@ -122,9 +120,7 @@ def test_batched_generation(llm):
 
     for i, output in enumerate(outputs):
         assert_output_matches(
-            output,
-            expected["transcriptions"][i],
-            expected["token_ids"][i],
+            output, expected["transcriptions"][i], expected["token_ids"][i]
         )
 
 
@@ -132,12 +128,10 @@ def test_single_and_batched_generation_match(llm):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=50)
 
     single_output = llm.chat(
-        messages=SINGLE_CONVERSATION,
-        sampling_params=sampling_params,
+        messages=SINGLE_CONVERSATION, sampling_params=sampling_params
     )[0]
     batched_output = llm.chat(
-        messages=BATCHED_CONVERSATIONS,
-        sampling_params=sampling_params,
+        messages=BATCHED_CONVERSATIONS, sampling_params=sampling_params
     )[0]
 
     assert single_output.outputs[0].text == batched_output.outputs[0].text

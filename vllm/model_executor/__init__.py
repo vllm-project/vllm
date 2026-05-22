@@ -3,7 +3,4 @@
 
 from vllm.model_executor.parameter import BasevLLMParameter, PackedvLLMParameter
 
-__all__ = [
-    "BasevLLMParameter",
-    "PackedvLLMParameter",
-]
+__all__ = ["BasevLLMParameter", "PackedvLLMParameter"]

@@ -183,10 +183,7 @@ def test_sampling_params_interface():
     assumes(SamplingParams, "extra_args")
 
     # dumb example use case in LMCache
-    kv_transfer_params = {
-        "lmcache.tag.user": "example_user_1",
-        "lmcache.ttl": 60,
-    }
+    kv_transfer_params = {"lmcache.tag.user": "example_user_1", "lmcache.ttl": 60}
     sampling_params = SamplingParams(
         extra_args={"kv_transfer_params": kv_transfer_params}
     )

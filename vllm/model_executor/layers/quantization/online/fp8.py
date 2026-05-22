@@ -8,28 +8,18 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEQuantConfig,
-    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
-)
+from vllm.model_executor.kernels.linear.scaled_mm import CutlassFP8ScaledMMLinearKernel
 from vllm.model_executor.layers.fused_moe import RoutedExperts
-from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    select_fp8_moe_backend,
-)
-from vllm.model_executor.layers.linear import (
-    LinearMethodBase,
-)
-from vllm.model_executor.layers.quantization.online.moe_base import (
-    OnlineMoEMethodBase,
-)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import select_fp8_moe_backend
+from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -159,10 +149,7 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, use BF16 dequant
         if envs.VLLM_BATCH_INVARIANT:
@@ -198,8 +185,7 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         super().__init__()
         self.weight_block_size = [128, 128]
         self.activation_quant_key = create_fp8_quant_key(
-            static=False,
-            group_shape=GroupShape(1, self.weight_block_size[0]),
+            static=False, group_shape=GroupShape(1, self.weight_block_size[0])
         )
         self.weight_quant_key = create_fp8_quant_key(
             static=True, group_shape=GroupShape(*self.weight_block_size)
@@ -255,19 +241,12 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         assert self.weight_block_size is not None
 
         # Note: batch invariance already handled in the function below
-        return self.fp8_linear.apply_weights(
-            layer,
-            x,
-            bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 # ---------------------------------------------------------------------------
@@ -285,12 +264,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     weight_scale_name: str
     weight_block_size: list[int] | None
 
-    def __init__(
-        self,
-        *,
-        weight_block_size: list[int] | None,
-        layer: torch.nn.Module,
-    ):
+    def __init__(self, *, weight_block_size: list[int] | None, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.weight_block_size = weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
@@ -389,15 +363,8 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online tensorwise FP8 MoE quantization.
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
-    def __init__(
-        self,
-        *,
-        layer: torch.nn.Module,
-    ):
-        super().__init__(
-            weight_block_size=None,
-            layer=layer,
-        )
+    def __init__(self, *, layer: torch.nn.Module):
+        super().__init__(weight_block_size=None, layer=layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
@@ -442,15 +409,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online blockwise FP8 MoE quantization.
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
-    def __init__(
-        self,
-        *,
-        layer: torch.nn.Module,
-    ):
-        super().__init__(
-            weight_block_size=[128, 128],
-            layer=layer,
-        )
+    def __init__(self, *, layer: torch.nn.Module):
+        super().__init__(weight_block_size=[128, 128], layer=layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -487,14 +447,10 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         for expert in range(num_experts):
             w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
-                layer.w13_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
+                layer.w13_weight[expert], block_size=block_size, use_ue8m0=False
             )
             w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
-                layer.w2_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
+                layer.w2_weight[expert], block_size=block_size, use_ue8m0=False
             )
 
         layer.weight_block_size = block_size

@@ -296,8 +296,7 @@ def _validate_dec_input(dec_input: SingletonInput) -> DecoderEngineInput:
 
 
 def _prepare_decoder_input_ids_for_generation(
-    decoder_input_ids: list[int],
-    decoder_start_token_id: int,
+    decoder_input_ids: list[int], decoder_start_token_id: int
 ) -> list[int]:
     """
     Prepare `decoder_input_ids` for generation with encoder-decoder models,
@@ -348,17 +347,14 @@ def build_enc_dec_input(
 
     if not skip_decoder_start_token:
         dec_input_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
-            dec_input_new["prompt_token_ids"],
-            decoder_start_token_id,
+            dec_input_new["prompt_token_ids"], decoder_start_token_id
         )
 
     if cache_salt := enc_input.get("cache_salt"):
         dec_input_new["cache_salt"] = cache_salt
 
     return EncoderDecoderInput(
-        type="enc_dec",
-        encoder_prompt=enc_input_new,
-        decoder_prompt=dec_input_new,
+        type="enc_dec", encoder_prompt=enc_input_new, decoder_prompt=dec_input_new
     )
 
 

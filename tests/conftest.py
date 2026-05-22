@@ -86,16 +86,8 @@ def sample_json_schema():
         "properties": {
             "name": {"type": "string"},
             "age": {"type": "integer"},
-            "skills": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                },
-            },
-            "grade": {
-                "type": "string",
-                "pattern": "^[A-D]$",
-            },
+            "skills": {"type": "array", "items": {"type": "string"}},
+            "grade": {"type": "string", "pattern": "^[A-D]$"},
             "email": {
                 "type": "string",
                 "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
@@ -154,12 +146,7 @@ class ImageAssetPrompts(TypedDict):
 
 class ImageTestAssets(list[ImageAsset]):
     def __init__(self) -> None:
-        super().__init__(
-            [
-                ImageAsset("stop_sign"),
-                ImageAsset("cherry_blossom"),
-            ]
-        )
+        super().__init__([ImageAsset("stop_sign"), ImageAsset("cherry_blossom")])
 
     def prompts(self, prompts: ImageAssetPrompts) -> list[str]:
         """
@@ -177,11 +164,7 @@ class VideoAssetPrompts(TypedDict):
 
 class VideoTestAssets(list[VideoAsset]):
     def __init__(self) -> None:
-        super().__init__(
-            [
-                VideoAsset("baby_reading"),
-            ]
-        )
+        super().__init__([VideoAsset("baby_reading")])
 
     def prompts(self, prompts: VideoAssetPrompts) -> list[str]:
         return [prompts["baby_reading"]]
@@ -194,12 +177,7 @@ class AudioAssetPrompts(TypedDict):
 
 class AudioTestAssets(list[AudioAsset]):
     def __init__(self) -> None:
-        super().__init__(
-            [
-                AudioAsset("mary_had_lamb"),
-                AudioAsset("winning_call"),
-            ]
-        )
+        super().__init__([AudioAsset("mary_had_lamb"), AudioAsset("winning_call")])
 
     def prompts(self, prompts: AudioAssetPrompts) -> list[str]:
         return [prompts["mary_had_lamb"], prompts["winning_call"]]
@@ -286,10 +264,7 @@ def workspace_init():
     create a full vLLM engine should NOT use this fixture as the engine
     will initialize the workspace manager itself.
     """
-    from vllm.v1.worker.workspace import (
-        init_workspace_manager,
-        reset_workspace_manager,
-    )
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
@@ -425,8 +400,7 @@ class HfRunner:
         self.model_name = model_name
 
         self.config = AutoConfig.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
+            model_name, trust_remote_code=trust_remote_code
         )
         # HF runner should use the HF config so that it's consistent with the HF model
         if self.config.__module__.startswith("vllm.transformers_utils.configs"):
@@ -434,8 +408,7 @@ class HfRunner:
 
             del CONFIG_MAPPING._extra_content[self.config.model_type]
             self.config = AutoConfig.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+                model_name, trust_remote_code=trust_remote_code
             )
         self.device = self.get_default_device()
         self.dtype = dtype = _get_and_verify_dtype(
@@ -499,8 +472,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    tokenizer_name or model_name,
-                    trust_remote_code=trust_remote_code,
+                    tokenizer_name or model_name, trust_remote_code=trust_remote_code
                 )
             )
 
@@ -512,8 +484,7 @@ class HfRunner:
             from transformers import AutoProcessor
 
             self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+                model_name, trust_remote_code=trust_remote_code
             )
         if skip_tokenizer_init:
             if self.processor is None:
@@ -554,12 +525,7 @@ class HfRunner:
                     if tokenization_kwargs is not None
                     else {}
                 )
-                processor_kwargs.update(
-                    {
-                        "text": prompt,
-                        "return_tensors": "pt",
-                    }
-                )
+                processor_kwargs.update({"text": prompt, "return_tensors": "pt"})
                 if images is not None and (image := images[i]) is not None:
                     processor_kwargs["images"] = image
                 if videos is not None and (video := videos[i]) is not None:
@@ -590,7 +556,7 @@ class HfRunner:
                         "When providing prompt token ids multimodal inputs are not supported."
                     )
                 input_dict = {
-                    "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0),
+                    "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0)
                 }
                 all_inputs.append(input_dict)
 
@@ -641,18 +607,14 @@ class HfRunner:
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
             output_ids: torch.Tensor = self.model.generate(
-                **self.wrap_device(inputs),
-                use_cache=True,
-                **kwargs,
+                **self.wrap_device(inputs), use_cache=True, **kwargs
             )
             if self.processor is None:
                 raise RuntimeError(
                     "HfRunner.processor is not initialized; cannot decode output."
                 )
             output_str = self.processor.batch_decode(
-                output_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
+                output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )
             outputs.append((output_ids.cpu().tolist(), output_str))
         return outputs
@@ -736,8 +698,7 @@ class HfRunner:
         return all_logprobs
 
     def _hidden_states_to_seq_logprobs(
-        self,
-        hidden_states: tuple[tuple[torch.Tensor, ...], ...],
+        self, hidden_states: tuple[tuple[torch.Tensor, ...], ...]
     ) -> list[torch.Tensor]:
         output_embeddings = self.model.get_output_embeddings()
 
@@ -780,10 +741,7 @@ class HfRunner:
 
             seq_logprobs_lst.append(tok_logprobs_dct)
 
-        return (
-            seq_logprobs_lst,
-            output_len,
-        )
+        return (seq_logprobs_lst, output_len)
 
     def generate_greedy_logprobs_limit(
         self,
@@ -826,10 +784,9 @@ class HfRunner:
                 getattr(output, "hidden_states", None) or output.decoder_hidden_states
             )
 
-            (
-                seq_logprobs_lst,
-                output_len,
-            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
+            (seq_logprobs_lst, output_len) = self._hidden_states_to_logprobs(
+                hidden_states, num_logprobs
+            )
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
@@ -1025,8 +982,7 @@ class VllmRunner:
 
     @staticmethod
     def _final_steps_generate_w_logprobs(
-        req_outputs: list[RequestOutput],
-        include_prompt_token_ids: bool = False,
+        req_outputs: list[RequestOutput], include_prompt_token_ids: bool = False
     ) -> list[TokensTextLogprobsPromptLogprobs]:
         outputs: list[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
@@ -1226,11 +1182,7 @@ class VllmRunner:
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
-        self,
-        text_1: list[str] | str,
-        text_2: list[str] | str,
-        *args,
-        **kwargs,
+        self, text_1: list[str] | str, text_2: list[str] | str, *args, **kwargs
     ) -> list[float]:
         req_outputs = self.llm.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
@@ -1640,8 +1592,7 @@ def clean_gpu_memory_between_tests():
     if num_gpus > 0:
         try:
             wait_for_gpu_memory_to_clear(
-                devices=list(range(num_gpus)),
-                threshold_ratio=0.1,
+                devices=list(range(num_gpus)), threshold_ratio=0.1
             )
         except ValueError as e:
             logger.info("Failed to clean GPU memory: %s", e)

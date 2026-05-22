@@ -87,9 +87,7 @@ def merge_attn_states(
             output_scale,
         )
     else:
-        from vllm.v1.attention.ops.triton_merge_attn_states import (
-            merge_attn_states,
-        )
+        from vllm.v1.attention.ops.triton_merge_attn_states import merge_attn_states
 
         return merge_attn_states(
             output,

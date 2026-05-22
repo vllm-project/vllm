@@ -33,10 +33,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -201,8 +198,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv_lora = qkv_lora.clone()
         q_c, kv_lora = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-            dim=-1,
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
         )
         q = self.q_b_proj(q_c)[0]
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -224,10 +220,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         return q, kv_c, k_pe, dummy
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops = [
-            INDEX_SELECT_OP,
-            torch.ops.vllm.unified_mla_kv_cache_update.default,
-        ]
+        ops = [INDEX_SELECT_OP, torch.ops.vllm.unified_mla_kv_cache_update.default]
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
@@ -277,19 +270,12 @@ def test_mla_rope_kvcache_cat_fusion(
     torch.manual_seed(0)
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            model="deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-        ),
-        cache_config=CacheConfig(
-            block_size=block_size,
-            cache_dtype=kv_cache_dtype,
-        ),
+        model_config=ModelConfig(model="deepseek-ai/DeepSeek-V2-Lite", dtype=dtype),
+        cache_config=CacheConfig(block_size=block_size, cache_dtype=kv_cache_dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(
-                fuse_rope_kvcache_cat_mla=True,
-                eliminate_noops=True,
+                fuse_rope_kvcache_cat_mla=True, eliminate_noops=True
             ),
         ),
     )
@@ -353,9 +339,7 @@ def test_mla_rope_kvcache_cat_fusion(
         T = 5
 
         qkv_lora = torch.randn(
-            T,
-            q_lora_rank + kv_lora_rank + qk_rope_head_dim,
-            dtype=dtype,
+            T, q_lora_rank + kv_lora_rank + qk_rope_head_dim, dtype=dtype
         )
         pos = torch.arange(T, dtype=torch.long)
 

@@ -12,9 +12,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -59,10 +57,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
 
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
@@ -123,9 +118,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
 
         if not get_pp_group().is_last_rank:
@@ -169,10 +162,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
             # FSE: remap shared_expert weights to the fused expert slot
             if is_fse and "mlp.shared_expert." in name:
-                name = name.replace(
-                    "mlp.shared_expert.",
-                    f"mlp.experts.{num_routed}.",
-                )
+                name = name.replace("mlp.shared_expert.", f"mlp.experts.{num_routed}.")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -237,11 +227,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 @support_torch_compile
 class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["up_proj", "down_proj"],
     }
 
@@ -289,9 +275,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 

@@ -84,10 +84,7 @@ class AllSparkLinearKernel(MPLinearKernel):
         replace_parameter(layer, self.w_s_name, new_scale_param.data)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
         gemm_args = self.gemm_args

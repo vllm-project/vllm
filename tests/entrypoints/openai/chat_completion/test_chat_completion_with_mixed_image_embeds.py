@@ -51,9 +51,7 @@ def server_args() -> list[str]:
 @pytest.fixture(scope="module")
 def server(server_args):
     with RemoteOpenAIServer(
-        MODEL_NAME,
-        server_args,
-        max_wait_seconds=600,
+        MODEL_NAME, server_args, max_wait_seconds=600
     ) as remote_server:
         yield remote_server
 
@@ -100,9 +98,7 @@ def aligned_content_and_embeds_b64() -> tuple[str, str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "image_first",
-    [True, False],
-    ids=["image_url-then-text", "text-then-image_url"],
+    "image_first", [True, False], ids=["image_url-then-text", "text-then-image_url"]
 )
 async def test_text_content_and_prompt_embeds_match_with_image_url(
     client: openai.AsyncOpenAI,

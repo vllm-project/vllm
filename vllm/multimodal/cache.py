@@ -105,8 +105,7 @@ class MultiModalCache:
 
         # These are not subclasses of dict
         if isinstance(
-            leaf,
-            (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem),
+            leaf, (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem)
         ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
@@ -117,12 +116,7 @@ class MultiModalCache:
         return sys.getsizeof(leaf)
 
     @classmethod
-    def get_item_size(
-        cls,
-        value: MultiModalCacheValue,
-        *,
-        debug: bool = False,
-    ) -> int:
+    def get_item_size(cls, value: MultiModalCacheValue, *, debug: bool = False) -> int:
         size = json_reduce_leaves(
             operator.add, json_map_leaves(cls.get_leaf_size, value)
         )
@@ -156,11 +150,7 @@ class MultiModalCache:
 
     @classmethod
     def get_lru_cache(
-        cls,
-        capacity_gb: float,
-        value_type: type[_V],
-        *,
-        debug: bool = False,
+        cls, capacity_gb: float, value_type: type[_V], *, debug: bool = False
     ) -> LRUCache[str, _V]:
         return LRUCache(
             GiB_bytes * capacity_gb,
@@ -198,11 +188,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     """
 
     @abstractmethod
-    def get_and_update_item(
-        self,
-        mm_item: _I,
-        mm_hash: str,
-    ) -> _O:
+    def get_and_update_item(self, mm_item: _I, mm_hash: str) -> _O:
         """
         Possibly update a multi-modal item based on whether it is
         in the underlying cache.
@@ -218,11 +204,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         """
         raise NotImplementedError
 
-    def get_and_update(
-        self,
-        mm_items: Sequence[_I],
-        mm_hashes: list[str],
-    ) -> list[_O]:
+    def get_and_update(self, mm_items: Sequence[_I], mm_hashes: list[str]) -> list[_O]:
         """
         Possibly update a sequence of multi-modal items based on whether they
         are in the underlying cache.
@@ -340,8 +322,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         mm_config = model_config.get_multimodal_config()
 
         self._cache = MultiModalCache.get_lru_cache(
-            mm_config.mm_processor_cache_gb,
-            MultiModalProcessorCacheItem,
+            mm_config.mm_processor_cache_gb, MultiModalProcessorCacheItem
         )
 
     @override
@@ -350,9 +331,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
     @override
     def get_and_update_item(
-        self,
-        mm_item: MultiModalProcessorCacheInItem,
-        mm_hash: str,
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
     ) -> MultiModalProcessorCacheOutItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item.item, cached_item.prompt_updates
@@ -398,8 +377,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         mm_config = model_config.get_multimodal_config()
 
         self._cache = MultiModalCache.get_lru_cache(
-            mm_config.mm_processor_cache_gb,
-            MultiModalProcessorCacheItemMetadata,
+            mm_config.mm_processor_cache_gb, MultiModalProcessorCacheItemMetadata
         )
 
     @override
@@ -408,9 +386,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def get_and_update_item(
-        self,
-        mm_item: MultiModalProcessorCacheInItem,
-        mm_hash: str,
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
     ) -> MultiModalProcessorCacheOutItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return None, cached_item.prompt_updates
@@ -486,9 +462,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def get_and_update_item(
-        self,
-        mm_item: MultiModalProcessorCacheInItem,
-        mm_hash: str,
+        self, mm_item: MultiModalProcessorCacheInItem, mm_hash: str
     ) -> MultiModalProcessorCacheOutItem:
         if self._shm_cache.is_cached(mm_hash):
             self._hits += 1
@@ -564,19 +538,9 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         for mm_hash in dangling_hashes:
             del self._p0_cache[mm_hash]
 
-    def address_as_item(
-        self,
-        address: int,
-        monotonic_id: int,
-    ) -> MultiModalKwargsItem:
-        addr_elem = MultiModalFieldElem(
-            data=address,
-            field=MultiModalBatchedField(),
-        )
-        id_elem = MultiModalFieldElem(
-            data=monotonic_id,
-            field=MultiModalBatchedField(),
-        )
+    def address_as_item(self, address: int, monotonic_id: int) -> MultiModalKwargsItem:
+        addr_elem = MultiModalFieldElem(data=address, field=MultiModalBatchedField())
+        id_elem = MultiModalFieldElem(data=monotonic_id, field=MultiModalBatchedField())
 
         return MultiModalKwargsItem({"address": addr_elem, "monotonic_id": id_elem})
 
@@ -587,8 +551,7 @@ class BaseMultiModalReceiverCache(
     """The required interface for caches on P1."""
 
     def get_and_update_features(
-        self,
-        mm_features: list["MultiModalFeatureSpec"],
+        self, mm_features: list["MultiModalFeatureSpec"]
     ) -> list["MultiModalFeatureSpec"]:
         """
         Update multimodal features with cached encoder outputs.
@@ -609,9 +572,7 @@ class BaseMultiModalReceiverCache(
 
     @abstractmethod
     def touch_receiver_cache_item(
-        self,
-        mm_hash: str,
-        mm_item: MultiModalKwargsItem | None = None,
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None
     ) -> None:
         """
         Update the cache eviction order for a multi-modal item.
@@ -644,15 +605,12 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         mm_config = model_config.get_multimodal_config()
 
         self._cache = MultiModalCache.get_lru_cache(
-            mm_config.mm_processor_cache_gb,
-            MultiModalKwargsItem,
+            mm_config.mm_processor_cache_gb, MultiModalKwargsItem
         )
 
     @override
     def get_and_update_item(
-        self,
-        mm_item: MultiModalKwargsItem | None,
-        mm_hash: str,
+        self, mm_item: MultiModalKwargsItem | None, mm_hash: str
     ) -> MultiModalKwargsItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
@@ -664,9 +622,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_receiver_cache_item(
-        self,
-        mm_hash: str,
-        mm_item: MultiModalKwargsItem | None = None,
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None
     ) -> None:
         self._cache.touch(mm_hash)
 
@@ -685,11 +641,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     - If not, return the input.
     """
 
-    def __init__(
-        self,
-        vllm_config: "VllmConfig",
-        shared_worker_lock: LockType,
-    ) -> None:
+    def __init__(self, vllm_config: "VllmConfig", shared_worker_lock: LockType) -> None:
         super().__init__()
 
         self.world_size = vllm_config.parallel_config.world_size
@@ -710,9 +662,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def get_and_update_item(
-        self,
-        mm_item: MultiModalKwargsItem | None,
-        mm_hash: str,
+        self, mm_item: MultiModalKwargsItem | None, mm_hash: str
     ) -> MultiModalKwargsItem:
         assert mm_item is not None, f"Expected an address item for {mm_hash=}"
         if "address" in mm_item:
@@ -724,9 +674,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 
     @override
     def touch_receiver_cache_item(
-        self,
-        mm_hash: str,
-        mm_item: MultiModalKwargsItem | None = None,
+        self, mm_hash: str, mm_item: MultiModalKwargsItem | None = None
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.
         Increments reader_count on receiver side."""

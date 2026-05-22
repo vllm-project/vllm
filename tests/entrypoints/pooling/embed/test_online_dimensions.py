@@ -23,9 +23,7 @@ MODELS = [
     ),
 ]
 
-input_texts = [
-    "The chef prepared a delicious meal.",
-]
+input_texts = ["The chef prepared a delicious meal."]
 
 
 @pytest.fixture(scope="module", params=MODELS)

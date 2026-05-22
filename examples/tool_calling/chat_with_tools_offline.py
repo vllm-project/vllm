@@ -116,12 +116,7 @@ outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
 output = outputs[0].outputs[0].text.strip()
 
 # append the assistant message
-messages.append(
-    {
-        "role": "assistant",
-        "content": output,
-    }
-)
+messages.append({"role": "assistant", "content": output})
 
 # let's now actually parse and execute the model's output simulating an API call by using the
 # above defined function

@@ -3,15 +3,10 @@
 
 
 import torch
-from compressed_tensors.quantization import (
-    QuantizationArgs,
-    QuantizationStrategy,
-)
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    RoutedExperts,
-)
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,

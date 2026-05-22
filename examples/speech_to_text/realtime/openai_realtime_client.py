@@ -141,10 +141,7 @@ if __name__ == "__main__":
         help="vLLM server host (default: localhost)",
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="vLLM server port (default: 8000)",
+        "--port", type=int, default=8000, help="vLLM server port (default: 8000)"
     )
     args = parser.parse_args()
     main(args)

@@ -40,9 +40,7 @@ def striding_block_hashes(
 
 
 def send_lmcache_request(
-    mq_client: MessageQueueClient,
-    request_type: RequestType,
-    payloads: list[Any],
+    mq_client: MessageQueueClient, request_type: RequestType, payloads: list[Any]
 ) -> MessagingFuture[Any]:
     """
     Helper function to send the request to the LMCache multiprocess server
@@ -62,9 +60,7 @@ def send_lmcache_request(
     return future
 
 
-def get_lmcache_chunk_size(
-    mq_client: MessageQueueClient,
-) -> int:
+def get_lmcache_chunk_size(mq_client: MessageQueueClient) -> int:
     """
     Helper function to get the LMCache chunk size from the server
 
@@ -244,18 +240,11 @@ class LMCacheMPSchedulerAdapter:
                 return
             keys = [
                 self._create_key(
-                    token_ids,
-                    start=0,
-                    end=aligned_end,
-                    request_id=request_id,
+                    token_ids, start=0, end=aligned_end, request_id=request_id
                 ).no_worker_id_version()
             ]
 
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [keys],
-        )
+        future = send_lmcache_request(self.mq_client, RequestType.LOOKUP, [keys])
         self.lookup_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
@@ -305,11 +294,7 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
-        send_lmcache_request(
-            self.mq_client,
-            RequestType.END_SESSION,
-            [request_id],
-        )
+        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
     # Helper functions
     def _create_key(
@@ -498,10 +483,7 @@ class LMCacheMPWorkerAdapter:
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
-        self,
-        request_ids: list[str],
-        ops: list[LoadStoreOp],
-        event: torch.cuda.Event,
+        self, request_ids: list[str], ops: list[LoadStoreOp], event: torch.cuda.Event
     ):
         """
         Submit a batched store request to LMCache
@@ -536,21 +518,13 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
+            [all_keys, self.instance_id, block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
-        self,
-        request_ids: list[str],
-        ops: list[LoadStoreOp],
-        event: torch.cuda.Event,
+        self, request_ids: list[str], ops: list[LoadStoreOp], event: torch.cuda.Event
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -585,12 +559,7 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
+            [all_keys, self.instance_id, block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
 
@@ -693,9 +662,7 @@ class LMCacheMPWorkerAdapter:
         self.mq_client.close()
 
     # Helper functions
-    def _update_and_get_finished_store(
-        self,
-    ) -> set[str]:
+    def _update_and_get_finished_store(self) -> set[str]:
         """Converge the internal states about finished stores
         and returns the 'safe finished store request ids' back
         """

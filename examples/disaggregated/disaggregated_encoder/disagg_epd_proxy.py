@@ -74,9 +74,7 @@ def extract_mm_items(request_data: dict) -> list[dict]:
 
 
 async def fanout_encoder_primer(
-    orig_request: dict,
-    e_urls: list[str],
-    req_id: str,
+    orig_request: dict, e_urls: list[str], req_id: str
 ) -> None:
     """
     1. Build one request *per MM item* with all text removed.
@@ -105,18 +103,14 @@ async def fanout_encoder_primer(
         encoder_req = {
             # You *may* need to keep additional fields
             "model": orig_request.get("model"),
-            "messages": [
-                {"role": "user", "content": [item]},
-            ],
+            "messages": [{"role": "user", "content": [item]}],
             # Only need 1 token so the server actually runs the encoder path
             "max_tokens": 1,
             "stream": False,
         }
         tasks.append(
             encode_session.post(
-                f"{target_url}/v1/chat/completions",
-                json=encoder_req,
-                headers=headers,
+                f"{target_url}/v1/chat/completions", json=encoder_req, headers=headers
             )
         )
 
@@ -148,8 +142,7 @@ async def fanout_encoder_primer(
                 detail,
             )
             raise HTTPException(
-                status_code=r.status,
-                detail=f"Encoder request failed: {detail}",
+                status_code=r.status, detail=f"Encoder request failed: {detail}"
             )
 
     logger.info(
@@ -157,11 +150,7 @@ async def fanout_encoder_primer(
     )
 
 
-async def maybe_prefill(
-    req_data: dict,
-    p_url: str,
-    req_id: str,
-) -> dict:
+async def maybe_prefill(req_data: dict, p_url: str, req_id: str) -> dict:
     """
     - Do prefill-only task if p_url exist;
     - Return modified request data with kv transfer params (for nixl connector)
@@ -182,11 +171,7 @@ async def maybe_prefill(
         return req_data
 
 
-async def process_prefill_stage(
-    req_data: dict,
-    p_url: str,
-    req_id: str,
-) -> dict:
+async def process_prefill_stage(req_data: dict, p_url: str, req_id: str) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
 
@@ -359,9 +344,7 @@ async def forward_stream(
 
         # Streaming response
         async with decode_session.post(
-            f"{d_url}/v1/chat/completions",
-            json=req_data,
-            headers=headers,
+            f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
             resp.raise_for_status()
             async for chunk in resp.content.iter_chunked(1024):
@@ -461,10 +444,7 @@ async def health_check():
 
 
 async def _post_if_available(
-    session: aiohttp.ClientSession,
-    url: str,
-    payload: dict,
-    headers: dict,
+    session: aiohttp.ClientSession, url: str, payload: dict, headers: dict
 ) -> dict | None:
     """
     POST `payload` to `url`.
@@ -518,8 +498,7 @@ async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: s
     # If *all* clusters said “I don’t have that route”, surface an error
     if encode_res is prefill_res is decode_res is None:
         raise HTTPException(
-            status_code=503,
-            detail="Profiling endpoints are disabled on all clusters",
+            status_code=503, detail="Profiling endpoints are disabled on all clusters"
         )
 
     return {

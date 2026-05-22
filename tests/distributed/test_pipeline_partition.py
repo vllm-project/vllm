@@ -59,9 +59,6 @@ def test_custom_layer_partition(monkeypatch: pytest.MonkeyPatch):
     ],
 )
 def test_uneven_auto_partition(
-    num_hidden_layers: int,
-    pp_size: int,
-    pp_rank: int,
-    indices: tuple[int, int],
+    num_hidden_layers: int, pp_size: int, pp_rank: int, indices: tuple[int, int]
 ):
     assert indices == get_pp_indices(num_hidden_layers, pp_rank, pp_size)

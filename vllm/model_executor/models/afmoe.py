@@ -90,10 +90,7 @@ class AfmoeMoE(nn.Module):
 
         # Router gate
         self.gate = nn.Linear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            dtype=torch.float32,
+            config.hidden_size, config.num_experts, bias=False, dtype=torch.float32
         )
         self.expert_bias = nn.Parameter(
             torch.empty(config.num_experts, dtype=torch.float32)
@@ -259,9 +256,7 @@ class AfmoeAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         gate, _ = self.gate_proj(hidden_states)
@@ -353,10 +348,7 @@ class AfmoeDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)  # attn norm b
 
         # Fully Connected
@@ -596,21 +588,12 @@ class AfmoeModel(nn.Module, EagleModelMixin):
 
 class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_suffix={
-            ".router.gate.weight": ".gate.weight",
-        },
+        orig_to_new_suffix={".router.gate.weight": ".gate.weight"}
     )
 
     fall_back_to_pt_during_load = False

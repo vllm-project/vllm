@@ -14,22 +14,10 @@ HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256, 512]
 HEAD_DIMS_16 = [80, 112]
 
 # ISA types
-ISA_TYPES = {
-    "AMX": 0,
-    "VEC": 1,
-    "VEC16": 2,
-    "NEON": 3,
-    "VXE": 4,
-    "RVV": 5,
-    "VSX": 6,
-}
+ISA_TYPES = {"AMX": 0, "VEC": 1, "VEC16": 2, "NEON": 3, "VXE": 4, "RVV": 5, "VSX": 6}
 
 # KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
-KV_CACHE_IDX = {
-    "auto": 0,
-    "fp8_e4m3": 1,
-    "fp8_e5m2": 2,
-}
+KV_CACHE_IDX = {"auto": 0, "fp8_e4m3": 1, "fp8_e5m2": 2}
 
 # C++ type for each kv_cache index
 KV_CACHE_CPP_TYPES = {
@@ -206,19 +194,13 @@ def generate_header_file() -> str:
         )
 
     header += _macro_block(
-        "#if defined(CPU_CAPABILITY_AMXBF16)",
-        ["AMX", "VEC", "VEC16"],
-        fp8=True,
+        "#if defined(CPU_CAPABILITY_AMXBF16)", ["AMX", "VEC", "VEC16"], fp8=True
     )
     header += _macro_block(
-        "#elif defined(__aarch64__)",
-        ["NEON", "VEC", "VEC16"],
-        fp8=False,
+        "#elif defined(__aarch64__)", ["NEON", "VEC", "VEC16"], fp8=False
     )
     header += _macro_block(
-        "#elif defined(__s390x__)",
-        ["VXE", "VEC", "VEC16"],
-        fp8=False,
+        "#elif defined(__s390x__)", ["VXE", "VEC", "VEC16"], fp8=False
     )
     # RISC-V with RVV.  cpu_attn_rvv.hpp supports VLEN=128 and VLEN=256
     # via RVVI() macros.  Builds with a supported VLEN get
@@ -229,31 +211,13 @@ def generate_header_file() -> str:
         ["RVV", "VEC", "VEC16"],
         fp8=False,
     )
+    header += _macro_block("#elif defined(__riscv)", ["VEC", "VEC16"], fp8=False)
     header += _macro_block(
-        "#elif defined(__riscv)",
-        ["VEC", "VEC16"],
-        fp8=False,
+        "#elif defined(__powerpc__)", ["VSX", "VEC", "VEC16"], fp8=False
     )
-    header += _macro_block(
-        "#elif defined(__powerpc__)",
-        ["VSX", "VEC", "VEC16"],
-        fp8=False,
-    )
-    header += _macro_block(
-        "#elif defined(__AVX512F__)",
-        ["VEC", "VEC16"],
-        fp8=True,
-    )
-    header += _macro_block(
-        "#elif defined(__AVX2__)",
-        ["VEC", "VEC16"],
-        fp8=False,
-    )
-    header += _macro_block(
-        "#else",
-        ["VEC", "VEC16"],
-        fp8=False,
-    )
+    header += _macro_block("#elif defined(__AVX512F__)", ["VEC", "VEC16"], fp8=True)
+    header += _macro_block("#elif defined(__AVX2__)", ["VEC", "VEC16"], fp8=False)
+    header += _macro_block("#else", ["VEC", "VEC16"], fp8=False)
     header += (
         "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ /"
         " __riscv / __powerpc__ */\n\n"

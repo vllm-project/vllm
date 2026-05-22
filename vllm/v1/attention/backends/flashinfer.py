@@ -20,11 +20,7 @@ from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
 from vllm import envs
-from vllm.config import (
-    CUDAGraphMode,
-    VllmConfig,
-    get_current_vllm_config_or_none,
-)
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -36,10 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import (
-    can_use_trtllm_attention,
-    use_trtllm_attention,
-)
+from vllm.utils.flashinfer import can_use_trtllm_attention, use_trtllm_attention
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
@@ -213,9 +206,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class BatchDCPPrefillWrapper:
     def __init__(
-        self,
-        workspace_buffer: torch.Tensor | None = None,
-        dcp_a2a: bool = False,
+        self, workspace_buffer: torch.Tensor | None = None, dcp_a2a: bool = False
     ):
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
@@ -298,28 +289,16 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
         )
         output_context, lse_context = self._dcp_combine(
-            output_context_tmp,
-            lse_context_tmp,
-            get_dcp_group(),
-            return_lse=True,
+            output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
-            prefill_query,
-            key,
-            value,
-            return_lse=True,
+            prefill_query, key, value, return_lse=True
         )
         lse_query = lse_query.transpose(0, 1).contiguous()
 
-        merge_attn_states(
-            out,
-            output_context,
-            lse_context,
-            output_query,
-            lse_query,
-        )
+        merge_attn_states(out, output_context, lse_context, output_query, lse_query)
         return out
 
 
@@ -734,8 +713,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
             if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
+                num_qo_heads=num_qo_heads, num_kv_heads=spec.num_kv_heads
             ):
                 has_trtllm_support = False
                 break
@@ -764,17 +742,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self._prefill_wrapper is None:
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
-                    workspace_buffer=self._get_workspace_buffer(),
-                    dcp_a2a=self.dcp_a2a,
+                    workspace_buffer=self._get_workspace_buffer(), dcp_a2a=self.dcp_a2a
                 )
             else:
                 # NVFP4 KV cache requires the trtllm-gen backend inside
                 # the wrapper; fa2/fa3 do not support nvfp4.
                 backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
-                    backend=backend,
+                    self._get_workspace_buffer(), get_kv_cache_layout(), backend=backend
                 )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -845,9 +820,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
-            num_blocks_np,
-            dtype=np.int32,
-            out=self.paged_kv_indptr.np[1 : num_reqs + 1],
+            num_blocks_np, dtype=np.int32, out=self.paged_kv_indptr.np[1 : num_reqs + 1]
         )
         # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
         # after this line (e.g., for cuda graphs), we need to copy the data to
@@ -1025,11 +998,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert num_blocks_np is not None
             assert seq_lens_np is not None
             paged_kv_indices = self._compute_flashinfer_kv_metadata(
-                num_blocks_np,
-                seq_lens_np,
-                block_table_tensor,
-                num_reqs,
-                page_size,
+                num_blocks_np, seq_lens_np, block_table_tensor, num_reqs, page_size
             )
         else:
             paged_kv_indices = None
@@ -1108,9 +1077,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Assign to slice to avoid cpu sync.
                 paged_kv_indptr_prefill_gpu[:1] = 0
                 torch.cumsum(
-                    num_blocks_per_req,
-                    dim=0,
-                    out=paged_kv_indptr_prefill_gpu[1:],
+                    num_blocks_per_req, dim=0, out=paged_kv_indptr_prefill_gpu[1:]
                 )
                 # Compute max_q_len for prefill requests
                 query_lens_prefill_cpu = (
@@ -1158,8 +1125,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
                 else:
                     assert isinstance(
-                        prefill_wrapper,
-                        BatchPrefillWithPagedKVCacheWrapper,
+                        prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
                     # NVFP4 trtllm kernel only supports FP8 output;
                     # use FP8 o_data_type so the wrapper matches the
@@ -1329,9 +1295,7 @@ class FlashInferImpl(AttentionImpl):
         if self.is_kvcache_nvfp4 and vllm_config is not None:
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self._nvfp4_fp8_out = torch.empty(
-                (max_num_tokens, num_heads, head_size),
-                dtype=FP8_DTYPE,
-                device="cuda",
+                (max_num_tokens, num_heads, head_size), dtype=FP8_DTYPE, device="cuda"
             )
         else:
             self._nvfp4_fp8_out = None
@@ -1731,9 +1695,7 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_sf=kv_cache_sf,
                     )
                     output[:num_decode_tokens] = self.dcp_combine(
-                        output_tmp,
-                        lse,
-                        get_dcp_group(),
+                        output_tmp, lse, get_dcp_group()
                     )
                 else:
                     decode_wrapper.run(

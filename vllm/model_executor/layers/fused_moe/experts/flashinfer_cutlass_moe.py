@@ -67,9 +67,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
     def __init__(
-        self,
-        moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        self, moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
     ):
         super().__init__(moe_config, quant_config)
 
@@ -116,15 +114,11 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             )
             if self.gemm1_clamp_limit is None:
                 self.gemm1_clamp_limit = torch.tensor(
-                    [7.0] * self.num_experts,
-                    dtype=torch.float32,
-                    device=self.device,
+                    [7.0] * self.num_experts, dtype=torch.float32, device=self.device
                 )
             if quant_config.quant_dtype == "mxfp8":
                 self.fake_input_scale = torch.ones(
-                    self.num_experts,
-                    device=self.device,
-                    dtype=torch.float32,
+                    self.num_experts, device=self.device, dtype=torch.float32
                 )
 
     @property
@@ -151,8 +145,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         p = current_platform
         scheme = (weight_key, activation_key)
@@ -160,29 +153,18 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         return (
             # unquantized and fp8 static per-tensor on 9.0+
             (
-                scheme
-                in [
-                    (None, None),
-                    (kFp8StaticTensorSym, kFp8StaticTensorSym),
-                ]
+                scheme in [(None, None), (kFp8StaticTensorSym, kFp8StaticTensorSym)]
                 and p.has_device_capability(90)
             )
             # fp8 block-scale, wmxfp4a16 on 9.0
             or (
                 scheme
-                in [
-                    (kMxfp4Static, None),
-                    (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-                ]
+                in [(kMxfp4Static, None), (kFp8Static128BlockSym, kFp8Dynamic128Sym)]
                 and p.is_device_capability(90)
             )
             # nvfp4, wmxfp4amxfp8 on 10.0+
             or (
-                scheme
-                in [
-                    (kMxfp4Static, kMxfp8Dynamic),
-                    (kNvfp4Static, kNvfp4Dynamic),
-                ]
+                scheme in [(kMxfp4Static, kMxfp8Dynamic), (kNvfp4Static, kNvfp4Dynamic)]
                 and p.has_device_capability(100)
             )
         )
@@ -356,19 +338,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 assert hidden_states.dtype == torch.bfloat16
                 fc1_expert_weights = w1
                 fc2_expert_weights = w2
-                quant_scales = [
-                    self.w1_scale,
-                    self.w2_scale,
-                ]
+                quant_scales = [self.w1_scale, self.w2_scale]
                 a1q_scale = None
                 use_w4_group_scaling = True
 
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
-            quant_scales = [
-                self.w1_scale,
-                self.w2_scale,
-            ]
+            quant_scales = [self.w1_scale, self.w2_scale]
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2

@@ -111,9 +111,7 @@ def find_tcmalloc() -> Path | None:
     try:
         # get all shared libs the dynamic loader knows about
         output = subprocess.check_output(
-            ["ldconfig", "-p"],
-            text=True,
-            stderr=subprocess.DEVNULL,
+            ["ldconfig", "-p"], text=True, stderr=subprocess.DEVNULL
         )
     except Exception:
         return None
@@ -403,9 +401,7 @@ class cmake_build_ext(build_ext):
             if os.path.exists(deep_gemm_build):
                 print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
                 shutil.copytree(
-                    deep_gemm_build,
-                    "vllm/third_party/deep_gemm",
-                    dirs_exist_ok=True,
+                    deep_gemm_build, "vllm/third_party/deep_gemm", dirs_exist_ok=True
                 )
 
 
@@ -806,10 +802,7 @@ class precompiled_wheel_utils:
             ]
             github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
             if github_token:
-                curl_cmd += [
-                    "-H",
-                    f"Authorization: token {github_token}",
-                ]
+                curl_cmd += ["-H", f"Authorization: token {github_token}"]
             resp_json = subprocess.check_output(curl_cmd).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
@@ -1137,7 +1130,7 @@ else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if USE_PRECOMPILED_EXTENSIONS
-        else cmake_build_ext,
+        else cmake_build_ext
     }
 if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
     cmdclass["build_rust"] = precompiled_build_rust
@@ -1154,7 +1147,7 @@ rust_extensions = [
         features=["native-tls-vendored"],
         binding=Binding.Exec,
         optional=not should_require_rust_frontend(),
-    ),
+    )
 ]
 
 setup(
@@ -1198,7 +1191,7 @@ setup(
         "triton-cpu": [
             "triton @ "
             "git+https://github.com/triton-lang/triton-cpu.git@270e696d ; "
-            "platform_machine == 'x86_64'",
+            "platform_machine == 'x86_64'"
         ],  # Remove after stable release
     },
     cmdclass=cmdclass,

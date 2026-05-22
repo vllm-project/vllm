@@ -21,11 +21,7 @@ logger = init_logger(__name__)
 
 
 class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer: Grok2Tokenizer | None,
-    ) -> None:
+    def __init__(self, config: VllmConfig, tokenizer: Grok2Tokenizer | None) -> None:
         super().__init__(config, tokenizer)
 
         self._apply_chat_template_async = make_async(
@@ -36,9 +32,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
         return self.get_tokenizer().apply_chat_template(*args, **kwargs)
 
     def render_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -63,9 +57,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
         return conversation, prompt
 
     async def render_messages_async(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,

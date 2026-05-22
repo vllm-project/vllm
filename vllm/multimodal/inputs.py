@@ -7,15 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
 from itertools import accumulate
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Literal,
-    TypeAlias,
-    TypedDict,
-    Union,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, Union, cast
 
 import numpy as np
 from PIL.Image import Image
@@ -267,8 +259,7 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
 
 
 def _nested_tensors_h2d(
-    tensors: NestedTensors,
-    device: torch.types.Device,
+    tensors: NestedTensors, device: torch.types.Device
 ) -> NestedTensors:
     if device is None:
         return tensors
@@ -408,10 +399,7 @@ class BaseMultiModalField(ABC):
 
     @abstractmethod
     def build_elems(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
+        self, modality: str, key: str, data: NestedTensors
     ) -> Sequence[MultiModalFieldElem]:
         """
         Construct
@@ -425,10 +413,7 @@ class BaseMultiModalField(ABC):
 
     @abstractmethod
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         raise NotImplementedError
 
@@ -468,19 +453,13 @@ class MultiModalBatchedField(BaseMultiModalField):
     """
 
     def build_elems(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
+        self, modality: str, key: str, data: NestedTensors
     ) -> Sequence[MultiModalFieldElem]:
         field_factory = self._field_factory()
         return [field_factory(item) for item in data]
 
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             batch = cast(list[torch.Tensor], batch)
@@ -514,10 +493,7 @@ class MultiModalFlatField(BaseMultiModalField):
     dim: int = 0
 
     def build_elems(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
+        self, modality: str, key: str, data: NestedTensors
     ) -> Sequence[MultiModalFieldElem]:
         field_factory = self._field_factory()
         if not is_list_of(self.slices, slice, check="all"):
@@ -527,10 +503,7 @@ class MultiModalFlatField(BaseMultiModalField):
         return [field_factory(data[cast(slice, s)]) for s in self.slices]
 
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             batch = cast(list[torch.Tensor], batch)
@@ -613,19 +586,13 @@ class MultiModalSharedField(BaseMultiModalField):
     batch_size: int
 
     def build_elems(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
+        self, modality: str, key: str, data: NestedTensors
     ) -> Sequence[MultiModalFieldElem]:
         field_factory = self._field_factory()
         return [field_factory(data)] * self.batch_size
 
     def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
+        self, batch: list[NestedTensors], *, pin_memory: bool
     ) -> NestedTensors:
         return batch[0]
 
@@ -658,8 +625,7 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalBatchedField(keep_on_cpu=keep_on_cpu),
-            modality=modality,
+            field=MultiModalBatchedField(keep_on_cpu=keep_on_cpu), modality=modality
         )
 
     @staticmethod
@@ -716,11 +682,7 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalFlatField(
-                slices=slices,
-                dim=dim,
-                keep_on_cpu=keep_on_cpu,
-            ),
+            field=MultiModalFlatField(slices=slices, dim=dim, keep_on_cpu=keep_on_cpu),
             modality=modality,
         )
 
@@ -791,19 +753,11 @@ class MultiModalFieldConfig:
         ]
 
         return MultiModalFieldConfig.flat(
-            modality,
-            slices,
-            dim=dim,
-            keep_on_cpu=keep_on_cpu,
+            modality, slices, dim=dim, keep_on_cpu=keep_on_cpu
         )
 
     @staticmethod
-    def shared(
-        modality: str,
-        batch_size: int,
-        *,
-        keep_on_cpu: bool = False,
-    ):
+    def shared(modality: str, batch_size: int, *, keep_on_cpu: bool = False):
         """
         Defines a field where an element in the batch is obtained by
         taking the entirety of the underlying data.
@@ -833,10 +787,7 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalSharedField(
-                batch_size=batch_size,
-                keep_on_cpu=keep_on_cpu,
-            ),
+            field=MultiModalSharedField(batch_size=batch_size, keep_on_cpu=keep_on_cpu),
             modality=modality,
         )
 
@@ -844,9 +795,7 @@ class MultiModalFieldConfig:
     modality: str
 
     def build_elems(
-        self,
-        key: str,
-        batch: NestedTensors,
+        self, key: str, batch: NestedTensors
     ) -> Sequence[MultiModalFieldElem]:
         return self.field.build_elems(self.modality, key, batch)
 
@@ -900,7 +849,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
             ],
             "audio": [
                 # For the first audio
-                MultiModalKwargsItem({"input_audio_features": ...}),
+                MultiModalKwargsItem({"input_audio_features": ...})
             ],
         }
     )
@@ -917,8 +866,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
     @staticmethod
     def from_hf_inputs(
-        hf_inputs: "BatchFeature",
-        config_by_key: Mapping[str, MultiModalFieldConfig],
+        hf_inputs: "BatchFeature", config_by_key: Mapping[str, MultiModalFieldConfig]
     ):
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
         # We assume that those fields are not used in vLLM
@@ -969,10 +917,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         return self  # type: ignore[return-value]
 
     def get_data(
-        self,
-        *,
-        device: torch.types.Device = None,
-        pin_memory: bool = False,
+        self, *, device: torch.types.Device = None, pin_memory: bool = False
     ) -> BatchedTensorInputs:
         """Construct a dictionary of keyword arguments to pass to the model."""
         from .utils import group_and_batch_mm_items
@@ -982,9 +927,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
             modality: [
                 data
                 for _, data in group_and_batch_mm_items(
-                    items,
-                    device=device,
-                    pin_memory=pin_memory,
+                    items, device=device, pin_memory=pin_memory
                 )
             ]
             for modality, items in items_by_modality.items()

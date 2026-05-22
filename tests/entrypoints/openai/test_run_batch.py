@@ -31,10 +31,7 @@ INPUT_BATCH = "\n".join(
             "body": {
                 "model": CHAT_MODEL_NAME,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant.",
-                    },
+                    {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
@@ -47,10 +44,7 @@ INPUT_BATCH = "\n".join(
             "body": {
                 "model": CHAT_MODEL_NAME,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an unhelpful assistant.",
-                    },
+                    {"role": "system", "content": "You are an unhelpful assistant."},
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
@@ -63,10 +57,7 @@ INPUT_BATCH = "\n".join(
             "body": {
                 "model": "NonExistModel",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an unhelpful assistant.",
-                    },
+                    {"role": "system", "content": "You are an unhelpful assistant."},
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
@@ -79,10 +70,7 @@ INPUT_BATCH = "\n".join(
             "body": {
                 "model": CHAT_MODEL_NAME,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an unhelpful assistant.",
-                    },
+                    {"role": "system", "content": "You are an unhelpful assistant."},
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
@@ -96,10 +84,7 @@ INPUT_BATCH = "\n".join(
                 "stream": "True",
                 "model": CHAT_MODEL_NAME,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an unhelpful assistant.",
-                    },
+                    {"role": "system", "content": "You are an unhelpful assistant."},
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
@@ -165,19 +150,13 @@ INPUT_EMBEDDING_BATCH = "\n".join(
             "custom_id": "request-3",
             "method": "POST",
             "url": "/v1/embeddings",
-            "body": {
-                "model": EMBEDDING_MODEL_NAME,
-                "input": "Hello world!",
-            },
+            "body": {"model": EMBEDDING_MODEL_NAME, "input": "Hello world!"},
         },
         {
             "custom_id": "request-4",
             "method": "POST",
             "url": "/v1/embeddings",
-            "body": {
-                "model": "NonExistModel",
-                "input": "Hello world!",
-            },
+            "body": {"model": "NonExistModel", "input": "Hello world!"},
         },
     ]
 )
@@ -343,10 +322,7 @@ WEATHER_TOOL = {
                     "type": "string",
                     "description": "The city and state, e.g. San Francisco, CA",
                 },
-                "unit": {
-                    "type": "string",
-                    "enum": ["celsius", "fahrenheit"],
-                },
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
             },
             "required": ["location"],
         },
@@ -361,7 +337,7 @@ INPUT_TOOL_CALLING_BATCH = json.dumps(
         "body": {
             "model": REASONING_MODEL_NAME,
             "messages": [
-                {"role": "user", "content": "What is the weather in San Francisco?"},
+                {"role": "user", "content": "What is the weather in San Francisco?"}
             ],
             "tools": [WEATHER_TOOL],
             "tool_choice": "required",
@@ -388,7 +364,7 @@ def test_empty_file():
                 output_file.name,
                 "--model",
                 EMBEDDING_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -415,7 +391,7 @@ def test_completions():
                 output_file.name,
                 "--model",
                 CHAT_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -448,7 +424,7 @@ def test_completions_invalid_input():
                 output_file.name,
                 "--model",
                 CHAT_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -472,7 +448,7 @@ def test_embeddings():
                 output_file.name,
                 "--model",
                 EMBEDDING_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -503,7 +479,7 @@ def test_score(input_batch):
                 output_file.name,
                 "--model",
                 RERANKER_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -543,7 +519,7 @@ def test_reasoning_parser():
                 REASONING_MODEL_NAME,
                 "--reasoning-parser",
                 "qwen3",
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -585,7 +561,7 @@ def test_transcription():
                 output_file.name,
                 "--model",
                 SPEECH_LARGE_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -623,7 +599,7 @@ def test_transcription_http_url():
                 output_file.name,
                 "--model",
                 SPEECH_LARGE_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -663,7 +639,7 @@ def test_translation():
                 output_file.name,
                 "--model",
                 SPEECH_SMALL_MODEL_NAME,
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -710,7 +686,7 @@ def test_tool_calling():
                 "--enable-auto-tool-choice",
                 "--tool-call-parser",
                 "hermes",
-            ],
+            ]
         )
         proc.communicate()
         proc.wait()
@@ -861,8 +837,7 @@ async def test_download_bytes_unsupported_scheme():
 
     with pytest.raises(ValueError, match="Unsupported URL scheme"):
         await download_bytes_from_url(
-            "ftp://example.com/file.wav",
-            allowed_media_domains=["example.com"],
+            "ftp://example.com/file.wav", allowed_media_domains=["example.com"]
         )
 
 

@@ -20,11 +20,7 @@ class MedusaProposer:
     Medusa proposer class for generating token sequences
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Save config parameters
         self.vllm_config = vllm_config
         assert vllm_config.speculative_config is not None, (

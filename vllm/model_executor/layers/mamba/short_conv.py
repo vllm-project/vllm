@@ -69,10 +69,7 @@ class ShortConv(MambaBase, CustomOp):
             prefix=f"{prefix}.in_proj",
         )
         self.out_proj = RowParallelLinear(
-            input_size=dim,
-            output_size=dim,
-            bias=self.bias,
-            prefix=f"{prefix}.out_proj",
+            input_size=dim, output_size=dim, bias=self.bias, prefix=f"{prefix}.out_proj"
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -85,29 +82,13 @@ class ShortConv(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_native(self, hidden_states: torch.Tensor, output: torch.Tensor):
         return
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        torch.ops.vllm.short_conv(
-            hidden_states,
-            output,
-            self.prefix,
-        )
+    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
+        torch.ops.vllm.short_conv(hidden_states, output, self.prefix)
 
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    def forward_cuda(self, hidden_states: torch.Tensor, output: torch.Tensor):
         forward_context = get_forward_context()
         # ShortConvAttentionMetadata contains metadata necessary for the
         # short_conv triton kernels to operate in continuous batching and in
@@ -156,19 +137,13 @@ class ShortConv(MambaBase, CustomOp):
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         B_d, B_p = torch.split(
-            B[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
+            B[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
         C_d, C_p = torch.split(
-            C[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
+            C[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
         x_d, x_p = torch.split(
-            x[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
+            x[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
         conv_output_list = []
 
@@ -212,8 +187,7 @@ class ShortConv(MambaBase, CustomOp):
         assert self.model_config is not None
         assert self.cache_config is not None
         return MambaStateDtypeCalculator.short_conv_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
+            self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...]]:
@@ -229,9 +203,7 @@ class ShortConv(MambaBase, CustomOp):
 
 
 def short_conv(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -239,9 +211,7 @@ def short_conv(
 
 
 def short_conv_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     return
 

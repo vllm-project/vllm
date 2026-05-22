@@ -114,8 +114,7 @@ async def test_basic(
 
     # test /tokenize
     response = requests.post(
-        server.url_for("/tokenize"),
-        json={"model": model_name, "prompt": input_text},
+        server.url_for("/tokenize"), json={"model": model_name, "prompt": input_text}
     )
     assert response.json()["tokens"] == input_tokens
 
@@ -127,9 +126,7 @@ async def test_completion_request(
 ):
     # test input: str
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=input_text,
-        encoding_format="float",
+        model=model_name, input=input_text, encoding_format="float"
     )
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json")
@@ -147,9 +144,7 @@ async def test_completion_request(
 
     # test input: list[int]
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=input_tokens,
-        encoding_format="float",
+        model=model_name, input=input_tokens, encoding_format="float"
     )
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json")
@@ -176,9 +171,7 @@ async def test_completion_request_batched(
 
     # test input: list[str]
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=input_texts,
-        encoding_format="float",
+        model=model_name, input=input_texts, encoding_format="float"
     )
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json")
@@ -196,9 +189,7 @@ async def test_completion_request_batched(
 
     # test list[list[int]]
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=[input_tokens] * N,
-        encoding_format="float",
+        model=model_name, input=[input_tokens] * N, encoding_format="float"
     )
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json")
@@ -218,9 +209,7 @@ async def test_completion_request_batched(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: str):
-    input_texts = [
-        "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
-    ]
+    input_texts = ["Como o Brasil pode fomentar o desenvolvimento de modelos de IA?"]
 
     # test single embedding
     embedding_response = await client.embeddings.create(
@@ -275,9 +264,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
     assert embeddings.usage.total_tokens == 10
 
     # invalid_truncate_prompt_tokens
-    input_texts = [
-        "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
-    ]
+    input_texts = ["Como o Brasil pode fomentar o desenvolvimento de modelos de IA?"]
 
     with pytest.raises(openai.BadRequestError):
         response = await client.embeddings.create(
@@ -298,28 +285,15 @@ async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     # test chat request basic usage
     chat_response = requests.post(
         server.url_for("v1/embeddings"),
-        json={
-            "model": model_name,
-            "messages": messages,
-            "encoding_format": "float",
-        },
+        json={"model": model_name, "messages": messages, "encoding_format": "float"},
     )
     chat_response.raise_for_status()
     chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
@@ -455,18 +429,9 @@ async def test_invocations_completion_request(
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     request_args = {
@@ -617,7 +582,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
     input_texts = [
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ] * 2
 
     responses_float = await client.embeddings.create(

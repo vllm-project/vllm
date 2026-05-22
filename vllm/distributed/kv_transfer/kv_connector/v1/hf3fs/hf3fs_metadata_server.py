@@ -507,10 +507,7 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
         return response.get("locations", [])
 
 
-def run_metadata_server(
-    host: str = "0.0.0.0",
-    port: int = 18000,
-):
+def run_metadata_server(host: str = "0.0.0.0", port: int = 18000):
     """Run the improved HF3FS metadata server."""
     server = Hf3fsMetadataServer()
     server.run(host=host, port=port)

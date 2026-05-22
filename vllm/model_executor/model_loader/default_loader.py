@@ -16,9 +16,7 @@ from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.ep_weight_filter import (
-    compute_local_expert_ids,
-)
+from vllm.model_executor.model_loader.ep_weight_filter import compute_local_expert_ids
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -233,13 +231,11 @@ class DefaultModelLoader(BaseModelLoader):
         elif use_safetensors:
             if self.load_config.load_format == "fastsafetensors":
                 weights_iterator = fastsafetensors_weights_iterator(
-                    hf_weights_files,
-                    self.load_config.use_tqdm_on_load,
+                    hf_weights_files, self.load_config.use_tqdm_on_load
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
-                    hf_weights_files,
-                    self.load_config.use_tqdm_on_load,
+                    hf_weights_files, self.load_config.use_tqdm_on_load
                 )
             else:
                 if extra_config.get("enable_multithread_load"):
@@ -286,9 +282,7 @@ class DefaultModelLoader(BaseModelLoader):
         return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
 
     def get_all_weights(
-        self,
-        model_config: ModelConfig,
-        model: nn.Module,
+        self, model_config: ModelConfig, model: nn.Module
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
@@ -300,8 +294,7 @@ class DefaultModelLoader(BaseModelLoader):
         yield from self._get_weights_iterator(primary_weights)
 
         secondary_weights = cast(
-            Iterable[DefaultModelLoader.Source],
-            getattr(model, "secondary_weights", ()),
+            Iterable[DefaultModelLoader.Source], getattr(model, "secondary_weights", ())
         )
         for source in secondary_weights:
             yield from self._get_weights_iterator(source)

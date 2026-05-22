@@ -36,9 +36,7 @@ class QuarkNVFP4(QuarkScheme):
     - input_scale_2: bfloat16/float32, scalar (global input scale)
     """
 
-    def __init__(
-        self,
-    ):
+    def __init__(self):
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
 
@@ -146,9 +144,6 @@ class QuarkNVFP4(QuarkScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

@@ -42,11 +42,7 @@ pytestmark = pytest.mark.cpu_test
                 {"start_idx": 2, "end_idx": 3},
             ],
         ),
-        (
-            [32000, 32000, 32000],
-            [32000, 32000],
-            [{"start_idx": 0, "end_idx": 2}],
-        ),
+        ([32000, 32000, 32000], [32000, 32000], [{"start_idx": 0, "end_idx": 2}]),
         (
             [32000, 32000, 32000],
             [32000, 32000, 32000],
@@ -55,17 +51,12 @@ pytestmark = pytest.mark.cpu_test
         (
             [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
             [28747, 32000],
-            [
-                {"start_idx": 1, "end_idx": 3},
-                {"start_idx": 6, "end_idx": 8},
-            ],
+            [{"start_idx": 1, "end_idx": 3}, {"start_idx": 6, "end_idx": 8}],
         ),
         (
             [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
             [28747, 32000, 32000, 32000],
-            [
-                {"start_idx": 1, "end_idx": 5},
-            ],
+            [{"start_idx": 1, "end_idx": 5}],
         ),
         (
             [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
@@ -94,24 +85,9 @@ def test_iter_token_matches(token_ids, match_ids, expected, start_idx):
     [
         ([], [], [-1], []),
         ([], [32000], [-1], []),
-        (
-            [32000, 32000, 32000],
-            [32000],
-            [-1],
-            [-1, -1, -1],
-        ),
-        (
-            [32000, 32000, 32000],
-            [32000, 32000],
-            [-1],
-            [-1, 32000],
-        ),
-        (
-            [32000, 32000, 32000],
-            [32000, 32000, 32000],
-            [-1],
-            [-1],
-        ),
+        ([32000, 32000, 32000], [32000], [-1], [-1, -1, -1]),
+        ([32000, 32000, 32000], [32000, 32000], [-1], [-1, 32000]),
+        ([32000, 32000, 32000], [32000, 32000, 32000], [-1], [-1]),
         (
             [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
             [28747, 32000],
@@ -154,13 +130,9 @@ def test_replace_token_matches(token_ids, match_ids, new_ids, expected):
             {
                 "pattern_1": [],
                 "pattern_2": [],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
+                "pattern_3": [{"start_idx": 0, "end_idx": 0}],
                 "pattern_4": [],
-                "pattern_5": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
+                "pattern_5": [{"start_idx": 0, "end_idx": 0}],
             },
         ),
         (
@@ -184,18 +156,10 @@ def test_replace_token_matches(token_ids, match_ids, new_ids, expected):
                     {"start_idx": 0, "end_idx": 2},
                     {"start_idx": 2, "end_idx": 4},
                 ],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 3},
-                ],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_5": [
-                    {"start_idx": 1, "end_idx": 1},
-                ],
-                "pattern_6": [
-                    {"start_idx": 4, "end_idx": 4},
-                ],
+                "pattern_3": [{"start_idx": 0, "end_idx": 3}],
+                "pattern_4": [{"start_idx": 0, "end_idx": 0}],
+                "pattern_5": [{"start_idx": 1, "end_idx": 1}],
+                "pattern_6": [{"start_idx": 4, "end_idx": 4}],
             },
         ),
         (
@@ -213,28 +177,17 @@ def test_replace_token_matches(token_ids, match_ids, new_ids, expected):
                     {"start_idx": 1, "end_idx": 3},
                     {"start_idx": 6, "end_idx": 8},
                 ],
-                "pattern_2": [
-                    {"start_idx": 1, "end_idx": 5},
-                ],
+                "pattern_2": [{"start_idx": 1, "end_idx": 5}],
                 "pattern_3": [],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
+                "pattern_4": [{"start_idx": 0, "end_idx": 0}],
                 "pattern_5": [],
-                "pattern_6": [
-                    {"start_idx": 10, "end_idx": 10},
-                ],
+                "pattern_6": [{"start_idx": 10, "end_idx": 10}],
             },
         ),
     ],
 )
 @pytest.mark.parametrize("update_type", [PromptInsertion, PromptReplacement])
-def test_find_token_matches(
-    prompt,
-    target_by_key,
-    expected_by_key,
-    update_type,
-):
+def test_find_token_matches(prompt, target_by_key, expected_by_key, update_type):
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
@@ -274,13 +227,9 @@ def test_find_token_matches(
             {
                 "pattern_1": [{"start_idx": 0, "end_idx": 0}],
                 "pattern_2": [],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
+                "pattern_3": [{"start_idx": 0, "end_idx": 0}],
                 "pattern_4": [],
-                "pattern_5": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
+                "pattern_5": [{"start_idx": 0, "end_idx": 0}],
             },
         ),
         (
@@ -304,18 +253,10 @@ def test_find_token_matches(
                     {"start_idx": 0, "end_idx": 14},
                     {"start_idx": 14, "end_idx": 28},
                 ],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 21},
-                ],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_5": [
-                    {"start_idx": 7, "end_idx": 7},
-                ],
-                "pattern_6": [
-                    {"start_idx": 28, "end_idx": 28},
-                ],
+                "pattern_3": [{"start_idx": 0, "end_idx": 21}],
+                "pattern_4": [{"start_idx": 0, "end_idx": 0}],
+                "pattern_5": [{"start_idx": 7, "end_idx": 7}],
+                "pattern_6": [{"start_idx": 28, "end_idx": 28}],
             },
         ),
         (
@@ -333,19 +274,11 @@ def test_find_token_matches(
                     {"start_idx": 0, "end_idx": 13},
                     {"start_idx": 27, "end_idx": 40},
                 ],
-                "pattern_2": [
-                    {"start_idx": 0, "end_idx": 27},
-                ],
+                "pattern_2": [{"start_idx": 0, "end_idx": 27}],
                 "pattern_3": [],
-                "pattern_4": [
-                    {"start_idx": 0, "end_idx": 0},
-                ],
-                "pattern_5": [
-                    {"start_idx": 13, "end_idx": 13},
-                ],
-                "pattern_6": [
-                    {"start_idx": 48, "end_idx": 48},
-                ],
+                "pattern_4": [{"start_idx": 0, "end_idx": 0}],
+                "pattern_5": [{"start_idx": 13, "end_idx": 13}],
+                "pattern_6": [{"start_idx": 48, "end_idx": 48}],
             },
         ),
         # Test regex escape
@@ -365,20 +298,13 @@ def test_find_token_matches(
                     {"start_idx": 0, "end_idx": 16},
                     {"start_idx": 16, "end_idx": 32},
                 ],
-                "pattern_3": [
-                    {"start_idx": 0, "end_idx": 25},
-                ],
+                "pattern_3": [{"start_idx": 0, "end_idx": 25}],
             },
         ),
     ],
 )
 @pytest.mark.parametrize("update_type", [PromptInsertion, PromptReplacement])
-def test_find_text_matches(
-    prompt,
-    target_by_key,
-    expected_by_key,
-    update_type,
-):
+def test_find_text_matches(prompt, target_by_key, expected_by_key, update_type):
     prompt_updates = {
         key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
@@ -442,22 +368,10 @@ def test_find_text_matches(
                 "pattern_2": PromptIndexTargets.prefix("<image>"),
                 "pattern_3": PromptIndexTargets.end(),
             },
+            {"pattern_1": "1", "pattern_2": "2", "pattern_3": "3"},
             {
-                "pattern_1": "1",
-                "pattern_2": "2",
-                "pattern_3": "3",
-            },
-            {
-                PromptInsertion: {
-                    0: "",
-                    1: "13",
-                    2: "1133",
-                },
-                PromptReplacement: {
-                    0: "",
-                    1: "13",
-                    2: "1133",
-                },
+                PromptInsertion: {0: "", 1: "13", 2: "1133"},
+                PromptReplacement: {0: "", 1: "13", 2: "1133"},
             },
         ),
         (
@@ -467,33 +381,17 @@ def test_find_text_matches(
                 "pattern_2": PromptIndexTargets.prefix("<image>"),
                 "pattern_3": PromptIndexTargets.end(),
             },
+            {"pattern_1": "1", "pattern_2": "2", "pattern_3": "3"},
             {
-                "pattern_1": "1",
-                "pattern_2": "2",
-                "pattern_3": "3",
-            },
-            {
-                PromptInsertion: {
-                    0: "<image>",
-                    1: "1<image>23",
-                    2: "11<image>2233",
-                },
-                PromptReplacement: {
-                    0: "<image>",
-                    1: "1<image>23",
-                    2: "11<image>2233",
-                },
+                PromptInsertion: {0: "<image>", 1: "1<image>23", 2: "11<image>2233"},
+                PromptReplacement: {0: "<image>", 1: "1<image>23", 2: "11<image>2233"},
             },
         ),
         # Test different replacement per item
         (
             "<image><image><image>",
-            {
-                "pattern_1": "<image>",
-            },
-            {
-                "pattern_1": lambda idx: str(idx + 1),
-            },
+            {"pattern_1": "<image>"},
+            {"pattern_1": lambda idx: str(idx + 1)},
             {
                 PromptInsertion: {
                     0: "<image><image><image>",
@@ -509,12 +407,8 @@ def test_find_text_matches(
         ),
         (
             "<image><image><image>",
-            {
-                "pattern_1": PromptIndexTargets.prefix("<image>"),
-            },
-            {
-                "pattern_1": lambda idx: str(idx + 1),
-            },
+            {"pattern_1": PromptIndexTargets.prefix("<image>")},
+            {"pattern_1": lambda idx: str(idx + 1)},
             {
                 PromptInsertion: {
                     0: "<image><image><image>",
@@ -531,15 +425,9 @@ def test_find_text_matches(
     ],
 )
 def test_find_update_text(
-    prompt,
-    target_by_key,
-    repl_by_key,
-    expected_by_update_type_mm_count,
+    prompt, target_by_key, repl_by_key, expected_by_update_type_mm_count
 ):
-    for (
-        update_type,
-        expected_by_mm_count,
-    ) in expected_by_update_type_mm_count.items():
+    for update_type, expected_by_mm_count in expected_by_update_type_mm_count.items():
         for mm_count, expected in expected_by_mm_count.items():
             mm_prompt_updates = {
                 key: [
@@ -550,9 +438,7 @@ def test_find_update_text(
             }
 
             new_prompt, result = apply_text_matches(
-                prompt,
-                mm_prompt_updates,
-                tokenizer=None,
+                prompt, mm_prompt_updates, tokenizer=None
             )
 
             # Only displayed on error
@@ -644,22 +530,10 @@ def test_find_update_text(
                 "pattern_2": PromptIndexTargets.prefix([32000]),
                 "pattern_3": PromptIndexTargets.end(),
             },
+            {"pattern_1": [-1], "pattern_2": [-2], "pattern_3": [-3]},
             {
-                "pattern_1": [-1],
-                "pattern_2": [-2],
-                "pattern_3": [-3],
-            },
-            {
-                PromptInsertion: {
-                    0: [],
-                    1: [-1, -3],
-                    2: [-1, -1, -3, -3],
-                },
-                PromptReplacement: {
-                    0: [],
-                    1: [-1, -3],
-                    2: [-1, -1, -3, -3],
-                },
+                PromptInsertion: {0: [], 1: [-1, -3], 2: [-1, -1, -3, -3]},
+                PromptReplacement: {0: [], 1: [-1, -3], 2: [-1, -1, -3, -3]},
             },
         ),
         (
@@ -669,11 +543,7 @@ def test_find_update_text(
                 "pattern_2": PromptIndexTargets.prefix([32000]),
                 "pattern_3": PromptIndexTargets.end(),
             },
-            {
-                "pattern_1": [-1],
-                "pattern_2": [-2],
-                "pattern_3": [-3],
-            },
+            {"pattern_1": [-1], "pattern_2": [-2], "pattern_3": [-3]},
             {
                 PromptInsertion: {
                     0: [32000],
@@ -690,12 +560,8 @@ def test_find_update_text(
         # Test different replacement per item
         (
             [32000, 32000, 32000],
-            {
-                "pattern_1": [32000],
-            },
-            {
-                "pattern_1": lambda idx: [-(idx + 1)],
-            },
+            {"pattern_1": [32000]},
+            {"pattern_1": lambda idx: [-(idx + 1)]},
             {
                 PromptInsertion: {
                     0: [32000, 32000, 32000],
@@ -711,12 +577,8 @@ def test_find_update_text(
         ),
         (
             [32000, 32000, 32000],
-            {
-                "pattern_1": PromptIndexTargets.prefix([32000]),
-            },
-            {
-                "pattern_1": lambda idx: [-(idx + 1)],
-            },
+            {"pattern_1": PromptIndexTargets.prefix([32000])},
+            {"pattern_1": lambda idx: [-(idx + 1)]},
             {
                 PromptInsertion: {
                     0: [32000, 32000, 32000],
@@ -733,15 +595,9 @@ def test_find_update_text(
     ],
 )
 def test_find_update_tokens(
-    prompt,
-    target_by_key,
-    repl_by_key,
-    expected_by_update_type_mm_count,
+    prompt, target_by_key, repl_by_key, expected_by_update_type_mm_count
 ):
-    for (
-        update_type,
-        expected_by_mm_count,
-    ) in expected_by_update_type_mm_count.items():
+    for update_type, expected_by_mm_count in expected_by_update_type_mm_count.items():
         for mm_count, expected in expected_by_mm_count.items():
             mm_prompt_updates = {
                 key: [
@@ -752,9 +608,7 @@ def test_find_update_tokens(
             }
 
             new_prompt, result = apply_token_matches(
-                prompt,
-                mm_prompt_updates,
-                tokenizer=None,
+                prompt, mm_prompt_updates, tokenizer=None
             )
 
             # Only displayed on error
@@ -777,7 +631,7 @@ def test_find_update_tokens(
             "pattern_3": [1550, 918, 1550],
             # Test different modalities having the same tokens (32000)
             "pattern_4": [32000],
-        },
+        }
     ],
 )
 @pytest.mark.parametrize(
@@ -793,7 +647,7 @@ def test_find_update_tokens(
                         start_idx=6,
                         tokens=[32000, 32000],
                         is_embed=None,
-                    ),
+                    )
                 ],
                 "pattern_4": [
                     PlaceholderFeaturesInfo(
@@ -802,7 +656,7 @@ def test_find_update_tokens(
                         start_idx=3,
                         tokens=[32000],
                         is_embed=None,
-                    ),
+                    )
                 ],
             },
         ),
@@ -832,7 +686,7 @@ def test_find_update_tokens(
                         start_idx=7,
                         tokens=[1550, 918, 1550],
                         is_embed=None,
-                    ),
+                    )
                 ],
                 # No match for pattern_4 as it has lower priority than pattern_1
             },
@@ -863,7 +717,7 @@ def test_find_update_tokens(
                         start_idx=5,
                         tokens=[32000],
                         is_embed=None,
-                    ),
+                    )
                 ],
                 "pattern_3": [
                     PlaceholderFeaturesInfo(
@@ -872,19 +726,14 @@ def test_find_update_tokens(
                         start_idx=6,
                         tokens=[1550, 918, 1550],
                         is_embed=None,
-                    ),
+                    )
                 ],
             },
         ),
     ],
 )
 @pytest.mark.parametrize("update_type", [PromptInsertion, PromptReplacement])
-def test_find_mm_placeholders(
-    repl_by_key,
-    prompt,
-    expected,
-    update_type,
-):
+def test_find_mm_placeholders(repl_by_key, prompt, expected, update_type):
     mm_prompt_updates = {
         key: [[update_type(key, [], repl).resolve(i)] for i in range(3)]
         for key, repl in repl_by_key.items()
@@ -915,10 +764,7 @@ def test_find_mm_placeholders(
 def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     limit_mm_per_prompt = {"image": limit}
 
-    model_config = ModelConfig(
-        model=model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
+    model_config = ModelConfig(model=model_id, limit_mm_per_prompt=limit_mm_per_prompt)
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
@@ -962,10 +808,7 @@ def test_budget_caps_prevent_dummy_input_validation_failure(
 ):
     limit_mm_per_prompt = {"image": user_limit}
 
-    model_config = ModelConfig(
-        model=model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
+    model_config = ModelConfig(model=model_id, limit_mm_per_prompt=limit_mm_per_prompt)
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     processor.info.get_supported_mm_limits = lambda: {"image": supported_limit}
@@ -993,10 +836,7 @@ class DummyProcessor:
         self.b = b
 
     def __call__(
-        self,
-        a: int = 0,
-        c: int = 0,
-        return_tensors: str | None = None,
+        self, a: int = 0, c: int = 0, return_tensors: str | None = None
     ) -> dict[str, int]:
         return dict(a=a, c=c)
 
@@ -1015,10 +855,7 @@ class DummyProcessor:
     ],
 )
 def test_hf_processor_init_kwargs(
-    model_id,
-    config_kwargs,
-    inference_kwargs,
-    expected_kwargs,
+    model_id, config_kwargs, inference_kwargs, expected_kwargs
 ):
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
@@ -1047,10 +884,7 @@ def test_hf_processor_init_kwargs(
     ],
 )
 def test_hf_processor_call_kwargs(
-    model_id,
-    config_kwargs,
-    inference_kwargs,
-    expected_kwargs,
+    model_id, config_kwargs, inference_kwargs, expected_kwargs
 ):
     ctx = InputProcessingContext(
         model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
@@ -1082,11 +916,7 @@ def test_apply_matches_no_match_exits_quickly():
     }
 
     start = time.perf_counter()
-    result, _ = _apply_matches(
-        long_prompt,
-        mm_prompt_updates,
-        tokenizer=None,
-    )
+    result, _ = _apply_matches(long_prompt, mm_prompt_updates, tokenizer=None)
     elapsed = time.perf_counter() - start
 
     # Should complete in < 100ms (was taking seconds before the fix)

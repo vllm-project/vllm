@@ -11,11 +11,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
 from vllm.triton_utils import triton
-from vllm.utils.deep_gemm import (
-    calc_diff,
-    fp8_gemm_nt,
-    per_block_cast_to_fp8,
-)
+from vllm.utils.deep_gemm import calc_diff, fp8_gemm_nt, per_block_cast_to_fp8
 from vllm.utils.torch_utils import set_random_seed
 
 

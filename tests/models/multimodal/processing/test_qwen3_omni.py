@@ -21,9 +21,7 @@ from ...utils import build_model_context
     ],
 )
 def test_processor_with_audio_sample_rate(
-    model_id: str,
-    audio_sample_rate: int,
-    audio_duration_sec: float,
+    model_id: str, audio_sample_rate: int, audio_duration_sec: float
 ) -> None:
     """
     Test that vLLM's processor generates expected outputs with audio_sample_rate.
@@ -32,8 +30,7 @@ def test_processor_with_audio_sample_rate(
     passed via hf_processor_mm_kwargs and generates audio tokens.
     """
     ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0},
+        model_id, limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = processor.info.get_tokenizer()
@@ -48,9 +45,7 @@ def test_processor_with_audio_sample_rate(
     mm_data = {"audio": [(audio_data, audio_sample_rate)]}
 
     # Apply processor with audio_sample_rate in mm_kwargs
-    hf_processor_mm_kwargs: dict[str, Any] = {
-        "audio_sample_rate": audio_sample_rate,
-    }
+    hf_processor_mm_kwargs: dict[str, Any] = {"audio_sample_rate": audio_sample_rate}
     processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
@@ -77,8 +72,7 @@ def test_longer_audio_generates_more_tokens(model_id: str) -> None:
     that audio duration affects token count as expected.
     """
     ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0},
+        model_id, limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = processor.info.get_tokenizer()
@@ -92,7 +86,7 @@ def test_longer_audio_generates_more_tokens(model_id: str) -> None:
         prompt = "<|audio_start|><|audio_pad|><|audio_end|>"
         mm_data = {"audio": [(audio_data, audio_sample_rate)]}
         hf_processor_mm_kwargs: dict[str, Any] = {
-            "audio_sample_rate": audio_sample_rate,
+            "audio_sample_rate": audio_sample_rate
         }
         processed = processor(
             prompt,

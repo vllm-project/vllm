@@ -514,10 +514,7 @@ class TestHadamardRotation:
 class TestStoreDecodeRoundTrip:
     """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
 
-    @pytest.mark.parametrize(
-        "preset",
-        ["turboquant_k8v4", "turboquant_4bit_nc"],
-    )
+    @pytest.mark.parametrize("preset", ["turboquant_k8v4", "turboquant_4bit_nc"])
     def test_single_token_roundtrip(self, preset):
         """Store 1 token, decode with query=key, check attention output.
 
@@ -564,12 +561,7 @@ class TestStoreDecodeRoundTrip:
         # Allocate KV cache
         padded_slot = cfg.slot_size_aligned
         kv_cache = torch.zeros(
-            num_blocks,
-            block_size,
-            Hk,
-            padded_slot,
-            device=device,
-            dtype=torch.uint8,
+            num_blocks, block_size, Hk, padded_slot, device=device, dtype=torch.uint8
         )
         slot_mapping = torch.tensor([0], device=device, dtype=torch.int32)
 
@@ -615,8 +607,7 @@ class TestStoreDecodeRoundTrip:
         val_fp32 = value.expand(B, Hq, D).float()
         for h in range(Hq):
             cos_sim = torch.nn.functional.cosine_similarity(
-                out_fp32[0, h].unsqueeze(0),
-                val_fp32[0, h].unsqueeze(0),
+                out_fp32[0, h].unsqueeze(0), val_fp32[0, h].unsqueeze(0)
             ).item()
             # FP8 keys should be very accurate; MSE keys have more error
             threshold = 0.95 if cfg.key_fp8 else 0.85

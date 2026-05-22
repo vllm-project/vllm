@@ -10,9 +10,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import fused_topk
-from vllm.model_executor.layers.fused_moe.expert_map_manager import (
-    determine_expert_map,
-)
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_permute_unpermute_supported,
@@ -159,19 +157,15 @@ def test_moe_permute_unpermute(
         expert_map=expert_map,
     )
 
-    (
-        permuted_hidden_states,
-        _,
-        expert_first_token_offset,
-        inv_permuted_idx,
-        _,
-    ) = moe_permute(
-        hidden_states=hidden_states,
-        a1q_scale=None,
-        topk_ids=topk_ids,
-        n_expert=n_expert,
-        n_local_expert=n_local_expert,
-        expert_map=expert_map,
+    (permuted_hidden_states, _, expert_first_token_offset, inv_permuted_idx, _) = (
+        moe_permute(
+            hidden_states=hidden_states,
+            a1q_scale=None,
+            topk_ids=topk_ids,
+            n_expert=n_expert,
+            n_local_expert=n_local_expert,
+            expert_map=expert_map,
+        )
     )
 
     # check expert_first_token_offset

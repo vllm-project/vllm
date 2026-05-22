@@ -46,9 +46,7 @@ from vllm.entrypoints.openai.responses.serving import (
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.openai.responses.streaming_events import (
-    StreamingState,
-)
+from vllm.entrypoints.openai.responses.streaming_events import StreamingState
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -195,9 +193,7 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert "schema_" not in fmt
 
     event = ResponseCreatedEvent(
-        type="response.created",
-        sequence_number=0,
-        response=initial_response,
+        type="response.created", sequence_number=0, response=initial_response
     )
     assert event.response.text is not None
     assert event.response.text.format is not None
@@ -438,11 +434,7 @@ class TestExtractAllowedToolsFromMcpRequests:
 
         tools = [
             # List format
-            Mcp(
-                type="mcp",
-                server_label="server1",
-                allowed_tools=["tool1", "tool2"],
-            ),
+            Mcp(type="mcp", server_label="server1", allowed_tools=["tool1", "tool2"]),
             # Object format
             Mcp(
                 type="mcp",
@@ -452,11 +444,7 @@ class TestExtractAllowedToolsFromMcpRequests:
                 ),
             ),
             # None (no filter)
-            Mcp(
-                type="mcp",
-                server_label="server3",
-                allowed_tools=None,
-            ),
+            Mcp(type="mcp", server_label="server3", allowed_tools=None),
         ]
         result = _extract_allowed_tools_from_mcp_requests(tools)
         assert result == {
@@ -475,17 +463,9 @@ class TestExtractAllowedToolsFromMcpRequests:
 
         tools = [
             # Star in list format
-            Mcp(
-                type="mcp",
-                server_label="server1",
-                allowed_tools=["*"],
-            ),
+            Mcp(type="mcp", server_label="server1", allowed_tools=["*"]),
             # Star mixed with other tools in list
-            Mcp(
-                type="mcp",
-                server_label="server2",
-                allowed_tools=["tool1", "*"],
-            ),
+            Mcp(type="mcp", server_label="server2", allowed_tools=["tool1", "*"]),
             # Star in object format
             Mcp(
                 type="mcp",
@@ -495,33 +475,18 @@ class TestExtractAllowedToolsFromMcpRequests:
         ]
         result = _extract_allowed_tools_from_mcp_requests(tools)
         # All should be normalized to None (allows all tools)
-        assert result == {
-            "server1": None,
-            "server2": None,
-            "server3": None,
-        }
+        assert result == {"server1": None, "server2": None, "server3": None}
 
     def test_extract_allowed_tools_filters_non_mcp(self):
         """Test that non-MCP tools are ignored during extraction."""
         tools = [
-            Mcp(
-                type="mcp",
-                server_label="server1",
-                allowed_tools=["tool1"],
-            ),
+            Mcp(type="mcp", server_label="server1", allowed_tools=["tool1"]),
             LocalShell(type="local_shell"),  # Non-MCP tool should be ignored
-            Mcp(
-                type="mcp",
-                server_label="server2",
-                allowed_tools=["tool2"],
-            ),
+            Mcp(type="mcp", server_label="server2", allowed_tools=["tool2"]),
         ]
         result = _extract_allowed_tools_from_mcp_requests(tools)
         # Non-MCP tools should be ignored
-        assert result == {
-            "server1": ["tool1"],
-            "server2": ["tool2"],
-        }
+        assert result == {"server1": ["tool1"], "server2": ["tool2"]}
 
 
 class TestHarmonyPreambleStreaming:
@@ -586,10 +551,7 @@ class TestHarmonyPreambleStreaming:
             emit_content_delta_events,
         )
 
-        ctx = self._make_ctx(
-            channel="commentary",
-            recipient="functions.get_weather",
-        )
+        ctx = self._make_ctx(channel="commentary", recipient="functions.get_weather")
         state = StreamingState()
 
         events = emit_content_delta_events(ctx, state)
@@ -996,10 +958,7 @@ class TestAutoToolStreaming:
                         id="call_vienna",
                         type="function",
                         index=0,
-                        function=DeltaFunctionCall(
-                            name="get_weather",
-                            arguments="",
-                        ),
+                        function=DeltaFunctionCall(name="get_weather", arguments=""),
                     )
                 ]
             ),
@@ -1007,9 +966,7 @@ class TestAutoToolStreaming:
                 tool_calls=[
                     DeltaToolCall(
                         index=0,
-                        function=DeltaFunctionCall(
-                            arguments='{"location":"Vienna"}',
-                        ),
+                        function=DeltaFunctionCall(arguments='{"location":"Vienna"}'),
                     )
                 ]
             ),
@@ -1020,8 +977,7 @@ class TestAutoToolStreaming:
                         type="function",
                         index=1,
                         function=DeltaFunctionCall(
-                            name="get_weather",
-                            arguments='{"location":"Berlin"}',
+                            name="get_weather", arguments='{"location":"Berlin"}'
                         ),
                     )
                 ]
@@ -1047,10 +1003,7 @@ class TestAutoToolStreaming:
             for event in events
             if event.type == "response.function_call_arguments.delta"
         ]
-        assert argument_deltas == [
-            '{"location":"Vienna"}',
-            '{"location":"Berlin"}',
-        ]
+        assert argument_deltas == ['{"location":"Vienna"}', '{"location":"Berlin"}']
 
         argument_done = [
             event
@@ -1089,10 +1042,7 @@ class TestAutoToolStreaming:
                         id="call_test",
                         type="function",
                         index=0,
-                        function=DeltaFunctionCall(
-                            name="get_weather",
-                            arguments="",
-                        ),
+                        function=DeltaFunctionCall(name="get_weather", arguments=""),
                     )
                 ]
             ),
@@ -1100,9 +1050,7 @@ class TestAutoToolStreaming:
                 tool_calls=[
                     DeltaToolCall(
                         index=0,
-                        function=DeltaFunctionCall(
-                            arguments='{"location":"Berlin"}',
-                        ),
+                        function=DeltaFunctionCall(arguments='{"location":"Berlin"}'),
                     )
                 ]
             ),

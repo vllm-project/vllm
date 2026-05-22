@@ -5,10 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.tokenizers import TokenizerLike
 
 
@@ -20,10 +17,7 @@ class TestLongCatToolParser(ToolParserTests):
         tokenizer_vocab = tokenizer.get_vocab()
         tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
-            {
-                "<longcat_tool_call>": 32000,
-                "</longcat_tool_call>": 32001,
-            }
+            {"<longcat_tool_call>": 32000, "</longcat_tool_call>": 32001}
         )
         tokenizer.get_vocab.return_value = tokenizer_vocab
         return tokenizer
@@ -93,7 +87,7 @@ class TestLongCatToolParser(ToolParserTests):
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers
             xfail_streaming={
-                "test_malformed_input": "Streaming has complex buffering behavior",
+                "test_malformed_input": "Streaming has complex buffering behavior"
             },
             xfail_nonstreaming={},
             # Configuration

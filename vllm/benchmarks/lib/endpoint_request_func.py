@@ -108,9 +108,7 @@ class RequestFunc(Protocol):
 
 
 def _validate_api_url(
-    api_url: str,
-    api_name: str,
-    expected_suffixes: str | set[str],
+    api_url: str, api_name: str, expected_suffixes: str | set[str]
 ) -> None:
     if isinstance(expected_suffixes, str):
         expected_suffixes = {expected_suffixes}
@@ -122,8 +120,7 @@ def _validate_api_url(
 
 
 def _update_payload_common(
-    payload: dict[str, Any],
-    request_func_input: RequestFuncInput,
+    payload: dict[str, Any], request_func_input: RequestFuncInput
 ) -> None:
     if request_func_input.ignore_eos:
         payload["ignore_eos"] = request_func_input.ignore_eos
@@ -132,8 +129,7 @@ def _update_payload_common(
 
 
 def _update_headers_common(
-    headers: dict[str, Any],
-    request_func_input: RequestFuncInput,
+    headers: dict[str, Any], request_func_input: RequestFuncInput
 ) -> None:
     if request_func_input.extra_headers:
         headers |= request_func_input.extra_headers
@@ -177,9 +173,7 @@ async def async_request_openai_completions(
         "max_tokens": request_func_input.output_len,
         "logprobs": request_func_input.logprobs,
         "stream": True,
-        "stream_options": {
-            "include_usage": True,
-        },
+        "stream_options": {"include_usage": True},
     }
     _update_payload_common(payload, request_func_input)
 
@@ -265,8 +259,7 @@ async def async_request_openai_completions(
 
 
 def _get_chat_content(
-    request_func_input: RequestFuncInput,
-    mm_position: Literal["first", "last"] = "last",
+    request_func_input: RequestFuncInput, mm_position: Literal["first", "last"] = "last"
 ) -> list[dict[str, Any]]:
     text_contents = [{"type": "text", "text": request_func_input.prompt}]
 
@@ -303,14 +296,10 @@ async def async_request_openai_chat_completions(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": [{"role": "user", "content": content}],
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
-        "stream_options": {
-            "include_usage": True,
-        },
+        "stream_options": {"include_usage": True},
     }
     _update_payload_common(payload, request_func_input)
 
@@ -555,11 +544,7 @@ async def async_request_openai_embeddings(
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
-        session,
-        api_url,
-        payload=payload,
-        headers=headers,
-        pbar=pbar,
+        session, api_url, payload=payload, headers=headers, pbar=pbar
     )
 
 
@@ -591,11 +576,7 @@ async def async_request_vllm_rerank(
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
-        session,
-        api_url,
-        payload=payload,
-        headers=headers,
-        pbar=pbar,
+        session, api_url, payload=payload, headers=headers, pbar=pbar
     )
 
 
@@ -614,9 +595,7 @@ async def async_request_openai_embeddings_chat(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": [{"role": "user", "content": content}],
         # Many embedding models have short context length,
         # this is to avoid dropping some of the requests.
         "truncate_prompt_tokens": -1,
@@ -627,11 +606,7 @@ async def async_request_openai_embeddings_chat(
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
-        session,
-        api_url,
-        payload=payload,
-        headers=headers,
-        pbar=pbar,
+        session, api_url, payload=payload, headers=headers, pbar=pbar
     )
 
 
@@ -679,9 +654,7 @@ async def async_request_openai_embeddings_clip(
     _preprocess_clip(request_func_input)
 
     return await async_request_openai_embeddings_chat(
-        request_func_input,
-        session,
-        pbar=pbar,
+        request_func_input, session, pbar=pbar
     )
 
 
@@ -693,10 +666,7 @@ async def async_request_openai_embeddings_vlm2vec(
     _preprocess_vlm2vec(request_func_input)
 
     return await async_request_openai_embeddings_chat(
-        request_func_input,
-        session,
-        pbar=pbar,
-        mm_position="first",
+        request_func_input, session, pbar=pbar, mm_position="first"
     )
 
 
@@ -711,7 +681,7 @@ async def async_request_infinity_embeddings(
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
-        else request_func_input.model,
+        else request_func_input.model
     }
 
     if request_func_input.prompt:
@@ -730,11 +700,7 @@ async def async_request_infinity_embeddings(
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
-        session,
-        api_url,
-        payload=payload,
-        headers=headers,
-        pbar=pbar,
+        session, api_url, payload=payload, headers=headers, pbar=pbar
     )
 
 
@@ -746,9 +712,7 @@ async def async_request_infinity_embeddings_clip(
     _preprocess_clip(request_func_input)
 
     return await async_request_infinity_embeddings(
-        request_func_input,
-        session,
-        pbar=pbar,
+        request_func_input, session, pbar=pbar
     )
 
 
@@ -775,11 +739,7 @@ async def async_request_vllm_pooling(
     _update_headers_common(headers, request_func_input)
 
     return await _run_pooling_request(
-        session,
-        api_url,
-        payload=payload,
-        headers=headers,
-        pbar=pbar,
+        session, api_url, payload=payload, headers=headers, pbar=pbar
     )
 
 

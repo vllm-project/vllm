@@ -74,19 +74,11 @@ def patch_init_and_catch_error(self, obj, method_name, expected_error: type[Exce
 
 
 def assert_specific_tensorizer_error_is_raised(
-    executor,
-    obj: Any,
-    method_name: str,
-    expected_error: type[Exception],
+    executor, obj: Any, method_name: str, expected_error: type[Exception]
 ):
     with pytest.raises(TensorizerCaughtError):
         executor.collective_rpc(
-            patch_init_and_catch_error,
-            args=(
-                obj,
-                method_name,
-                expected_error,
-            ),
+            patch_init_and_catch_error, args=(obj, method_name, expected_error)
         )
 
 
@@ -151,8 +143,7 @@ def test_deserialized_hf_model_has_same_outputs(
         model_ref,
         load_format="tensorizer",
         model_loader_extra_config=TensorizerConfig(
-            tensorizer_uri=str(model_path),
-            num_readers=1,
+            tensorizer_uri=str(model_path), num_readers=1
         ),
     ) as loaded_hf_model:
         deserialized_outputs = loaded_hf_model.generate_greedy(
@@ -238,9 +229,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     model_ref = "EleutherAI/pythia-1.4b"
     # record outputs from un-sharded un-tensorized model
     with vllm_runner(
-        model_ref,
-        disable_custom_all_reduce=True,
-        enforce_eager=True,
+        model_ref, disable_custom_all_reduce=True, enforce_eager=True
     ) as base_model:
         outputs = base_model.generate(prompts, sampling_params)
 
@@ -249,8 +238,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     key_path = tmp_path / (model_ref + ".key")
 
     tensorizer_config = TensorizerConfig(
-        tensorizer_uri=model_path,
-        encryption_keyfile=str(key_path),
+        tensorizer_uri=model_path, encryption_keyfile=str(key_path)
     )
 
     tensorize_vllm_model(
@@ -326,17 +314,13 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
 
 
 def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
-    serialization_params = {
-        "limit_cpu_concurrency": 2,
-    }
+    serialization_params = {"limit_cpu_concurrency": 2}
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(
         tensorizer_uri=str(model_path), serialization_kwargs=serialization_params
     )
-    llm = LLM(
-        model=model_ref,
-    )
+    llm = LLM(model=model_ref)
 
     def serialization_test(self, *args, **kwargs):
         # This is performed in the ephemeral worker process, so monkey-patching
@@ -358,9 +342,7 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
         )
 
         tensorizer_config = TensorizerConfig(**kwargs["tensorizer_config"])
-        self.save_tensorized_model(
-            tensorizer_config=tensorizer_config,
-        )
+        self.save_tensorized_model(tensorizer_config=tensorizer_config)
         return to_compare | original_dict == to_compare
 
     kwargs = {"tensorizer_config": config.to_serializable()}
@@ -370,12 +352,10 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
 def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
     deserialization_kwargs = {
-        "num_readers": "bar",  # illegal value
+        "num_readers": "bar"  # illegal value
     }
 
-    serialization_params = {
-        "limit_cpu_concurrency": 2,
-    }
+    serialization_params = {"limit_cpu_concurrency": 2}
 
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
@@ -387,8 +367,7 @@ def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, c
     tensorize_vllm_model(args, config)
 
     loader_tc = TensorizerConfig(
-        tensorizer_uri=str(model_path),
-        deserialization_kwargs=deserialization_kwargs,
+        tensorizer_uri=str(model_path), deserialization_kwargs=deserialization_kwargs
     )
 
     engine_args = EngineArgs(
@@ -401,21 +380,14 @@ def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, c
     executor = DummyExecutor(vllm_config)
 
     assert_specific_tensorizer_error_is_raised(
-        executor,
-        tensorizer.serialization.TensorDeserializer,
-        "__init__",
-        TypeError,
+        executor, tensorizer.serialization.TensorDeserializer, "__init__", TypeError
     )
 
 
 def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
-    deserialization_kwargs = {
-        "num_readers": 1,
-    }
+    deserialization_kwargs = {"num_readers": 1}
 
-    serialization_params = {
-        "limit_cpu_concurrency": 2,
-    }
+    serialization_params = {"limit_cpu_concurrency": 2}
 
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
@@ -444,10 +416,7 @@ def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
     executor = DummyExecutor(vllm_config)
 
     assert_specific_tensorizer_error_is_raised(
-        executor,
-        vllm.model_executor.model_loader.tensorizer,
-        "open_stream",
-        ValueError,
+        executor, vllm.model_executor.model_loader.tensorizer, "open_stream", ValueError
     )
 
 
@@ -488,13 +457,8 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
 
     model_loader_extra_config = {
         "tensorizer_uri": str(model_uri),
-        "stream_kwargs": {
-            "force_http": False,
-        },
-        "deserialization_kwargs": {
-            "verify_hash": True,
-            "num_readers": 8,
-        },
+        "stream_kwargs": {"force_http": False},
+        "deserialization_kwargs": {"verify_hash": True, "num_readers": 8},
     }
 
     cmd = [
@@ -531,9 +495,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
 
 @pytest.mark.parametrize("illegal_value", BLACKLISTED_TENSORIZER_ARGS)
 def test_blacklisted_parameter_for_loading(tmp_path, vllm_runner, capfd, illegal_value):
-    serialization_params = {
-        "limit_cpu_concurrency": 2,
-    }
+    serialization_params = {"limit_cpu_concurrency": 2}
 
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
@@ -548,9 +510,7 @@ def test_blacklisted_parameter_for_loading(tmp_path, vllm_runner, capfd, illegal
 
     try:
         vllm_runner(
-            model_ref,
-            load_format="tensorizer",
-            model_loader_extra_config=loader_tc,
+            model_ref, load_format="tensorizer", model_loader_extra_config=loader_tc
         )
     except RuntimeError:
         out, err = capfd.readouterr()

@@ -125,7 +125,7 @@ class FSDPTrainWorker:
                 master_address=self.transfer_master_address,
                 master_port=self.transfer_port,
                 world_size=transfer_world_size,
-            ),
+            )
         )
 
     def get_weight_metadata(self):
@@ -151,12 +151,10 @@ class FSDPTrainWorker:
                     yield name, param.full_tensor()
 
             trainer_args = NCCLTrainerSendWeightsArgs(
-                group=self.model_update_group,
-                packed=packed,
+                group=self.model_update_group, packed=packed
             )
             NCCLWeightTransferEngine.trainer_send_weights(
-                iterator=_full_param_iter(),
-                trainer_args=trainer_args,
+                iterator=_full_param_iter(), trainer_args=trainer_args
             )
         else:
             for _, param in self.model.named_parameters():
@@ -182,9 +180,7 @@ async def generate_batch(engine, prompts, sampling_params):
     async def gen_one(prompt):
         output = None
         async for request_output in engine.generate(
-            {"prompt": prompt},
-            sampling_params,
-            request_id=str(uuid.uuid4()),
+            {"prompt": prompt}, sampling_params, request_id=str(uuid.uuid4())
         ):
             output = request_output
         return output
@@ -208,11 +204,7 @@ async def main():
     # placement groups will land on the remaining 4 GPUs.
     fsdp_workers = [
         FSDPTrainWorker.remote(
-            local_model_path,
-            rank,
-            FSDP_WORLD_SIZE,
-            fsdp_master_addr,
-            fsdp_master_port,
+            local_model_path, rank, FSDP_WORLD_SIZE, fsdp_master_addr, fsdp_master_port
         )
         for rank in range(FSDP_WORLD_SIZE)
     ]
@@ -309,10 +301,7 @@ async def main():
         WeightTransferUpdateRequest(
             update_info=asdict(
                 NCCLWeightTransferUpdateInfo(
-                    names=names,
-                    dtype_names=dtype_names,
-                    shapes=shapes,
-                    packed=True,
+                    names=names, dtype_names=dtype_names, shapes=shapes, packed=True
                 )
             )
         )

@@ -45,11 +45,7 @@ def make_add_lora_request(name: str, path: str):
     INCREASE_LORA_ID += 1
     LORA_NAME_ID_MAP[name] = INCREASE_LORA_ID
 
-    return LoRARequest(
-        lora_name=name,
-        lora_int_id=INCREASE_LORA_ID,
-        lora_path=path,
-    )
+    return LoRARequest(lora_name=name, lora_int_id=INCREASE_LORA_ID, lora_path=path)
 
 
 @multi_gpu_test(num_gpus=2)

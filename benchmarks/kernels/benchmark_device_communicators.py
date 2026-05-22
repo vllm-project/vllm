@@ -37,9 +37,7 @@ from vllm.distributed.device_communicators.pynccl import (
     PyNcclCommunicator,
     register_nccl_symmetric_ops,
 )
-from vllm.distributed.device_communicators.pynccl_allocator import (
-    set_graph_pool_id,
-)
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -167,8 +165,7 @@ class CommunicatorBenchmark:
 
         try:
             self.fi_ar_comm = FlashInferAllReduce(
-                group=self.cpu_group,
-                device=self.device,
+                group=self.cpu_group, device=self.device
             )
             if not self.fi_ar_comm.disabled:
                 logger.info("Rank %s: FlashInferAllReduce initialized", self.rank)

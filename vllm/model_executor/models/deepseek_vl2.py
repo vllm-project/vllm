@@ -21,10 +21,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -247,10 +244,7 @@ class DeepseekVL2MultiModalProcessor(
             return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
 
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         processed_outputs["num_patches"] = (
@@ -260,9 +254,7 @@ class DeepseekVL2MultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
 
@@ -309,9 +301,7 @@ class DeepseekVL2MultiModalProcessor(
         ]
 
     def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
@@ -330,9 +320,7 @@ class DeepseekVL2MultiModalProcessor(
 )
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "language.": "language_model.",
-        }
+        orig_to_new_prefix={"language.": "language_model."}
     )
 
     @classmethod
@@ -471,24 +459,18 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 type="pixel_values",
                 data=pixel_values,
                 images_spatial_crop=images_spatial_crop,
-                resolve_bindings={
-                    "h": expected_h,
-                    "w": expected_w,
-                },
+                resolve_bindings={"h": expected_h, "w": expected_w},
             )
 
         if image_embeds is not None:
             return DeepseekVL2VImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _pixel_values_to_embedding(
-        self,
-        pixel_values: torch.Tensor,
-        images_spatial_crop: torch.Tensor,
+        self, pixel_values: torch.Tensor, images_spatial_crop: torch.Tensor
     ) -> list[torch.Tensor]:
         # [batch_all_tiles, vit_seq_len, c]
         images_feature = self.vision.forward_features(pixel_values)
@@ -559,19 +541,11 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # merge global and local tiles
             if self.global_view_pos == "head":
                 global_local_features = torch.cat(
-                    [
-                        global_features,
-                        self.view_seperator[None, :],
-                        local_features,
-                    ]
+                    [global_features, self.view_seperator[None, :], local_features]
                 )
             else:
                 global_local_features = torch.cat(
-                    [
-                        local_features,
-                        self.view_seperator[None, :],
-                        global_features,
-                    ]
+                    [local_features, self.view_seperator[None, :], global_features]
                 )
 
             vision_embeddings.append(global_local_features)
@@ -614,10 +588,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

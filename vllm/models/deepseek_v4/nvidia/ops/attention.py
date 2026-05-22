@@ -15,9 +15,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.model_executor.layers.linear import (
-    ReplicatedLinear,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
@@ -29,15 +27,9 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.backends.mla.sparse_swa import (
-        DeepseekSparseSWAMetadata,
-    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
-from vllm.config import (
-    CacheConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -45,22 +37,13 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.input_quant_fp8 import (
-    QuantFP8,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
-from vllm.utils.multi_stream_utils import (
-    execute_in_parallel,
-    maybe_execute_in_parallel,
-)
+from vllm.utils.multi_stream_utils import execute_in_parallel, maybe_execute_in_parallel
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseBackend,
-)
+from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
     get_max_prefill_buffer_size,
@@ -69,9 +52,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.nvidia.flashmla import (
-        DeepseekV4SparseMLAAttentionImpl,
-    )
+    from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4SparseMLAAttentionImpl
 
 logger = init_logger(__name__)
 
@@ -79,14 +60,10 @@ logger = init_logger(__name__)
 def _select_v4_sparse_impl() -> "type[DeepseekV4SparseMLAAttentionImpl]":
     """Pick the platform-specific V4 sparse MLA impl class. Sole platform check."""
     if current_platform.is_rocm():
-        from vllm.models.deepseek_v4.amd.rocm import (
-            DeepseekV4ROCMAiterMLASparseImpl,
-        )
+        from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLASparseImpl
 
         return DeepseekV4ROCMAiterMLASparseImpl
-    from vllm.models.deepseek_v4.nvidia.flashmla import (
-        DeepseekV4FlashMLASparseImpl,
-    )
+    from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLASparseImpl
 
     return DeepseekV4FlashMLASparseImpl
 
@@ -194,9 +171,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.wo_a = mla_modules.wo_a
 
         self._wo_a_act_quant = QuantFP8(
-            static=False,
-            group_shape=GroupShape(1, 128),
-            use_ue8m0=True,
+            static=False, group_shape=GroupShape(1, 128), use_ue8m0=True
         )
         # Bypass packed-for-deepgemm path — we need FP32 scales (not packed
         # INT32) so fp8_einsum can handle layout transform internally.
@@ -303,10 +278,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         # Attention (inside custom op for torch.compile boundary)
         torch.ops.vllm.deepseek_v4_attention(
-            hidden_states,
-            positions,
-            o_padded,
-            self.layer_name,
+            hidden_states, positions, o_padded, self.layer_name
         )
         o = o_padded[:, : self.n_local_heads, :]
 
@@ -430,11 +402,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr, kv = fused_q_kv_rmsnorm(
-            qr,
-            kv,
-            self.q_norm.weight.data,
-            self.kv_norm.weight.data,
-            self.eps,
+            qr, kv, self.q_norm.weight.data, self.kv_norm.weight.data, self.eps
         )
 
         # wq_b + kv_insert (+ MLA compressor when an indexer is present) ride

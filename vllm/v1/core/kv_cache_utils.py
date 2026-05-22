@@ -569,8 +569,7 @@ def hash_block_tokens(
 
 
 def resolve_kv_cache_block_sizes(
-    kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig
 ) -> tuple[int, int]:
     """Resolve (scheduler_block_size, hash_block_size).
 
@@ -635,8 +634,7 @@ def resolve_kv_cache_block_sizes(
 
 
 def get_request_block_hasher(
-    block_size: int,
-    caching_hash_fn: Callable[[Any], bytes],
+    block_size: int, caching_hash_fn: Callable[[Any], bytes]
 ) -> Callable[[Request], list[BlockHash]]:
     """
     Returns a function which computes the list of un-computed block hashes
@@ -933,10 +931,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
 
 
 def get_num_blocks(
-    vllm_config: VllmConfig,
-    num_layers: int,
-    available_memory: int,
-    page_size: int,
+    vllm_config: VllmConfig, num_layers: int, available_memory: int, page_size: int
 ) -> int:
     """
     Get the number of kv cache blocks.
@@ -1253,9 +1248,7 @@ def get_kv_cache_config_from_groups(
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
         return KVCacheConfig(
-            num_blocks=1,
-            kv_cache_tensors=[],
-            kv_cache_groups=kv_cache_groups,
+            num_blocks=1, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
         )
 
     # Determine how model runners should initialize the KV cache tensors.
@@ -1583,8 +1576,7 @@ def _get_kv_cache_groups_uniform_groups(
             assert sub_sm_spec is not None
             swa_mla_groups.append(
                 KVCacheGroupSpec(
-                    layer_names=group_layer_names,
-                    kv_cache_spec=sub_sm_spec,
+                    layer_names=group_layer_names, kv_cache_spec=sub_sm_spec
                 )
             )
 
@@ -1739,8 +1731,7 @@ def _report_kv_cache_config(
 
 
 def _max_memory_usage_bytes_from_groups(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -1901,8 +1892,7 @@ def _auto_fit_max_model_len(
 
 
 def _project_kv_cache_groups_to_worker(
-    global_kv_cache_groups: list[KVCacheGroupSpec],
-    worker_spec: dict[str, KVCacheSpec],
+    global_kv_cache_groups: list[KVCacheGroupSpec], worker_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
     """
     Projects global KV cache groups onto a single worker's assigned layers.

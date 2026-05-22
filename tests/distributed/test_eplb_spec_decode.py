@@ -73,8 +73,7 @@ pytestmark = pytest.mark.skipif(
     ids=["qwen3_next_mtp", "llama4_eagle"],
 )
 def test_eplb_spec_decode(
-    monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, int, float],
+    monkeypatch: pytest.MonkeyPatch, model_setup: tuple[str, str, str, int, float]
 ):
     """
     Test the correctness of EPLB speculative decoding with GSM8K dataset.
@@ -95,11 +94,7 @@ def test_eplb_spec_decode(
     )
 
     results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=TASK,
-        batch_size=64,
-        num_fewshot=8,
+        model="vllm", model_args=model_args, tasks=TASK, batch_size=64, num_fewshot=8
     )
     measured_value = results["results"][TASK][FILTER]
     assert (
@@ -129,11 +124,7 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
     )
 
     results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=TASK,
-        batch_size=64,
-        num_fewshot=8,
+        model="vllm", model_args=model_args, tasks=TASK, batch_size=64, num_fewshot=8
     )
     measured_value = results["results"][TASK][FILTER]
     assert (

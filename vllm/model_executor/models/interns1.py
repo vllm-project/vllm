@@ -28,10 +28,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -162,10 +159,7 @@ def resolve_interns1_min_max_num(
     return min_dynamic_patch, max_dynamic_patch
 
 
-def get_interns1_target_ratios(
-    min_num: int,
-    max_num: int,
-) -> list[tuple[int, int]]:
+def get_interns1_target_ratios(min_num: int, max_num: int) -> list[tuple[int, int]]:
     target_ratios = {
         (i, j)
         for n in range(min_num, max_num + 1)
@@ -203,9 +197,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         image_processor: GotOcr2ImageProcessorFast = processor.image_processor
 
         num_image_patches = image_processor.get_number_of_image_patches(
-            image_height,
-            image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            image_height, image_width, self.ctx.get_merged_mm_kwargs(mm_kwargs)
         )
 
         return processor.image_seq_length * num_image_patches
@@ -266,9 +258,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -411,9 +401,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         return BatchFeature({**text_outputs, **image_outputs, **video_outputs})
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
         video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
@@ -626,10 +614,7 @@ class InternS1ForConditionalGeneration(
             return None
 
         if image_embeds is not None:
-            return InternS1ImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return InternS1ImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         image_token_id = kwargs["image_token_id"]
         if isinstance(image_token_id, torch.Tensor):
@@ -644,10 +629,7 @@ class InternS1ForConditionalGeneration(
                 type="pixel_values",
                 pixel_values=pixel_values,
                 num_patches=image_num_patches,
-                resolve_bindings={
-                    "h": h,
-                    "w": w,
-                },
+                resolve_bindings={"h": h, "w": w},
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -663,10 +645,7 @@ class InternS1ForConditionalGeneration(
             return None
 
         if video_embeds is not None:
-            return InternS1VideoEmbeddingInputs(
-                type="video_embeds",
-                data=video_embeds,
-            )
+            return InternS1VideoEmbeddingInputs(type="video_embeds", data=video_embeds)
 
         video_token_id = kwargs["video_token_id"]
         if isinstance(video_token_id, torch.Tensor):
@@ -681,17 +660,13 @@ class InternS1ForConditionalGeneration(
                 type="pixel_values_videos",
                 num_patches=video_num_patches,
                 pixel_values=pixel_values_flat_video,
-                resolve_bindings={
-                    "h": h,
-                    "w": w,
-                },
+                resolve_bindings={"h": h, "w": w},
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _process_vision_input(
-        self,
-        image_input: InternS1ImageInputs | InternS1VideoInputs,
+        self, image_input: InternS1ImageInputs | InternS1VideoInputs
     ) -> tuple[torch.Tensor, ...]:
         if (
             image_input["type"] == "image_embeds"
@@ -799,10 +774,7 @@ class InternS1ForConditionalGeneration(
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

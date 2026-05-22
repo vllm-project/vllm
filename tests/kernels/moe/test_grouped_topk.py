@@ -30,13 +30,7 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
 @pytest.mark.parametrize(
     "n_expert,topk,num_expert_group,topk_group",
-    [
-        (16, 2, 8, 2),
-        (128, 2, 8, 2),
-        (256, 8, 8, 4),
-        (384, 8, 1, 1),
-        (512, 22, 1, 1),
-    ],
+    [(16, 2, 8, 2), (128, 2, 8, 2), (256, 8, 8, 4), (384, 8, 1, 1), (512, 22, 1, 1)],
 )
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])

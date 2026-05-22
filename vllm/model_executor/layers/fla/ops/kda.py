@@ -1196,12 +1196,7 @@ def chunk_kda_fwd(
     )
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
     w, u, _, kg = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        gk=g,
-        cu_seqlens=cu_seqlens,
+        k=k, v=v, beta=beta, A=A, gk=g, cu_seqlens=cu_seqlens
     )
     del A
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(

@@ -84,9 +84,7 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
 
 
 def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
+    world_size: int, rank: int, vllm_config: VllmConfig
 ) -> tuple[int, int]:
     """
     Convert the rank for the MLA.
@@ -260,10 +258,7 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_blocks += num_new_blocks
 
-    def append_block_ids(
-        self,
-        new_block_ids: list[int],
-    ):
+    def append_block_ids(self, new_block_ids: list[int]):
         """Update the block ids for the current request
         This function will be called when processing the cached requests.
         """
@@ -297,9 +292,7 @@ class LMCacheMPRequestMetadata:
 
     @staticmethod
     def GetStoreMetadata(
-        tracker: LMCacheMPRequestTracker,
-        blocks_in_chunk: int,
-        vllm_block_size: int,
+        tracker: LMCacheMPRequestTracker, blocks_in_chunk: int, vllm_block_size: int
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -335,9 +328,7 @@ class LMCacheMPRequestMetadata:
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
-            len(tracker.block_hashes),
-            len(tracker.allocated_block_ids),
-            computed_blocks,
+            len(tracker.block_hashes), len(tracker.allocated_block_ids), computed_blocks
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -371,9 +362,7 @@ class LMCacheMPRequestMetadata:
 
     @staticmethod
     def GetRetrieveMetadata(
-        tracker: LMCacheMPRequestTracker,
-        blocks_in_chunk: int,
-        vllm_block_size: int,
+        tracker: LMCacheMPRequestTracker, blocks_in_chunk: int, vllm_block_size: int
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -503,20 +492,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
-                mq_timeout,
-                heartbeat_interval,
+                server_url, zmq_context, vllm_config, mq_timeout, heartbeat_interval
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
-                mq_timeout,
-                heartbeat_interval,
+                server_url, zmq_context, vllm_config, mq_timeout, heartbeat_interval
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -731,9 +712,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     # ==============================
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
@@ -913,9 +892,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         return
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished, before its blocks are
@@ -1025,28 +1002,21 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     ##############################
     # Helper functions
     ##############################
-    def _process_retrieve_requests(
-        self,
-        metadata: LMCacheMPConnectorMetadata,
-    ) -> None:
+    def _process_retrieve_requests(self, metadata: LMCacheMPConnectorMetadata) -> None:
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         for request_tracker in self.request_trackers.values():
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
-                request_tracker,
-                blocks_per_chunk,
-                vllm_block_size=self.vllm_block_size,
+                request_tracker, blocks_per_chunk, vllm_block_size=self.vllm_block_size
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
             request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(
-        self,
-        scheduler_output: SchedulerOutput,
-        metadata: LMCacheMPConnectorMetadata,
+        self, scheduler_output: SchedulerOutput, metadata: LMCacheMPConnectorMetadata
     ) -> None:
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
@@ -1063,9 +1033,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                 metadata.add_request_metadata(r_meta)
 
     def _process_cached_requests(
-        self,
-        scheduler_output: SchedulerOutput,
-        metadata: LMCacheMPConnectorMetadata,
+        self, scheduler_output: SchedulerOutput, metadata: LMCacheMPConnectorMetadata
     ) -> None:
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
@@ -1091,8 +1059,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                 metadata.add_request_metadata(r_meta)
 
     def _report_block_allocation_deltas(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> None:
         """Gather per-request block allocation deltas and report to LMCache.
 
@@ -1186,8 +1153,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         # Clean up request tracker
         if self.request_trackers.pop(request_id, None):
             logger.debug(
-                "[KVConnector] Cleaned up request_tracker for request %s",
-                request_id,
+                "[KVConnector] Cleaned up request_tracker for request %s", request_id
             )
 
 
@@ -1199,9 +1165,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 # implementation defined above.
 def _resolve_lmcache_mp_connector() -> type[KVConnectorBase_V1]:
     if os.environ.get("LMCACHE_USE_UPSTREAM_MP"):
-        logger.info(
-            "Force use builtin LMCacheMPConnectorUpstream in vLLM.",
-        )
+        logger.info("Force use builtin LMCacheMPConnectorUpstream in vLLM.")
         return LMCacheMPConnectorUpstream
 
     try:

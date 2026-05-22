@@ -3,9 +3,7 @@
 from collections import defaultdict
 
 from torch import fx
-from torch._inductor.pattern_matcher import (
-    PatternMatcherPass,
-)
+from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

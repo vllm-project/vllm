@@ -6,11 +6,7 @@ from typing import Any, NamedTuple
 
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
-from bench_utils import (
-    TEXT_SEPARATOR,
-    Color,
-    logger,
-)
+from bench_utils import TEXT_SEPARATOR, Color, logger
 from tqdm import tqdm
 from transformers import AutoTokenizer  # type: ignore
 
@@ -35,10 +31,7 @@ class Distribution(ABC):
 
 class UniformDistribution(Distribution):
     def __init__(
-        self,
-        min_val: int | float,
-        max_val: int | float,
-        is_integer: bool = True,
+        self, min_val: int | float, max_val: int | float, is_integer: bool = True
     ) -> None:
         self.min_val = min_val
         self.max_val = max_val

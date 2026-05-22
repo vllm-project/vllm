@@ -8,9 +8,7 @@ from vllm.v1.request import Request, RequestStatus
 
 
 def _has_repeating_pattern(
-    token_ids: Sequence[int],
-    pattern_len: int,
-    repetition_min_count: int,
+    token_ids: Sequence[int], pattern_len: int, repetition_min_count: int
 ) -> bool:
     """Check if the tail of token_ids contains a repeating pattern.
 
@@ -26,8 +24,7 @@ def _has_repeating_pattern(
 
 
 def check_sequence_repetition(
-    token_ids: Sequence[int],
-    params: RepetitionDetectionParams,
+    token_ids: Sequence[int], params: RepetitionDetectionParams
 ) -> bool:
     """Check if a sequence of token IDs has a repetition pattern.
     Args:
@@ -46,10 +43,7 @@ def check_sequence_repetition(
     if max_pattern_size <= 0 or min_count < 2 or min_pattern_size > max_pattern_size:
         return False
 
-    for pattern_len in range(
-        min_pattern_size,
-        max_pattern_size + 1,
-    ):
+    for pattern_len in range(min_pattern_size, max_pattern_size + 1):
         if pattern_len * min_count > len(token_ids):
             return False
 
@@ -118,10 +112,7 @@ def check_stop(request: Request, max_model_len: int) -> bool:
 
     repetition_detection = sampling_params.repetition_detection
     if repetition_detection is not None and (
-        check_sequence_repetition(
-            request.output_token_ids,
-            repetition_detection,
-        )
+        check_sequence_repetition(request.output_token_ids, repetition_detection)
     ):
         request.status = RequestStatus.FINISHED_REPETITION
         request.stop_reason = "repetition_detected"

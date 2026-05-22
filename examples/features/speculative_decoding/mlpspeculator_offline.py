@@ -42,9 +42,7 @@ def main():
     )
 
     # Sample prompts.
-    prompts = [
-        "Write about the president of the United States.",
-    ]
+    prompts = ["Write about the president of the United States."]
     prompts = [template.format(prompt) for prompt in prompts]
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.0, max_tokens=200)
@@ -60,9 +58,7 @@ def main():
     # Create an LLM with spec decoding
     llm = LLM(
         model="meta-llama/Llama-2-13b-chat-hf",
-        speculative_config={
-            "model": "ibm-ai-platform/llama-13b-accelerator",
-        },
+        speculative_config={"model": "ibm-ai-platform/llama-13b-accelerator"},
     )
 
     time_generation(llm, prompts, sampling_params, "With speculation")

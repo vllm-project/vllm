@@ -172,13 +172,7 @@ class DualChunkRotaryEmbedding(CustomOp):
 
         # merge query into one tensor to simplify the interfaces
         query = torch.cat(
-            (
-                query,
-                query_succ,
-                query_inter,
-                query_succ_critical,
-                query_inter_critical,
-            ),
+            (query, query_succ, query_inter, query_succ_critical, query_inter_critical),
             dim=-1,
         )
         return query, key

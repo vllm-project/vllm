@@ -21,17 +21,11 @@ def tokenizer():
 
 @pytest.mark.parametrize(
     "thinking,expected_parser_type",
-    [
-        (True, DeepSeekR1ReasoningParser),
-        (False, IdentityReasoningParser),
-    ],
+    [(True, DeepSeekR1ReasoningParser), (False, IdentityReasoningParser)],
 )
 def test_parser_selection(tokenizer, thinking, expected_parser_type):
     parser = Holo2ReasoningParser(
-        tokenizer,
-        chat_template_kwargs={
-            "thinking": thinking,
-        },
+        tokenizer, chat_template_kwargs={"thinking": thinking}
     )
 
     assert isinstance(parser._parser, expected_parser_type)
@@ -103,36 +97,13 @@ COMPLETE_REASONING = {
 }
 
 TEST_CASES = [
+    pytest.param(False, WITH_THINK, None, id="with_think"),
+    pytest.param(True, WITH_THINK_STREAM, None, id="with_think_stream"),
+    pytest.param(False, WITH_THINK, {"thinking": True}, id="with_think_enabled"),
     pytest.param(
-        False,
-        WITH_THINK,
-        None,
-        id="with_think",
+        True, WITH_THINK_STREAM, {"thinking": True}, id="with_think_stream_enabled"
     ),
-    pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        None,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITH_THINK,
-        {"thinking": True},
-        id="with_think_enabled",
-    ),
-    pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        {"thinking": True},
-        id="with_think_stream_enabled",
-    ),
-    pytest.param(
-        False,
-        THINKING_DISABLED,
-        {"thinking": False},
-        id="thinking_disabled",
-    ),
+    pytest.param(False, THINKING_DISABLED, {"thinking": False}, id="thinking_disabled"),
     pytest.param(
         True,
         THINKING_DISABLED_STREAM,
@@ -151,35 +122,21 @@ TEST_CASES = [
         {"thinking": False},
         id="thinking_disabled_with_close_tag_stream",
     ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        None,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        None,
-        id="complete_reasoning_stream",
-    ),
+    pytest.param(False, COMPLETE_REASONING, None, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, None, id="complete_reasoning_stream"),
 ]
 
 
 @pytest.mark.parametrize("streaming, param_dict, chat_template_kwargs", TEST_CASES)
 def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    chat_template_kwargs: dict | None,
-    tokenizer,
+    streaming: bool, param_dict: dict, chat_template_kwargs: dict | None, tokenizer
 ):
     output = tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = [
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser("holo2")(
-        tokenizer,
-        chat_template_kwargs=chat_template_kwargs,
+        tokenizer, chat_template_kwargs=chat_template_kwargs
     )
 
     reasoning, content = run_reasoning_extraction(

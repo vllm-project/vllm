@@ -51,10 +51,7 @@ def setup_environment_variables():
 
 @contextlib.contextmanager
 def build_llm_with_lmcache(lmcache_connector: str, model: str):
-    ktc = KVTransferConfig(
-        kv_connector=lmcache_connector,
-        kv_role="kv_both",
-    )
+    ktc = KVTransferConfig(kv_connector=lmcache_connector, kv_role="kv_both")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
@@ -74,10 +71,7 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
 
 
 def print_output(
-    llm: LLM,
-    prompt: list[str],
-    sampling_params: SamplingParams,
-    req_str: str,
+    llm: LLM, prompt: list[str], sampling_params: SamplingParams, req_str: str
 ):
     # Should be able to see logs like the following:
     # `LMCache INFO: Storing KV cache for 6006 out of 6006 tokens for request 0`
@@ -112,12 +106,8 @@ def main():
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         shared_prompt = "Hello, how are you?" * 1000
-        first_prompt = [
-            shared_prompt + "Hello, my name is",
-        ]
-        second_prompt = [
-            shared_prompt + "Tell me a very long story",
-        ]
+        first_prompt = [shared_prompt + "Hello, my name is"]
+        second_prompt = [shared_prompt + "Tell me a very long story"]
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 

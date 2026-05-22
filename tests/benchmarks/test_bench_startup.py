@@ -7,11 +7,7 @@ import pytest
 
 @pytest.mark.benchmark
 def test_bench_startup():
-    command = [
-        "vllm",
-        "bench",
-        "startup",
-    ]
+    command = ["vllm", "bench", "startup"]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
     print(result.stderr)

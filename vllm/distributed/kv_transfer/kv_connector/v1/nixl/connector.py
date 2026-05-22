@@ -35,9 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
     NixlPromMetrics,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-    NixlConnectorWorker,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import NixlConnectorWorker
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
@@ -67,11 +65,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
             return False
 
         backend = get_current_attn_backend(self._vllm_config)
-        if backend.get_name() not in (
-            "FLASH_ATTN",
-            "FLASHINFER",
-            "TRITON_ATTN",
-        ):
+        if backend.get_name() not in ("FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"):
             return False
 
         # For now there is no benefit to run cross layers when backend
@@ -151,8 +145,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
@@ -166,17 +159,13 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler.update_connector_output(connector_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, (block_ids,))
 
     def request_finished_all_groups(
-        self,
-        request: "Request",
-        block_ids: tuple[list[int], ...],
+        self, request: "Request", block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)

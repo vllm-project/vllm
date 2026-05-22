@@ -194,12 +194,7 @@ def _xpu_fp8_mqa_logits_impl(
     cu_seqlen_ke: torch.Tensor,
 ) -> torch.Tensor:
     return torch.ops._xpu_C.fp8_mqa_logits(
-        q,
-        k_quant,
-        k_scale,
-        weights,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
+        q, k_quant, k_scale, weights, cu_seqlen_ks, cu_seqlen_ke
     )
 
 
@@ -212,9 +207,7 @@ def _xpu_fp8_mqa_logits_fake(
     cu_seqlen_ke: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty(
-        (q.shape[0], k_quant.shape[0]),
-        dtype=torch.float32,
-        device=q.device,
+        (q.shape[0], k_quant.shape[0]), dtype=torch.float32, device=q.device
     )
 
 
@@ -249,9 +242,7 @@ def _xpu_fp8_paged_mqa_logits_fake(
 ) -> torch.Tensor:
     batch_size, next_n = q.shape[:2]
     return torch.empty(
-        (batch_size * next_n, max_model_len),
-        dtype=torch.float32,
-        device=q.device,
+        (batch_size * next_n, max_model_len), dtype=torch.float32, device=q.device
     )
 
 
@@ -326,9 +317,7 @@ def _xpu_mxfp8_quantize_fake(
     return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
 
 
-def _xpu_mxfp4_quantize_impl(
-    x: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _xpu_mxfp4_quantize_impl(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     MXFP4_BLOCK_SIZE = 32
     eps = 1e-10
     assert x.ndim == 2, "input must be 2-D"
@@ -351,9 +340,7 @@ def _xpu_mxfp4_quantize_impl(
     return x_q, x_s
 
 
-def _xpu_mxfp4_quantize_fake(
-    x: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _xpu_mxfp4_quantize_fake(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     MXFP4_BLOCK_SIZE = 32
     M, N = x.shape
 
@@ -395,9 +382,7 @@ class xpu_ops:
             zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
         scale = scale.to(dtype=input.dtype)
         quantized = torch.clamp(
-            torch.round(input / scale.to(dtype=torch.float32) + zero_point),
-            qmin,
-            qmax,
+            torch.round(input / scale.to(dtype=torch.float32) + zero_point), qmin, qmax
         ).to(dtype=torch.int8 if use_sym_quant else torch.uint8)
         return (
             quantized.view(original_sizes),

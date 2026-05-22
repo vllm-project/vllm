@@ -198,12 +198,7 @@ def persistent_masked_m_silu_mul_quant(
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
     ys_shape, ys_strides, ys_dtype = scales_shape_stride_dtype(E, T, G, quant_scale_fmt)
-    y_s = torch.empty_strided(
-        ys_shape,
-        ys_strides,
-        dtype=ys_dtype,
-        device=y.device,
-    )
+    y_s = torch.empty_strided(ys_shape, ys_strides, dtype=ys_dtype, device=y.device)
 
     ceil_ue8m0 = quant_scale_fmt in [
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
@@ -302,8 +297,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
@@ -368,7 +362,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         if dp_meta is None:
             logger.warning_once(
                 "DPMetadata unavailable. Defaulting expected_m to "
-                f"{max_tokens_per_expert}.",
+                f"{max_tokens_per_expert}."
             )
             return max_tokens_per_expert
 
@@ -434,15 +428,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         quant_scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
         a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
-            workspace1,
-            expert_num_tokens,
-            quant_scale_fmt=quant_scale_fmt,
+            workspace1, expert_num_tokens, quant_scale_fmt=quant_scale_fmt
         )
 
         fp8_m_grouped_gemm_nt_masked(
-            (a2q, a2q_scale),
-            (w2, self.w2_scale),
-            output,
-            expert_num_tokens,
-            expected_m,
+            (a2q, a2q_scale), (w2, self.w2_scale), output, expert_num_tokens, expected_m
         )

@@ -17,12 +17,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
-from .typing import (
-    ScoreContentPartParam,
-    ScoreData,
-    ScoreInput,
-    ScoringData,
-)
+from .typing import ScoreContentPartParam, ScoreData, ScoreInput, ScoringData
 
 
 def get_num_special_tokens_for_pair(tokenizer) -> int:
@@ -38,11 +33,7 @@ def get_num_special_tokens_for_pair(tokenizer) -> int:
     return len(empty_encoding["input_ids"])
 
 
-def truncate_text_to_tokens(
-    text: str,
-    tokenizer,
-    max_tokens: int,
-) -> str:
+def truncate_text_to_tokens(text: str, tokenizer, max_tokens: int) -> str:
     """Truncate text to a maximum number of content tokens.
 
     Uses offset_mapping to slice the original text at the exact character
@@ -75,9 +66,7 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
 
 
 def _validate_mm_score_input(
-    data: list[ScoreInput],
-    is_multimodal_model: bool,
-    architecture: str,
+    data: list[ScoreInput], is_multimodal_model: bool, architecture: str
 ) -> list[ScoreData]:
     out: list[ScoreData] = []
     for d in data:
@@ -91,10 +80,7 @@ def _validate_mm_score_input(
     return out
 
 
-def _validate_score_input_lens(
-    data_1: list[ScoreData],
-    data_2: list[ScoreData],
-):
+def _validate_score_input_lens(data_1: list[ScoreData], data_2: list[ScoreData]):
     len_1 = len(data_1)
     len_2 = len(data_2)
 
@@ -125,9 +111,7 @@ def validate_score_input(
 
 
 def score_data_to_prompts(
-    data_list: list[ScoreData],
-    role: str,
-    model_config: ModelConfig,
+    data_list: list[ScoreData], role: str, model_config: ModelConfig
 ) -> list[PromptType]:
     """Convert a list of ScoreData into PromptType objects.
 
@@ -164,9 +148,7 @@ def _ensure_str(content: list[ConversationMessage]) -> str:
 
 
 def _parse_score_content(
-    role: str,
-    data: ScoreData,
-    mm_tracker: BaseMultiModalItemTracker,
+    role: str, data: ScoreData, mm_tracker: BaseMultiModalItemTracker
 ) -> list[ConversationMessage]:
     parts: Iterable[ChatCompletionContentPartParam]
     if isinstance(data, str):
@@ -200,9 +182,7 @@ def _parse_score_content(
 
 
 def parse_score_data_single(
-    data: ScoreData,
-    role: str,
-    model_config: ModelConfig,
+    data: ScoreData, role: str, model_config: ModelConfig
 ) -> tuple[str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     """Parse **one** ScoreData into a text prompt and its own multi-modal
     data.
@@ -221,9 +201,7 @@ def parse_score_data_single(
 
 
 def parse_score_data(
-    data_1: ScoreData,
-    data_2: ScoreData,
-    model_config: ModelConfig,
+    data_1: ScoreData, data_2: ScoreData, model_config: ModelConfig
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     """Parse a query-document pair into text prompts and shared multi-modal
     data.

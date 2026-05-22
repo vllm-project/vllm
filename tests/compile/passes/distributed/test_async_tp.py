@@ -7,9 +7,7 @@ import torch
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
-from tests.utils import (
-    multi_gpu_test,
-)
+from tests.utils import multi_gpu_test
 from vllm.compilation.passes.fusion.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
@@ -338,9 +336,7 @@ def async_tp_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
-        pass_config=PassConfig(
-            fuse_gemm_comms=True,
-        ),
+        pass_config=PassConfig(fuse_gemm_comms=True)
     )
     vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 

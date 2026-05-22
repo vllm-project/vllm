@@ -6,9 +6,7 @@ from typing import Any
 import torch
 
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (
-    get_ep_group,
-)
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -151,11 +149,9 @@ def maybe_make_prepare_finalize(
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
-            (
-                global_to_physical,
-                physical_to_global,
-                local_expert_global_ids,
-            ) = routing_tables
+            (global_to_physical, physical_to_global, local_expert_global_ids) = (
+                routing_tables
+            )
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
@@ -223,7 +219,7 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
-            num_dispatchers=all2all_manager.world_size,
+            num_dispatchers=all2all_manager.world_size
         )
 
     elif moe.use_fi_nvl_one_sided_kernels:
@@ -272,11 +268,9 @@ def maybe_make_prepare_finalize(
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
-            (
-                global_to_physical,
-                physical_to_global,
-                local_expert_global_ids,
-            ) = routing_tables
+            (global_to_physical, physical_to_global, local_expert_global_ids) = (
+                routing_tables
+            )
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,

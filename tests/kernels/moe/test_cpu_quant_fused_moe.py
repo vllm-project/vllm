@@ -41,9 +41,7 @@ FACTOR_FOR_SCALE = 1e-3
 
 
 def _block_dequant_weight(
-    weight: torch.Tensor,
-    scales: torch.Tensor,
-    block_size: list[int],
+    weight: torch.Tensor, scales: torch.Tensor, block_size: list[int]
 ) -> torch.Tensor:
     """Block-dequantize FP8 weight [E, N, K] -> float [E, N, K]."""
     E, N, K = weight.shape
@@ -114,10 +112,7 @@ def ref_w8a16_block_fp8_moe(
 
 
 def _make_fp8_moe_weights(
-    E: int,
-    N: int,
-    K: int,
-    block_size: list[int],
+    E: int, N: int, K: int, block_size: list[int]
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate random FP8 MoE weights with random block scales."""
     block_n, block_k = block_size

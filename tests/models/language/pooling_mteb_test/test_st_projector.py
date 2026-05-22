@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from tests.models.utils import (
-    EmbedModelInfo,
-)
+from tests.models.utils import EmbedModelInfo
 
 from .mteb_embed_utils import mteb_test_embed_models
 

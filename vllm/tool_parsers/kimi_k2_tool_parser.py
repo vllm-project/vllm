@@ -5,9 +5,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -19,10 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import partial_tag_overlap
 
 logger = init_logger(__name__)
@@ -71,9 +66,7 @@ class KimiK2ToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
@@ -167,9 +160,7 @@ class KimiK2ToolParser(ToolParser):
         return results
 
     @staticmethod
-    def _extract_tool_id_and_name(
-        header: str | None,
-    ) -> tuple[str | None, str | None]:
+    def _extract_tool_id_and_name(header: str | None) -> tuple[str | None, str | None]:
         """Parse ``(tool_id, tool_name)`` from a header
         like ``"functions.get_weather:0"``."""
         if header is None:
@@ -265,10 +256,7 @@ class KimiK2ToolParser(ToolParser):
                     )
 
             if content or tool_call_deltas:
-                return DeltaMessage(
-                    content=content,
-                    tool_calls=tool_call_deltas,
-                )
+                return DeltaMessage(content=content, tool_calls=tool_call_deltas)
             return None
 
         except Exception:

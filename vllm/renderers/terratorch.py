@@ -19,9 +19,7 @@ logger = init_logger(__name__)
 
 class TerratorchRenderer(BaseRenderer):
     def render_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 
@@ -42,9 +40,7 @@ class TerratorchRenderer(BaseRenderer):
         return conversation, prompt
 
     async def render_messages_async(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 

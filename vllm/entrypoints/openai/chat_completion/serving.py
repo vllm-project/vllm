@@ -191,16 +191,14 @@ class OpenAIServingChat(OpenAIServing):
     ) -> dict[str, Any]:
         return (
             request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
+                self.chat_template, self.chat_template_content_format
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
         )
 
     async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
+        self, request: ChatCompletionRequest
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """
         Validate the model and preprocess a chat completion request.
@@ -226,9 +224,7 @@ class OpenAIServingChat(OpenAIServing):
         return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        self, request: ChatCompletionRequest, raw_request: Request | None = None
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         """
         Chat Completion API similar to OpenAI's API.
@@ -242,9 +238,7 @@ class OpenAIServingChat(OpenAIServing):
         )
 
     async def _create_chat_completion(
-        self,
-        request: ChatCompletionRequest,
-        raw_request: Request | None = None,
+        self, request: ChatCompletionRequest, raw_request: Request | None = None
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
         tokenizer = self.renderer.tokenizer
@@ -307,8 +301,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 sampling_params = request.to_sampling_params(
-                    max_tokens,
-                    self.default_sampling_params,
+                    max_tokens, self.default_sampling_params
                 )
 
             self._log_inputs(
@@ -357,7 +350,7 @@ class OpenAIServingChat(OpenAIServing):
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
+                        "chat_template_kwargs": chat_template_kwargs
                     }
                     if reasoning_parser
                     else None,
@@ -519,10 +512,7 @@ class OpenAIServingChat(OpenAIServing):
                     for i in range(num_choices):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(
-                                role=role,
-                                content="",
-                            ),
+                            delta=DeltaMessage(role=role, content=""),
                             logprobs=None,
                             finish_reason=None,
                         )
@@ -1084,9 +1074,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
                 else:
                     message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
+                        role=role, reasoning=reasoning, content=content
                     )
 
                 # Encode routed_experts for transport. JSON can't carry raw
@@ -1303,9 +1291,7 @@ class OpenAIServingChat(OpenAIServing):
                     if content and len(content) > 0:
                         ret_content = content
                     message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=ret_content,
+                        role=role, reasoning=reasoning, content=ret_content
                     )
 
             # undetermined case that is still important to handle
@@ -1495,8 +1481,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
-                        token=token,
-                        bytes=list(token.encode("utf-8", errors="replace")),
+                        token=token, bytes=list(token.encode("utf-8", errors="replace"))
                     )
                 )
             else:
@@ -1506,10 +1491,7 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=self._get_decoded_token(
-                            step_token,
-                            token_id,
-                            tokenizer,
-                            should_return_as_token_id,
+                            step_token, token_id, tokenizer, should_return_as_token_id
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=(
@@ -1545,9 +1527,7 @@ class OpenAIServingChat(OpenAIServing):
         )
 
     def _should_check_for_unstreamed_tool_arg_tokens(
-        self,
-        delta_message: DeltaMessage | None,
-        output: CompletionOutput,
+        self, delta_message: DeltaMessage | None, output: CompletionOutput
     ) -> bool:
         """
         Check to see if we should check for unstreamed tool arguments tokens.
@@ -1570,17 +1550,14 @@ class OpenAIServingChat(OpenAIServing):
 
     @staticmethod
     def _create_remaining_args_delta(
-        delta_message: DeltaMessage,
-        remaining_call: str,
-        index: int,
+        delta_message: DeltaMessage, remaining_call: str, index: int
     ) -> DeltaMessage:
         """
         Create a delta message for remaining tool arguments, preserving
         id/type/name from the original delta.
         """
         original_tc = next(
-            (tc for tc in delta_message.tool_calls if tc.index == index),
-            None,
+            (tc for tc in delta_message.tool_calls if tc.index == index), None
         )
         original_fn = original_tc.function if original_tc else None
         return DeltaMessage(

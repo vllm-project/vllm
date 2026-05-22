@@ -102,8 +102,7 @@ class TerratorchMultiModalDataParser(MultiModalDataParser):
         self.input_definition = input_definition
 
     def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -130,8 +129,7 @@ class TerratorchProcessingInfo(BaseProcessingInfo):
 
     def get_data_parser(self):
         return TerratorchMultiModalDataParser(
-            self.input_definition,
-            expected_hidden_size=self._get_expected_hidden_size(),
+            self.input_definition, expected_hidden_size=self._get_expected_hidden_size()
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -176,8 +174,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         is_shared: bool = True,
     ) -> Mapping[str, MultiModalFieldConfig]:
         factory = _terratorch_field_factory(
-            self.info.input_definition,
-            is_shared=is_shared,
+            self.info.input_definition, is_shared=is_shared
         )
         return factory(hf_inputs)
 
@@ -190,9 +187,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         return []
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         mm_items = inputs.mm_data_items
         hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
@@ -210,9 +205,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
             self._get_mm_fields_config(
-                mm_processed_data,
-                hf_processor_mm_kwargs,
-                is_shared=False,
+                mm_processed_data, hf_processor_mm_kwargs, is_shared=False
             ),
         )
 

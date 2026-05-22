@@ -12,8 +12,7 @@ from .common import AttentionBackendCase, Matches, ModelFusionInfo, is_blackwell
 # Attn backends
 FLASHINFER_ATTN = pytest.param(
     AttentionBackendCase(
-        backend=AttentionBackendEnum.FLASHINFER,
-        model_kwargs=dict(kv_cache_dtype="fp8"),
+        backend=AttentionBackendEnum.FLASHINFER, model_kwargs=dict(kv_cache_dtype="fp8")
     ),
     id="FLASHINFER",
     marks=pytest.mark.skipif(
@@ -30,8 +29,7 @@ ROCM_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.ROCM_ATTN),
     id="ROCM_ATTN",
     marks=pytest.mark.skipif(
-        not current_platform.is_rocm(),
-        reason="ROCm attention only for AMD",
+        not current_platform.is_rocm(), reason="ROCm attention only for AMD"
     ),
 )
 
@@ -54,8 +52,7 @@ FLASHINFER_MLA_ATTN = pytest.param(
 )
 
 TRITON_MLA_ATTN = pytest.param(
-    AttentionBackendCase(backend=AttentionBackendEnum.TRITON_MLA),
-    id="TRITON_MLA",
+    AttentionBackendCase(backend=AttentionBackendEnum.TRITON_MLA), id="TRITON_MLA"
 )
 
 FLASHMLA_SPARSE_ATTN = pytest.param(
@@ -65,8 +62,7 @@ FLASHMLA_SPARSE_ATTN = pytest.param(
     ),
     id="FLASHMLA_SPARSE",
     marks=pytest.mark.skipif(
-        not is_blackwell(),
-        reason="FlashMLA Sparse requires Blackwell",
+        not is_blackwell(), reason="FlashMLA Sparse requires Blackwell"
     ),
 )
 

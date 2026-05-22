@@ -34,10 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_properties,
@@ -178,9 +175,7 @@ class Glm4MoeModelToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         matched_tool_calls = self.func_call_regex.findall(model_output)
         logger.debug("model_output: %s", model_output)
@@ -189,10 +184,7 @@ class Glm4MoeModelToolParser(ToolParser):
             for match in matched_tool_calls:
                 tc_detail = self.func_detail_regex.search(match)
                 if not tc_detail:
-                    logger.warning(
-                        "Failed to parse tool call details from: %s",
-                        match,
-                    )
+                    logger.warning("Failed to parse tool call details from: %s", match)
                     continue
                 tc_name = tc_detail.group(1).strip()
                 tc_args = tc_detail.group(2)
@@ -320,10 +312,7 @@ class Glm4MoeModelToolParser(ToolParser):
         return name if name else None
 
     def _build_args_json_so_far(
-        self,
-        tool_name: str,
-        inner_text: str,
-        is_complete: bool,
+        self, tool_name: str, inner_text: str, is_complete: bool
     ) -> str:
         """Build the JSON arguments string from the XML pairs seen so far.
 
@@ -462,8 +451,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         id=self._tool_call_ids[i],
                         type="function",
                         function=DeltaFunctionCall(
-                            name=tool_name,
-                            arguments="",
+                            name=tool_name, arguments=""
                         ).model_dump(exclude_none=True),
                     )
                 )
@@ -488,8 +476,5 @@ class Glm4MoeModelToolParser(ToolParser):
             self.current_tool_id = len(regions) - 1
 
         if content or tool_call_deltas:
-            return DeltaMessage(
-                content=content,
-                tool_calls=tool_call_deltas,
-            )
+            return DeltaMessage(content=content, tool_calls=tool_call_deltas)
         return None

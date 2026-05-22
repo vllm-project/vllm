@@ -127,11 +127,7 @@ atexit.register(_cleanup_nccl_allocator_wrapper)
 
 
 class nccl_symm_mem_context:
-    def __init__(
-        self,
-        pynccl_comm: PyNcclCommunicator,
-        disabled: bool = False,
-    ):
+    def __init__(self, pynccl_comm: PyNcclCommunicator, disabled: bool = False):
         self.disabled = (
             disabled
             or not is_symmetric_memory_enabled()

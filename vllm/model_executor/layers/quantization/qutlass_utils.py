@@ -59,9 +59,7 @@ def triton_scale_swizzle(
     mask = (global_rows < scale_rows) & (global_cols < scale_cols)
 
     input_scales = tl.load(
-        scale_ptr + global_rows * input_row_stride + global_cols,
-        mask=mask,
-        other=0.0,
+        scale_ptr + global_rows * input_row_stride + global_cols, mask=mask, other=0.0
     )
 
     r_div_32 = rows // 32
@@ -78,10 +76,7 @@ def triton_scale_swizzle(
     LOCAL_NUMEL = BLOCK_ROWS * BLOCK_COLS
     block_offset = pid_col * LOCAL_NUMEL + (pid_row * output_block_stride)
 
-    tl.store(
-        output_ptr + block_offset + dest_indices_flat,
-        scales_flat,
-    )
+    tl.store(output_ptr + block_offset + dest_indices_flat, scales_flat)
 
 
 def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:

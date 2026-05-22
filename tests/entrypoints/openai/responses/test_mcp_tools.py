@@ -61,9 +61,7 @@ class TestMCPToolServerUnit:
 
         server.harmony_tool_descriptions = {
             "test_server": ToolNamespaceConfig(
-                name="test_server",
-                description="test",
-                tools=[tool1, tool2, tool3],
+                name="test_server", description="test", tools=[tool1, tool2, tool3]
             )
         }
 
@@ -222,10 +220,7 @@ class TestMCPEnabled:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])
     async def test_mcp_tool_calling_streaming_types(
-        self,
-        pairs_of_event_types: dict[str, str],
-        client: OpenAI,
-        model_name: str,
+        self, pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
     ):
         def _has_mcp_events(events: list) -> bool:
             return events_contain_type(events, "mcp_call")

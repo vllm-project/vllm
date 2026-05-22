@@ -18,10 +18,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelL
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -183,16 +180,10 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
         return vision_encoder_info.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
+            image_width=image_width, image_height=image_height
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -241,10 +232,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         pixel_values = processed_outputs.get("pixel_values")
@@ -261,9 +249,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -293,8 +279,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
             image_size = images.get_image_size(item_idx)
 
             ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
+                image_width=image_size.width, image_height=image_size.height
             )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
@@ -304,10 +289,8 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
 
         return [
             PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=get_replacement,
-            ),
+                modality="image", target=[image_token_id], replacement=get_replacement
+            )
         ]
 
 
@@ -456,13 +439,11 @@ class Mistral3ForConditionalGeneration(
             return None
 
         return Mistral3ImagePixelInputs(
-            type="pixel_values_pixtral",
-            pixel_values=pixel_values,
+            type="pixel_values_pixtral", pixel_values=pixel_values
         )
 
     def _process_image_input(
-        self,
-        image_input: Mistral3ImagePixelInputs,
+        self, image_input: Mistral3ImagePixelInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -553,10 +534,7 @@ class Mistral3ForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

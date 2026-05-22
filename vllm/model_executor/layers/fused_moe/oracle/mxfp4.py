@@ -11,9 +11,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEConfig,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -103,15 +101,10 @@ TRTLLM_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
 )
 
-TRITON_BACKENDS = (
-    Mxfp4MoeBackend.TRITON,
-    Mxfp4MoeBackend.TRITON_UNFUSED,
-)
+TRITON_BACKENDS = (Mxfp4MoeBackend.TRITON, Mxfp4MoeBackend.TRITON_UNFUSED)
 
 
-def backend_to_kernel_cls(
-    backend: Mxfp4MoeBackend,
-) -> list[type[mk.FusedMoEExperts]]:
+def backend_to_kernel_cls(backend: Mxfp4MoeBackend) -> list[type[mk.FusedMoEExperts]]:
     if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
             DeepGemmFP4Experts,
@@ -335,9 +328,7 @@ def _user_moe_activation_override() -> QuantKey | None:
     return args.moe.activation
 
 
-def _resolve_activation_key(
-    model_activation_key: QuantKey | None,
-) -> QuantKey | None:
+def _resolve_activation_key(model_activation_key: QuantKey | None) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
     Raises on conflict (both set and disagreeing)."""
     user_override = _user_moe_activation_override()
@@ -384,8 +375,7 @@ def _return_or_raise(
 
 
 def _filter_by_activation(
-    backends: list[Mxfp4MoeBackend],
-    requested_activation_key: QuantKey | None,
+    backends: list[Mxfp4MoeBackend], requested_activation_key: QuantKey | None
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching ``requested_activation_key``; without one,
     prefer BF16 if the list has any, else keep the list as-is so explicit
@@ -402,8 +392,7 @@ def _filter_by_activation(
 
 
 def select_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-    activation_key: QuantKey | None = None,
+    config: FusedMoEConfig, activation_key: QuantKey | None = None
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary MXFP4 MoE backend.
@@ -448,11 +437,7 @@ def select_mxfp4_moe_backend(
             )
             try:
                 return _return_or_raise(
-                    requested_backend,
-                    config,
-                    kMxfp4Static,
-                    act_key,
-                    activation_format,
+                    requested_backend, config, kMxfp4Static, act_key, activation_format
                 )
             except ValueError as e:
                 last_error = e
@@ -525,11 +510,7 @@ def select_mxfp4_moe_backend(
     # Handle explicit Marlin MXFP4 configuration.
     if envs.is_set("VLLM_MXFP4_USE_MARLIN") and envs.VLLM_MXFP4_USE_MARLIN:
         return _return_or_raise(
-            Mxfp4MoeBackend.MARLIN,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
+            Mxfp4MoeBackend.MARLIN, config, kMxfp4Static, None, activation_format
         )
 
     for backend in AVAILABLE_BACKENDS:
@@ -553,22 +534,14 @@ def select_mxfp4_moe_backend(
         backend = Mxfp4MoeBackend.XPU
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
-            Mxfp4MoeBackend.XPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
+            Mxfp4MoeBackend.XPU, config, kMxfp4Static, None, activation_format
         )
 
     if current_platform.is_cpu():
         backend = Mxfp4MoeBackend.CPU
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
-            Mxfp4MoeBackend.CPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
+            Mxfp4MoeBackend.CPU, config, kMxfp4Static, None, activation_format
         )
 
     if current_platform.is_cuda() or current_platform.is_rocm():
@@ -743,10 +716,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             getattr(layer, "w13_bias", None),
             getattr(layer, "w2_bias", None),
         )
-    elif mxfp4_backend in (
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
-    ):
+    elif mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
             prepare_moe_mxfp4_layer_for_marlin,
         )
@@ -805,9 +775,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         for i in range(num_experts):
             # w13 weight
             permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_weight[i].view(torch.uint8),
-                epilogue_tile_m,
+                _cache_permute_indices, w13_weight[i].view(torch.uint8), epilogue_tile_m
             )
             gemm1_weights_shuffled.append(
                 w13_weight[i]
@@ -842,9 +810,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             )
             # w2 weight
             permute_indices = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_weight[i].view(torch.uint8),
-                epilogue_tile_m,
+                _cache_permute_indices, w2_weight[i].view(torch.uint8), epilogue_tile_m
             )
             gemm2_weights_shuffled.append(
                 w2_weight[i]
@@ -1054,16 +1020,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         # Shuffle weights and scales for AITER CK kernel layout
         w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
-            num_experts,
-            True,
+            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]), num_experts, True
         )
 
         w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
-            num_experts,
-            False,
+            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]), num_experts, False
         )
 
         # Permute bias to match de-interleaved weight layout
@@ -1149,14 +1111,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
-        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-            w13_weight,
-            w13_weight_scale,
-        )
-        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-            w2_weight,
-            w2_weight_scale,
-        )
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(w13_weight, w13_weight_scale)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(w2_weight, w2_weight_scale)
 
         w13_precision_config = PrecisionConfig(
             weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
@@ -1345,9 +1301,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         # w13 weight permute
         w13_perm = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            w13_weight[0].view(torch.uint8),
-            epilogue_tile_m,
+            _cache_permute_indices, w13_weight[0].view(torch.uint8), epilogue_tile_m
         ).to(w13_weight.device)
         w13_weight = w13_weight.view(torch.uint8)[:, w13_perm].contiguous()
 
@@ -1368,9 +1322,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         # w2 weight permute
         w2_perm = get_w2_permute_indices_with_cache(
-            _cache_permute_indices,
-            w2_weight[0].view(torch.uint8),
-            epilogue_tile_m,
+            _cache_permute_indices, w2_weight[0].view(torch.uint8), epilogue_tile_m
         ).to(w2_weight.device)
         w2_weight = w2_weight.view(torch.uint8)[:, w2_perm].contiguous()
 
@@ -1392,9 +1344,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # w13 bias permute
         if w13_bias is not None:
             w13_b_perm = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w13_bias[0].reshape(-1, 1),
-                epilogue_tile_m,
+                _cache_permute_indices, w13_bias[0].reshape(-1, 1), epilogue_tile_m
             ).to(w13_bias.device)
             w13_bias = w13_bias.reshape(num_experts, -1, 1)[:, w13_b_perm].reshape(
                 num_experts, -1
@@ -1403,9 +1353,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # w2 bias permute
         if w2_bias is not None:
             w2_b_perm = get_w2_permute_indices_with_cache(
-                _cache_permute_indices,
-                w2_bias[0].reshape(-1, 1),
-                epilogue_tile_m,
+                _cache_permute_indices, w2_bias[0].reshape(-1, 1), epilogue_tile_m
             ).to(w2_bias.device)
             w2_bias = w2_bias.reshape(num_experts, -1, 1)[:, w2_b_perm].reshape(
                 num_experts, -1
@@ -1449,16 +1397,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
-            num_experts,
-            True,
+            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]), num_experts, True
         )
 
         w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
-            num_experts,
-            False,
+            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]), num_experts, False
         )
 
         if w13_bias is not None:
@@ -1503,14 +1447,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
-        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-            w13_weight,
-            w13_weight_scale,
-        )
-        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-            w2_weight,
-            w2_weight_scale,
-        )
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(w13_weight, w13_weight_scale)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(w2_weight, w2_weight_scale)
 
         w13_precision_config = PrecisionConfig(
             weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
@@ -1562,9 +1500,7 @@ def make_mxfp4_moe_quant_config(
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            GroupShape,
-        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
         # DeepGEMM FP4 uses FP8 per-token-group activation quantization
         # with block 128, matching the FP8 DeepGEMM path.
@@ -1712,9 +1648,7 @@ def make_mxfp4_moe_kernel(
         )
     else:
         experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_kwargs,
+            moe_config=moe_config, quant_config=moe_quant_config, **extra_kwargs
         )
 
     kernel = mk.FusedMoEKernel(

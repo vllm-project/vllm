@@ -42,10 +42,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_retained_tokens_count,
-    compute_retention_mask,
-)
+from vllm.multimodal.evs import compute_retained_tokens_count, compute_retention_mask
 from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
@@ -319,9 +316,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         )
 
     def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -417,9 +412,7 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = self._get_image_fields_config(hf_inputs)
         if self.info.supports_video:
@@ -475,9 +468,7 @@ class NanoNemotronVLMultiModalProcessor(
             return hf_processor.get_image_repl(feature_size, num_patches)
 
         return PromptReplacement(
-            modality="image",
-            target="<image>",
-            replacement=get_image_replacement,
+            modality="image", target="<image>", replacement=get_image_replacement
         )
 
     def _get_prompt_repl_video(
@@ -551,9 +542,7 @@ class NanoNemotronVLMultiModalProcessor(
             )
 
         return PromptReplacement(
-            modality="video",
-            target="<video>",
-            replacement=get_video_replacement,
+            modality="video", target="<video>", replacement=get_video_replacement
         )
 
     def _get_prompt_repl_audio(
@@ -567,9 +556,7 @@ class NanoNemotronVLMultiModalProcessor(
             return hf_processor.get_audio_repl(audios.get(item_idx))
 
         return PromptReplacement(
-            modality="audio",
-            target=AUDIO_CONTEXT,
-            replacement=get_audio_replacement,
+            modality="audio", target=AUDIO_CONTEXT, replacement=get_audio_replacement
         )
 
     def _get_prompt_updates(
@@ -582,7 +569,7 @@ class NanoNemotronVLMultiModalProcessor(
         out_mm_data = out_mm_kwargs.get_data()
 
         prompt_repls = [
-            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data),
+            self._get_prompt_repl_image(mm_items, hf_processor, out_mm_data)
         ]
         if self.info.supports_video:
             prompt_repls.append(
@@ -596,8 +583,7 @@ class NanoNemotronVLMultiModalProcessor(
         return prompt_repls
 
     def _extract_audio_from_videos(
-        self,
-        mm_items: MultiModalDataItems,
+        self, mm_items: MultiModalDataItems
     ) -> tuple[MultiModalDataItems, list[AudioItem], list[bool]]:
         """Extract audio tracks from video bytes in *mm_items*.
 
@@ -656,9 +642,7 @@ class NanoNemotronVLMultiModalProcessor(
         return mm_items, audio_items, has_audio
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         mm_config = self.info.ctx.model_config.get_multimodal_config()
         merged_kwargs = mm_config.merge_mm_processor_kwargs(
@@ -690,8 +674,7 @@ class NanoNemotronVLMultiModalProcessor(
             audio_items = audios.get_all()
             has_audio = [True] * len(videos)
             logger.info(
-                "Using %d pre-populated audio item(s) from upstream.",
-                len(audio_items),
+                "Using %d pre-populated audio item(s) from upstream.", len(audio_items)
             )
         else:
             # Extract audio from video bytes (library usage path).
@@ -731,11 +714,9 @@ class NanoNemotronVLMultiModalProcessor(
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._apply_hf_processor(inputs, timing_ctx)
+        (prompt_ids, mm_info, is_update_applied) = self._apply_hf_processor(
+            inputs, timing_ctx
+        )
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
@@ -882,9 +863,7 @@ class NanoNemotronVLDummyInputsBuilder(
             audio_len = min(max_audio_num_samples, calculated_max_audio_num_samples)
             dummy_audio = {
                 "audio": self._get_dummy_audios(
-                    length=audio_len,
-                    num_audios=num_audios,
-                    overrides=audio_overrides,
+                    length=audio_len, num_audios=num_audios, overrides=audio_overrides
                 )
             }
         else:
@@ -905,9 +884,7 @@ class NemotronH_Nano_VL_V2(
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "language_model.backbone": "language_model.model",
-        },
+        orig_to_new_prefix={"language_model.backbone": "language_model.model"}
     )
 
     @classmethod
@@ -1060,9 +1037,7 @@ class NemotronH_Nano_VL_V2(
         return vit_embeds
 
     def extract_feature(
-        self,
-        pixel_values: torch.Tensor,
-        num_frames: int | None = None,
+        self, pixel_values: torch.Tensor, num_frames: int | None = None
     ) -> torch.Tensor:
         # Process images in a micro-batch of at most 128 frames per call
         #   This is done on purpose to ensure peak GPU ram usage of huge batch
@@ -1107,8 +1082,7 @@ class NemotronH_Nano_VL_V2(
     ) -> NanoNemotronVLImageInputs | None:
         if image_embeds := kwargs.pop("image_embeds", None):
             return NanoNemotronVLImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
@@ -1355,8 +1329,7 @@ class NemotronH_Nano_VL_V2(
 
         if video_embeds is not None:
             return NanoNemotronVLVideoEmbeddingInputs(
-                type="video_embeds",
-                data=video_embeds,
+                type="video_embeds", data=video_embeds
             )
 
         if pixel_values_flat_video is not None:
@@ -1414,11 +1387,7 @@ class NemotronH_Nano_VL_V2(
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
             if (
                 input_key
-                in (
-                    "input_audio_features",
-                    "feature_attention_mask",
-                    "audio_num_clips",
-                )
+                in ("input_audio_features", "feature_attention_mask", "audio_num_clips")
                 and "audios" not in modalities
             ):
                 modalities["audios"] = NanoNemotronVLAudioFeatureInputs(
@@ -1492,10 +1461,7 @@ class NemotronH_Nano_VL_V2(
             tower_model=["vision_model", "sound_encoder.encoder"],
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

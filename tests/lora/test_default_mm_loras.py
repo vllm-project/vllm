@@ -51,10 +51,7 @@ def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs)
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         vllm_outputs_with_default_lora = [
             vllm_model.generate_greedy(
-                prompts,
-                max_tokens=128,
-                audios=audios,
-                lora_request=lora_request,
+                prompts, max_tokens=128, audios=audios, lora_request=lora_request
             )
             for prompts, audios in inputs
         ]
@@ -64,8 +61,7 @@ def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs)
 
 @create_new_process_for_each_test()
 def test_active_default_mm_lora(
-    vllm_runner: type[VllmRunner],
-    audio_assets: AudioTestAssets,
+    vllm_runner: type[VllmRunner], audio_assets: AudioTestAssets
 ):
     """Ensure that we can use the default audio lora."""
     run_test(
@@ -82,8 +78,7 @@ def test_active_default_mm_lora(
 )
 @create_new_process_for_each_test()
 def test_inactive_default_mm_lora(
-    vllm_runner: type[VllmRunner],
-    audio_assets: AudioTestAssets,
+    vllm_runner: type[VllmRunner], audio_assets: AudioTestAssets
 ):
     """Ensure that modalities are filtered properly."""
     # Default image lora won't be active since we only pass audio
@@ -101,8 +96,7 @@ def test_inactive_default_mm_lora(
 )
 @create_new_process_for_each_test()
 def test_default_mm_lora_succeeds_with_redundant_lora_request(
-    vllm_runner: type[VllmRunner],
-    audio_assets: AudioTestAssets,
+    vllm_runner: type[VllmRunner], audio_assets: AudioTestAssets
 ):
     """Ensure that redundantly providing the lora works."""
     run_test(
@@ -119,8 +113,7 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
 )
 @create_new_process_for_each_test()
 def test_default_mm_lora_fails_with_overridden_lora_request(
-    vllm_runner: type[VllmRunner],
-    audio_assets: AudioTestAssets,
+    vllm_runner: type[VllmRunner], audio_assets: AudioTestAssets
 ):
     """Ensure that if the lora_request conflicts with default_mm_loras,
     we use the lora_request."""

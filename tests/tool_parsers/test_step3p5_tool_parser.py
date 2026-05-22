@@ -10,11 +10,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
@@ -1347,10 +1343,7 @@ rectangle""",
             for tool_call in delta_message.tool_calls:
                 idx = tool_call.index
                 if idx not in tool_states:
-                    tool_states[idx] = {
-                        "name": None,
-                        "arguments": "",
-                    }
+                    tool_states[idx] = {"name": None, "arguments": ""}
                 if tool_call.function:
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name

@@ -7,16 +7,11 @@ import torch
 
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    RoutedExperts,
-)
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    UnquantizedLinearMethod,
-)
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -31,9 +26,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
-from vllm.model_executor.layers.quantization.online.int8 import (
-    Int8OnlineMoEMethod,
-)
+from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
     Mxfp8OnlineMoEMethod,
@@ -70,10 +63,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
     """Model-level config for online quantization (quantize fp16/bf16 weights
     during model loading, without requiring a pre-quantized checkpoint)."""
 
-    def __init__(
-        self,
-        args: QuantizationConfigArgs,
-    ) -> None:
+    def __init__(self, args: QuantizationConfigArgs) -> None:
         super().__init__()
         if args.linear is None and args.moe is None:
             raise ValueError(

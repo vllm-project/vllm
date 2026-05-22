@@ -184,17 +184,9 @@ def make_mock_model(hidden: int = 8):
     )
 
     # super().embed_input_ids → use SupportsMultiModal.embed_input_ids
-    def fake_super_embed(
-        ids,
-        mm_embs=None,
-        *,
-        is_multimodal=None,
-    ):
+    def fake_super_embed(ids, mm_embs=None, *, is_multimodal=None):
         return SupportsMultiModal.embed_input_ids(
-            model,
-            ids,
-            mm_embs,
-            is_multimodal=is_multimodal,
+            model, ids, mm_embs, is_multimodal=is_multimodal
         )
 
     # Bind embed_input_ids as the real method

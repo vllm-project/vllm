@@ -91,22 +91,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         if self.base_layer.vocab_size > 258048:
             raise ValueError("When using LoRA, vocab size must be <= 258048")
         self.lora_a_stacked = torch.zeros(
-            (
-                max_loras,
-                1,
-                lora_config.max_lora_rank,
-                self.hidden_size,
-            ),
+            (max_loras, 1, lora_config.max_lora_rank, self.hidden_size),
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
         self.lora_b_stacked = torch.zeros(
-            (
-                max_loras,
-                1,
-                self.base_layer.vocab_size,
-                lora_config.max_lora_rank,
-            ),
+            (max_loras, 1, self.base_layer.vocab_size, lora_config.max_lora_rank),
             dtype=lora_config.lora_dtype,
             device=self.device,
         )

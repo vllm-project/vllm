@@ -106,9 +106,7 @@ class GPTNeoXAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -169,14 +167,11 @@ class GPTNeoXLayer(nn.Module):
         self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         attn_input = self.input_layernorm(hidden_states)
         attn_output = self.attention(
-            position_ids=position_ids,
-            hidden_states=attn_input,
+            position_ids=position_ids, hidden_states=attn_input
         )
 
         if self.use_parallel_residual:
@@ -207,10 +202,7 @@ class GPTNeoXModel(nn.Module):
 
         self.config = config
 
-        self.embed_in = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_in = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: GPTNeoXLayer(
@@ -328,10 +320,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.embed_out, hidden_states)
         return logits
 

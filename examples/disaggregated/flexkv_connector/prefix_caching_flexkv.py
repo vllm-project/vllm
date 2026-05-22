@@ -47,16 +47,10 @@ def parse_args():
         description="Example of using FlexKV with vLLM for prefix caching."
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Path or name of the model to use.",
+        "--model", type=str, required=True, help="Path or name of the model to use."
     )
     parser.add_argument(
-        "--tp-size",
-        type=int,
-        default=1,
-        help="Tensor parallel size (default: 1).",
+        "--tp-size", type=int, default=1, help="Tensor parallel size (default: 1)."
     )
     parser.add_argument(
         "--gpu-memory-util",
@@ -72,10 +66,7 @@ def main():
 
     flexkv_config = {
         "server_recv_port": f"ipc:///tmp/flexkv_test_{os.getpid()}",
-        "cache_config": {
-            "enable_cpu": True,
-            "num_cpu_blocks": 10240,
-        },
+        "cache_config": {"enable_cpu": True, "num_cpu_blocks": 10240},
         "num_log_interval_requests": 200,
     }
     flexkv_config_path = f"./flexkv_config_{os.getpid()}.json"
@@ -117,10 +108,7 @@ def _run(args):
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.0)
 
-    kv_transfer_config = {
-        "kv_connector": "FlexKVConnectorV1",
-        "kv_role": "kv_both",
-    }
+    kv_transfer_config = {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
 
     # Create an LLM without prefix caching as a baseline.
     regular_llm = LLM(

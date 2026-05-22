@@ -137,18 +137,8 @@ class MiniCPMMoE(nn.Module):
             )
         )
 
-        set_weight_attrs(
-            self.ws,
-            {
-                "weight_loader": self.weight_loader,
-            },
-        )
-        set_weight_attrs(
-            self.w2s,
-            {
-                "weight_loader": self.weight_loader,
-            },
-        )
+        set_weight_attrs(self.ws, {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.w2s, {"weight_loader": self.weight_loader})
 
     def weight_loader(
         self,
@@ -300,9 +290,7 @@ class MiniCPMAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -377,10 +365,7 @@ class MiniCPMDecoderLayer(nn.Module):
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = residual + hidden_states * (
             self.config.scale_depth / math.sqrt(self.config.num_hidden_layers)
         )
@@ -411,10 +396,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -463,11 +445,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -557,15 +535,8 @@ class MiniCPMForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # LoRA specific attributes
@@ -640,10 +611,7 @@ class MiniCPMForCausalLM(
                 hidden_states = model_output / self.scale_width
                 return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

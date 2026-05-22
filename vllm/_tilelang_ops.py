@@ -42,7 +42,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    }
 )
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
@@ -152,10 +152,7 @@ def mhc_pre_big_fuse_tilelang(
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
                 pre_mix_shared[j] = (
-                    T.sigmoid(
-                        mixes_shared[j] * hc_scale[0] + hc_base[j],
-                    )
-                    + hc_pre_eps
+                    T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j]) + hc_pre_eps
                 )
             ###################################################################
             # _pre_apply_mix_fwd
@@ -182,7 +179,7 @@ def mhc_pre_big_fuse_tilelang(
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    }
 )
 def mhc_fused_tilelang(
     comb_mix,
@@ -307,18 +304,10 @@ def mhc_fused_tilelang(
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    }
 )
 def mhc_post_tilelang(
-    a,
-    b,
-    c,
-    d,
-    x,
-    hc: int,
-    hidden: int,
-    n_thr: int = 128,
-    h_blk: int = 1024,
+    a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024
 ) -> tilelang.JITKernel:
     # rename for shorter code
     n = T.dynamic("num_tokens")
@@ -366,7 +355,7 @@ def mhc_post_tilelang(
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    }
 )
 def hc_head_fuse_tilelang(
     residual,

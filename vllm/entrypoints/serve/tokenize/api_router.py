@@ -9,9 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -20,9 +18,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
-from vllm.entrypoints.utils import (
-    with_cancellation,
-)
+from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

@@ -96,9 +96,7 @@ class QuantFP8(CustomOp):
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
             return fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
-                x,
-                group_size=self.group_size,
-                use_ue8m0=True,
+                x, group_size=self.group_size, use_ue8m0=True
             )
 
         if self.is_group_quant and not self.static:

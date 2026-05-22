@@ -172,8 +172,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if use_safetensors:
             iterator = safetensors_weights_iterator(
-                hf_weights_files,
-                self.load_config.use_tqdm_on_load,
+                hf_weights_files, self.load_config.use_tqdm_on_load
             )
         else:
             iterator = pt_weights_iterator(
@@ -190,9 +189,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             yield org_name, mapped_name, param
 
     def _get_quantized_weights_iterator(
-        self,
-        model_name_or_path: str,
-        revision: str | None,
+        self, model_name_or_path: str, revision: str | None
     ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], dict[str, Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""
@@ -251,22 +248,18 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _quantized_8bit_generator(
         self, hf_weights_files, use_safetensors, quant_state_dict
     ) -> Generator:
-        for (
-            org_weight_name,
-            mapped_weight_name,
-            weight_tensor,
-        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+        for org_weight_name, mapped_weight_name, weight_tensor in self._hf_weight_iter(
+            hf_weights_files, use_safetensors
+        ):
             if not mapped_weight_name.lower().endswith(".scb"):
                 continue
 
             weight_key = mapped_weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
-        for (
-            org_weight_name,
-            mapped_weight_name,
-            weight_tensor,
-        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+        for org_weight_name, mapped_weight_name, weight_tensor in self._hf_weight_iter(
+            hf_weights_files, use_safetensors
+        ):
             if self._is_8bit_weight_name(mapped_weight_name):
                 continue
 
@@ -284,11 +277,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # First iterate over all quant state weights
         weight_iterator = self._hf_weight_iter(hf_weights_files, use_safetensors)
         temp_state_dict = {}
-        for (
-            org_weight_name,
-            mapped_weight_name,
-            weight_tensor,
-        ) in weight_iterator:
+        for org_weight_name, mapped_weight_name, weight_tensor in weight_iterator:
             if not self._is_4bit_weight_name(mapped_weight_name):
                 continue
             # bitsandbytes library requires
@@ -311,11 +300,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # Second iterate over all prequant and normal weights
         # pre quantized weights would have a quant_state
-        for (
-            org_weight_name,
-            mapped_weight_name,
-            weight_tensor,
-        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+        for org_weight_name, mapped_weight_name, weight_tensor in self._hf_weight_iter(
+            hf_weights_files, use_safetensors
+        ):
             if self._is_4bit_weight_name(mapped_weight_name):
                 continue
 
@@ -341,11 +328,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             lambda weight_name, module_name: weight_name.removesuffix(".weight")
             == module_name
         )
-        for (
-            org_weight_name,
-            mapped_weight_name,
-            weight_tensor,
-        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+        for org_weight_name, mapped_weight_name, weight_tensor in self._hf_weight_iter(
+            hf_weights_files, use_safetensors
+        ):
             # override tp_size and tp_rank if the module has disabled TP
             if any(
                 tp_disabled_module in mapped_weight_name
@@ -432,9 +417,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
                 with set_default_torch_dtype(torch.float32):
                     processed_weight, quant_state = quantize_4bit(
-                        loaded_weight,
-                        compress_statistics=True,
-                        quant_type="nf4",
+                        loaded_weight, compress_statistics=True, quant_type="nf4"
                     )
 
                 quant_state_dict[mapped_weight_name] = quant_state
@@ -787,8 +770,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             "Loading weights with BitsAndBytes quantization. May take a while ..."
         )
         qweight_iterator, quant_state_dict = self._get_quantized_weights_iterator(
-            model_config.model,
-            model_config.revision,
+            model_config.model, model_config.revision
         )
         weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(qweight_iterator)

@@ -158,9 +158,7 @@ def benchmark_function(
 
 
 def create_benchmark_configs(
-    batch_sizes: list[int],
-    vocab_sizes: list[int],
-    device: str = "cuda",
+    batch_sizes: list[int], vocab_sizes: list[int], device: str = "cuda"
 ) -> list[BenchmarkConfig]:
     """Create all benchmark configurations."""
     configs = []
@@ -428,11 +426,7 @@ def main():
         default=20,
         help="Number of benchmark iterations (default: 20)",
     )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Only print summary table",
-    )
+    parser.add_argument("--quiet", action="store_true", help="Only print summary table")
 
     args = parser.parse_args()
 
@@ -453,10 +447,7 @@ def main():
     print()
 
     # Create configs
-    configs = create_benchmark_configs(
-        args.batch_sizes,
-        args.vocab_sizes,
-    )
+    configs = create_benchmark_configs(args.batch_sizes, args.vocab_sizes)
 
     # Run benchmarks
     results = run_benchmark(

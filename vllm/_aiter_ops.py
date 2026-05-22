@@ -290,9 +290,7 @@ def _rocm_aiter_topk_softmax_fake(
 
 
 def _rocm_aiter_topk_sigmoid_impl(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor, topk_indices: torch.Tensor, gating_output: torch.Tensor
 ) -> None:
     from aiter import topk_sigmoid
 
@@ -300,9 +298,7 @@ def _rocm_aiter_topk_sigmoid_impl(
 
 
 def _rocm_aiter_topk_sigmoid_fake(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor, topk_indices: torch.Tensor, gating_output: torch.Tensor
 ) -> None:
     pass
 
@@ -383,10 +379,7 @@ def _rocm_aiter_grouped_topk_fake(
 
 
 def _rocm_aiter_fused_topk_impl(
-    x: torch.Tensor,
-    router_logits: torch.Tensor,
-    top_k: int,
-    gate_up: bool,
+    x: torch.Tensor, router_logits: torch.Tensor, top_k: int, gate_up: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.fused_moe import fused_topk
 
@@ -395,10 +388,7 @@ def _rocm_aiter_fused_topk_impl(
 
 
 def _rocm_aiter_fused_topk_fake(
-    x: torch.Tensor,
-    router_logits: torch.Tensor,
-    top_k: int,
-    gate_up: bool,
+    x: torch.Tensor, router_logits: torch.Tensor, top_k: int, gate_up: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = x.shape[0]
     topk_weights = torch.empty(
@@ -716,10 +706,7 @@ def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
 
 
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    quant_dtype: torch.dtype,
+    x: torch.Tensor, weight: torch.Tensor, epsilon: float, quant_dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
@@ -736,10 +723,7 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
 
 
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    quant_dtype: torch.dtype,
+    x: torch.Tensor, weight: torch.Tensor, epsilon: float, quant_dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
     y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
@@ -748,10 +732,7 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
 
 
 def _rocm_aiter_fused_allreduce_rmsnorm_impl(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
+    input_: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
@@ -792,18 +773,13 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
 
 def _rocm_aiter_fused_allreduce_rmsnorm_fake(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
+    input_: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
 
 
 def _rocm_aiter_per_tensor_quant_impl(
-    x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    scale: torch.Tensor | None = None,
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.quant import per_tensor_quant_hip
 
@@ -811,9 +787,7 @@ def _rocm_aiter_per_tensor_quant_impl(
 
 
 def _rocm_aiter_per_tensor_quant_fake(
-    x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    scale: torch.Tensor | None = None,
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x, dtype=quant_dtype), torch.empty(
         1, dtype=torch.float32, device=x.device
@@ -873,11 +847,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         dtype_quant=FP8_DTYPE,
         res1=residual,
     )
-    return (
-        x_quant,
-        res,
-        x_quant_scales,
-    )
+    return (x_quant, res, x_quant_scales)
 
 
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
@@ -897,10 +867,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
 
 
 def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
@@ -919,10 +886,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
 
 
 def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -977,8 +941,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
 
 
 def _rocm_aiter_group_fp8_quant_impl(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
     from aiter import QuantType, get_hip_quant
@@ -988,49 +951,35 @@ def _rocm_aiter_group_fp8_quant_impl(
 
 
 def _rocm_aiter_group_fp8_quant_fake(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
-        (
-            M,
-            (N + group_size - 1) // group_size,
-        ),
-        dtype=torch.float32,
-        device=x.device,
+        (M, (N + group_size - 1) // group_size), dtype=torch.float32, device=x.device
     )
     return x_fp8, out_bs
 
 
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
     return act_mul_and_fp8_group_quant(
-        x,
-        activation="silu",
-        group_size=group_size,
-        dtype_quant=FP8_DTYPE,
+        x, activation="silu", group_size=group_size, dtype_quant=FP8_DTYPE
     )
 
 
 def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     assert N % 2 == 0
     N_half = N // 2
     x_fp8 = torch.empty((M, N_half), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
-        (
-            M,
-            (N_half + group_size - 1) // group_size,
-        ),
+        (M, (N_half + group_size - 1) // group_size),
         dtype=torch.float32,
         device=x.device,
     )
@@ -1047,11 +996,7 @@ def _rocm_aiter_triton_add_rmsnorm_pad_impl(
     from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
 
     return fused_add_rmsnorm_pad(
-        x,
-        weight,
-        variance_epsilon,
-        residual,
-        x_pad_to_multiple=x_pad_to_multiple,
+        x, weight, variance_epsilon, residual, x_pad_to_multiple=x_pad_to_multiple
     )
 
 
@@ -2027,10 +1972,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def fused_topk(
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        gate_up: bool,
+        x: torch.Tensor, router_logits: torch.Tensor, top_k: int, gate_up: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
 
@@ -2078,17 +2020,13 @@ class rocm_aiter_ops:
 
     @staticmethod
     def per_tensor_quant(
-        x: torch.Tensor,
-        quant_dtype: torch.dtype,
-        scale: torch.Tensor | None = None,
+        x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, quant_dtype, scale)
 
     @staticmethod
     def per_token_quant(
-        x: torch.Tensor,
-        quant_dtype: torch.dtype,
-        scale: torch.Tensor | None = None,
+        x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
@@ -2223,8 +2161,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def group_fp8_quant(
-        input_2d: torch.Tensor,
-        group_size: int = 128,
+        input_2d: torch.Tensor, group_size: int = 128
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
@@ -2298,9 +2235,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight_a16w4(
-        tensor: "torch.Tensor",
-        nLane: int,
-        gate_up: bool,
+        tensor: "torch.Tensor", nLane: int, gate_up: bool
     ) -> "torch.Tensor":
         """
         Shuffles the weight tensor into (A16W4) layout for AITER kernels.
@@ -2318,9 +2253,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_scale_a16w4(
-        tensor: "torch.Tensor",
-        num_experts: int,
-        gate_up: bool,
+        tensor: "torch.Tensor", num_experts: int, gate_up: bool
     ) -> "torch.Tensor":
         """
         Shuffles the scale tensor into (A16W4) layout for AITER kernels.
@@ -2622,10 +2555,7 @@ class rocm_aiter_ops:
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
 
         full_fn = torch.zeros(
-            hc_mult3,
-            hc_mult * hidden_size,
-            dtype=fn.dtype,
-            device=fn.device,
+            hc_mult3, hc_mult * hidden_size, dtype=fn.dtype, device=fn.device
         )
         full_fn[:hc_mult] = fn
 
@@ -2636,15 +2566,7 @@ class rocm_aiter_ops:
         full_scale[0] = hc_scale[0]
 
         _, _, layer_input = rocm_aiter_ops.mhc_pre(
-            hs_flat,
-            full_fn,
-            full_scale,
-            full_base,
-            rms_eps,
-            hc_eps,
-            0.0,
-            1.0,
-            0,
+            hs_flat, full_fn, full_scale, full_base, rms_eps, hc_eps, 0.0, 1.0, 0
         )
         out.copy_(layer_input)
 

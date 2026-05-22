@@ -9,9 +9,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -107,18 +105,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             replace_parameter(layer, scale_attr, dg_weight_scale)
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
-        output = torch.empty(
-            (A.shape[0], B.shape[0]),
-            dtype=out_dtype,
-            device=A.device,
-        )
+        output = torch.empty((A.shape[0], B.shape[0]), dtype=out_dtype, device=A.device)
         torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
         return output
 

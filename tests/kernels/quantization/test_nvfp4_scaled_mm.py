@@ -55,10 +55,7 @@ def get_ref_results(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_nvfp4_gemm(
-    dtype: torch.dtype,
-    shape: tuple[int, int, int],
-    seed: int,
-    device: str,
+    dtype: torch.dtype, shape: tuple[int, int, int], seed: int, device: str
 ) -> None:
     set_random_seed(seed)
     m, n, packed_k = shape

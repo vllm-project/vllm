@@ -11,10 +11,7 @@ from vllm.model_executor.models import (
     is_text_generation_model,
     supports_multimodal,
 )
-from vllm.model_executor.models.adapters import (
-    as_embedding_model,
-    as_seq_cls_model,
-)
+from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
 from vllm.model_executor.models.registry import (
     _MULTIMODAL_MODELS,
     _SPECULATIVE_DECODING_MODELS,
@@ -32,9 +29,7 @@ def test_registry_imports(model_arch):
     # Skip if transformers version is incompatible
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
+        on_fail="skip", check_max_version=False, check_version_reason="vllm"
     )
 
     if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):

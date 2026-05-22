@@ -73,14 +73,8 @@ async def test_default_mm_lora_chat_completions(
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": "Can you transcribe this audio?",
-                },
-                {
-                    "type": "audio_url",
-                    "audio_url": {"url": audio_assets[0].url},
-                },
+                {"type": "text", "text": "Can you transcribe this audio?"},
+                {"type": "audio_url", "audio_url": {"url": audio_assets[0].url}},
             ],
         }
     ]

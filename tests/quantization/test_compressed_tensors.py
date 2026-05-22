@@ -16,9 +16,7 @@ from compressed_tensors.quantization import (
 )
 
 from tests.models.utils import check_logprobs_close
-from vllm.model_executor.kernels.linear import (
-    Fp8BlockScaledMMLinearKernel,
-)
+from vllm.model_executor.kernels.linear import Fp8BlockScaledMMLinearKernel
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
@@ -147,12 +145,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         assert output
 
 
-@pytest.mark.parametrize(
-    "model_path",
-    [
-        "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    ],
-)
+@pytest.mark.parametrize("model_path", ["neuralmagic/Llama-3.2-1B-quantized.w8a8"])
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.parametrize(
@@ -200,10 +193,7 @@ def test_compressed_tensors_w8a8_logprobs(
         )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
     if current_platform.is_rocm():
@@ -221,20 +211,14 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
     "model_args",
     [
         ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2", "tensor"),
-        (
-            "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
-            "channel",
-        ),
+        ("nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2", "channel"),
     ],
 )
 @pytest.mark.parametrize(
     "use_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_compressed_tensors_w8a8_dynamic_per_token(
-    vllm_runner,
-    model_args,
-    use_aiter,
-    monkeypatch,
+    vllm_runner, model_args, use_aiter, monkeypatch
 ):
     model_path, strategy = model_args
 
@@ -328,8 +312,7 @@ def test_compressed_tensors_fp8(vllm_runner):
 
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(
-                qkv_proj.scheme,
-                (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
+                qkv_proj.scheme, (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8)
             )
 
             assert qkv_proj.input_scale.dtype is torch.float32
@@ -378,7 +361,7 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     [
         # TODO: Enable once model is available again
         # ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4),
-        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)
     ],
 )
 def test_compressed_tensors_nvfp4(vllm_runner, args):
@@ -501,8 +484,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="This test is not for non-CUDA platforms",
+    not current_platform.is_cuda(), reason="This test is not for non-CUDA platforms"
 )
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     """
@@ -562,9 +544,7 @@ def test_w4a16_moe_torch_compile(vllm_runner):
         model_path,
         enforce_eager=False,
         max_model_len=256,
-        compilation_config={
-            "cudagraph_mode": "NONE",
-        },
+        compilation_config={"cudagraph_mode": "NONE"},
     ) as llm:
         output = llm.generate_greedy("Hi", max_tokens=1)
         assert output
@@ -649,8 +629,7 @@ def test_find_matched_target_returns_none_on_no_match():
 def test_get_scheme_dict_returns_none_on_no_match():
     config = _make_ct_config(target="matched_layer")
     result = config.get_scheme_dict(
-        layer=Mock(spec=torch.nn.Linear),
-        layer_name="model.layers.0.unmatched_layer",
+        layer=Mock(spec=torch.nn.Linear), layer_name="model.layers.0.unmatched_layer"
     )
     assert result is None
 

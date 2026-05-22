@@ -18,9 +18,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
-    select_mxfp8_moe_backend,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import select_mxfp8_moe_backend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )

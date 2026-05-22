@@ -32,10 +32,7 @@ MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 MODEL_NAME_4_0 = "ibm-granite/granite-4.0-1b-speech"
 # Audio lora co-exists directly in the 3.3 model directory,
 # the 4.0 model has adapters merged into the weights.
-models: dict[str, str | None] = {
-    MODEL_NAME: MODEL_NAME,
-    MODEL_NAME_4_0: None,
-}
+models: dict[str, str | None] = {MODEL_NAME: MODEL_NAME, MODEL_NAME_4_0: None}
 
 
 @pytest.fixture
@@ -164,9 +161,7 @@ def test_models(
     run_test(
         hf_runner,
         vllm_runner,
-        [
-            ([HF_AUDIO_PROMPT], [audio]),
-        ],
+        [([HF_AUDIO_PROMPT], [audio])],
         model,
         dtype=dtype,
         max_model_len=max_model_len,

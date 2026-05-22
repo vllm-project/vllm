@@ -22,9 +22,7 @@ logger = init_logger(__name__)
 
 class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
     def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer: DeepseekV4Tokenizer | None,
+        self, config: VllmConfig, tokenizer: DeepseekV4Tokenizer | None
     ) -> None:
         super().__init__(config, tokenizer)
 
@@ -36,9 +34,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         return self.get_tokenizer().apply_chat_template(*args, **kwargs)
 
     def render_messages(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -63,9 +59,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         return conversation, prompt
 
     async def render_messages_async(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        params: ChatParams,
+        self, messages: list[ChatCompletionMessageParam], params: ChatParams
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,

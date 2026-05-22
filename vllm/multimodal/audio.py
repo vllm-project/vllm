@@ -84,8 +84,7 @@ PASSTHROUGH_AUDIO_SPEC = AudioSpec(target_channels=None)
 
 
 def normalize_audio(
-    audio: npt.NDArray[np.floating] | torch.Tensor,
-    spec: AudioSpec,
+    audio: npt.NDArray[np.floating] | torch.Tensor, spec: AudioSpec
 ) -> npt.NDArray[np.floating] | torch.Tensor:
     """Normalize audio to the specified format.
 
@@ -167,10 +166,7 @@ def normalize_audio(
 
 
 def resample_audio_pyav(
-    audio: npt.NDArray[np.floating],
-    *,
-    orig_sr: float,
-    target_sr: float,
+    audio: npt.NDArray[np.floating], *, orig_sr: float, target_sr: float
 ) -> npt.NDArray[np.floating]:
     """Resample audio using PyAV (libswresample via FFmpeg).
 
@@ -225,10 +221,7 @@ def resample_audio_pyav(
 
 
 def resample_audio_scipy(
-    audio: npt.NDArray[np.floating],
-    *,
-    orig_sr: float,
-    target_sr: float,
+    audio: npt.NDArray[np.floating], *, orig_sr: float, target_sr: float
 ) -> npt.NDArray[np.floating]:
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -238,10 +231,7 @@ def resample_audio_scipy(
 
     gcd = math.gcd(orig_sr_int, target_sr_int)
     return scipy_signal.resample_poly(
-        audio,
-        target_sr_int // gcd,
-        orig_sr_int // gcd,
-        axis=-1,
+        audio, target_sr_int // gcd, orig_sr_int // gcd, axis=-1
     )
 
 
@@ -249,28 +239,20 @@ class AudioResampler:
     """Resample audio data to a target sample rate."""
 
     def __init__(
-        self,
-        target_sr: float | None = None,
-        method: Literal["pyav", "scipy"] = "pyav",
+        self, target_sr: float | None = None, method: Literal["pyav", "scipy"] = "pyav"
     ):
         self.target_sr = target_sr
         self.method = method
 
     def resample(
-        self,
-        audio: npt.NDArray[np.floating],
-        *,
-        orig_sr: float,
+        self, audio: npt.NDArray[np.floating], *, orig_sr: float
     ) -> npt.NDArray[np.floating]:
         if self.target_sr is None:
             raise RuntimeError(
                 "Audio resampling is not supported when `target_sr` is not provided"
             )
         if math.isclose(
-            float(orig_sr),
-            float(self.target_sr),
-            rel_tol=0.0,
-            abs_tol=1e-6,
+            float(orig_sr), float(self.target_sr), rel_tol=0.0, abs_tol=1e-6
         ):
             return audio
         if self.method == "pyav":
@@ -355,10 +337,7 @@ def split_audio(
 
 
 def find_split_point(
-    wav: np.ndarray,
-    start_idx: int,
-    end_idx: int,
-    min_energy_window: int,
+    wav: np.ndarray, start_idx: int, end_idx: int, min_energy_window: int
 ) -> int:
     """Find the best point to split audio by looking for silence or low amplitude.
 
@@ -380,10 +359,7 @@ def find_split_point(
         >>> # Insert quiet region
         >>> audio[16000:17600] = 0.01
         >>> split_idx = find_split_point(
-        ...     wav=audio,
-        ...     start_idx=0,
-        ...     end_idx=32000,
-        ...     min_energy_window=1600,
+        ...     wav=audio, start_idx=0, end_idx=32000, min_energy_window=1600
         ... )
         >>> 16000 <= split_idx <= 17600
         True

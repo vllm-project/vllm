@@ -84,22 +84,19 @@ def _should_ignore_torch_compile(cls: type[_T]) -> bool:
 
 @overload
 def support_torch_compile(
-    *,
-    enable_if: Callable[[VllmConfig], bool] | None = None,
+    *, enable_if: Callable[[VllmConfig], bool] | None = None
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
-    *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
+    *, dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
-    *,
-    mark_unbacked_dims: dict[str, int | list[int]] | None,
+    *, mark_unbacked_dims: dict[str, int | list[int]] | None
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -237,11 +234,7 @@ def support_torch_compile(
                 )
 
         return _support_torch_compile(
-            cls,
-            inferred_dynamic_arg_dims,
-            mark_unbacked_dims,
-            enable_if,
-            is_encoder,
+            cls, inferred_dynamic_arg_dims, mark_unbacked_dims, enable_if, is_encoder
         )
 
     if cls is not None:
@@ -281,10 +274,7 @@ def _verify_source_unchanged(
         )
 
 
-def _try_load_aot_compiled_fn(
-    model: Any,
-    aot_compilation_path: str,
-) -> Any | None:
+def _try_load_aot_compiled_fn(model: Any, aot_compilation_path: str) -> Any | None:
     """Try to load an AOT-compiled function from disk.
 
     Returns the loaded callable on success, or None on failure.
@@ -433,9 +423,7 @@ def _support_torch_compile(
                             )
                         else:
                             torch._dynamo.decorators.mark_unbacked(
-                                arg,
-                                dim,
-                                hint_override=arg.size()[dim],
+                                arg, dim, hint_override=arg.size()[dim]
                             )
                 else:
                     # For older versions, we can't use hint_override or shape_id
@@ -582,12 +570,7 @@ def _support_torch_compile(
 
         # This is the path for the first compilation.
         # the first compilation needs to have dynamic shapes marked
-        _mark_dynamic_inputs(
-            self,
-            ds_type,
-            *args,
-            **kwargs,
-        )
+        _mark_dynamic_inputs(self, ds_type, *args, **kwargs)
 
         original_code_object = self.original_code_object()
         logger.debug("Start compiling function %s", original_code_object)
@@ -706,8 +689,7 @@ def _support_torch_compile(
             os.replace(tmp_file, self._aot_compilation_path)
             compilation_counter.num_aot_artifacts_saved += 1
             logger.info_once(
-                "saved AOT compiled function to %s",
-                self._aot_compilation_path,
+                "saved AOT compiled function to %s", self._aot_compilation_path
             )
         except Exception as e:
             logger.warning(

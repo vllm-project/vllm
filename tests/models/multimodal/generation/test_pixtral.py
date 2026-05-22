@@ -42,12 +42,7 @@ def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
     return [
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": PROMPT,
-                }
-            ]
+            "content": [{"type": "text", "text": PROMPT}]
             + [{"type": "image_url", "image_url": {"url": url}} for url in urls],
         }
     ]
@@ -58,10 +53,7 @@ def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
         {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "content": PROMPT,
-                },
+                {"type": "text", "content": PROMPT},
                 *({"type": "image", "image": download_image(url)} for url in urls),
             ],
         }
@@ -124,10 +116,7 @@ OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
 
 
 # For the test author to store golden output in JSON
-def _dump_outputs_w_logprobs(
-    outputs: OutputsLogprobs,
-    filename: "StrPath",
-) -> None:
+def _dump_outputs_w_logprobs(outputs: OutputsLogprobs, filename: "StrPath") -> None:
     json_data = [
         (
             tokens,

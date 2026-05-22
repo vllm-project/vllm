@@ -26,9 +26,7 @@ logger = init_logger(__name__)
 
 class SharedHead(nn.Module):
     def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None = None
     ) -> None:
         super().__init__()
         self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -41,11 +39,7 @@ class SharedHead(nn.Module):
 
 
 class Step3p5AMultiTokenPredictorLayer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -53,10 +47,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.mtp_block = Step3p5DecoderLayer(
-            vllm_config,
-            prefix=f"{prefix}.mtp_block",
-        )
+        self.mtp_block = Step3p5DecoderLayer(vllm_config, prefix=f"{prefix}.mtp_block")
 
     def forward(
         self,
@@ -83,8 +74,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
@@ -92,8 +82,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): Step3p5AMultiTokenPredictorLayer(
-                    vllm_config,
-                    f"{prefix}.layers.{idx}",
+                    vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -124,9 +113,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -166,9 +153,7 @@ class Step3p5MTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 

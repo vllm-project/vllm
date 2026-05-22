@@ -121,10 +121,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         self.mask_prompt = mask_prompt
         self.ignore_id = ignore_id
 
-        super().__init__(
-            tokenizer,
-            **kwargs,
-        )
+        super().__init__(tokenizer, **kwargs)
 
     def select_best_resolution(self, image_size):
         # used for cropping
@@ -294,9 +291,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         """
 
         prepare = self.process_one(
-            prompt=text,
-            images=images,
-            inference_mode=inference_mode,
+            prompt=text, images=images, inference_mode=inference_mode
         )
 
         return prepare

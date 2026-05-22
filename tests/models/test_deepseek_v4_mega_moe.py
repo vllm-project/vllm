@@ -14,8 +14,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="DeepSeek V4 MegaMoE requires CUDA",
+    not current_platform.is_cuda(), reason="DeepSeek V4 MegaMoE requires CUDA"
 )
 
 
@@ -143,18 +142,11 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
         generator=generator,
     )
     topk_weights = torch.randn(
-        num_tokens,
-        top_k,
-        device=device,
-        dtype=torch.float32,
-        generator=generator,
+        num_tokens, top_k, device=device, dtype=torch.float32, generator=generator
     )
 
     ref_x, ref_x_sf = per_token_cast_to_fp8(
-        hidden_states,
-        use_ue8m0=True,
-        gran_k=32,
-        use_packed_ue8m0=True,
+        hidden_states, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
     )
     ref_topk_idx = topk_ids.to(torch.int64)
     ref_topk_weights = topk_weights.clone()
@@ -179,6 +171,5 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
     assert torch.equal(fused_x_sf, ref_x_sf)
     assert torch.equal(fused_topk_idx, ref_topk_idx)
     assert torch.equal(
-        fused_topk_weights.view(torch.uint8),
-        ref_topk_weights.view(torch.uint8),
+        fused_topk_weights.view(torch.uint8), ref_topk_weights.view(torch.uint8)
     )

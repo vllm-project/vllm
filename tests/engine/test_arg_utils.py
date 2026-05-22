@@ -142,13 +142,7 @@ class DummyConfig:
     """Nested config"""
 
 
-@pytest.mark.parametrize(
-    ("type_hint", "expected"),
-    [
-        (int, False),
-        (DummyConfig, True),
-    ],
-)
+@pytest.mark.parametrize(("type_hint", "expected"), [(int, False), (DummyConfig, True)])
 def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
@@ -322,7 +316,7 @@ def test_compilation_config():
         [
             "--compilation-config="
             '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            '"backend": "inductor"}'
         ]
     )
     assert (
@@ -392,7 +386,7 @@ def test_attention_config():
             '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
             '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            '"disable_flashinfer_q_quantization": false}'
         ]
     )
     assert args is not None
@@ -407,12 +401,7 @@ def test_attention_config():
 
     # test --attention-backend flows into VllmConfig.attention_config
     args = parser.parse_args(
-        [
-            "--model",
-            "facebook/opt-125m",
-            "--attention-backend",
-            "FLASH_ATTN",
-        ]
+        ["--model", "facebook/opt-125m", "--attention-backend", "FLASH_ATTN"]
     )
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
@@ -421,12 +410,7 @@ def test_attention_config():
 
     # test --attention-config.backend flows into VllmConfig.attention_config
     args = parser.parse_args(
-        [
-            "--model",
-            "facebook/opt-125m",
-            "--attention-config.backend",
-            "FLASHINFER",
-        ]
+        ["--model", "facebook/opt-125m", "--attention-config.backend", "FLASHINFER"]
     )
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)

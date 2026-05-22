@@ -40,10 +40,7 @@ from .utils import (
 )
 
 
-def _get_alibi_slopes(
-    total_num_heads: int,
-    alibi_bias_max: int,
-) -> torch.Tensor:
+def _get_alibi_slopes(total_num_heads: int, alibi_bias_max: int) -> torch.Tensor:
     next_power_of_2 = 2 ** math.ceil(math.log2(total_num_heads))
     m = torch.arange(1, next_power_of_2 + 1, dtype=torch.float32)
     m = m.mul(alibi_bias_max / next_power_of_2)
@@ -132,9 +129,7 @@ class MPTAttention(nn.Module):
         )
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
@@ -201,15 +196,10 @@ class MPTBlock(nn.Module):
         self.ffn = MPTMLP(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
-        self,
-        position_ids: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, position_ids: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         x = self.norm_1(hidden_states)
-        x = self.attn(
-            position_ids=position_ids,
-            hidden_states=x,
-        )
+        x = self.attn(position_ids=position_ids, hidden_states=x)
         hidden_states = hidden_states + x
         x = self.norm_2(hidden_states)
         x = self.ffn(x)
@@ -229,10 +219,7 @@ class MPTModel(nn.Module):
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
 
-        self.wte = VocabParallelEmbedding(
-            config.vocab_size,
-            config.d_model,
-        )
+        self.wte = VocabParallelEmbedding(config.vocab_size, config.d_model)
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
             lambda prefix: MPTBlock(config, cache_config, quant_config, prefix=prefix),
@@ -323,10 +310,7 @@ class MPTForCausalLM(nn.Module, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -44,10 +44,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale

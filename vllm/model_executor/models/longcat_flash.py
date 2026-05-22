@@ -440,9 +440,7 @@ class FlashDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm[0](hidden_states, residual)
 
         hidden_states = self.self_attn[0](
-            positions=positions,
-            hidden_states=hidden_states,
-            llama_4_scaling=None,
+            positions=positions, hidden_states=hidden_states, llama_4_scaling=None
         )
 
         hidden_states, residual = self.post_attention_layernorm[0](
@@ -460,9 +458,7 @@ class FlashDecoderLayer(nn.Module):
 
         # second_attn
         hidden_states = self.self_attn[1](
-            positions=positions,
-            hidden_states=hidden_states,
-            llama_4_scaling=None,
+            positions=positions, hidden_states=hidden_states, llama_4_scaling=None
         )
         hidden_states, residual = self.post_attention_layernorm[1](
             hidden_states, residual
@@ -539,11 +535,7 @@ class FlashModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -702,15 +694,8 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Flash model for causal language modeling."""
 
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -761,10 +746,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

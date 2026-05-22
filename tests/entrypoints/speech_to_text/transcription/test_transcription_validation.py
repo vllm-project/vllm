@@ -141,10 +141,7 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
-        model_name,
-        server_args,
-        max_wait_seconds=480,
-        env_dict=ROCM_ENV_OVERRIDES,
+        model_name, server_args, max_wait_seconds=480, env_dict=ROCM_ENV_OVERRIDES
     ) as remote_server:
         client = remote_server.get_async_client()
         await transcribe_and_check(

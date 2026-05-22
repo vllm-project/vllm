@@ -119,9 +119,7 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 
 
 def _nvfp4_quantize(
-    A: torch.Tensor,
-    A_scale: torch.Tensor | None,
-    is_sf_swizzled_layout: bool,
+    A: torch.Tensor, A_scale: torch.Tensor | None, is_sf_swizzled_layout: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return ops.scaled_fp4_quant(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
 
@@ -353,8 +351,7 @@ def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def normalize_batched_scales_shape(
-    scales: torch.Tensor | None,
-    num_experts: int,
+    scales: torch.Tensor | None, num_experts: int
 ) -> torch.Tensor | None:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
@@ -406,9 +403,7 @@ def _pack_topk_ids_weights_kernel(
 
 
 def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
+    topk_ids: torch.Tensor, topk_weights: torch.Tensor, block_size: int = 1024
 ) -> torch.Tensor:
     assert topk_ids.shape == topk_weights.shape
     assert topk_ids.is_contiguous() and topk_weights.is_contiguous()

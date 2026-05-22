@@ -71,10 +71,7 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
     Form the prompt based on the text and image input, then llm generate output
     """
     placeholders = [
-        {
-            "type": "image_url",
-            "image_url": {"url": encode_image_url(image_pil)},
-        }
+        {"type": "image_url", "image_url": {"url": encode_image_url(image_pil)}}
         for image_pil in image_urls
     ]
 
@@ -82,10 +79,7 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
+            "content": [*placeholders, {"type": "text", "text": question}],
         },
     ]
 

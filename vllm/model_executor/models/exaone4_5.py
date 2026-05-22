@@ -21,10 +21,7 @@ from functools import partial
 import einops
 import torch
 import torch.nn as nn
-from transformers.models.exaone4_5 import (
-    Exaone4_5_Config,
-    Exaone4_5_Processor,
-)
+from transformers.models.exaone4_5 import Exaone4_5_Config, Exaone4_5_Processor
 from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
 
 from vllm.compilation.decorators import (
@@ -39,9 +36,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.exaone4 import Exaone4GatedMLP as Exaone4_5_VisionMLP
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -158,24 +153,12 @@ class EXAONE4_5_VisionAttention(nn.Module):
         seq_len, batch_size, _ = x.shape
 
         q, k, v = self.split_qkv(x)
-        q = self.apply_rotary_emb(
-            q,
-            rotary_pos_emb_cos,
-            rotary_pos_emb_sin,
-        )
+        q = self.apply_rotary_emb(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
 
-        k = self.apply_rotary_emb(
-            k,
-            rotary_pos_emb_cos,
-            rotary_pos_emb_sin,
-        )
+        k = self.apply_rotary_emb(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
 
         context_layer = einops.rearrange(
@@ -298,9 +281,7 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Exaone4_5_Processor:
         return self.ctx.get_hf_processor(
-            Exaone4_5_Processor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            Exaone4_5_Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
 
@@ -346,10 +327,7 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["mtp."]),
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=(["mtp."]))
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod

@@ -21,11 +21,7 @@ device = "cuda"
 def reverse_awq_order(t: torch.Tensor):
     bits = 4
     AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
-    reverse_order_tensor = torch.arange(
-        t.shape[-1],
-        dtype=torch.int32,
-        device=t.device,
-    )
+    reverse_order_tensor = torch.arange(t.shape[-1], dtype=torch.int32, device=t.device)
     reverse_order_tensor = reverse_order_tensor.view(-1, 32 // bits)
     reverse_order_tensor = reverse_order_tensor[:, AWQ_REVERSE_ORDER]
     reverse_order_tensor = reverse_order_tensor.view(-1)

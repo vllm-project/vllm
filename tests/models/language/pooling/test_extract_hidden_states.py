@@ -7,10 +7,7 @@ from vllm import TokensPrompt
 from vllm.config import PoolerConfig
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["Qwen/Qwen3-0.6B"],
-)
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 @torch.inference_mode
 def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
     n_prompt_tokens = [55, 56, 57]

@@ -60,9 +60,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
         weight = getattr(layer, w_q_name)
         replace_parameter(
-            layer,
-            w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False),
+            layer, w_q_name, torch.nn.Parameter(weight.t().data, requires_grad=False)
         )
 
         # WEIGHT SCALE
@@ -74,9 +72,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+            layer, w_s_name, torch.nn.Parameter(weight_scale.data, requires_grad=False)
         )
 
         # INPUT SCALE
@@ -122,9 +118,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.float32)
             azp_adj = azp_adj * weight_scale.squeeze()
             setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
+                layer, azp_adj_name, torch.nn.Parameter(azp_adj, requires_grad=False)
             )
 
         weight = getattr(layer, w_q_name)
@@ -163,28 +157,16 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         if not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+            layer, w_s_name, torch.nn.Parameter(weight_scale.data, requires_grad=False)
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return self.linear_method(
-            layer,
-            x,
-            bias,
-        )
+        return self.linear_method(layer, x, bias)
 
     def _apply_weights_onednn(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         x_shape = x.shape
         x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
@@ -205,19 +187,11 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return out
 
     def _apply_weights_sgl(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_layer_params(layer)
         return torch.ops._C.int8_scaled_mm_with_quant(
-            x,
-            w_q,
-            w_s,
-            layer.bias_fp32 if bias is not None else None,
-            x.dtype,
-            True,
+            x, w_q, w_s, layer.bias_fp32 if bias is not None else None, x.dtype, True
         )
 
 
@@ -265,9 +239,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         params = self._get_layer_params(layer)
         packed_weight = torch.ops._C.convert_weight_packed(params.weight)
         replace_parameter(
-            layer,
-            params.WEIGHT,
-            torch.nn.Parameter(packed_weight, requires_grad=False),
+            layer, params.WEIGHT, torch.nn.Parameter(packed_weight, requires_grad=False)
         )
 
         # Re-wrap scale as a plain Parameter so the kernel can read it
@@ -316,11 +288,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         raise NotImplementedError(
             "CPUFp8BlockScaledMMKernel overrides apply_weights directly."

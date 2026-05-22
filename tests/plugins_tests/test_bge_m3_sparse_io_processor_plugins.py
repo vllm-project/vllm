@@ -92,10 +92,7 @@ def server():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "return_tokens",
-    [True, False],
-)
+@pytest.mark.parametrize("return_tokens", [True, False])
 async def test_bge_m3_sparse_plugin_online(
     server: RemoteOpenAIServer, return_tokens: bool
 ):
@@ -106,10 +103,7 @@ async def test_bge_m3_sparse_plugin_online(
         "data": {"input": model_config["test_input"], "return_tokens": return_tokens},
     }
 
-    ret = requests.post(
-        server.url_for("pooling"),
-        json=request_payload,
-    )
+    ret = requests.post(server.url_for("pooling"), json=request_payload)
 
     response = ret.json()
 
@@ -143,17 +137,11 @@ async def test_bge_m3_sparse_plugin_online(
     )
 
 
-@pytest.mark.parametrize(
-    "return_tokens",
-    [True, False],
-)
+@pytest.mark.parametrize("return_tokens", [True, False])
 def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
     """Test BGE-M3 sparse plugin in offline mode."""
     prompt = {
-        "data": {
-            "input": model_config["test_input"],
-            "return_tokens": return_tokens,
-        }
+        "data": {"input": model_config["test_input"], "return_tokens": return_tokens}
     }
 
     with vllm_runner(

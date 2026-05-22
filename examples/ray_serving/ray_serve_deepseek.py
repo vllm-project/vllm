@@ -28,12 +28,7 @@ llm_config = LLMConfig(
         # the model is large. Set model_source="/path/to/the/model".
         "model_source": "deepseek-ai/DeepSeek-R1",
     },
-    deployment_config={
-        "autoscaling_config": {
-            "min_replicas": 1,
-            "max_replicas": 1,
-        }
-    },
+    deployment_config={"autoscaling_config": {"min_replicas": 1, "max_replicas": 1}},
     # Set to the node's accelerator type.
     accelerator_type="H100",
     # Customize engine arguments as required (for example, vLLM engine kwargs).

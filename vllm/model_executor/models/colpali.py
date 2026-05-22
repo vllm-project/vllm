@@ -73,10 +73,7 @@ class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
             # truncation to keep all image + text tokens intact.
             tok_kwargs = dict(tok_kwargs, truncation=False)
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
 
@@ -86,10 +83,7 @@ class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
     info=ColPaliProcessingInfo,
     dummy_inputs=PaliGemmaDummyInputsBuilder,
 )
-class ColPaliModel(
-    PaliGemmaForConditionalGeneration,
-    SupportsLateInteraction,
-):
+class ColPaliModel(PaliGemmaForConditionalGeneration, SupportsLateInteraction):
     """ColPali late interaction model for multi-modal retrieval/reranking.
 
     This model extends PaliGemmaForConditionalGeneration with a ColBERT-style
@@ -150,10 +144,7 @@ class ColPaliModel(
         # Build the projection layer if embed_dim is known
         if self.embed_dim is not None:
             self.custom_text_proj = nn.Linear(
-                hidden_size,
-                self.embed_dim,
-                bias=False,
-                dtype=head_dtype,
+                hidden_size, self.embed_dim, bias=False, dtype=head_dtype
             )
         else:
             # Will be created during load_weights when dim is inferred
@@ -162,8 +153,7 @@ class ColPaliModel(
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler = pooler_for_token_embed(
-            pooler_config,
-            projector=self.custom_text_proj,
+            pooler_config, projector=self.custom_text_proj
         )
 
     def forward(

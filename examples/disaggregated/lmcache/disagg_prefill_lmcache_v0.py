@@ -40,9 +40,7 @@ os.environ["LMCACHE_REMOTE_URL"] = f"lm://localhost:{port}"
 # `naive` indicates using raw bytes of the tensor without any compression
 os.environ["LMCACHE_REMOTE_SERDE"] = "naive"
 
-prompts = [
-    "Hello, how are you?" * 1000,
-]
+prompts = ["Hello, how are you?" * 1000]
 
 
 def run_prefill(prefill_done, prompts):

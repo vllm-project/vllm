@@ -4,10 +4,7 @@
 
 import vllm.kernels.helion.ops  # noqa: F401  Auto-register all Helion ops
 from vllm.kernels.helion.case_key import CaseKey
-from vllm.kernels.helion.config_manager import (
-    ConfigManager,
-    ConfigSet,
-)
+from vllm.kernels.helion.config_manager import ConfigManager, ConfigSet
 from vllm.kernels.helion.register import (
     ConfigPicker,
     ConfiguredHelionKernel,

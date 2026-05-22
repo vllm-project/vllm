@@ -219,13 +219,7 @@ def _build_and_run_align(
     }
 
 
-@pytest.mark.parametrize(
-    "max_loras",
-    [
-        1,
-        2,
-    ],
-)
+@pytest.mark.parametrize("max_loras", [1, 2])
 def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
     """Regression test for issue #32235: real LoRA slot must not be skipped
     when ``active_lora_ids`` has -1 at position 0."""
@@ -270,10 +264,7 @@ def test_moe_lora_align_block_size_disabled_adapter_untouched():
     pollutes ``sorted_token_ids`` / ``cumsum_buffer``."""
     max_loras = 1
     out = _build_and_run_align(
-        num_lora_tokens=16,
-        num_base_tokens=0,
-        max_loras=max_loras,
-        disabled_slots=(0,),
+        num_lora_tokens=16, num_base_tokens=0, max_loras=max_loras, disabled_slots=(0,)
     )
     # Sanity: slot 0 IS present in active_lora_ids (otherwise we would only
     # exercise the lora_id == -1 / >= max_loras guards).

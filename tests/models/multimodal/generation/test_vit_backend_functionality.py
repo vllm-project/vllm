@@ -140,17 +140,9 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "max_model_len": 4000,
         "max_num_seqs": 1,
         "limit_mm_per_prompt": {"video": 1},
-        "sampling_params": {
-            "max_tokens": 128,
-        },
-        "runner_kwargs": {
-            "runner": "generate",
-            "dtype": "bfloat16",
-        },
-        "video_params": {
-            "num_frames": 16,
-            "pruning_rates": [0.0, 0.75],
-        },
+        "sampling_params": {"max_tokens": 128},
+        "runner_kwargs": {"runner": "generate", "dtype": "bfloat16"},
+        "video_params": {"num_frames": 16, "pruning_rates": [0.0, 0.75]},
     },
     "qwen2_5_omni": {
         "model_name": "Qwen/Qwen2.5-Omni-3B",
@@ -203,7 +195,7 @@ def build_dots_ocr_prompt(images, config):
                     "text": f"<|img|><|imgpad|><|endofimg|>{DOTS_OCR_PROMPT}",
                 },
             ],
-        },
+        }
     ]
 
     return messages
@@ -220,11 +212,8 @@ def build_processor_prompt(images, config):
     messages = [
         {
             "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": config["question"]},
-            ],
-        },
+            "content": [*placeholders, {"type": "text", "text": config["question"]}],
+        }
     ]
 
     return processor.apply_chat_template(
@@ -288,10 +277,7 @@ def run_llm_generate_test(config, mm_encoder_attn_backend, image_assets):
     # Generate
     sampling_params = SamplingParams(**config["sampling_params"])
     outputs = llm.generate(
-        {
-            "prompt": prompt,
-            "multi_modal_data": {"image": images},
-        },
+        {"prompt": prompt, "multi_modal_data": {"image": images}},
         sampling_params=sampling_params,
     )
 
@@ -370,9 +356,7 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
             **config["runner_kwargs"],
         ) as vllm_model:
             outputs = vllm_model.generate_greedy(
-                prompts,
-                config["sampling_params"]["max_tokens"],
-                videos=videos,
+                prompts, config["sampling_params"]["max_tokens"], videos=videos
             )
 
             # Validate output

@@ -76,9 +76,7 @@ def test_rms_norm_batch_invariant_vs_standard(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("eps", [1e-6])
 def test_fused_add_rms_norm_batch_invariant_residual_path(
-    hidden_size: int,
-    dtype: torch.dtype,
-    eps: float,
+    hidden_size: int, dtype: torch.dtype, eps: float
 ):
     """
     Test the batch-invariant fused residual-add + RMSNorm helper directly.
@@ -91,17 +89,10 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
     weight = torch.randn(hidden_size, dtype=dtype, device=device)
 
     x_batch = torch.cat(
-        [
-            x_single,
-            torch.randn(3, hidden_size, dtype=dtype, device=device),
-        ],
-        dim=0,
+        [x_single, torch.randn(3, hidden_size, dtype=dtype, device=device)], dim=0
     )
     residual_batch = torch.cat(
-        [
-            residual_single,
-            torch.randn(3, hidden_size, dtype=dtype, device=device),
-        ],
+        [residual_single, torch.randn(3, hidden_size, dtype=dtype, device=device)],
         dim=0,
     )
 
@@ -112,16 +103,10 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
         return x, residual
 
     out_single, residual_out_single = fused_add_rms_norm(
-        x_single.clone(),
-        residual_single.clone(),
-        weight,
-        eps,
+        x_single.clone(), residual_single.clone(), weight, eps
     )
     out_batch, residual_out_batch = fused_add_rms_norm(
-        x_batch.clone(),
-        residual_batch.clone(),
-        weight,
-        eps,
+        x_batch.clone(), residual_batch.clone(), weight, eps
     )
 
     merged_single = x_single + residual_single

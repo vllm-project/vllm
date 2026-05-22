@@ -21,12 +21,8 @@ import torch
 import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
-from vllm.lora.ops.triton_ops.lora_expand_fp8_op import (
-    _EXPAND_LORA_SCALE_PTR_DICT,
-)
-from vllm.lora.ops.triton_ops.lora_shrink_fp8_op import (
-    _SHRINK_LORA_SCALE_PTR_DICT,
-)
+from vllm.lora.ops.triton_ops.lora_expand_fp8_op import _EXPAND_LORA_SCALE_PTR_DICT
+from vllm.lora.ops.triton_ops.lora_shrink_fp8_op import _SHRINK_LORA_SCALE_PTR_DICT
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -145,8 +141,7 @@ def quantize_to_fp8_per_tensor(
 
 
 def quantize_to_fp8_per_channel(
-    tensor: torch.Tensor,
-    channel_dim: int = 0,
+    tensor: torch.Tensor, channel_dim: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a tensor to FP8 with per-channel scaling.
 
@@ -189,9 +184,7 @@ def quantize_to_fp8_per_token(
 
 
 def quantize_to_fp8_blockwise(
-    tensor: torch.Tensor,
-    group_n: int,
-    group_k: int,
+    tensor: torch.Tensor, group_n: int, group_k: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a 2D or 3D tensor to FP8 with block-wise scaling.
 
@@ -361,8 +354,7 @@ def generate_fp8_shrink_data(
     """
     seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches,)).to(device)
     b_seq_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-        dim=0,
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long), dim=0
     ).to(device)
     total_tokens = seq_len_tensor.sum().item()
 
@@ -381,27 +373,19 @@ def generate_fp8_shrink_data(
             inputs_bf16, group_n=1, group_k=group_k
         )
         inputs_dequant = dequantize_fp8_blockwise(
-            inputs_fp8,
-            a_scale,
-            group_n=1,
-            group_k=group_k,
-            output_dtype=dtype,
+            inputs_fp8, a_scale, group_n=1, group_k=group_k, output_dtype=dtype
         )
     elif quant_mode == "per_tensor":
         # Per-tensor: kernel loads a single scalar from a_scale_ptr
         inputs_fp8, a_scale = quantize_to_fp8_per_tensor(inputs_bf16)
         inputs_dequant = dequantize_fp8_per_tensor(
-            inputs_fp8,
-            a_scale,
-            output_dtype=dtype,
+            inputs_fp8, a_scale, output_dtype=dtype
         )
     else:
         # per_channel: kernel loads per-token a_scale via ram indexing
         inputs_fp8, a_scale = quantize_to_fp8_per_token(inputs_bf16)
         inputs_dequant = dequantize_fp8_per_token(
-            inputs_fp8,
-            a_scale,
-            output_dtype=dtype,
+            inputs_fp8, a_scale, output_dtype=dtype
         )
 
     # Quantize lora_a weights to FP8 and dequantize back for reference
@@ -421,10 +405,7 @@ def generate_fp8_shrink_data(
             # Per-channel along rank dim: scale shape (num_loras, rank)
             w_fp8, w_scale = quantize_to_fp8_per_channel(w, channel_dim=1)
             w_dequant = dequantize_fp8_per_channel(
-                w_fp8,
-                w_scale,
-                channel_dim=1,
-                output_dtype=dtype,
+                w_fp8, w_scale, channel_dim=1, output_dtype=dtype
             )
             lora_a_weights_fp8.append(w_fp8)
             b_scales.append(w_scale)
@@ -434,11 +415,7 @@ def generate_fp8_shrink_data(
                 w, group_n=group_n, group_k=group_k
             )
             w_dequant = dequantize_fp8_blockwise(
-                w_fp8,
-                w_scale,
-                group_n=group_n,
-                group_k=group_k,
-                output_dtype=dtype,
+                w_fp8, w_scale, group_n=group_n, group_k=group_k, output_dtype=dtype
             )
             lora_a_weights_fp8.append(w_fp8)
             b_scales.append(w_scale)
@@ -504,8 +481,7 @@ def generate_fp8_expand_data(
     """
     seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches,)).to(device)
     b_seq_start_loc = torch.cumsum(
-        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-        dim=0,
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long), dim=0
     ).to(device)
     total_tokens = seq_len_tensor.sum().item()
 
@@ -562,9 +538,7 @@ def generate_fp8_expand_data(
         # Per-tensor: kernel loads a single scalar from a_scale_ptr
         inputs_fp8_2d, a_scale = quantize_to_fp8_per_tensor(inputs_2d_all)
         inputs_dequant_2d = dequantize_fp8_per_tensor(
-            inputs_fp8_2d,
-            a_scale,
-            output_dtype=dtype,
+            inputs_fp8_2d, a_scale, output_dtype=dtype
         )
         inputs_fp8 = inputs_fp8_2d.reshape(nslices, total_tokens, rank)
         inputs_dequant = inputs_dequant_2d.reshape(nslices, total_tokens, rank)
@@ -614,10 +588,7 @@ def generate_fp8_expand_data(
             # Per-channel along hidden_size dim: scale (num_loras, hidden_size)
             w_fp8, w_scale = quantize_to_fp8_per_channel(w, channel_dim=1)
             w_dequant = dequantize_fp8_per_channel(
-                w_fp8,
-                w_scale,
-                channel_dim=1,
-                output_dtype=dtype,
+                w_fp8, w_scale, channel_dim=1, output_dtype=dtype
             )
             lora_b_weights_fp8.append(w_fp8)
             b_scales.append(w_scale)
@@ -627,11 +598,7 @@ def generate_fp8_expand_data(
                 w, group_n=group_n, group_k=group_k
             )
             w_dequant = dequantize_fp8_blockwise(
-                w_fp8,
-                w_scale,
-                group_n=group_n,
-                group_k=group_k,
-                output_dtype=dtype,
+                w_fp8, w_scale, group_n=group_n, group_k=group_k, output_dtype=dtype
             )
             lora_b_weights_fp8.append(w_fp8)
             b_scales.append(w_scale)

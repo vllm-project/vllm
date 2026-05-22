@@ -50,9 +50,7 @@ def sync_cudagraph_and_dp_padding(
     # If any rank wants to run eager, all ranks run eager
     if synced_cg_mode == CUDAGraphMode.NONE:
         return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
+            cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
         ), num_tokens_across_dp
 
     assert cudagraph_manager is not None, (
@@ -90,9 +88,7 @@ def dispatch_cg_and_sync_dp(
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
+            cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
         )
     else:
         assert cudagraph_manager is not None, (

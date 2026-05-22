@@ -118,14 +118,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
         self.non_spec_state_indices_tensor: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.int32,
-            device=device,
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
         )
         self.spec_sequence_masks: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.bool,
-            device=device,
+            (self.decode_cudagraph_max_bs,), dtype=torch.bool, device=device
         )
         self.spec_token_indx: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
@@ -138,19 +134,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
         self.spec_query_start_loc: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs + 1,),
-            dtype=torch.int32,
-            device=device,
+            (self.decode_cudagraph_max_bs + 1,), dtype=torch.int32, device=device
         )
         self.non_spec_query_start_loc: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs + 1,),
-            dtype=torch.int32,
-            device=device,
+            (self.decode_cudagraph_max_bs + 1,), dtype=torch.int32, device=device
         )
         self.num_accepted_tokens: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs,),
-            dtype=torch.int32,
-            device=device,
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
         )
 
     def build(  # type: ignore[override]
@@ -244,9 +234,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     query_start_loc_cpu[-1].item(),
                 )
                 spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
+                    spec_token_size, dtype=torch.int32, device=query_start_loc.device
                 )
                 non_spec_token_indx = torch.empty(
                     0, dtype=torch.int32, device=query_start_loc.device
@@ -301,8 +289,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     out=non_spec_query_start_loc[1:],
                 )
                 non_spec_query_start_loc_cpu = torch.zeros(
-                    query_lens_cpu.size(0) - num_spec_decodes + 1,
-                    dtype=torch.int32,
+                    query_lens_cpu.size(0) - num_spec_decodes + 1, dtype=torch.int32
                 )
                 torch.cumsum(
                     query_lens_cpu[~spec_sequence_masks_cpu],
@@ -340,8 +327,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
-                    device=query_start_loc.device,
+                    non_spec_query_start_loc_cpu, device=query_start_loc.device
                 )
             )
         else:

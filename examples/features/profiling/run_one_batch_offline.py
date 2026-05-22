@@ -22,9 +22,7 @@ def create_parser() -> FlexibleArgumentParser:
 
     profile_group = parser.add_argument_group("Profiling parameters")
     profile_group.add_argument(
-        "--profile",
-        choices=["none", "prefill", "decode", "both"],
-        default="none",
+        "--profile", choices=["none", "prefill", "decode", "both"], default="none"
     )
     profile_group.add_argument(
         "--profile-dir",

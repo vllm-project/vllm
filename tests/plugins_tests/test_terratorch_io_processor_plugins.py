@@ -87,10 +87,7 @@ async def test_prithvi_mae_plugin_online(
         "softmax": False,
     }
 
-    ret = requests.post(
-        server.url_for("pooling"),
-        json=request_payload_url,
-    )
+    ret = requests.post(server.url_for("pooling"), json=request_payload_url)
 
     response = ret.json()
 

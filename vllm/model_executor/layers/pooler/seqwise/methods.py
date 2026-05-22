@@ -26,18 +26,14 @@ class SequencePoolingMethod(nn.Module, ABC):
 
     @abstractmethod
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolingMethodOutput:
         raise NotImplementedError
 
 
 class CLSPool(SequencePoolingMethod):
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         assert not pooling_cursor.is_partial_prefill(), (
@@ -49,9 +45,7 @@ class CLSPool(SequencePoolingMethod):
 
 class LastPool(SequencePoolingMethod):
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         return hidden_states[pooling_cursor.last_token_indices_gpu]
@@ -59,9 +53,7 @@ class LastPool(SequencePoolingMethod):
 
 class MeanPool(SequencePoolingMethod):
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
         assert not pooling_cursor.is_partial_prefill(), (
@@ -80,16 +72,13 @@ class MeanPool(SequencePoolingMethod):
         # GPU->CPU to learn its data-dependent output length, then upload
         # non-blocking. eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
         segment_ids = torch.repeat_interleave(
-            torch.arange(num_seqs, dtype=torch.long),
-            prompt_lens_cpu,
+            torch.arange(num_seqs, dtype=torch.long), prompt_lens_cpu
         ).to(hidden_states.device, non_blocking=True)
         prompt_lens = prompt_lens_cpu.to(
             hidden_states.device, dtype=torch.int64, non_blocking=True
         )
         segment_sums = torch.zeros(
-            (num_seqs, hidden_size),
-            dtype=torch.float32,
-            device=hidden_states.device,
+            (num_seqs, hidden_size), dtype=torch.float32, device=hidden_states.device
         )
 
         bytes_per_token = hidden_size * torch.finfo(torch.float32).bits // 8

@@ -22,16 +22,13 @@ SHORT_PROMPT = "Red Hat is "
 def test_edge_cases():
     # Set the OpenAI API key and base URL
     decode_client = openai.OpenAI(
-        api_key="MY_KEY",
-        base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1",
+        api_key="MY_KEY", base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1"
     )
     prefill_client = openai.OpenAI(
-        api_key="MY_KEY",
-        base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1",
+        api_key="MY_KEY", base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1"
     )
     proxy_client = openai.OpenAI(
-        api_key="MY_KEY",
-        base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1",
+        api_key="MY_KEY", base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1"
     )
 
     # Get the list of models

@@ -19,10 +19,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
-    from vllm.lora.ops.triton_ops import (
-        LoRAKernelMeta,
-        fused_moe_lora,
-    )
+    from vllm.lora.ops.triton_ops import LoRAKernelMeta, fused_moe_lora
 
 from .punica_base import PunicaWrapperBase
 
@@ -88,11 +85,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
     def _apply_shrink(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
+        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
     ):
         bgmv_shrink(x, w_t_all, y, self._get_token_lora_indices(x), scale)
 
@@ -243,9 +236,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
             buffer = torch.zeros(  # type: ignore
-                (len(output_slices), x.size(0), r),
-                dtype=x.dtype,
-                device=x.device,
+                (len(output_slices), x.size(0), r), dtype=x.dtype, device=x.device
             )
         self.add_shrink(
             buffer,  # type: ignore
@@ -394,16 +385,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            num_active_loras,
-        ) = self.token_mapping_meta.meta_args(
-            x.size(0), self.lora_config.specialize_active_lora
+        (token_lora_mapping_meta, _, _, _, lora_ids, _, num_active_loras) = (
+            self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            )
         )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta

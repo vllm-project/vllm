@@ -221,10 +221,7 @@ class PerceptionEncoderVisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.attn = MMEncoderAttention(
-            self.num_heads,
-            self.head_dim,
-            self.scale,
-            prefix=f"{prefix}.attn",
+            self.num_heads, self.head_dim, self.scale, prefix=f"{prefix}.attn"
         )
         self.rope = PerceptionEncoderRope2D(
             dim=self.head_dim,
@@ -412,8 +409,7 @@ class PerceptionEncoder(nn.Module):
             self.positional_embedding = nn.Parameter(
                 (self.width**-0.5)
                 * torch.randn(
-                    int(self.use_cls_token) + self.posemb_grid_size**2,
-                    self.width,
+                    int(self.use_cls_token) + self.posemb_grid_size**2, self.width
                 )
             )
 

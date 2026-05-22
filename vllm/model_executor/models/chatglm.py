@@ -124,9 +124,7 @@ class GLMAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -225,17 +223,14 @@ class GLMBlock(nn.Module):
         self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         # hidden_states: [num_tokens, h]
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
         # Self attention.
         attention_output = self.self_attention(
-            hidden_states=layernorm_output,
-            position_ids=position_ids,
+            hidden_states=layernorm_output, position_ids=position_ids
         )
 
         # Residual connection.
@@ -295,9 +290,7 @@ class GLMTransformer(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor | IntermediateTensors:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
@@ -379,8 +372,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
 
         # Run encoder.
         hidden_states = self.encoder(
-            hidden_states=hidden_states,
-            position_ids=positions,
+            hidden_states=hidden_states, position_ids=positions
         )
 
         return hidden_states
@@ -423,9 +415,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
 
 
 class ChatGLMBaseModel(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".word_embeddings": ""},
-    )
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".word_embeddings": ""})
 
     def __init__(
         self,
@@ -458,10 +448,7 @@ class ChatGLMBaseModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.embed_input_ids(input_ids)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

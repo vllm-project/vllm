@@ -35,9 +35,7 @@ random.seed(42)
 
 
 def _create_random_top_logprob_test_vector(
-    num_logprobs: int,
-    lower: float,
-    upper: float,
+    num_logprobs: int, lower: float, upper: float
 ) -> torch.Tensor:
     """Create a random vector of top logprob float values.
 
@@ -59,9 +57,7 @@ def _create_random_top_logprob_test_vector(
 
 
 def _create_random_top_logprob_test_matrix(
-    shape: tuple,
-    lower: float,
-    upper: float,
+    shape: tuple, lower: float, upper: float
 ) -> torch.Tensor:
     """Create a random matrix of top logprob float values.
 
@@ -141,10 +137,7 @@ def _create_random_top_token_test_vector(
 
 
 def _create_random_top_token_test_matrix(
-    shape: tuple[int, int],
-    lower: int,
-    upper: int,
-    tokens_list: list[int],
+    shape: tuple[int, int], lower: int, upper: int, tokens_list: list[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create a random matrix of top logprob token indices
 
@@ -191,10 +184,7 @@ def _create_random_top_token_test_matrix(
     return matrix, prompt_token_ranks
 
 
-def decode_token(
-    tok_id: int,
-    tokenizer: PreTrainedTokenizer,
-) -> str:
+def decode_token(tok_id: int, tokenizer: PreTrainedTokenizer) -> str:
     """Reproduce the process of detokenizing a token for testing purposes.
 
     Args:
@@ -208,9 +198,7 @@ def decode_token(
 
 
 def generate_dummy_sample_logprobs(
-    sampled_tokens_list: list,
-    num_logprobs: int,
-    tokenizer: PreTrainedTokenizer,
+    sampled_tokens_list: list, num_logprobs: int, tokenizer: PreTrainedTokenizer
 ) -> list[tuple[list[int], list[float], int]]:
     """Generate dummy sample logprobs
 
@@ -232,10 +220,7 @@ def generate_dummy_sample_logprobs(
     """
     res = []
     for sampled_token_id in sampled_tokens_list:
-        (
-            token_vector,
-            sampled_token_rank,
-        ) = _create_random_top_token_test_vector(
+        (token_vector, sampled_token_rank) = _create_random_top_token_test_vector(
             num_logprobs, 0, len(tokenizer.vocab) - 1, sampled_token_id
         )
 
@@ -257,9 +242,7 @@ def generate_dummy_sample_logprobs(
 
 
 def generate_dummy_prompt_logprobs_tensors(
-    prompt_tokens_list: list,
-    num_logprobs: int,
-    tokenizer: PreTrainedTokenizer,
+    prompt_tokens_list: list, num_logprobs: int, tokenizer: PreTrainedTokenizer
 ) -> LogprobsTensors:
     """Generate dummy prompt logprobs tensors
 
@@ -286,10 +269,7 @@ def generate_dummy_prompt_logprobs_tensors(
     # `prompt_tokens_list[1:]` to the dummy token ids, just as the engine
     # would.
     num_prompt_logprobs = len(prompt_tokens_list) - 1
-    (
-        token_vector,
-        prompt_token_ranks,
-    ) = _create_random_top_token_test_matrix(
+    (token_vector, prompt_token_ranks) = _create_random_top_token_test_matrix(
         (num_prompt_logprobs, num_logprobs),
         0,
         len(tokenizer.vocab) - 1,

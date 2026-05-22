@@ -7,9 +7,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -20,10 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -117,15 +112,12 @@ class MinimaxM2ToolParser(ToolParser):
         return ToolCall(
             type="function",
             function=FunctionCall(
-                name=function_name,
-                arguments=json.dumps(param_dict, ensure_ascii=False),
+                name=function_name, arguments=json.dumps(param_dict, ensure_ascii=False)
             ),
         )
 
     def _extract_delta_tool_calls(
-        self,
-        current_text: str,
-        request: ChatCompletionRequest | None,
+        self, current_text: str, request: ChatCompletionRequest | None
     ) -> list[DeltaToolCall]:
         """Extract DeltaToolCalls from newly completed <invoke> blocks.
 
@@ -137,10 +129,7 @@ class MinimaxM2ToolParser(ToolParser):
 
         while len(complete_invokes) > self.current_tool_index:
             invoke_str = complete_invokes[self.current_tool_index]
-            tool_call = self._parse_single_invoke(
-                invoke_str,
-                self.tools,
-            )
+            tool_call = self._parse_single_invoke(invoke_str, self.tools)
             if not tool_call:
                 self.current_tool_index += 1
                 continue
@@ -150,10 +139,7 @@ class MinimaxM2ToolParser(ToolParser):
             self.current_tool_index += 1
 
             self.prev_tool_call_arr.append(
-                {
-                    "name": tool_call.function.name,
-                    "arguments": json.loads(args_json),
-                }
+                {"name": tool_call.function.name, "arguments": json.loads(args_json)}
             )
             self.streamed_args_for_tool.append(args_json)
             delta_tool_calls.append(
@@ -161,8 +147,7 @@ class MinimaxM2ToolParser(ToolParser):
                     index=idx,
                     id=self._generate_tool_call_id(),
                     function=DeltaFunctionCall(
-                        name=tool_call.function.name,
-                        arguments=args_json,
+                        name=tool_call.function.name, arguments=args_json
                     ),
                     type="function",
                 )
@@ -171,9 +156,7 @@ class MinimaxM2ToolParser(ToolParser):
         return delta_tool_calls
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from complete model output (non-streaming)."""
         # Quick check
@@ -263,10 +246,7 @@ class MinimaxM2ToolParser(ToolParser):
         delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
 
         if delta_tool_calls or content_before:
-            return DeltaMessage(
-                content=content_before,
-                tool_calls=delta_tool_calls,
-            )
+            return DeltaMessage(content=content_before, tool_calls=delta_tool_calls)
 
         # EOS and </minimax:tool_call> both arrive as special tokens with
         # no decoded text. Return non-None for EOS so the serving framework

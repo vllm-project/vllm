@@ -127,18 +127,14 @@ def _run_simple_model(
             None,
             vllm_config=vllm_config,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             model(torch.randn(2).cuda())
         with set_forward_context(
             None,
             vllm_config=vllm_config,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=1,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=1),
         ):
             model(torch.randn(1).cuda())
 
@@ -148,9 +144,7 @@ def _run_simple_model(
             None,
             vllm_config=vllm_config,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             output = model(input)
         assert get_global_counter() == 2

@@ -31,9 +31,7 @@ class OffloadingSpecFactory:
 
     @classmethod
     def create_spec(
-        cls,
-        config: "VllmConfig",
-        kv_cache_config: "KVCacheConfig",
+        cls, config: "VllmConfig", kv_cache_config: "KVCacheConfig"
     ) -> OffloadingSpec:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
@@ -57,7 +55,5 @@ OffloadingSpecFactory.register_spec(
     "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu.spec", "CPUOffloadingSpec"
 )
 OffloadingSpecFactory.register_spec(
-    "TieringOffloadingSpec",
-    "vllm.v1.kv_offload.tiering.spec",
-    "TieringOffloadingSpec",
+    "TieringOffloadingSpec", "vllm.v1.kv_offload.tiering.spec", "TieringOffloadingSpec"
 )

@@ -186,14 +186,9 @@ class MatcherRMSNormGated(MatcherCustomOp):
         return [x, z, weight]
 
     def forward_custom(
-        self,
-        x: torch.Tensor,
-        z: torch.Tensor,
-        weight: torch.Tensor,
+        self, x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fla.ops.layernorm_guard import (
-            rmsnorm_fn,
-        )
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 
         return rmsnorm_fn(
             x,
@@ -206,10 +201,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         )
 
     def forward_native(
-        self,
-        x: torch.Tensor,
-        z: torch.Tensor,
-        weight: torch.Tensor,
+        self, x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
         return RMSNormGated.forward_static(
             x,
@@ -261,12 +253,7 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox,
+                positions, query, key, self.head_size, cos_sin_cache, self.is_neox
             )
             return query, key
         result: tuple[torch.Tensor, torch.Tensor | None] = (
@@ -357,24 +344,18 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
     def forward_rocm_aiter(
-        self,
-        input: torch.Tensor,
-        scale: torch.Tensor | None = None,
+        self, input: torch.Tensor, scale: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
-                x=input,
-                quant_dtype=self.quant_key.dtype,
-                scale=scale,
+                x=input, quant_dtype=self.quant_key.dtype, scale=scale
             )
         else:
             return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
-        self,
-        input: torch.Tensor,
-        scale: torch.Tensor | None = None,
+        self, input: torch.Tensor, scale: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.match_rocm_aiter:
             return self.forward_rocm_aiter(input, scale)
@@ -424,9 +405,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             return result, scale
 
     def forward_native(
-        self,
-        input: torch.Tensor,
-        scale: torch.Tensor | None = None,
+        self, input: torch.Tensor, scale: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)  # type: ignore[no-any-return]
 
@@ -464,18 +443,12 @@ class MatcherSiluAndMul(MatcherCustomOp):
         input = self.empty(5, 4)
         return [input]
 
-    def forward_custom(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward_custom(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         result = auto_functionalized(SILU_MUL_OP, result=out, input=x)
         return result[1]
 
-    def forward_native(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         return SiluAndMul.forward_native(x)

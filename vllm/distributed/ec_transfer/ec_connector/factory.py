@@ -34,9 +34,7 @@ class ECConnectorFactory:
 
     @classmethod
     def create_connector(
-        cls,
-        config: "VllmConfig",
-        role: ECConnectorRole,
+        cls, config: "VllmConfig", role: ECConnectorRole
     ) -> ECConnectorBase:
         ec_transfer_config = config.ec_transfer_config
         if ec_transfer_config is None:

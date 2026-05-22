@@ -31,9 +31,7 @@ class VitCudagraphTestConfig:
     marks: list = field(default_factory=list)
 
 
-def params_with_marks(
-    configs: dict[str, VitCudagraphTestConfig],
-) -> list[pytest.param]:
+def params_with_marks(configs: dict[str, VitCudagraphTestConfig]) -> list[pytest.param]:
     return [
         pytest.param(model_id, marks=cfg.marks) for model_id, cfg in configs.items()
     ]
@@ -107,9 +105,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # tokens (1152 > 1141 for cherry_blossom). The default auto-
         # inferred range fans out into multiple power-of-2 buckets, each
         # holding a full ViT capture pool.
-        compilation_config_overrides={
-            "encoder_cudagraph_token_budgets": [1152],
-        },
+        compilation_config_overrides={"encoder_cudagraph_token_budgets": [1152]},
         # Shrink to 1 text + 1 vision layer with random weights so the
         # test runs on any CI GPU (incl. L4) and skips the 20 GiB weight
         # download. The test only validates that encoder CG capture/
@@ -117,8 +113,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={
             "load_format": "dummy",
             "hf_overrides": partial(
-                dummy_hf_overrides,
-                model_arch="StepVLForConditionalGeneration",
+                dummy_hf_overrides, model_arch="StepVLForConditionalGeneration"
             ),
         },
     ),
@@ -190,7 +185,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
 
     video_prompts = VIDEO_ASSETS.prompts(
         {
-            "baby_reading": config.video_prompt,  # type: ignore[typeddict-item]
+            "baby_reading": config.video_prompt  # type: ignore[typeddict-item]
         }
     )
     if config.needs_video_metadata:

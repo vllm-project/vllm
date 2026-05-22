@@ -33,10 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
     MoRIIOConnectorWorker,
 )
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import (
-    get_ip,
-    make_zmq_path,
-)
+from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from .utils import create_request, create_scheduler
@@ -212,10 +209,7 @@ def create_vllm_config(
         is_encoder_decoder=False,
     )
     model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        seed=42,
+        model=model, trust_remote_code=True, dtype="bfloat16", seed=42
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -460,26 +454,18 @@ def test_register_kv_caches(mock_parallel_groups):
     ):
         # Create connector
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-            {
-                "proxy_ip": "127.0.0.1",
-                "proxy_ping_port": 12345,
-                "http_port": 12346,
-            }
+            {"proxy_ip": "127.0.0.1", "proxy_ping_port": 12345, "http_port": 12346}
         )
 
         with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(
-                vllm_config,
-                KVConnectorRole.WORKER,
-                _make_test_kv_cache_config(),
+                vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
             )
             connector.connector_worker = FakeMoRIIOConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )
 
-        from mori.io import (
-            MemoryDesc,
-        )
+        from mori.io import MemoryDesc
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -547,11 +533,9 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
         "layer2": shared_tensor,
     }
 
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
-            FakeMoRIIOWrapper,
-        ),
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
+        FakeMoRIIOWrapper,
     ):
         handshake_port = _find_free_port()
         # Create connector
@@ -565,9 +549,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
         )
         with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(
-                vllm_config,
-                KVConnectorRole.WORKER,
-                _make_test_kv_cache_config(),
+                vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
             )
 
         # Execute register_kv_caches

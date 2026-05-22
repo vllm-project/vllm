@@ -228,9 +228,7 @@ class SarvamMLAAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         return self.mla_attn(positions, hidden_states, llama_4_scaling=None)
 
@@ -304,18 +302,12 @@ class SarvamMLAMoE(nn.Module):
             self.router_dtype = torch.bfloat16
 
         self.gate = nn.Linear(
-            self.hidden_size,
-            self.num_experts,
-            bias=False,
-            dtype=self.router_dtype,
+            self.hidden_size, self.num_experts, bias=False, dtype=self.router_dtype
         )
 
         if getattr(config, "moe_router_enable_expert_bias", True):
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(
-                    (self.num_experts,),
-                    dtype=torch.float32,
-                )
+                torch.empty((self.num_experts,), dtype=torch.float32)
             )
         else:
             self.gate.e_score_correction_bias = None
@@ -368,19 +360,14 @@ class SarvamMLAMoE(nn.Module):
         )
         router_logits = router_logits.to(hidden_states.dtype)
         final_hidden = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
+            hidden_states=hidden_states, router_logits=router_logits
         )
 
         return final_hidden.view(num_tokens, hidden_dim)
 
 
 class SarvamMLABlock(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -437,22 +424,14 @@ class SarvamMLABlock(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
 class SarvamMLAModel(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -479,10 +458,7 @@ class SarvamMLAModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: SarvamMLABlock(
-                vllm_config=vllm_config,
-                prefix=prefix,
-            ),
+            lambda prefix: SarvamMLABlock(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -516,11 +492,7 @@ class SarvamMLAModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                hidden_states,
-                positions,
-                residual,
-            )
+            hidden_states, residual = layer(hidden_states, positions, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -540,10 +512,7 @@ class SarvamMLAModel(nn.Module):
             num_experts=self.config.num_experts,
         )
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with stacked gate+up and MoE expert remapping."""
         weights = _normalized_weights(weights)
         stacked_params_mapping = [
@@ -638,9 +607,7 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
         self.num_redundant_experts = 0
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
@@ -686,8 +653,7 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         self.quant_config = quant_config
 
         self.model = SarvamMLAModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
@@ -745,22 +711,15 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
             inputs_embeds=inputs_embeds,
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         if not get_pp_group().is_last_rank:
             return None
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
+            self, skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None)
         )
         return loader.load_weights(weights)
 

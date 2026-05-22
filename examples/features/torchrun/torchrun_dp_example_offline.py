@@ -27,22 +27,13 @@ def parse_args():
         description="Data-parallel inference with torchrun"
     )
     parser.add_argument(
-        "--tp-size",
-        type=int,
-        default=1,
-        help="Tensor parallel size (default: 1)",
+        "--tp-size", type=int, default=1, help="Tensor parallel size (default: 1)"
     )
     parser.add_argument(
-        "--pp-size",
-        type=int,
-        default=1,
-        help="Pipeline parallel size (default: 1)",
+        "--pp-size", type=int, default=1, help="Pipeline parallel size (default: 1)"
     )
     parser.add_argument(
-        "--dp-size",
-        type=int,
-        default=2,
-        help="Data parallel size (default: 2)",
+        "--dp-size", type=int, default=2, help="Data parallel size (default: 2)"
     )
     parser.add_argument(
         "--enable-ep",
@@ -67,12 +58,7 @@ def parse_args():
         default=0.6,
         help="GPU memory utilization (default: 0.6)",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=1,
-        help="Random seed (default: 1)",
-    )
+    parser.add_argument("--seed", type=int, default=1, help="Random seed (default: 1)")
     return parser.parse_args()
 
 

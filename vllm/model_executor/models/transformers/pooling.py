@@ -97,6 +97,5 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
         self.classifier.__class__ = ClassifierWithReshape
 
         self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            classifier=self.classifier,
+            pooler_config, classifier=self.classifier
         )

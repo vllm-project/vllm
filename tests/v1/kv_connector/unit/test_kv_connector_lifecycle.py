@@ -51,8 +51,7 @@ def test_kv_connector_mixin_clears_metadata():
     mock_tp_group.broadcast_object.side_effect = lambda value, src=0: value
 
     with patch(
-        "vllm.distributed.parallel_state.get_tp_group",
-        return_value=mock_tp_group,
+        "vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group
     ):
         ensure_kv_transfer_initialized(vllm_config, kv_cache_config)
 

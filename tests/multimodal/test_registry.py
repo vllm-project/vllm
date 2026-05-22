@@ -29,10 +29,7 @@ pytestmark = pytest.mark.cpu_test
 def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     """Test supports_multimodal_inputs returns correct boolean for various
     configs."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt=limit_mm_per_prompt)
     assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
 
 
@@ -44,7 +41,6 @@ def test_create_processor_error_uses_served_model_name():
     )
 
     with pytest.raises(
-        ValueError,
-        match="friendly-model-name is not a multimodal model",
+        ValueError, match="friendly-model-name is not a multimodal model"
     ):
         MULTIMODAL_REGISTRY.create_processor(model_config)

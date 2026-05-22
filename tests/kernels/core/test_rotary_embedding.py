@@ -12,10 +12,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 
 def rotary_embedding_opcheck(
-    rot,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor | None = None,
+    rot, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor | None = None
 ):
     cos_sin_cache = rot.cos_sin_cache.to(query.device, dtype=query.dtype)
 

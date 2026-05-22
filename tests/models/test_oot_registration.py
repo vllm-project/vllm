@@ -11,10 +11,7 @@ from ..utils import create_new_process_for_each_test
 
 
 @create_new_process_for_each_test()
-def test_plugin(
-    monkeypatch: pytest.MonkeyPatch,
-    dummy_opt_path: str,
-):
+def test_plugin(monkeypatch: pytest.MonkeyPatch, dummy_opt_path: str):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "")
 
@@ -24,8 +21,7 @@ def test_plugin(
 
 @create_new_process_for_each_test()
 def test_oot_registration_text_generation(
-    monkeypatch: pytest.MonkeyPatch,
-    dummy_opt_path: str,
+    monkeypatch: pytest.MonkeyPatch, dummy_opt_path: str
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
@@ -44,8 +40,7 @@ def test_oot_registration_text_generation(
 
 @create_new_process_for_each_test()
 def test_oot_registration_embedding(
-    monkeypatch: pytest.MonkeyPatch,
-    dummy_gemma2_embedding_path: str,
+    monkeypatch: pytest.MonkeyPatch, dummy_gemma2_embedding_path: str
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
@@ -64,8 +59,7 @@ image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
 @create_new_process_for_each_test()
 def test_oot_registration_multimodal(
-    monkeypatch: pytest.MonkeyPatch,
-    dummy_llava_path: str,
+    monkeypatch: pytest.MonkeyPatch, dummy_llava_path: str
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")

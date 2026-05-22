@@ -25,5 +25,5 @@ SHAPE_CONFIGS: dict[str, list[dict]] = {
         for dtype in [torch.float16, torch.bfloat16, torch.float32]
         for d in COMMON_HIDDEN_SIZES
         for n in NUM_TOKENS
-    ],
+    ]
 }

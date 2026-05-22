@@ -23,12 +23,7 @@ from ..utils import check_logprobs_close
 )
 @pytest.mark.parametrize(
     "base_model,test_model",
-    [
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            "meta-llama/Llama-3.2-1B-Instruct",
-        ),
-    ],
+    [("meta-llama/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct")],
 )
 @pytest.mark.parametrize(
     "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]

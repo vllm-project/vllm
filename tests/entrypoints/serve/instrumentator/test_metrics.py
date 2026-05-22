@@ -99,10 +99,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
             ("_count", num_requests),
         ],
         "vllm:iteration_tokens_total": [
-            (
-                "_sum",
-                num_requests * (num_prompt_tokens + max_tokens),
-            ),
+            ("_sum", num_requests * (num_prompt_tokens + max_tokens)),
             ("_count", num_requests * max_tokens),
         ],
         "vllm:prompt_tokens": [("_total", num_requests * num_prompt_tokens)],
@@ -113,9 +110,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
 
 @pytest.mark.asyncio
 async def test_metrics_counts(
-    server: RemoteOpenAIServer,
-    client: openai.AsyncClient,
-    model_key: str,
+    server: RemoteOpenAIServer, client: openai.AsyncClient, model_key: str
 ):
     if model_key == "multimodal":
         pytest.skip("Unnecessary test")
@@ -129,9 +124,7 @@ async def test_metrics_counts(
     for _ in range(num_requests):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
-            model=model_name,
-            prompt=prompt_ids,
-            max_tokens=max_tokens,
+            model=model_name, prompt=prompt_ids, max_tokens=max_tokens
         )
 
     response = requests.get(server.url_for("metrics"))
@@ -227,10 +220,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
-EXPECTED_METRICS_MM = [
-    "vllm:mm_cache_queries",
-    "vllm:mm_cache_hits",
-]
+EXPECTED_METRICS_MM = ["vllm:mm_cache_queries", "vllm:mm_cache_hits"]
 
 HIDDEN_DEPRECATED_METRICS: list[str] = []
 
@@ -247,10 +237,7 @@ async def test_metrics_exist(
     # sending a request triggers the metrics to be logged.
     if model_key == "text":
         await client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=0.0
         )
     else:
         # https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg
@@ -265,7 +252,7 @@ async def test_metrics_exist(
                             "image_url": {
                                 "url": local_asset_server.url_for(
                                     "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-                                ),
+                                )
                             },
                         },
                         {"type": "text", "text": "What's in this image?"},
@@ -292,16 +279,14 @@ async def test_metrics_exist(
 
 @pytest.mark.asyncio
 async def test_abort_metrics_reset(
-    server: RemoteOpenAIServer,
-    client: openai.AsyncClient,
-    model_key: str,
+    server: RemoteOpenAIServer, client: openai.AsyncClient, model_key: str
 ):
     model_name = MODELS[model_key]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt_ids = tokenizer.encode(_PROMPT)
 
     running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
-        server,
+        server
     )
 
     # Expect no running requests or kvcache usage
@@ -339,7 +324,7 @@ async def test_abort_metrics_reset(
 
     # Check that we have running requests
     running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
-        server,
+        server
     )
 
     # Expect running requests and kvcache usage
@@ -451,7 +436,7 @@ def test_metrics_exist_run_batch():
                 base_url,
                 "--port",
                 port,
-            ],
+            ]
         )
 
         try:

@@ -23,10 +23,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -128,12 +125,7 @@ class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
@@ -145,11 +137,7 @@ class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
         return (grid_h * grid_w) // (spatial_merge_size**2)
 
     def get_num_video_tokens(
-        self,
-        *,
-        video_width: int,
-        video_height: int,
-        num_frames: int,
+        self, *, video_width: int, video_height: int, num_frames: int
     ) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -173,18 +161,14 @@ class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
         return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+            image_width=target_width, image_height=target_height
         )
 
 
 class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2ProcessingInfo]):
     """Dummy inputs builder for HyperCLOVAX V2 memory profiling."""
 
-    def get_dummy_text(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> str:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
         return V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
@@ -202,10 +186,7 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
         dummy_mm_data = self.get_dummy_mm_data(
-            seq_len,
-            mm_counts,
-            mm_options,
-            mm_processor_kwargs=mm_processor_kwargs,
+            seq_len, mm_counts, mm_options, mm_processor_kwargs=mm_processor_kwargs
         )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
@@ -273,16 +254,10 @@ class HCXVisionV2MultiModalProcessor(
         # NOTE: We pass the prompt as-is without token normalization.
         # Token expansion is handled by vLLM via _get_prompt_updates since
         # _hf_processor_applies_updates returns False.
-        data: dict[str, object] = dict(
-            text=prompt,
-            images=images,
-            videos=videos,
-        )
+        data: dict[str, object] = dict(text=prompt, images=images, videos=videos)
 
         processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=hf_processor,
-            data=data,
-            kwargs=dict(**mm_kwargs, **tok_kwargs),
+            hf_processor=hf_processor, data=data, kwargs=dict(**mm_kwargs, **tok_kwargs)
         )
 
         return processed_outputs
@@ -298,10 +273,7 @@ class HCXVisionV2MultiModalProcessor(
         # - raw multimodal inputs: HF processor applies updates
         # - embedding inputs: vLLM applies updates
         return super()._hf_processor_applies_updates(
-            prompt_text,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
+            prompt_text, mm_items, hf_processor_mm_kwargs, tokenization_kwargs
         )
 
     def _get_prompt_updates(
@@ -322,9 +294,7 @@ class HCXVisionV2MultiModalProcessor(
         merge_size = hf_config.vision_config.spatial_merge_size
 
         def get_replacement_v2(
-            item_idx: int,
-            modality: str,
-            out_mm_kwargs: MultiModalKwargsItems,
+            item_idx: int, modality: str, out_mm_kwargs: MultiModalKwargsItems
         ):
             out_item = out_mm_kwargs[modality][item_idx]
 
@@ -356,22 +326,16 @@ class HCXVisionV2MultiModalProcessor(
         return [
             PromptReplacement(
                 modality=modality,
-                target=[
-                    placeholder[modality],
-                ],
+                target=[placeholder[modality]],
                 replacement=partial(
-                    get_replacement_v2,
-                    modality=modality,
-                    out_mm_kwargs=out_mm_kwargs,
+                    get_replacement_v2, modality=modality, out_mm_kwargs=out_mm_kwargs
                 ),
             )
             for modality in ("image", "video")
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HyperCLOVAX V2 uses Qwen2.5-VL style flattened pixel values where
         # pixel_values has shape (num_patches, channels*patch_size*patch_size)
@@ -441,16 +405,11 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         },
         orig_to_new_substr={
             # Ignore modules not implemented in vLLM
-            "discrete_vision_model": None,  # TextAlignedTokenizer
+            "discrete_vision_model": None  # TextAlignedTokenizer
         },
     )
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -513,8 +472,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         raise ValueError("Only image or video modality is supported")
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> HCXVisionV2ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -525,21 +483,18 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         if pixel_values is not None:
             return HCXVisionV2ImagePixelInputs(
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
+                pixel_values=pixel_values, image_grid_thw=image_grid_thw
             )
 
         if image_embeds is not None:
             return HCXVisionV2ImageEmbeddingInputs(
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
+                image_embeds=image_embeds, image_grid_thw=image_grid_thw
             )
 
         return None
 
     def _parse_and_validate_video_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> HCXVisionV2VideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -550,21 +505,18 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         if pixel_values_videos is not None:
             return HCXVisionV2VideoPixelInputs(
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
+                pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw
             )
 
         if video_embeds is not None:
             return HCXVisionV2VideoEmbeddingInputs(
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
+                video_embeds=video_embeds, video_grid_thw=video_grid_thw
             )
 
         return None
 
     def _process_image_input(
-        self,
-        image_input: HCXVisionV2ImageInputs,
+        self, image_input: HCXVisionV2ImageInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process images through Qwen2.5 ViT and projector."""
         grid_thw = image_input["image_grid_thw"]
@@ -587,8 +539,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return image_embeds.split(sizes)
 
     def _process_video_input(
-        self,
-        video_input: HCXVisionV2VideoInputs,
+        self, video_input: HCXVisionV2VideoInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process videos through Qwen2.5 ViT and projector."""
         grid_thw = video_input["video_grid_thw"]
@@ -627,10 +578,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def embed_multimodal(
-        self,
-        **kwargs: object,
-    ) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -667,15 +615,9 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

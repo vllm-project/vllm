@@ -56,15 +56,9 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         # when the input has an extra batch dimension (transformers backend).
         if x.ndim == 3:
             return torch.empty(
-                (x.size(0), x.size(1), output_size),
-                device=x.device,
-                dtype=x.dtype,
+                (x.size(0), x.size(1), output_size), device=x.device, dtype=x.dtype
             )
-        return torch.empty(
-            (x.size(0), output_size),
-            device=x.device,
-            dtype=x.dtype,
-        )
+        return torch.empty((x.size(0), output_size), device=x.device, dtype=x.dtype)
 
     direct_register_custom_op(
         op_name="lora_linear_async",
@@ -256,9 +250,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             # writing) when lora_id == -1 (no active LoRA). If uninitialized,
             # output.add_(lora_result) below would corrupt the base output.
             lora_output = torch.zeros(
-                (num_tokens, output_size),
-                device=self.device,
-                dtype=x.dtype,
+                (num_tokens, output_size), device=self.device, dtype=x.dtype
             )
 
             # Flatten the batch dimension for the transformers backend
@@ -276,11 +268,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             return lora_output
 
         output, lora_result = maybe_execute_in_parallel(
-            base_fn,
-            lora_fn,
-            self._events[0],
-            self._events[1],
-            self._lora_stream,
+            base_fn, lora_fn, self._events[0], self._events[1], self._lora_stream
         )
 
         original_shape = output.shape if output.ndim == 3 else None

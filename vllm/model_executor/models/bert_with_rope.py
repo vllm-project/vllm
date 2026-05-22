@@ -15,9 +15,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
-from vllm.model_executor.layers.attention import (
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import EncoderOnlyAttention
 from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -66,9 +64,7 @@ class BertWithRopeEmbedding(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        token_type_ids: torch.Tensor | None = None,
+        self, input_ids: torch.Tensor, token_type_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
@@ -148,9 +144,7 @@ class BertWithRopeAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -275,24 +269,11 @@ class NomicMoE(nn.Module):
             )
         )
         self.bias = nn.Parameter(torch.zeros(self.hidden_size))
-        set_weight_attrs(
-            self.w1,
-            {
-                "weight_loader": self.weight_loader,
-            },
-        )
-        set_weight_attrs(
-            self.w2,
-            {
-                "weight_loader": self.weight_loader,
-            },
-        )
+        set_weight_attrs(self.w1, {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.w2, {"weight_loader": self.weight_loader})
 
     def weight_loader(
-        self,
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-        weight_name: str,
+        self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
     ):
         # NOTE: Nomic-MoE has fused experts weights with shape
         # (num_experts * intermediate_size, hidden_size)
@@ -302,15 +283,11 @@ class NomicMoE(nn.Module):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1"):
             loaded_weight = loaded_weight.reshape(
-                self.num_total_experts,
-                self.total_intermediate_size,
-                self.hidden_size,
+                self.num_total_experts, self.total_intermediate_size, self.hidden_size
             )[:, shard]
         if weight_name.endswith("w2"):
             loaded_weight = loaded_weight.reshape(
-                self.num_total_experts,
-                self.total_intermediate_size,
-                self.hidden_size,
+                self.num_total_experts, self.total_intermediate_size, self.hidden_size
             )[:, shard].transpose(1, 2)
         param_data.copy_(loaded_weight)
 
@@ -431,9 +408,7 @@ class BertWithRopeEncoder(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         for layer in self.layers:
             hidden_states = layer(positions, hidden_states)
@@ -701,9 +676,7 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            pooling=self.new.pooler,
-            classifier=self.classifier,
+            pooler_config, pooling=self.new.pooler, classifier=self.classifier
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

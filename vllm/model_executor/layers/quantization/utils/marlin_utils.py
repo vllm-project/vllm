@@ -84,21 +84,14 @@ def query_marlin_supported_quant_types(
 
 
 def _query_cpu_marlin_supported_quant_types(
-    has_zp: bool | None = None,
-    include_fp_type: bool = True,
+    has_zp: bool | None = None, include_fp_type: bool = True
 ):
     # - has_zp is True: return quant_types that has zero points
     # - has_zp is False: return quant_types that has not zero points
     # - has_zp is None: both
     if has_zp is None:
-        types0 = _query_cpu_marlin_supported_quant_types(
-            False,
-            include_fp_type,
-        )
-        types1 = _query_cpu_marlin_supported_quant_types(
-            True,
-            include_fp_type,
-        )
+        types0 = _query_cpu_marlin_supported_quant_types(False, include_fp_type)
+        types1 = _query_cpu_marlin_supported_quant_types(True, include_fp_type)
         return types0 + types1
 
     if has_zp:
@@ -335,9 +328,7 @@ def marlin_moe_permute_scales(
 ):
     num_experts = s.shape[0]
     output = torch.empty(
-        (num_experts, s.shape[1], s.shape[2]),
-        device=s.device,
-        dtype=s.dtype,
+        (num_experts, s.shape[1], s.shape[2]), device=s.device, dtype=s.dtype
     )
 
     for e in range(num_experts):

@@ -184,10 +184,7 @@ def compile_execution_fn(
     """
     trace_structured(
         "artifact",
-        metadata_fn=lambda: {
-            "name": "vllm_execution_code",
-            "encoding": "string",
-        },
+        metadata_fn=lambda: {"name": "vllm_execution_code", "encoding": "string"},
         payload_fn=lambda: code,
     )
     namespace: dict[str, Any] = {}

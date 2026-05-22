@@ -47,9 +47,7 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_tokenize_then_chat_completion_with_image(
-    client: openai.AsyncOpenAI,
-    server: RemoteOpenAIServer,
-    local_asset_server,
+    client: openai.AsyncOpenAI, server: RemoteOpenAIServer, local_asset_server
 ):
     """Tokenize a multimodal message, then send the same message to chat
     completions.  The chat completion must succeed (not 500)."""
@@ -66,18 +64,14 @@ async def test_tokenize_then_chat_completion_with_image(
     ]
 
     tok_resp = requests.post(
-        server.url_for("tokenize"),
-        json={"model": MODEL_NAME, "messages": messages},
+        server.url_for("tokenize"), json={"model": MODEL_NAME, "messages": messages}
     )
     tok_resp.raise_for_status()
     tok_data = tok_resp.json()
     assert tok_data["count"] > 0, "Tokenization must return tokens"
 
     chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_tokens=10,
-        temperature=0.0,
+        model=MODEL_NAME, messages=messages, max_tokens=10, temperature=0.0
     )
 
     assert chat_completion.choices[0].message.content, (

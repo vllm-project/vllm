@@ -34,10 +34,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_merge_kernel(
-    num_tokens: int,
-    num_heads: tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
+    num_tokens: int, num_heads: tuple[int, int], head_size: int, dtype: torch.dtype
 ):
     torch.set_default_device("cuda")
     set_random_seed(0)

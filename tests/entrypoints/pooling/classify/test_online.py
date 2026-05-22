@@ -18,13 +18,7 @@ input_tokens = [1986, 1985, 572, 9073, 323, 33808, 847, 16665]
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--enforce-eager",
-        "--max-model-len",
-        "512",
-        "--dtype",
-        DTYPE,
-    ]
+    args = ["--enforce-eager", "--max-model-len", "512", "--dtype", DTYPE]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -39,8 +33,7 @@ def test_basic(server: RemoteOpenAIServer, model_name: str):
 
     # test /tokenize
     response = requests.post(
-        server.url_for("/tokenize"),
-        json={"model": model_name, "prompt": input_text},
+        server.url_for("/tokenize"), json={"model": model_name, "prompt": input_text}
     )
     assert response.json()["tokens"] == input_tokens
 
@@ -49,8 +42,7 @@ def test_basic(server: RemoteOpenAIServer, model_name: str):
 def test_completion_request(server: RemoteOpenAIServer, model_name: str):
     # test input: str
     classification_response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "input": input_text},
+        server.url_for("classify"), json={"model": model_name, "input": input_text}
     )
 
     classification_response.raise_for_status()
@@ -64,8 +56,7 @@ def test_completion_request(server: RemoteOpenAIServer, model_name: str):
 
     # test input: list[int]
     classification_response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "input": input_tokens},
+        server.url_for("classify"), json={"model": model_name, "input": input_tokens}
     )
 
     classification_response.raise_for_status()
@@ -116,8 +107,7 @@ def test_completion_request_batched(server: RemoteOpenAIServer, model_name: str)
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
     classification_response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "input": ""},
+        server.url_for("classify"), json={"model": model_name, "input": ""}
     )
 
     error = classification_response.json()
@@ -125,8 +115,7 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
     assert "error" in error
 
     classification_response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "input": []},
+        server.url_for("classify"), json={"model": model_name, "input": []}
     )
 
     error = classification_response.json()
@@ -186,24 +175,14 @@ def test_add_special_tokens(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     # test chat request basic usage
     response = requests.post(
-        server.url_for("classify"),
-        json={"model": model_name, "messages": messages},
+        server.url_for("classify"), json={"model": model_name, "messages": messages}
     )
 
     response.raise_for_status()
@@ -287,10 +266,7 @@ async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 async def test_invocations_completion_request(server: RemoteOpenAIServer):
-    request_args = {
-        "model": MODEL_NAME,
-        "input": input_text,
-    }
+    request_args = {"model": MODEL_NAME, "input": input_text}
 
     classification_response = requests.post(
         server.url_for("classify"), json=request_args
@@ -318,18 +294,9 @@ async def test_invocations_completion_request(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
     messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "assistant", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
     ]
 
     request_args = {"model": MODEL_NAME, "messages": messages}
@@ -393,11 +360,7 @@ async def test_score(server: RemoteOpenAIServer, model_name: str):
     # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("score"),
-        json={
-            "model": model_name,
-            "queries": "ping",
-            "documents": "pong",
-        },
+        json={"model": model_name, "queries": "ping", "documents": "pong"},
     )
     assert response.json()["detail"] == "Not Found"
 
@@ -408,11 +371,7 @@ async def test_rerank(server: RemoteOpenAIServer, model_name: str):
     # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": model_name,
-            "query": "ping",
-            "documents": ["pong"],
-        },
+        json={"model": model_name, "query": "ping", "documents": ["pong"]},
     )
     assert response.json()["detail"] == "Not Found"
 

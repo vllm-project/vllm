@@ -108,9 +108,7 @@ def _maybe_load_tokenizer_config(
         return {}
 
 
-def _load_tiktoken_encoding(
-    vocab_file: Path,
-) -> tuple[Any, dict[str, int]]:
+def _load_tiktoken_encoding(vocab_file: Path) -> tuple[Any, dict[str, int]]:
     try:
         import tiktoken
     except ImportError as exc:
@@ -168,10 +166,7 @@ def _load_tiktoken_encoding(
         if isinstance(allowed_special, set):
             allowed_special |= self._default_allowed_special
         return tiktoken.Encoding.encode(
-            self,
-            text,
-            allowed_special=allowed_special,
-            disallowed_special=(),
+            self, text, allowed_special=allowed_special, disallowed_special=()
         )
 
     tokenizer.encode = functools.partial(encode_patched, tokenizer)
@@ -222,10 +217,7 @@ class Grok2Tokenizer(TokenizerLike):
             raise FileNotFoundError(f"tokenizer.tok.json not found at {vocab_file}.")
 
         config = _maybe_load_tokenizer_config(
-            model_path,
-            repo_id=repo_id,
-            revision=revision,
-            download_dir=download_dir,
+            model_path, repo_id=repo_id, revision=revision, download_dir=download_dir
         )
 
         return cls(
@@ -442,10 +434,7 @@ class Grok2Tokenizer(TokenizerLike):
             )
         kwargs["return_dict"] = False
         prompt = hf_chat_utils.apply_chat_template(
-            conversation=messages,
-            chat_template=template,
-            tools=tools,
-            **kwargs,
+            conversation=messages, chat_template=template, tools=tools, **kwargs
         )
         if tokenize:
             return self.encode(prompt, add_special_tokens=False)

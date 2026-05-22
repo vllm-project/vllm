@@ -54,8 +54,7 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     base_hash = MultiModalConfig().compute_hash()
     fp8_hash = MultiModalConfig(mm_encoder_attn_dtype="fp8").compute_hash()
     fp8_static_hash = MultiModalConfig(
-        mm_encoder_attn_dtype="fp8",
-        mm_encoder_fp8_scale_path=str(scale_file),
+        mm_encoder_attn_dtype="fp8", mm_encoder_fp8_scale_path=str(scale_file)
     ).compute_hash()
     assert base_hash != fp8_hash
     assert fp8_hash != fp8_static_hash

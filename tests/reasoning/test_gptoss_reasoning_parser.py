@@ -138,11 +138,7 @@ TEST_CASES = [
     "output, is_reasoning_end",
     [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
 )
-def test_gptoss_is_reasoning_end(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
-):
+def test_gptoss_is_reasoning_end(output, is_reasoning_end, gpt_oss_tokenizer):
     output = gpt_oss_tokenizer.tokenize(output)
     parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
 
@@ -286,11 +282,7 @@ class TestGptOssStructuralTags:
     "output, is_reasoning_end",
     [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
 )
-def test_gptoss_is_reasoning_end_streaming(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
-):
+def test_gptoss_is_reasoning_end_streaming(output, is_reasoning_end, gpt_oss_tokenizer):
     """Streaming override must agree with is_reasoning_end for all cases."""
     tokens = gpt_oss_tokenizer.tokenize(output)
     parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
@@ -305,9 +297,7 @@ def test_gptoss_is_reasoning_end_streaming(
     [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
 )
 def test_gptoss_is_reasoning_end_streaming_long_prefix(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
+    output, is_reasoning_end, gpt_oss_tokenizer
 ):
     """Windowing must produce correct results even with a long prefix."""
     tokens = gpt_oss_tokenizer.tokenize(output)
@@ -326,9 +316,7 @@ def test_gptoss_is_reasoning_end_streaming_long_prefix(
     [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
 )
 def test_gptoss_is_reasoning_end_streaming_large_delta(
-    output,
-    is_reasoning_end,
-    gpt_oss_tokenizer,
+    output, is_reasoning_end, gpt_oss_tokenizer
 ):
     """Simulate speculative decoding where the entire test sequence arrives
     as a single large delta appended after a long prefix.  The window must

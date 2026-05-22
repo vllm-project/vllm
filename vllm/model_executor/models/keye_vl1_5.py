@@ -274,9 +274,7 @@ class KeyeVL1_5Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-def _keye_field_config(
-    hf_inputs: Mapping[str, torch.Tensor],
-):
+def _keye_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     image_grid_thw = hf_inputs.get(
         "image_grid_thw", torch.empty((0, 3), dtype=torch.int64)
     )
@@ -321,34 +319,26 @@ def _keye_field_config(
 
 class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields={"image_embeds", "image_grid_thw"},
                 fields_factory=_keye_field_config,
             )
 
         return super()._parse_image_data(data)
 
     def _parse_video_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[VideoItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields={"video_embeds", "video_grid_thw"},
                 fields_factory=_keye_field_config,
             )
 
@@ -358,15 +348,13 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
 class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
     def get_data_parser(self):
         return KeyeVL1_5MultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
+            expected_hidden_size=self._get_expected_hidden_size()
         )
 
     def get_max_frame_per_video(self) -> int:
         return 2048
 
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
 
 
@@ -493,9 +481,7 @@ class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingIn
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _keye_field_config(hf_inputs)
 
@@ -655,19 +641,14 @@ class KeyeVL1_5ForConditionalGeneration(
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
 
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-        ) in self.iter_mm_grid_thw(mm_features):
+        for offset, llm_grid_t, llm_grid_h, llm_grid_w in self.iter_mm_grid_thw(
+            mm_features
+        ):
             text_len = offset - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0

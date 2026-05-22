@@ -173,11 +173,7 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
-    VLLM_DEEP_GEMM_WARMUP: Literal[
-        "skip",
-        "full",
-        "relax",
-    ] = "relax"
+    VLLM_DEEP_GEMM_WARMUP: Literal["skip", "full", "relax"] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
@@ -284,16 +280,12 @@ if TYPE_CHECKING:
 
 
 def get_default_cache_root():
-    return os.getenv(
-        "XDG_CACHE_HOME",
-        os.path.join(os.path.expanduser("~"), ".cache"),
-    )
+    return os.getenv("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
 
 
 def get_default_config_root():
     return os.getenv(
-        "XDG_CONFIG_HOME",
-        os.path.join(os.path.expanduser("~"), ".config"),
+        "XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")
     )
 
 
@@ -345,10 +337,7 @@ def use_mega_aot_artifact():
 
 
 def deprecated_env(
-    env_name: str,
-    removal_version: str,
-    replacement: str,
-    getter: Callable[[], Any],
+    env_name: str, removal_version: str, replacement: str, getter: Callable[[], Any]
 ) -> Callable[[], Any]:
     """Wrap an env-var getter to emit a FutureWarning when the var is set."""
 
@@ -513,8 +502,7 @@ def get_vllm_port() -> int | None:
 
 
 def get_env_or_set_default(
-    env_name: str,
-    default_factory: Callable[[], str],
+    env_name: str, default_factory: Callable[[], str]
 ) -> Callable[[], str]:
     """
     Create a lambda that returns an environment variable value if set,
@@ -643,19 +631,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during runtime, but also affects how vllm installs its configuration
     # files during **installation**.
     "VLLM_CONFIG_ROOT": lambda: os.path.expanduser(
-        os.getenv(
-            "VLLM_CONFIG_ROOT",
-            os.path.join(get_default_config_root(), "vllm"),
-        )
+        os.getenv("VLLM_CONFIG_ROOT", os.path.join(get_default_config_root(), "vllm"))
     ),
     # ================== Runtime Env Vars ==================
     # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT": lambda: os.path.expanduser(
-        os.getenv(
-            "VLLM_CACHE_ROOT",
-            os.path.join(get_default_cache_root(), "vllm"),
-        )
+        os.getenv("VLLM_CACHE_ROOT", os.path.join(get_default_cache_root(), "vllm"))
     ),
     # used in distributed environment to determine the ip address
     # of the current node, when the node has multiple network interfaces.
@@ -1406,13 +1388,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   heuristic aims to have the same effect as running all possible gemm
     #   shapes, but provides no guarantees.
     "VLLM_DEEP_GEMM_WARMUP": env_with_choices(
-        "VLLM_DEEP_GEMM_WARMUP",
-        "relax",
-        [
-            "skip",
-            "full",
-            "relax",
-        ],
+        "VLLM_DEEP_GEMM_WARMUP", "relax", ["skip", "full", "relax"]
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
@@ -1561,9 +1537,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
-        "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "auto",
-        ["auto", "trtllm", "mnnvl"],
+        "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto", ["auto", "trtllm", "mnnvl"]
     ),
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(

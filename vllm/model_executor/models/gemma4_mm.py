@@ -23,11 +23,7 @@ import torch
 from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
-from transformers.models.gemma4 import (
-    Gemma4Config,
-    Gemma4Processor,
-    Gemma4VisionConfig,
-)
+from transformers.models.gemma4 import Gemma4Config, Gemma4Processor, Gemma4VisionConfig
 from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
@@ -162,14 +158,8 @@ class Gemma4VideoInputs(TensorSchema):
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
-    pixel_values_videos: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", "pp"),
-    ]
-    pixel_position_ids_videos: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", 2),
-    ]
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("bn", "np", "pp")]
+    pixel_position_ids_videos: Annotated[torch.Tensor, TensorShape("bn", "np", 2)]
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +191,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return params
 
     def get_hf_processor(self, **kwargs: object) -> Gemma4Processor:
-        return self.ctx.get_hf_processor(
-            Gemma4Processor,
-            **kwargs,
-        )
+        return self.ctx.get_hf_processor(Gemma4Processor, **kwargs)
 
     def validate_num_items(self, modality: str, num_items: int) -> None:
         if (
@@ -267,10 +254,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return MultiModalDataParser(**kwargs)
 
     def _compute_num_soft_tokens(
-        self,
-        image_width: int,
-        image_height: int,
-        max_soft_tokens: int | None = None,
+        self, image_width: int, image_height: int, max_soft_tokens: int | None = None
     ) -> int:
         """Compute the number of soft tokens the vision tower produces
         for an image of the given dimensions, after padding is stripped.
@@ -324,9 +308,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor()
 
         num_soft = self._compute_num_soft_tokens(
-            image_width,
-            image_height,
-            max_soft_tokens=max_soft_tokens,
+            image_width, image_height, max_soft_tokens=max_soft_tokens
         )
         config = self.get_hf_config()
         token_ids = (
@@ -337,10 +319,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return PromptUpdateDetails.select_token_id(token_ids, processor.image_token_id)
 
     def get_audio_repl(
-        self,
-        *,
-        audio_len: int,
-        processor: Gemma4Processor | None,
+        self, *, audio_len: int, processor: Gemma4Processor | None
     ) -> PromptUpdateDetails[list[int]]:
         """Return the dynamic audio token sequence for this audio.
 
@@ -451,15 +430,13 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
                 height=img_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
         if num_audios > 0:
             audio_len = processor.feature_extractor.fft_length
             data["audio"] = self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
 
         if num_videos > 0:
@@ -673,10 +650,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             patched_mm_kwargs["max_soft_tokens"] = val
 
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            patched_mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, patched_mm_kwargs, tok_kwargs
         )
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
@@ -694,11 +668,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             # padding regardless of cache history.
             masks = processed_outputs["input_features_mask"]
             unpadded_features = [
-                f[mask]
-                for f, mask in zip(
-                    processed_outputs["input_features"],
-                    masks,
-                )
+                f[mask] for f, mask in zip(processed_outputs["input_features"], masks)
             ]
             unpadded_masks = [mask[mask] for mask in masks]
             processed_outputs["input_features"] = unpadded_features
@@ -710,9 +680,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         return BatchFeature(combined_outputs)
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -735,9 +703,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 pixel_position_ids_videos=(
                     MultiModalFieldConfig.flat_from_sizes("video", vfc)
                 ),
-                video_frame_counts=MultiModalFieldConfig.batched(
-                    "video",
-                ),
+                video_frame_counts=MultiModalFieldConfig.batched("video"),
                 video_num_soft_tokens=MultiModalFieldConfig.batched(
                     "video", keep_on_cpu=True
                 ),
@@ -777,7 +743,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 # would fall back to vision_cfg.default_output_length
                 # instead of the config's mm_processor_kwargs default.
                 merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
-                    hf_processor_mm_kwargs,
+                    hf_processor_mm_kwargs
                 )
                 val, _ = _get_max_soft_tokens(merged_kwargs)
                 max_soft_tokens = (
@@ -828,8 +794,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio_len = audios.get_audio_length(item_idx)
                 return self.info.get_audio_repl(
-                    audio_len=audio_len,
-                    processor=hf_processor,
+                    audio_len=audio_len, processor=hf_processor
                 )
 
             prompt_updates.append(
@@ -886,15 +851,11 @@ class Gemma4MultimodalEmbedder(nn.Module):
         )
 
         self.embedding_pre_projection_norm = RMSNorm(
-            embedding_dim,
-            eps=self.eps,
-            has_weight=False,
+            embedding_dim, eps=self.eps, has_weight=False
         )
 
         self.embedding_projection = ReplicatedLinear(
-            embedding_dim,
-            self.text_hidden_size,
-            bias=False,
+            embedding_dim, self.text_hidden_size, bias=False
         )
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
@@ -915,22 +876,11 @@ class Gemma4MultimodalEmbedder(nn.Module):
     dummy_inputs=Gemma4DummyInputsBuilder,
 )
 class Gemma4ForConditionalGeneration(
-    nn.Module,
-    SupportsMultiModal,
-    SupportsPP,
-    SupportsLoRA,
-    SupportsEagle3,
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEagle3
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # Maps checkpoint prefixes to vLLM module paths.
@@ -1041,8 +991,7 @@ class Gemma4ForConditionalGeneration(
         if pixel_values is None:
             return None
         return Gemma4ImagePixelInputs(
-            pixel_values=pixel_values,
-            pixel_position_ids=pixel_position_ids,
+            pixel_values=pixel_values, pixel_position_ids=pixel_position_ids
         )
 
     def _parse_and_validate_audio_input(
@@ -1137,8 +1086,7 @@ class Gemma4ForConditionalGeneration(
     # ------------------------------------------------------------------ #
 
     def _process_image_input(
-        self,
-        image_input: Gemma4ImageInputs,
+        self, image_input: Gemma4ImageInputs
     ) -> list[torch.Tensor]:
         """Batch-encode images through the vision tower.
 
@@ -1252,8 +1200,7 @@ class Gemma4ForConditionalGeneration(
     # ------------------------------------------------------------------ #
 
     def _process_video_input(
-        self,
-        video_input: dict[str, torch.Tensor],
+        self, video_input: dict[str, torch.Tensor]
     ) -> list[torch.Tensor]:
         """Batch-encode video frames through the vision tower.
 
@@ -1285,10 +1232,7 @@ class Gemma4ForConditionalGeneration(
         max_batch_size = min(
             total_frames,
             self._encoder_chunk(
-                pixel_values.shape[1],
-                free,
-                total,
-                vision_cfg.position_embedding_size,
+                pixel_values.shape[1], free, total, vision_cfg.position_embedding_size
             ),
         )
 
@@ -1358,8 +1302,7 @@ class Gemma4ForConditionalGeneration(
     # ------------------------------------------------------------------ #
 
     def _process_audio_input(
-        self,
-        audio_input: Gemma4AudioInputs,
+        self, audio_input: Gemma4AudioInputs
     ) -> list[torch.Tensor]:
         input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
@@ -1495,10 +1438,7 @@ class Gemma4ForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     # ------------------------------------------------------------------ #
@@ -1553,23 +1493,12 @@ class Gemma4ForConditionalGeneration(
         # embed_audio.embedding weights from the Gemma3n architecture
         # that are not used by Gemma4's MultimodalEmbedder (which only
         # has embedding_projection + embedding_post_projection_norm).
-        ignore_prefixes = [
-            "embed_vision.embedding.",
-            "embed_audio.embedding.",
-        ]
+        ignore_prefixes = ["embed_vision.embedding.", "embed_audio.embedding."]
         # Models without audio tower should skip
         # audio weights entirely.
         if self.audio_tower is None:
-            ignore_prefixes.extend(
-                [
-                    "audio_tower.",
-                    "embed_audio.",
-                ]
-            )
-        loader = AutoWeightsLoader(
-            self,
-            ignore_unexpected_prefixes=ignore_prefixes,
-        )
+            ignore_prefixes.extend(["audio_tower.", "embed_audio."])
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=ignore_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     # ------------------------------------------------------------------ #

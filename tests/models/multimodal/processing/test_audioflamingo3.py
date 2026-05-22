@@ -126,9 +126,7 @@ def test_dummy_data_generation(mock_ctx):
 
 
 def test_audio_token_count_matches_hf_processor_math():
-    from vllm.model_executor.models.audioflamingo3 import (
-        _count_audio_tokens_from_mask,
-    )
+    from vllm.model_executor.models.audioflamingo3 import _count_audio_tokens_from_mask
 
     feature_attention_mask = torch.zeros((3, 3000), dtype=torch.long)
     feature_attention_mask[0, :2999] = 1

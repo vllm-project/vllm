@@ -100,7 +100,7 @@ def test_gpt_oss_lora(
             max_num_batched_tokens=2048,
             specialize_active_lora=specialize_active_lora,
             compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
+                cudagraph_specialize_lora=False
             ),
         )
 
@@ -131,7 +131,7 @@ def test_gpt_oss_lora_tp2(
             fully_sharded_loras=fully_sharded_loras,
             enable_expert_parallel=not fully_sharded_loras,
             compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
+                cudagraph_specialize_lora=False
             ),
         )
 

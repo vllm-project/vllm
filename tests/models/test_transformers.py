@@ -104,9 +104,7 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 
 @multi_gpu_test(num_gpus=2)
 def test_distributed(
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-    example_prompts,
+    hf_runner: type[HfRunner], vllm_runner: type[VllmRunner], example_prompts
 ):
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
     check_implementation(
@@ -123,12 +121,7 @@ def test_distributed(
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            {
-                "quantization": "bitsandbytes",
-            },
-        ),
+        ("meta-llama/Llama-3.2-1B-Instruct", {"quantization": "bitsandbytes"}),
         ("unsloth/tinyllama-bnb-4bit", {}),
     ],
 )

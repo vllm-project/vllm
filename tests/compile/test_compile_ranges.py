@@ -10,14 +10,8 @@ from torch import nn
 import tests.compile.silly_attention  # noqa
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.passes.inductor_pass import (
-    InductorPass,
-    get_pass_context,
-)
-from vllm.config import (
-    VllmConfig,
-    set_current_vllm_config,
-)
+from vllm.compilation.passes.inductor_pass import InductorPass, get_pass_context
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationConfig, CompilationMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import Range
@@ -80,16 +74,14 @@ def test_compile_ranges(use_fresh_inductor_cache):
     torch.set_default_device("cuda")
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
-            max_num_batched_tokens=8192,
-            max_model_len=8192,
-            is_encoder_decoder=False,
+            max_num_batched_tokens=8192, max_model_len=8192, is_encoder_decoder=False
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             compile_ranges_endpoints=[8, 32],
             compile_sizes=[16, 64, 128],
             inductor_compile_config={
-                "post_grad_custom_post_pass": post_grad_range_checker,
+                "post_grad_custom_post_pass": post_grad_range_checker
             },
         ),
     )
@@ -100,23 +92,17 @@ def test_compile_ranges(use_fresh_inductor_cache):
         batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
 
         with compilation_counter.expect(
-            num_graphs_seen=1,
-            num_piecewise_graphs_seen=1,
-            num_backend_compilations=6,
+            num_graphs_seen=1, num_piecewise_graphs_seen=1, num_backend_compilations=6
         ):
             run_model(vllm_config, model, batch_sizes)
         assert post_grad_range_checker.num_calls == 6
 
 
 def test_compile_config_get_compile_ranges():
-    compilation_config = CompilationConfig(
-        compile_ranges_endpoints=[8, 32],
-    )
+    compilation_config = CompilationConfig(compile_ranges_endpoints=[8, 32])
     VllmConfig(
         scheduler_config=SchedulerConfig(
-            max_num_batched_tokens=8192,
-            max_model_len=8192,
-            is_encoder_decoder=False,
+            max_num_batched_tokens=8192, max_model_len=8192, is_encoder_decoder=False
         ),
         compilation_config=compilation_config,
     )
@@ -175,17 +161,13 @@ def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
     torch.set_default_device("cuda")
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
-            max_num_batched_tokens=8192,
-            max_model_len=8192,
-            is_encoder_decoder=False,
+            max_num_batched_tokens=8192, max_model_len=8192, is_encoder_decoder=False
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             compile_ranges_endpoints=[8],
             compile_sizes=[16],
-            inductor_compile_config={
-                "post_grad_custom_post_pass": checker,
-            },
+            inductor_compile_config={"post_grad_custom_post_pass": checker},
         ),
     )
 
@@ -193,9 +175,7 @@ def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
         model = TestModel(vllm_config=vllm_config, prefix="").eval()
         # 3 compilations: Range(1,8), Range(9,8192), single-size 16
         with compilation_counter.expect(
-            num_graphs_seen=1,
-            num_piecewise_graphs_seen=1,
-            num_backend_compilations=3,
+            num_graphs_seen=1, num_piecewise_graphs_seen=1, num_backend_compilations=3
         ):
             run_model(vllm_config, model, [1, 16, 64])
 
@@ -214,15 +194,10 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     post_grad_range_checker = PostGradRangeChecker(
-        ranges=[
-            Range(start=1, end=8),
-            Range(start=9, end=8192),
-        ]
+        ranges=[Range(start=1, end=8), Range(start=9, end=8192)]
     )
     scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=8192,
-        max_model_len=8192,
-        is_encoder_decoder=False,
+        max_num_batched_tokens=8192, max_model_len=8192, is_encoder_decoder=False
     )
     torch.set_default_device("cuda")
 
@@ -233,7 +208,7 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
                 mode=CompilationMode.VLLM_COMPILE,
                 compile_ranges_endpoints=[8],
                 inductor_compile_config={
-                    "post_grad_custom_post_pass": post_grad_range_checker,
+                    "post_grad_custom_post_pass": post_grad_range_checker
                 },
             ),
         )

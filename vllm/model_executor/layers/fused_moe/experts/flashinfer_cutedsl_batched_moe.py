@@ -73,12 +73,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kNvfp4Static, kNvfp4Dynamic),
-        ]
+        SUPPORTED_W_A = [(kNvfp4Static, kNvfp4Dynamic)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -279,19 +276,16 @@ def flashinfer_cutedsl_moe_masked(
         )
 
         aq, aq_sf = scaled_fp4_grouped_quantize(
-            hidden_states,
-            masked_m,
-            input_global_scale,
+            hidden_states, masked_m, input_global_scale
         )
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
     assert w1.shape[-1] * 2 == k, (
         f"w1 last dim * 2 must equal k, got {w1.shape[-1]} vs k={k}"
     )
-    assert w2.shape[-2:] == (
-        k,
-        n // 2,
-    ), f"w2 shape mismatch, got {w2.shape[-2:]}, expected {(k, n // 2)}"
+    assert w2.shape[-2:] == (k, n // 2), (
+        f"w2 shape mismatch, got {w2.shape[-2:]}, expected {(k, n // 2)}"
+    )
 
     assert w1_alpha.shape == (num_experts,), (
         f"w1_alpha must be (l,), got {w1_alpha.shape}"
@@ -331,9 +325,7 @@ def flashinfer_cutedsl_moe_masked(
 
     # SILU and quantization
     diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
-        workspace.permute(2, 0, 1),
-        masked_m,
-        a2_global_scale,
+        workspace.permute(2, 0, 1), masked_m, a2_global_scale
     )
 
     # Gemm2

@@ -25,13 +25,7 @@ USE_DEFAULT_FLA_NORM = int(os.getenv("USE_DEFAULT_FLA_NORM", "0"))
     key=["D"],
 )
 @triton.jit
-def l2norm_fwd_kernel1(
-    x,
-    y,
-    D,
-    BD: tl.constexpr,
-    eps,
-):
+def l2norm_fwd_kernel1(x, y, D, BD: tl.constexpr, eps):
     i_t = tl.program_id(0)
     x += i_t * D
     y += i_t * D
@@ -57,14 +51,7 @@ def l2norm_fwd_kernel1(
 )
 @triton.jit(do_not_specialize=["NB"])
 def l2norm_fwd_kernel(
-    x,
-    y,
-    eps,
-    NB,
-    T,
-    D: tl.constexpr,
-    BT: tl.constexpr,
-    BD: tl.constexpr,
+    x, y, eps, NB, T, D: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr
 ):
     i_t = tl.program_id(0)
     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
@@ -114,15 +101,7 @@ def l2norm_fwd(
     if not USE_DEFAULT_FLA_NORM:
         MBLOCK = 32
         # M, N = x.shape
-        l2norm_fwd_kernel2[(triton.cdiv(T, MBLOCK),)](
-            x,
-            y,
-            eps,
-            T,
-            D,
-            BD,
-            MBLOCK,
-        )
+        l2norm_fwd_kernel2[(triton.cdiv(T, MBLOCK),)](x, y, eps, T, D, BD, MBLOCK)
     else:
         if D <= 512:
             NB = triton.cdiv(T, 2048)
@@ -130,22 +109,8 @@ def l2norm_fwd(
             def grid(meta):
                 return (triton.cdiv(T, meta["BT"]),)
 
-            l2norm_fwd_kernel[grid](
-                x,
-                y,
-                eps,
-                NB=NB,
-                T=T,
-                D=D,
-                BD=BD,
-            )
+            l2norm_fwd_kernel[grid](x, y, eps, NB=NB, T=T, D=D, BD=BD)
         else:
-            l2norm_fwd_kernel1[(T,)](
-                x,
-                y,
-                eps=eps,
-                D=D,
-                BD=BD,
-            )
+            l2norm_fwd_kernel1[(T,)](x, y, eps=eps, D=D, BD=BD)
 
     return y.view(x_shape_og)

@@ -170,8 +170,7 @@ class SupportsMultiModal(Protocol):
         """
         self._has_oov_mm_tokens = any(tok_id >= vocab_size for tok_id in mm_token_ids)
         logger.info(
-            "Contains out of vocabulary multimodal tokens? %s",
-            self._has_oov_mm_tokens,
+            "Contains out of vocabulary multimodal tokens? %s", self._has_oov_mm_tokens
         )
 
     def get_language_model(self) -> VllmModel:
@@ -305,18 +304,13 @@ class SupportsMultiModal(Protocol):
         """
         with ExitStack() as stack:
             stack.enter_context(
-                self._mark_language_model(
-                    vllm_config,
-                    targets=language_targets,
-                )
+                self._mark_language_model(vllm_config, targets=language_targets)
             )
 
             for modality, modality_targets in tower_targets.items():
                 stack.enter_context(
                     self._mark_tower_model(
-                        vllm_config,
-                        modality,
-                        targets=modality_targets,
+                        vllm_config, modality, targets=modality_targets
                     )
                 )
 
@@ -580,10 +574,7 @@ def supports_lora(
     result = _supports_lora(model)
 
     if not result:
-        lora_attrs = (
-            "packed_modules_mapping",
-            "embedding_modules",
-        )
+        lora_attrs = ("packed_modules_mapping", "embedding_modules")
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
         if getattr(model, "supports_lora", False):
@@ -626,10 +617,7 @@ class SupportsPP(Protocol):
     """
 
     def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         """Called when PP rank > 0 for profiling purposes."""
         ...
@@ -658,10 +646,7 @@ class _SupportsPPType(Protocol):
     supports_pp: Literal[True]
 
     def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors: ...
 
     def forward(
@@ -799,8 +784,7 @@ class IsHybrid(Protocol):
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: VllmConfig,
+        cls, vllm_config: VllmConfig
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -916,9 +900,7 @@ class MixtureOfExperts(Protocol):
             )
 
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None: ...
 
 
@@ -1056,9 +1038,7 @@ class SupportsRealtime(Protocol):
 
 
 @overload
-def supports_realtime(
-    model: type[object],
-) -> TypeIs[type[SupportsRealtime]]: ...
+def supports_realtime(model: type[object]) -> TypeIs[type[SupportsRealtime]]: ...
 
 
 @overload
@@ -1119,10 +1099,7 @@ class SupportsTranscription(Protocol):
             )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -1197,9 +1174,7 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def get_language_detection_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
+        cls, audio: np.ndarray, stt_config: SpeechToTextConfig
     ) -> PromptType:
         """Return a prompt that triggers language detection.
 
@@ -1210,9 +1185,7 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def parse_language_detection_output(
-        cls,
-        token_ids: list[int],
-        tokenizer: object,
+        cls, token_ids: list[int], tokenizer: object
     ) -> str:
         """Parse the detected language from model output token IDs.
 
@@ -1222,10 +1195,7 @@ class SupportsTranscription(Protocol):
         raise NotImplementedError
 
     @classmethod
-    def get_language_token_ids(
-        cls,
-        tokenizer: object,
-    ) -> list[int] | None:
+    def get_language_token_ids(cls, tokenizer: object) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 
         Used to constrain language detection to only produce valid language tokens.
@@ -1420,9 +1390,7 @@ class SupportsMRoPE(Protocol):
     """
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list["MultiModalFeatureSpec"],
+        self, input_tokens: list[int], mm_features: list["MultiModalFeatureSpec"]
     ) -> tuple[torch.Tensor, int]:
         """
         Get M-RoPE input positions and delta value for this specific model.
@@ -1470,9 +1438,7 @@ class SupportsXDRoPE(Protocol):
     """
 
     def get_xdrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list["MultiModalFeatureSpec"],
+        self, input_tokens: list[int], mm_features: list["MultiModalFeatureSpec"]
     ) -> torch.Tensor:
         """
         Get XD-RoPE input positions and delta value for this specific model.
@@ -1520,22 +1486,16 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
         """Return the modality of the inputs."""
         ...
 
-    def get_max_frames_per_video(
-        self,
-    ) -> int:
+    def get_max_frames_per_video(self) -> int:
         """Return model-specific max frames per video."""
         ...
 
     def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config: "VllmConfig",
+        self, vllm_config: "VllmConfig"
     ) -> tuple[int, int]:
         """Return (min_token_budget, max_token_budget) for auto-inference.
 
@@ -1551,8 +1511,7 @@ class SupportsEncoderCudaGraph(Protocol):
         ...
 
     def get_encoder_cudagraph_item_specs(
-        self,
-        mm_kwargs: dict[str, Any],
+        self, mm_kwargs: dict[str, Any]
     ) -> list["EncoderItemSpec"]:
         """Return specs describing each item in the batch.
 
@@ -1563,9 +1522,7 @@ class SupportsEncoderCudaGraph(Protocol):
         ...
 
     def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
+        self, mm_kwargs: dict[str, Any], indices: list[int]
     ) -> dict[str, Any]:
         """Select a subset of items and return mm_kwargs for the sub-batch.
 
@@ -1613,18 +1570,13 @@ class SupportsEncoderCudaGraph(Protocol):
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(
-        self,
-        mm_kwargs: dict[str, Any],
-        max_batch_size: int,
-        max_frames_per_batch: int,
+        self, mm_kwargs: dict[str, Any], max_batch_size: int, max_frames_per_batch: int
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
 
     def encoder_cudagraph_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 
@@ -1632,10 +1584,7 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
         """Run the encoder forward pass without precomputed buffers.
 
         Used as eager fallback when inputs exceed all budgets.
@@ -1650,9 +1599,7 @@ def supports_encoder_cudagraph(
 
 
 @overload
-def supports_encoder_cudagraph(
-    model: object,
-) -> TypeIs[SupportsEncoderCudaGraph]: ...
+def supports_encoder_cudagraph(model: object) -> TypeIs[SupportsEncoderCudaGraph]: ...
 
 
 def supports_encoder_cudagraph(

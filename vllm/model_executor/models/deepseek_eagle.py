@@ -8,9 +8,7 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -32,11 +30,7 @@ from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        start_layer_id: int = 0,
+        self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -62,9 +56,7 @@ class DeepseekV2Model(nn.Module):
         )
 
         self.fc = nn.Linear(
-            self.config.model.hidden_size * 2,
-            self.config.model.hidden_size,
-            bias=False,
+            self.config.model.hidden_size * 2, self.config.model.hidden_size, bias=False
         )
 
         self.enorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
@@ -88,11 +80,7 @@ class DeepseekV2Model(nn.Module):
         hidden_states = self.fc(inputs)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
@@ -235,10 +223,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             )
         return self.model(input_ids, positions, hidden_states)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -250,8 +235,5 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             process_eagle_weight(self, name)
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=None)
         loader.load_weights(map(transform, weights))

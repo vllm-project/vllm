@@ -15,9 +15,7 @@ from .base_linear import BaseLinearLayerWithLoRA
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
     def __init__(self, base_layer: ReplicatedLinear) -> None:
-        super().__init__(
-            base_layer,
-        )
+        super().__init__(base_layer)
         # To ensure interface compatibility, set to 1 always.
         self.output_size = self.base_layer.output_size
         self.n_slices = 1

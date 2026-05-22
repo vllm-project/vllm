@@ -17,12 +17,7 @@ PROMPTS = [
     "The future of AI is",
 ]
 
-TOKEN_IDS = [
-    [0],
-    [0, 1],
-    [0, 2, 1],
-    [0, 3, 1, 2],
-]
+TOKEN_IDS = [[0], [0, 1], [0, 2, 1], [0, 3, 1, 2]]
 
 
 @pytest.fixture(scope="module")

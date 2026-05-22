@@ -64,9 +64,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
-        kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
-        ],
+        kv_cache_tensors=[KVCacheTensor(size=tensor_size, shared_by=["layer.0"])],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
         ],
@@ -88,11 +86,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
 
 
 def get_vllm_config():
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
         max_num_batched_tokens=512,
@@ -100,9 +94,7 @@ def get_vllm_config():
         is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
-        block_size=BLOCK_SIZE,
-        gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        block_size=BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto"
     )
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
@@ -219,9 +211,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     ).all()
 
 
-def _make_mock_backend_for_kernel_block_size(
-    supported_sizes: list[int | MultipleOf],
-):
+def _make_mock_backend_for_kernel_block_size(supported_sizes: list[int | MultipleOf]):
     class _MockBackend:
         @staticmethod
         def get_supported_kernel_block_sizes():
@@ -293,11 +283,7 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     runner.kv_connector_output = None
     runner.use_async_scheduling = False
 
-    monkeypatch.setattr(
-        gpu_model_runner_module,
-        "get_pp_group",
-        pytest.fail,
-    )
+    monkeypatch.setattr(gpu_model_runner_module, "get_pp_group", pytest.fail)
 
     assert GPUModelRunner.sample_tokens(runner, None) is None
 
@@ -418,32 +404,19 @@ def test_get_nans_in_logits(model_runner, dist_init):
     scheduler_output = _schedule_new_request(*req_ids)
     model_runner._update_states(scheduler_output)
 
-    logits = torch.tensor(
-        [
-            [1.0, 2.0, 3.0],
-            [3.0, 2.0, 1.0],
-        ],
-        device=DEVICE_TYPE,
-    )
+    logits = torch.tensor([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]], device=DEVICE_TYPE)
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 0, "req_1": 0}
 
     logits = torch.tensor(
-        [
-            [1.0, float("nan"), 3.0],
-            [4.0, float("nan"), float("nan")],
-        ],
+        [[1.0, float("nan"), 3.0], [4.0, float("nan"), float("nan")]],
         device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 1, "req_1": 2}
 
     logits = torch.tensor(
-        [
-            [1.0, 2.0, 3.0],
-            [4.0, float("nan"), float("nan")],
-        ],
-        device=DEVICE_TYPE,
+        [[1.0, 2.0, 3.0], [4.0, float("nan"), float("nan")]], device=DEVICE_TYPE
     )
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 0, "req_1": 2}
@@ -451,21 +424,12 @@ def test_get_nans_in_logits(model_runner, dist_init):
     result = model_runner._get_nans_in_logits(logits=None)
     assert result == {"req_0": 0, "req_1": 0}
 
-    logits = torch.tensor(
-        [
-            [1.0, float("nan"), 3.0],
-        ],
-        device=DEVICE_TYPE,
-    )
+    logits = torch.tensor([[1.0, float("nan"), 3.0]], device=DEVICE_TYPE)
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 1, "req_1": 0}
 
     logits = torch.tensor(
-        [
-            [float("nan"), float("nan"), 2.0],
-            [1.0, 2.0, 3.0],
-            [float("nan"), 2.0, 3.0],
-        ],
+        [[float("nan"), float("nan"), 2.0], [1.0, 2.0, 3.0], [float("nan"), 2.0, 3.0]],
         device=DEVICE_TYPE,
     )
     result = model_runner._get_nans_in_logits(logits)
@@ -763,8 +727,7 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner._draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
 
     spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        [[1, 2], [], [3]],
-        device=torch.device("cpu"),
+        [[1, 2], [], [3]], device=torch.device("cpu")
     )
     logits = torch.randn(6, 4)
 
@@ -773,11 +736,7 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     assert output == "sampler_output"
     passed_draft_probs = runner.rejection_sampler.call_args.args[1]
     expected_draft_probs = torch.cat(
-        [
-            runner._draft_probs[1, :2],
-            runner._draft_probs[0, :1],
-        ],
-        dim=0,
+        [runner._draft_probs[1, :2], runner._draft_probs[0, :1]], dim=0
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
 
@@ -798,12 +757,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_c
                 prefix=layer_0,
                 kv_sharing_target_layer_name=layer_1,
             ),
-            layer_1: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_1,
-            ),
+            layer_1: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_1),
         }
         # suppress var not used error
         assert fwd_context is not None
@@ -817,12 +771,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(default_vllm_confi
     error_msg = f"{invalid_layer} is not a valid Attention layer in the model"
     with pytest.raises(ValueError, match=error_msg):
         fwd_context = {
-            layer_0: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_0,
-            ),
+            layer_0: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_0),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
@@ -845,12 +794,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(default_vllm_confi
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
-            layer_0: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_0,
-            ),
+            layer_0: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_0),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
@@ -870,18 +814,8 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     vllm_config = get_vllm_config()
     with set_current_vllm_config(vllm_config):
         fwd_context = {
-            layer_0: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_0,
-            ),
-            layer_1: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_1,
-            ),
+            layer_0: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_0),
+            layer_1: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_1),
         }
         # suppress var not used error
         assert fwd_context is not None
@@ -937,12 +871,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     vllm_config = get_vllm_config()
     with set_current_vllm_config(vllm_config):
         fwd_context = {
-            layer_0: Attention(
-                num_heads=8,
-                head_size=64,
-                scale=1.0,
-                prefix=layer_0,
-            ),
+            layer_0: Attention(num_heads=8, head_size=64, scale=1.0, prefix=layer_0),
             layer_1: Attention(
                 num_heads=8,
                 head_size=64,
@@ -1032,8 +961,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     torch.set_default_dtype(torch.float16)
 
     model_config = ModelConfig(
-        model="ibm-granite/granite-4.0-tiny-preview",
-        dtype="float16",
+        model="ibm-granite/granite-4.0-tiny-preview", dtype="float16"
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -1042,9 +970,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
         is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
-        block_size=BLOCK_SIZE,
-        gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        block_size=BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto"
     )
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
@@ -1340,9 +1266,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
-        kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
-        ],
+        kv_cache_tensors=[KVCacheTensor(size=tensor_size, shared_by=["layer.0"])],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
         ],
@@ -1492,8 +1416,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     torch.set_default_dtype(torch.float16)
 
     model_config = ModelConfig(
-        model="ibm-granite/granite-4.0-tiny-preview",
-        dtype="float16",
+        model="ibm-granite/granite-4.0-tiny-preview", dtype="float16"
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -1502,9 +1425,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
-        block_size=BLOCK_SIZE,
-        gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        block_size=BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto"
     )
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)

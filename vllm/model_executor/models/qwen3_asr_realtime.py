@@ -25,9 +25,7 @@ import torch
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    SupportsRealtime,
-)
+from vllm.model_executor.models.interfaces import SupportsRealtime
 from vllm.model_executor.models.qwen3_asr import (
     Qwen3ASRDummyInputsBuilder,
     Qwen3ASRForConditionalGeneration,
@@ -197,8 +195,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         # Use a small segment size for low-latency streaming.
         segment_duration_s = 5.0
         buffer = Qwen3ASRRealtimeBuffer(
-            sampling_rate=sampling_rate,
-            segment_duration_s=segment_duration_s,
+            sampling_rate=sampling_rate, segment_duration_s=segment_duration_s
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
@@ -220,8 +217,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         remaining = buffer.flush()
         if remaining is not None and len(remaining) > 0:
             yield TokensPrompt(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data={"audio": remaining},
+                prompt_token_ids=prompt_token_ids, multi_modal_data={"audio": remaining}
             )
 
     @classmethod

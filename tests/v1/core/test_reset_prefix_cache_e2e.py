@@ -24,10 +24,7 @@ def test_reset_prefix_cache_e2e(monkeypatch):
         dtype="float16",
     )
     engine = LLMEngine.from_engine_args(engine_args)
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=16,
-    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=16)
 
     # No preempt case:
     for i, prompt in enumerate(PROMPTS):

@@ -47,9 +47,7 @@ class IncrementalDetokenizer:
 
     @classmethod
     def from_new_request(
-        cls,
-        tokenizer: TokenizerLike | None,
-        request: EngineCoreRequest,
+        cls, tokenizer: TokenizerLike | None, request: EngineCoreRequest
     ) -> "IncrementalDetokenizer":
         assert request.sampling_params is not None
 
@@ -181,8 +179,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
         self.stream = tokenizers.decoders.DecodeStream(
-            ids=request.prompt_token_ids,
-            skip_special_tokens=self.skip_special_tokens,
+            ids=request.prompt_token_ids, skip_special_tokens=self.skip_special_tokens
         )
 
         self.spaces_between_special_tokens = (
@@ -307,10 +304,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 def check_stop_strings(
-    output_text: str,
-    new_char_count: int,
-    stop: list[str],
-    include_in_output: bool,
+    output_text: str, new_char_count: int, stop: list[str], include_in_output: bool
 ) -> tuple[str, int] | None:
     """Check if any stop strings are matched and truncate sequence
     output text accordingly.

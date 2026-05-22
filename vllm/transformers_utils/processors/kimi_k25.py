@@ -47,8 +47,7 @@ class KimiK25Processor(ProcessorMixin):
         """
         if vision_chunks is not None:
             mm_inputs = self.image_processor.preprocess(
-                vision_chunks,
-                return_tensors=return_tensors,
+                vision_chunks, return_tensors=return_tensors
             )
         else:
             mm_inputs = {}
@@ -83,6 +82,5 @@ class KimiK25Processor(ProcessorMixin):
             text_inputs = {}
 
         return BatchFeature(
-            data={**text_inputs, **mm_inputs},
-            tensor_type=return_tensors,
+            data={**text_inputs, **mm_inputs}, tensor_type=return_tensors
         )

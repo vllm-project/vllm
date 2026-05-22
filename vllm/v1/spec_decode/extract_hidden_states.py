@@ -140,9 +140,7 @@ class ExtractHiddenStatesProposer:
                 num_input_tokens, common_attn_metadata.slot_mapping
             ),
         ):
-            self.model(
-                hidden_states=self.hidden_states[:num_input_tokens],
-            )
+            self.model(hidden_states=self.hidden_states[:num_input_tokens])
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
@@ -152,9 +150,7 @@ class ExtractHiddenStatesProposer:
         return sampled_token_ids[:, :1]
 
     def _get_slot_mapping(
-        self,
-        num_tokens: int,
-        slot_mapping: torch.Tensor | None = None,
+        self, num_tokens: int, slot_mapping: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         """Return slot_mapping dict for cache-only attention layers.
 
@@ -170,9 +166,7 @@ class ExtractHiddenStatesProposer:
         return {name: view for name in self.attn_layer_names}
 
     def _determine_batch_execution_and_padding(
-        self,
-        num_tokens: int,
-        use_cudagraphs: bool = True,
+        self, num_tokens: int, use_cudagraphs: bool = True
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
@@ -269,9 +263,7 @@ class ExtractHiddenStatesProposer:
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
         ):
-            self.model(
-                hidden_states=self.hidden_states[:num_input_tokens],
-            )
+            self.model(hidden_states=self.hidden_states[:num_input_tokens])
 
     def _build_attn_metadata_builder(
         self, draft_attn_layers: dict[str, AttentionLayerBase]

@@ -43,10 +43,7 @@ from vllm.platforms import current_platform
         # quantization='online' with per-layer-kind overrides
         (
             "online",
-            {
-                "linear": "fp8_per_block",
-                "moe": "fp8_per_tensor",
-            },
+            {"linear": "fp8_per_block", "moe": "fp8_per_tensor"},
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
         ),
@@ -91,17 +88,11 @@ def test_online_quantization(
     # a tiny model with both dense and MoE layers
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
 
-    runner_kwargs = dict(
-        quantization=quant_scheme,
-        enforce_eager=True,
-    )
+    runner_kwargs = dict(quantization=quant_scheme, enforce_eager=True)
     if online_quant_args is not None:
         runner_kwargs["quantization_config"] = online_quant_args
 
-    with vllm_runner(
-        model_name,
-        **runner_kwargs,
-    ) as llm:
+    with vllm_runner(model_name, **runner_kwargs) as llm:
 
         def check_model(model):
             # checks further down in the test case are hardcoded for this
@@ -149,11 +140,7 @@ def test_online_quantization(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_online_quant_peak_mem(
-    vllm_runner,
-    caplog_mp_spawn,
-    monkeypatch,
-) -> None:
+def test_online_quant_peak_mem(vllm_runner, caplog_mp_spawn, monkeypatch) -> None:
     _test_online_quant_peak_mem_impl(
         "fp8_per_tensor", vllm_runner, caplog_mp_spawn, monkeypatch
     )
@@ -163,11 +150,7 @@ def test_online_quant_peak_mem(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_online_quant_load_format_dummy(
-    vllm_runner,
-    monkeypatch,
-    caplog,
-) -> None:
+def test_online_quant_load_format_dummy(vllm_runner, monkeypatch, caplog) -> None:
     with vllm_runner(
         "ibm-granite/granite-3.0-1b-a400m-base",
         quantization="fp8_per_tensor",

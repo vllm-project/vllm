@@ -53,9 +53,7 @@ use_fork_for_test = (
 @pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
-    monkeypatch: pytest.MonkeyPatch,
-    kv_sharing_fast_prefill: bool,
-    enforce_eager: bool,
+    monkeypatch: pytest.MonkeyPatch, kv_sharing_fast_prefill: bool, enforce_eager: bool
 ):
     if not enforce_eager and current_platform.is_rocm():
         # Relevant context: https://github.com/vllm-project/vllm/pull/29244

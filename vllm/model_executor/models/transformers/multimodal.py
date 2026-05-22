@@ -33,10 +33,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     PlaceholderRange,
 )
-from vllm.multimodal.parse import (
-    ImageProcessorItems,
-    MultiModalDataItems,
-)
+from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -107,7 +104,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -134,9 +131,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return None
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: "BatchFeature",
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: "BatchFeature", hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
@@ -158,8 +153,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return mm_fields
 
     def _get_hf_mm_data(
-        self,
-        mm_items: MultiModalDataItems,
+        self, mm_items: MultiModalDataItems
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         """
         In contrast to the base class, this method always adds
@@ -170,9 +164,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return processor_data, passthrough_data
 
     def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
     ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -223,8 +215,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             image_sizes.append((image_size.height, image_size.width))
 
         mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes,
-            **self.info.ctx.get_merged_mm_kwargs({}),
+            image_sizes=image_sizes, **self.info.ctx.get_merged_mm_kwargs({})
         )
 
         mm_placeholders = {}
@@ -468,9 +459,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,

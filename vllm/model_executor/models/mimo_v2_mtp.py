@@ -40,11 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    _require_is_multimodal,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, _require_is_multimodal
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
@@ -78,9 +74,7 @@ class MiMoV2MTPLayer(nn.Module):
         # MTP uses the SWA attention configuration
         # implementation.
         swa_rope_theta = getattr(
-            config,
-            "swa_rope_theta",
-            getattr(config, "rope_theta", 1000000),
+            config, "swa_rope_theta", getattr(config, "rope_theta", 1000000)
         )
         sliding_window_size = getattr(config, "sliding_window_size", -1)
 
@@ -154,9 +148,7 @@ class _MiMoV2MTPLayers(nn.Module):
         self.layers = nn.ModuleDict(
             {
                 str(i): MiMoV2MTPLayer(
-                    config=config,
-                    prefix=f"{prefix}.{i}",
-                    quant_config=quant_config,
+                    config=config, prefix=f"{prefix}.{i}", quant_config=quant_config
                 )
                 for i in range(num_mtp_layers)
             }
@@ -175,8 +167,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         self.num_mtp_layers = num_mtp_layers
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
 
         self.mtp = _MiMoV2MTPLayers(
@@ -245,9 +236,7 @@ class MiMoV2MTP(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
@@ -347,9 +336,7 @@ class MiMoV2OmniMTP(MiMoV2MTP, SupportsMultiModal):
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.model.embed_input_ids,
-            is_multimodal=is_multimodal,
+            input_ids, self.model.embed_input_ids, is_multimodal=is_multimodal
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

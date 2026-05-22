@@ -29,8 +29,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
 
 
 def _select_kernel_cls(
-    backend: Fp8MoeBackend,
-    config: FusedMoEConfig,
+    backend: Fp8MoeBackend, config: FusedMoEConfig
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
     activation_format = (
@@ -41,11 +40,7 @@ def _select_kernel_cls(
     last_reason: str | None = None
     for cls in backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
-            cls,
-            config,
-            kMxfp8Static,
-            kMxfp8Dynamic,
-            activation_format,
+            cls, config, kMxfp8Static, kMxfp8Dynamic, activation_format
         )
         if supported:
             return cls
@@ -74,8 +69,7 @@ def select_mxfp8_moe_backend(
                 f"{list(_BACKEND_NAME_MAP.keys())}."
             )
         logger.info_once(
-            "Using '%s' MxFp8 MoE backend (user-requested).",
-            backend.value,
+            "Using '%s' MxFp8 MoE backend (user-requested).", backend.value
         )
         return backend, _select_kernel_cls(backend, config)
 

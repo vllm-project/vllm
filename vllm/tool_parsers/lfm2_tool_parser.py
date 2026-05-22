@@ -7,9 +7,7 @@ from collections.abc import Sequence
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -17,10 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
@@ -48,11 +43,7 @@ class Lfm2ToolParser(ToolParser):
 
     TOOL_CALL_REGEX = re.compile(r"\[.*\]$", re.DOTALL)
 
-    def __init__(
-        self,
-        tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
-    ):
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.tool_call_start_token_id = self.vocab.get(TOOL_CALL_START)
@@ -157,8 +148,7 @@ class Lfm2ToolParser(ToolParser):
         try:
             is_tool_call_pattern = (
                 self.TOOL_CALL_REGEX.match(
-                    tool_text,
-                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                    tool_text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
                 )
                 is not None
             )
@@ -307,10 +297,7 @@ class Lfm2ToolParser(ToolParser):
                     withheld_suffix = withheld_suffix + "}"
                 withheld_suffix = withheld_suffix.replace("'", '"')
                 delta = compute_tool_delta(
-                    self.streamed_args_for_tool[index],
-                    new_call,
-                    index,
-                    withheld_suffix,
+                    self.streamed_args_for_tool[index], new_call, index, withheld_suffix
                 )
 
                 if delta is not None:

@@ -62,11 +62,7 @@ class DummyPerReqLogitsProcessor:
         """Specify `target_token`"""
         self.target_token = target_token
 
-    def __call__(
-        self,
-        output_ids: list[int],
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
+    def __call__(self, output_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
         val_to_keep = logits[self.target_token].item()
         logits[:] = float("-inf")
         logits[self.target_token] = val_to_keep
@@ -95,8 +91,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         return False
 
     def new_req_logits_processor(
-        self,
-        params: SamplingParams,
+        self, params: SamplingParams
     ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
@@ -143,8 +138,7 @@ sampling_params_list = [
 def main():
     # Create an LLM.
     llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=[WrappedPerReqLogitsProcessor],
+        model="facebook/opt-125m", logits_processors=[WrappedPerReqLogitsProcessor]
     )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects

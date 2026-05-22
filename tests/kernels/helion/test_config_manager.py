@@ -24,10 +24,7 @@ if not has_helion():
 import helion
 
 from vllm.kernels.helion.case_key import CaseKey
-from vllm.kernels.helion.config_manager import (
-    ConfigManager,
-    ConfigSet,
-)
+from vllm.kernels.helion.config_manager import ConfigManager, ConfigSet
 
 
 @pytest.fixture(autouse=True)
@@ -56,11 +53,7 @@ class TestConfigSet:
             "num_stages": 3,
             "pid_type": "persistent_interleaved",
         }
-        data = {
-            "h100": [
-                {"key": {"batch": 32, "hidden": 4096}, "config": config_data},
-            ]
-        }
+        data = {"h100": [{"key": {"batch": 32, "hidden": 4096}, "config": config_data}]}
 
         config_set = ConfigSet.from_dict("test_kernel", data)
 
@@ -83,11 +76,7 @@ class TestConfigSet:
             config_set.get_config("h100", "nonexistent")
 
         config_data = {"num_warps": 8, "num_stages": 4}
-        data = {
-            "h100": [
-                {"key": {"batch": 64, "hidden": 2048}, "config": config_data},
-            ]
-        }
+        data = {"h100": [{"key": {"batch": 64, "hidden": 2048}, "config": config_data}]}
         config_set = ConfigSet.from_dict("test_kernel", data)
 
         nonexistent_key = CaseKey({"batch": 32, "hidden": 4096})
@@ -101,12 +90,8 @@ class TestConfigSet:
         config2 = {"num_warps": 8, "num_stages": 5}
 
         data = {
-            "h100": [
-                {"key": {"batch": 32, "hidden": 4096}, "config": config1},
-            ],
-            "a100": [
-                {"key": {"batch": 16, "hidden": 2048}, "config": config2},
-            ],
+            "h100": [{"key": {"batch": 32, "hidden": 4096}, "config": config1}],
+            "a100": [{"key": {"batch": 16, "hidden": 2048}, "config": config2}],
         }
         config_set = ConfigSet.from_dict("test_kernel", data)
 
@@ -147,9 +132,7 @@ class TestConfigSet:
             "pid_type": "persistent_blocked",
         }
         original_data = {
-            "h100": [
-                {"key": {"batch": 32, "hidden": 4096}, "config": original_config},
-            ]
+            "h100": [{"key": {"batch": 32, "hidden": 4096}, "config": original_config}]
         }
 
         config_set = ConfigSet.from_dict("test_kernel", original_data)
@@ -223,8 +206,7 @@ class TestConfigManager:
             platform_file = kernel_dir / "h100.json"
             with open(platform_file, "w") as f:
                 json.dump(
-                    [{"key": {"batch": 32, "hidden": 4096}, "config": kernel_config}],
-                    f,
+                    [{"key": {"batch": 32, "hidden": 4096}, "config": kernel_config}], f
                 )
 
             manager = ConfigManager(base_dir=temp_dir)
@@ -267,7 +249,7 @@ class TestConfigManager:
             }
             data = {
                 "h100": [
-                    {"key": {"batch": 32, "hidden": 4096}, "config": kernel_config},
+                    {"key": {"batch": 32, "hidden": 4096}, "config": kernel_config}
                 ]
             }
             config_set = ConfigSet.from_dict("test_kernel", data)
@@ -293,11 +275,7 @@ class TestConfigManager:
         """Test that save_config_set creates parent directories if needed."""
         with tempfile.TemporaryDirectory() as temp_dir:
             nested_dir = Path(temp_dir) / "nested" / "configs"
-            data = {
-                "h100": [
-                    {"key": {}, "config": {"num_warps": 4}},
-                ]
-            }
+            data = {"h100": [{"key": {}, "config": {"num_warps": 4}}]}
             config_set = ConfigSet.from_dict("test_kernel", data)
 
             manager = ConfigManager(base_dir=nested_dir)
@@ -333,8 +311,7 @@ class TestConfigManager:
                 )
             with open(kernel_dir / "a100.json", "w") as f:
                 json.dump(
-                    [{"key": {"batch": 16, "hidden": 1024}, "config": config_3}],
-                    f,
+                    [{"key": {"batch": 16, "hidden": 1024}, "config": config_3}], f
                 )
 
             manager = ConfigManager(base_dir=temp_dir)

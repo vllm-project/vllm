@@ -9,9 +9,7 @@ from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 # Role label that Gemma4 emits at the start of the thinking channel.
@@ -101,9 +99,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     # ------------------------------------------------------------------
 
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """Extract reasoning, stripping the ``thought\\n`` role label."""
         if self.start_token not in model_output and self.end_token not in model_output:

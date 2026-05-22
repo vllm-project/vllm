@@ -57,30 +57,15 @@ STEP_PACKED_MODULES_MAPPING = {
 def _get_step_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     """Reference ALiBi slopes used by Step models."""
     closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
-    base = torch.tensor(
-        2 ** (-8.0 / closest_power_of_2),
-        dtype=torch.float32,
-    )
-    slopes = torch.pow(
-        base,
-        torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32),
-    )
+    base = torch.tensor(2 ** (-8.0 / closest_power_of_2), dtype=torch.float32)
+    slopes = torch.pow(base, torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32))
     if closest_power_of_2 != total_num_heads:
-        extra_base = torch.tensor(
-            2 ** (-4.0 / closest_power_of_2),
-            dtype=torch.float32,
-        )
+        extra_base = torch.tensor(2 ** (-4.0 / closest_power_of_2), dtype=torch.float32)
         num_remaining_heads = total_num_heads - closest_power_of_2
         extra_powers = torch.arange(
-            1,
-            1 + 2 * num_remaining_heads,
-            2,
-            dtype=torch.int32,
+            1, 1 + 2 * num_remaining_heads, 2, dtype=torch.int32
         )
-        slopes = torch.cat(
-            [slopes, torch.pow(extra_base, extra_powers)],
-            dim=0,
-        )
+        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
     return slopes
 
 
@@ -152,10 +137,7 @@ class StepAttention(nn.Module):
             attn_type=AttentionType.DECODER,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         attn_output = self.attn(q, k, v)
@@ -217,13 +199,9 @@ class StepDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
             bias=getattr(config, "mlp_bias", False),
         )
-        self.input_layernorm = RMSNorm(
-            self.hidden_size,
-            eps=config.rms_norm_eps,
-        )
+        self.input_layernorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
-            self.hidden_size,
-            eps=config.rms_norm_eps,
+            self.hidden_size, eps=config.rms_norm_eps
         )
 
     def forward(
@@ -292,9 +270,7 @@ class StepDecoderModel(nn.Module, EagleModelMixin):
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
+                config.vocab_size, config.hidden_size, quant_config=quant_config
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -309,8 +285,7 @@ class StepDecoderModel(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"],
-            config.hidden_size,
+            ["hidden_states", "residual"], config.hidden_size
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -364,8 +339,7 @@ class Step1ForCausalLM(nn.Module, SupportsPP, SupportsEagle, SupportsEagle3):
         self.config = config
         self.quant_config = quant_config
         self.model = StepDecoderModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         if get_pp_group().is_last_rank:
@@ -397,16 +371,10 @@ class Step1ForCausalLM(nn.Module, SupportsPP, SupportsEagle, SupportsEagle3):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         if not get_pp_group().is_last_rank:
             return None
         return self.logits_processor(self.lm_head, hidden_states)

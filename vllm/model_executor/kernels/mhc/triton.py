@@ -9,14 +9,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
-def _rmsnorm_nw_kernel(
-    x_ptr,
-    out_ptr,
-    stride_row,
-    D,
-    eps,
-    RBLOCK: tl.constexpr,
-):
+def _rmsnorm_nw_kernel(x_ptr, out_ptr, stride_row, D, eps, RBLOCK: tl.constexpr):
     """Weight-free RMSNorm Triton kernel: out = x * rsqrt(mean(x², -1) + eps)."""
     row = tl.program_id(0)
     cols = tl.arange(0, RBLOCK)
@@ -99,9 +92,7 @@ def _hc_head_reduce_store_kernel(
         acc += pre * x
 
     tl.store(
-        out_ptr + token_idx * out_stride_t + offsets * out_stride_h,
-        acc,
-        mask=mask,
+        out_ptr + token_idx * out_stride_t + offsets * out_stride_h, acc, mask=mask
     )
 
 
@@ -155,20 +146,10 @@ def _hc_head_triton(
     if hs_flat.shape[0] == 0:
         return
 
-    hc_head_reduce_triton_kernel(
-        hs_flat,
-        fn,
-        hc_scale,
-        hc_base,
-        out,
-        rms_eps,
-        hc_eps,
-    )
+    hc_head_reduce_triton_kernel(hs_flat, fn, hc_scale, hc_base, out, rms_eps, hc_eps)
     return
 
 
 direct_register_custom_op(
-    op_name="hc_head_triton",
-    op_func=_hc_head_triton,
-    mutates_args=["out"],
+    op_name="hc_head_triton", op_func=_hc_head_triton, mutates_args=["out"]
 )

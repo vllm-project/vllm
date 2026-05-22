@@ -24,10 +24,7 @@ GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
     Gemma4ImagePixelInputs(
-        pixel_values=[
-            torch.randn(10080, 768),
-            torch.randn(2520, 768),
-        ],
+        pixel_values=[torch.randn(10080, 768), torch.randn(2520, 768)],
         pixel_position_ids=[
             torch.zeros(10080, 2, dtype=torch.long),
             torch.zeros(2520, 2, dtype=torch.long),
@@ -38,9 +35,7 @@ def test_gemma4_image_schema_accepts_variable_patch_counts():
 def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
     field = MultiModalFieldConfig.batched("image").field
     elems = field.build_elems(
-        "image",
-        "pixel_values",
-        [torch.randn(10080, 768), torch.randn(2520, 768)],
+        "image", "pixel_values", [torch.randn(10080, 768), torch.randn(2520, 768)]
     )
 
     reduced = field.reduce_data(list(elems))
@@ -70,10 +65,7 @@ def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
 )
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
-    model_id: str,
-    image_width: int,
-    image_height: int,
-    max_soft_tokens: int,
+    model_id: str, image_width: int, image_height: int, max_soft_tokens: int
 ):
     """Regression for the Gemma 3/4 multimodal crash.
 
@@ -120,9 +112,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
 )
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
-    model_id: str,
-    mm_processor_kwargs: dict[str, object],
-    expected_image_tokens: int,
+    model_id: str, mm_processor_kwargs: dict[str, object], expected_image_tokens: int
 ):
     ctx = build_model_context(
         model_id,
@@ -132,8 +122,7 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     tokens = processor.info.get_mm_max_tokens_per_item(
-        seq_len=ctx.model_config.max_model_len,
-        mm_counts={"image": 1, "video": 1},
+        seq_len=ctx.model_config.max_model_len, mm_counts={"image": 1, "video": 1}
     )
 
     assert tokens is not None
@@ -158,15 +147,11 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
     limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]],
     expected_video_tokens: int,
 ):
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
+    ctx = build_model_context(model_id, limit_mm_per_prompt=limit_mm_per_prompt)
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
     tokens = processor.info.get_mm_max_tokens_per_item(
-        seq_len=ctx.model_config.max_model_len,
-        mm_counts={"video": 1},
+        seq_len=ctx.model_config.max_model_len, mm_counts={"video": 1}
     )
 
     assert tokens is not None
@@ -199,16 +184,11 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
-def test_limit_mm_per_prompt(
-    image_assets: ImageTestAssets,
-    model_id: str,
-):
+def test_limit_mm_per_prompt(image_assets: ImageTestAssets, model_id: str):
     """Test that limit_mm_per_prompt accurately restricts multiple images."""
     # We only allow 1 image
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs={},
-        limit_mm_per_prompt={"image": 1},
+        model_id, mm_processor_kwargs={}, limit_mm_per_prompt={"image": 1}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 

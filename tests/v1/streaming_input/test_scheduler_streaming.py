@@ -84,10 +84,7 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_add_request(self):
         scheduler = create_scheduler()
 
-        request = DummyRequest(
-            request_id="test_request",
-            resumable=True,
-        )
+        request = DummyRequest(request_id="test_request", resumable=True)
 
         scheduler.add_request(request)
 
@@ -95,10 +92,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert request.status == RequestStatus.WAITING
         assert len(scheduler.waiting) == 1
 
-        next_request = DummyRequest(
-            request_id="test_request",
-            resumable=True,
-        )
+        next_request = DummyRequest(request_id="test_request", resumable=True)
         scheduler.add_request(next_request)
 
         assert next_request.status == RequestStatus.WAITING
@@ -107,18 +101,12 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_update_request_as_session_max_token(self):
         scheduler = create_scheduler()
 
-        session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-        )
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
         session.num_computed_tokens = len(session.prompt_token_ids)
         session.max_tokens = 10  # Initial max_tokens
         session._output_token_ids = [1] * 10  # reach max_tokens
 
-        new_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[4, 5, 6],
-        )
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5, 6])
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
@@ -134,10 +122,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         # Simulate generating 5 more output tokens
         session._output_token_ids = [1] * 5
-        new_request2 = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[7, 8, 9],
-        )
+        new_request2 = DummyRequest(request_id="session", prompt_token_ids=[7, 8, 9])
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
         update2 = StreamingUpdate.from_request(new_request2)
@@ -150,16 +135,10 @@ class TestStreamingScheduler(unittest.TestCase):
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
 
-        session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-        )
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
         session.num_computed_tokens = len(session.prompt_token_ids)
 
-        new_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[4, 5, 6],
-        )
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5, 6])
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
         update = StreamingUpdate.from_request(new_request)
@@ -180,9 +159,7 @@ class TestStreamingScheduler(unittest.TestCase):
             mm_position=PlaceholderRange(offset=1, length=1),
         )
         session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-            mm_features=[mm_feature],
+            request_id="session", prompt_token_ids=[1, 2, 3], mm_features=[mm_feature]
         )
         session.num_computed_tokens = len(session.prompt_token_ids)
 
@@ -216,9 +193,7 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler = create_scheduler()
 
         session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-            resumable=True,
+            request_id="session", prompt_token_ids=[1, 2, 3], resumable=True
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
@@ -226,10 +201,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         # A non-resumable request signals stream completion
         close_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[0],
-            resumable=False,
-            max_tokens=1,
+            request_id="session", prompt_token_ids=[0], resumable=False, max_tokens=1
         )
         scheduler.add_request(close_request)
 
@@ -248,18 +220,14 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler = create_scheduler()
 
         session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-            resumable=True,
+            request_id="session", prompt_token_ids=[1, 2, 3], resumable=True
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         next_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[4, 5],
-            resumable=True,
+            request_id="session", prompt_token_ids=[4, 5], resumable=True
         )
 
         scheduler.add_request(next_request)
@@ -288,10 +256,7 @@ class TestStreamingScheduler(unittest.TestCase):
         """
         session.num_computed_tokens = 4
 
-        new_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[4, 5],
-        )
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5])
 
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
@@ -364,10 +329,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # CYCLE 1: Initial Request Scheduling and First Decode
         # ═══════════════════════════════════════════════════════════════════
 
-        session = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[1, 2, 3],
-        )
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
         scheduler.add_request(session)
 
         # Step 2: Schedule creates NewRequestData
@@ -512,10 +474,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # ═══════════════════════════════════════════════════════════════════
 
         # Step 12: Add new streaming request with seq_id=1
-        new_request = DummyRequest(
-            request_id="session",
-            prompt_token_ids=[4, 5],
-        )
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5])
         scheduler.add_request(new_request)
 
         # With the new streaming API, when session is in WAITING_FOR_STREAMING_REQ,

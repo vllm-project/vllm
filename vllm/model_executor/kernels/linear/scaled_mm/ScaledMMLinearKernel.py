@@ -9,9 +9,7 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 
 from ..base import MMLinearLayerConfig
@@ -77,10 +75,7 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
 
     @abstractmethod
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -118,10 +113,7 @@ class FP8ScaledMMLinearKernel(
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
@@ -139,11 +131,7 @@ class FP8ScaledMMLinearKernel(
         # TODO(luka) remove this path if not used anymore
         x_2d_q = x_2d
         if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-                x_s_ub,
-            )
+            x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,

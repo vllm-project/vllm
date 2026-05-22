@@ -62,16 +62,12 @@ def _make_vllm_config() -> SimpleNamespace:
 
 def _make_addresses() -> EngineZmqAddresses:
     return EngineZmqAddresses(
-        inputs=["tcp://127.0.0.1:12345"],
-        outputs=["tcp://127.0.0.1:12346"],
+        inputs=["tcp://127.0.0.1:12345"], outputs=["tcp://127.0.0.1:12346"]
     )
 
 
 def _make_cpu_placement_group():
-    pg = ray.util.placement_group(
-        [{"CPU": 0.001}, {"CPU": 1.0}],
-        strategy="PACK",
-    )
+    pg = ray.util.placement_group([{"CPU": 0.001}, {"CPU": 1.0}], strategy="PACK")
     ray.get(pg.ready())
     return pg
 

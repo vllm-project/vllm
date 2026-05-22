@@ -76,9 +76,7 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_length=1.35,
         expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
         id="qwen3-30b-moe-vl-eagle3",
-        marks=[
-            pytest.mark.slow_test,
-        ],
+        marks=[pytest.mark.slow_test],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
 ]
@@ -126,8 +124,7 @@ def get_available_attention_backends() -> list[str]:
     )
 
     valid_backends, _ = current_platform.get_valid_backends(
-        device_capability=device_capability,
-        attn_selector_config=attn_selector_config,
+        device_capability=device_capability, attn_selector_config=attn_selector_config
     )
 
     return [
@@ -257,8 +254,7 @@ def test_eagle3_acceptance_length(
             prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
 
             sampling_params = SamplingParams(
-                temperature=0,
-                max_tokens=DEFAULT_OUTPUT_LEN,
+                temperature=0, max_tokens=DEFAULT_OUTPUT_LEN
             )
             vllm_runner.llm.generate(
                 [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],

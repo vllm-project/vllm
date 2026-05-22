@@ -32,13 +32,12 @@ class PlotFilterBase(ABC):
             if op_key in s:
                 key, value = s.split(op_key)
                 return PLOT_FILTERS[op_key](
-                    key,
-                    value.removeprefix(op_key).strip("'").strip('"'),
+                    key, value.removeprefix(op_key).strip("'").strip('"')
                 )
         else:
             raise ValueError(
                 f"Invalid operator for plot filter '{s}'. "
-                f"Valid operators are: {sorted(PLOT_FILTERS)}",
+                f"Valid operators are: {sorted(PLOT_FILTERS)}"
             )
 
     @abstractmethod
@@ -139,7 +138,7 @@ class PlotBinner:
         else:
             raise ValueError(
                 f"Invalid operator for plot binner '{s}'. "
-                f"Valid operators are: {sorted(PLOT_BINNERS)}",
+                f"Valid operators are: {sorted(PLOT_BINNERS)}"
             )
 
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -149,9 +148,7 @@ class PlotBinner:
         return df
 
 
-PLOT_BINNERS: dict[str, type[PlotBinner]] = {
-    "%": PlotBinner,
-}
+PLOT_BINNERS: dict[str, type[PlotBinner]] = {"%": PlotBinner}
 
 
 class PlotBinners(list[PlotBinner]):
@@ -269,10 +266,7 @@ def _plot_fig(
 
     fig_group, fig_data = fig_group_data
 
-    row_groups = full_groupby(
-        fig_data,
-        key=lambda item: _get_group(item, row_by),
-    )
+    row_groups = full_groupby(fig_data, key=lambda item: _get_group(item, row_by))
     num_rows = len(row_groups)
     num_cols = max(
         len(full_groupby(row_data, key=lambda item: _get_group(item, col_by)))
@@ -336,19 +330,17 @@ def _plot_fig(
         df = df.sort_values(by=curve_by)
 
     df["row_group"] = (
-        pd.concat(
-            [k + "=" + df[k].astype(str) for k in row_by],
-            axis=1,
-        ).agg("\n".join, axis=1)
+        pd.concat([k + "=" + df[k].astype(str) for k in row_by], axis=1).agg(
+            "\n".join, axis=1
+        )
         if row_by
         else "(All)"
     )
 
     df["col_group"] = (
-        pd.concat(
-            [k + "=" + df[k].astype(str) for k in col_by],
-            axis=1,
-        ).agg("\n".join, axis=1)
+        pd.concat([k + "=" + df[k].astype(str) for k in col_by], axis=1).agg(
+            "\n".join, axis=1
+        )
         if col_by
         else "(All)"
     )
@@ -372,10 +364,9 @@ def _plot_fig(
         )
     else:
         df["curve_group"] = (
-            pd.concat(
-                [k + "=" + df[k].astype(str) for k in curve_by],
-                axis=1,
-            ).agg("\n".join, axis=1)
+            pd.concat([k + "=" + df[k].astype(str) for k in curve_by], axis=1).agg(
+                "\n".join, axis=1
+            )
             if curve_by
             else "(All)"
         )
@@ -444,10 +435,7 @@ def plot(
 
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    fig_groups = full_groupby(
-        all_data,
-        key=lambda item: _get_group(item, fig_by),
-    )
+    fig_groups = full_groupby(all_data, key=lambda item: _get_group(item, fig_by))
 
     with DummyExecutor() if len(fig_groups) <= 1 else ProcessPoolExecutor() as executor:
         # Resolve the iterable to ensure that the workers are run

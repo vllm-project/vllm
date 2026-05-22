@@ -43,14 +43,10 @@ async def client(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME)],
-    indirect=["tokenizer_name"],
+    "model_name,tokenizer_name", [(MODEL_NAME, MODEL_NAME)], indirect=["tokenizer_name"]
 )
 async def test_tokenize_completions(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
@@ -77,14 +73,10 @@ async def test_tokenize_completions(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME)],
-    indirect=["tokenizer_name"],
+    "model_name,tokenizer_name", [(MODEL_NAME, MODEL_NAME)], indirect=["tokenizer_name"]
 )
 async def test_tokenize_chat(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
@@ -130,24 +122,17 @@ async def test_tokenize_chat(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME)],
-    indirect=["tokenizer_name"],
+    "model_name,tokenizer_name", [(MODEL_NAME, MODEL_NAME)], indirect=["tokenizer_name"]
 )
 async def test_tokenize_chat_with_tools(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
             conversation = [
-                {
-                    "role": "user",
-                    "content": "What's the weather like in Paris today?",
-                }
+                {"role": "user", "content": "What's the weather like in Paris today?"}
             ]
 
             tools = [
@@ -205,9 +190,7 @@ async def test_tokenize_chat_with_tools(
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_with_return_token_strs(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
@@ -230,14 +213,10 @@ async def test_tokenize_with_return_token_strs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME)],
-    indirect=["tokenizer_name"],
+    "model_name,tokenizer_name", [(MODEL_NAME, MODEL_NAME)], indirect=["tokenizer_name"]
 )
 async def test_detokenize(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
@@ -254,14 +233,10 @@ async def test_detokenize(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME)],
-    indirect=["tokenizer_name"],
+    "model_name,tokenizer_name", [(MODEL_NAME, MODEL_NAME)], indirect=["tokenizer_name"]
 )
 async def test_tokenizer_info_basic(
-    server: RemoteOpenAIServer,
-    model_name: str,
-    tokenizer_name: str,
+    server: RemoteOpenAIServer, model_name: str, tokenizer_name: str
 ):
     """Test basic tokenizer info endpoint functionality."""
     response = requests.get(server.url_for("tokenizer_info"))
@@ -301,16 +276,13 @@ async def test_tokenizer_info_schema(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_tokenizer_info_consistency_with_tokenize(
-    server: RemoteOpenAIServer,
-):
+async def test_tokenizer_info_consistency_with_tokenize(server: RemoteOpenAIServer):
     """Test that tokenizer info is consistent with tokenization endpoint."""
     info_response = requests.get(server.url_for("tokenizer_info"))
     info_response.raise_for_status()
     info = info_response.json()
     tokenize_response = requests.post(
-        server.url_for("tokenize"),
-        json={"model": MODEL_NAME, "prompt": "Hello world!"},
+        server.url_for("tokenize"), json={"model": MODEL_NAME, "prompt": "Hello world!"}
     )
     tokenize_response.raise_for_status()
     tokenize_result = tokenize_response.json()

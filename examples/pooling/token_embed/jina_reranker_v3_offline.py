@@ -19,10 +19,7 @@ documents = [
 
 def main():
     # Initialize model
-    llm = LLM(
-        model="jinaai/jina-reranker-v3",
-        runner="pooling",
-    )
+    llm = LLM(model="jinaai/jina-reranker-v3", runner="pooling")
 
     # Generate scores.
     outputs = llm.score(query, documents)

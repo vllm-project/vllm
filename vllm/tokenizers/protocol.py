@@ -123,8 +123,6 @@ class TokenizerLike(Protocol):
         raise NotImplementedError
 
     def convert_ids_to_tokens(
-        self,
-        ids: Sequence[int],
-        skip_special_tokens: bool = False,
+        self, ids: Sequence[int], skip_special_tokens: bool = False
     ) -> list[str]:
         raise NotImplementedError

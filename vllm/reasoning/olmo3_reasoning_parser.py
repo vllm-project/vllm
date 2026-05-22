@@ -118,19 +118,13 @@ class Olmo3ReasoningBuffer:
         if self.state == Olmo3ReasoningState.REASONING:
             # we are inside reasoning block, return and empty
             # the text buffer
-            (
-                text_buffer,
-                self.buffer,
-            ) = self.buffer, ""
+            (text_buffer, self.buffer) = self.buffer, ""
             return DeltaMessage(reasoning=text_buffer)
 
         if self.state == Olmo3ReasoningState.CONTENT:
             # we are outside reasoning block, return and empty
             # the text buffer
-            (
-                text_buffer,
-                self.buffer,
-            ) = self.buffer, ""
+            (text_buffer, self.buffer) = self.buffer, ""
             return DeltaMessage(content=text_buffer)
 
         # nothing to return unless we are in reasoning or content state
@@ -272,9 +266,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning(
-        self,
-        model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates

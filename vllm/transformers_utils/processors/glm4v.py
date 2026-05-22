@@ -28,9 +28,7 @@ class GLM4VProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
     def __init__(
-        self,
-        image_processor: GLM4VImageProcessorFast,
-        tokenizer: PreTrainedTokenizer,
+        self, image_processor: GLM4VImageProcessorFast, tokenizer: PreTrainedTokenizer
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer

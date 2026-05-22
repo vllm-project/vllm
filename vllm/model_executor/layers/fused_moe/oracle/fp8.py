@@ -108,9 +108,7 @@ def _get_priority_backends(
     return _AVAILABLE_BACKENDS
 
 
-def backend_to_kernel_cls(
-    backend: Fp8MoeBackend,
-) -> list[type[mk.FusedMoEExperts]]:
+def backend_to_kernel_cls(backend: Fp8MoeBackend) -> list[type[mk.FusedMoEExperts]]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (  # noqa: E501
             TrtLlmFp8ExpertsModular,
@@ -191,9 +189,7 @@ def backend_to_kernel_cls(
         return [XPUExpertsFp8, XPUExpertsMxfp8]
 
     elif backend == Fp8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            CPUExpertsFp8,
-        )
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsFp8
 
         return [CPUExpertsFp8]
 
@@ -293,10 +289,7 @@ def select_fp8_moe_backend(
 
         if (
             requested_backend
-            in [
-                Fp8MoeBackend.VLLM_CUTLASS,
-                Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-            ]
+            in [Fp8MoeBackend.VLLM_CUTLASS, Fp8MoeBackend.BATCHED_VLLM_CUTLASS]
             and not allow_vllm_cutlass
         ):
             raise ValueError(
@@ -337,11 +330,7 @@ def select_fp8_moe_backend(
             ]:
                 for k_cls in backend_to_kernel_cls(backend):
                     supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
+                        k_cls, config, weight_key, activation_key, activation_format
                     )
 
                     if supported:
@@ -395,11 +384,7 @@ def select_fp8_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
+                k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -433,11 +418,7 @@ def convert_to_fp8_moe_kernel_format(
     if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
         assert block_quant
         w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            tuple(layer.weight_block_size),
+            w13, w2, w13_scale, w2_scale, tuple(layer.weight_block_size)
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
@@ -449,19 +430,11 @@ def convert_to_fp8_moe_kernel_format(
             )
 
             w13, w2, w13_scale, w2_scale = prepare_mxfp8_moe_layer_for_marlin(
-                layer,
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
+                layer, w13, w2, w13_scale, w2_scale
             )
         else:
             w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_marlin(
-                layer,
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
+                layer, w13, w2, w13_scale, w2_scale
             )
     elif fp8_backend in [
         Fp8MoeBackend.FLASHINFER_CUTLASS,
@@ -529,17 +502,13 @@ def make_fp8_moe_quant_config(
     # MARLIN is mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN:
         return fp8_w8a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            block_shape=block_shape,
+            w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape
         )
 
     # CPU is mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            block_shape=block_shape,
+            w1_scale=w1_scale, w2_scale=w2_scale, block_shape=block_shape
         )
 
     # Flashinfer CUTLASS per-tensor uses single dq scale
@@ -616,10 +585,7 @@ def make_fp8_moe_kernel(
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
+        experts = experts_cls(moe_config=moe_config, quant_config=moe_quant_config)
 
     kernel = mk.FusedMoEKernel(
         prepare_finalize,

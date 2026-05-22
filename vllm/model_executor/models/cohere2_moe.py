@@ -10,10 +10,7 @@ from transformers import CohereConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -229,9 +226,7 @@ class Cohere2MoeAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -372,8 +367,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states_attention = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
+            positions=positions, hidden_states=hidden_states
         )
         hidden_states_mlp = self.mlp(hidden_states)
 
@@ -536,15 +530,8 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     is_text_generation_model = True
 
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -582,10 +569,7 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     ) -> torch.Tensor | IntermediateTensors:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.model.embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

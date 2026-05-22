@@ -17,11 +17,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 BADREQUEST_CASES = [
-    (
-        "test_rank",
-        {"r": 1024},
-        "is greater than max_lora_rank",
-    ),
+    ("test_rank", {"r": 1024}, "is greater than max_lora_rank"),
     ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
     (
         "test_modules_to_save",
@@ -124,9 +120,7 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
     assert "success" in response.lower()
 
     completion = await client.chat.completions.create(
-        model=adapter_name,
-        messages=messages,
-        max_tokens=10,
+        model=adapter_name, messages=messages, max_tokens=10
     )
     assert "Meow Meow Meow" in completion.choices[0].message.content
 
@@ -143,9 +137,7 @@ async def test_load_lora_adapter_with_same_name_replaces_inplace(
     assert "success" in response.lower()
 
     completion = await client.chat.completions.create(
-        model=adapter_name,
-        messages=messages,
-        max_tokens=10,
+        model=adapter_name, messages=messages, max_tokens=10
     )
     assert "Woof Woof Woof" in completion.choices[0].message.content
 
@@ -170,10 +162,7 @@ async def test_load_lora_adapter_with_load_inplace_false_errors(
         await client.post(
             "load_lora_adapter",
             cast_to=str,
-            body={
-                "lora_name": adapter_name,
-                "lora_path": qwen3_meowing_lora_files,
-            },
+            body={"lora_name": adapter_name, "lora_path": qwen3_meowing_lora_files},
         )
 
     # Verify the error message
@@ -332,17 +321,13 @@ async def test_loading_invalid_adapters_does_not_break_others(
         body={"lora_name": "valid", "lora_path": qwen3_lora_files},
     )
     await client.completions.create(
-        model="valid",
-        prompt=["Hello there", "Foo bar bazz buzz"],
-        max_tokens=5,
+        model="valid", prompt=["Hello there", "Foo bar bazz buzz"], max_tokens=5
     )
 
 
 @pytest.mark.asyncio
 async def test_beam_search_with_lora_adapters(
-    client: openai.AsyncOpenAI,
-    tmp_path,
-    qwen3_lora_files,
+    client: openai.AsyncOpenAI, tmp_path, qwen3_lora_files
 ):
     """Validate that async beam search can be used with lora."""
 

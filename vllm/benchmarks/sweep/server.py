@@ -19,11 +19,7 @@ class ServerProcess:
     ]
 
     def __init__(
-        self,
-        server_cmd: list[str],
-        after_bench_cmd: list[str],
-        *,
-        show_stdout: bool,
+        self, server_cmd: list[str], after_bench_cmd: list[str], *, show_stdout: bool
     ) -> None:
         super().__init__()
 
@@ -64,9 +60,7 @@ class ServerProcess:
 
     def run_subcommand(self, cmd: list[str]):
         return subprocess.run(
-            cmd,
-            stdout=None if self.show_stdout else subprocess.DEVNULL,
-            check=True,
+            cmd, stdout=None if self.show_stdout else subprocess.DEVNULL, check=True
         )
 
     def after_bench(self) -> None:

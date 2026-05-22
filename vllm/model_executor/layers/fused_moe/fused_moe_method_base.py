@@ -17,9 +17,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
-)
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts

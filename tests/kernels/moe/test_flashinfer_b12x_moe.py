@@ -45,17 +45,11 @@ from vllm.utils.torch_utils import set_random_seed
 
 # Dimensions chosen to satisfy FP4 alignment requirements (k multiple of 256,
 # n multiple of 128) while keeping tests fast.
-MNK_FACTORS = [
-    (2, 128, 256),
-    (2, 256, 512),
-    (16, 128, 256),
-    (64, 256, 512),
-]
+MNK_FACTORS = [(2, 128, 256), (2, 256, 512), (16, 128, 256), (64, 256, 512)]
 
 
 def _reorder_gate_up_to_up_gate(
-    w: torch.Tensor,
-    w_s: torch.Tensor,
+    w: torch.Tensor, w_s: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Swap gate and up-projection halves along dim=1 to [up, gate] order.
 
@@ -76,13 +70,7 @@ def _reorder_gate_up_to_up_gate(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_flashinfer_b12x_moe(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-    dtype: torch.dtype,
-    workspace_init,
+    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, workspace_init
 ):
     """Test FlashInferB12xExperts against a BF16 torch reference.
 
@@ -171,8 +159,7 @@ def test_flashinfer_b12x_moe(
         )
 
         experts = FlashInferB12xExperts(
-            moe_config=moe_config,
-            quant_config=quant_config,
+            moe_config=moe_config, quant_config=quant_config
         )
         # In production, process_weights_after_loading computes these after
         # normalizing block scales. In the test the scales are already in final

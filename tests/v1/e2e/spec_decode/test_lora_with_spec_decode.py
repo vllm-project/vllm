@@ -50,8 +50,7 @@ SEED = 42
     ],
 )
 def test_batch_inference_correctness(
-    monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, str, int],
+    monkeypatch: pytest.MonkeyPatch, model_setup: tuple[str, str, str, str, int]
 ):
     """
     Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.

@@ -38,9 +38,7 @@ class ExternalCachedBlockPool:
         self._present_block = KVCacheBlock(block_id=1)
 
     def get_cached_block(
-        self,
-        block_hash: BlockHash,
-        group_ids: list[int],
+        self, block_hash: BlockHash, group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
         # Mirrors BlockPool.get_cached_block: hit only when every group_id
         # (groups sharing a spec) has the hash cached.
@@ -99,8 +97,7 @@ class MooncakeStoreCoordinator:
                 attention_groups.append((spec, [i], manager_cls))
         # Full attention first (matches upstream convergence ordering).
         self.attention_groups = sorted(
-            attention_groups,
-            key=lambda x: not isinstance(x[0], FullAttentionSpec),
+            attention_groups, key=lambda x: not isinstance(x[0], FullAttentionSpec)
         )
         self.eagle_attn_group_indices: set[int] = {
             i
@@ -129,9 +126,7 @@ class MooncakeStoreCoordinator:
         return masks, hit_length
 
     def load_mask(
-        self,
-        block_hashes: list[BlockHash],
-        token_len: int,
+        self, block_hashes: list[BlockHash], token_len: int
     ) -> tuple[list[bool], ...]:
         """Per-group load masks: ``mask[g][i]`` is True iff group ``g``'s
         spec would populate chunk ``i`` locally at length ``token_len``

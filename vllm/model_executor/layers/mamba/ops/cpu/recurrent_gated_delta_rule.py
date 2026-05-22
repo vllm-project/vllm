@@ -6,11 +6,7 @@ import torch
 import torch.nn.functional as F
 
 
-def l2norm(
-    x: torch.Tensor,
-    dim: int = -1,
-    eps: float = 1e-6,
-) -> torch.Tensor:
+def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
     return x * inv_norm
 
@@ -47,11 +43,7 @@ def recurrent_gated_delta_rule(
     query = query * scale
 
     core_attn_out = torch.empty(
-        batch_size,
-        num_heads,
-        sequence_length,
-        v_head_dim,
-        dtype=value.dtype,
+        batch_size, num_heads, sequence_length, v_head_dim, dtype=value.dtype
     )
     last_recurrent_state = initial_state.to(value)
 
@@ -106,11 +98,7 @@ def chunk_gated_delta_rule(
     state_dtype = initial_state.dtype
     chunk_size = 128
     sequence_bounds = [
-        (
-            seq_idx,
-            int(cu_seqlens[seq_idx].item()),
-            int(cu_seqlens[seq_idx + 1].item()),
-        )
+        (seq_idx, int(cu_seqlens[seq_idx].item()), int(cu_seqlens[seq_idx + 1].item()))
         for seq_idx in range(len(cu_seqlens) - 1)
     ]
     chunk_eye = torch.eye(chunk_size, dtype=torch.float32)
@@ -156,11 +144,7 @@ def chunk_gated_delta_rule(
 
         seq_state = initial_state[seq_idx : seq_idx + 1].to(v_seq)
         seq_output = torch.empty(
-            seq_batch_size,
-            num_heads,
-            seq_len,
-            value_head_dim,
-            dtype=v_seq.dtype,
+            seq_batch_size, num_heads, seq_len, value_head_dim, dtype=v_seq.dtype
         )
 
         for chunk_start in range(0, seq_len, chunk_size):
@@ -183,9 +167,7 @@ def chunk_gated_delta_rule(
             system = interaction + chunk_eye[:chunk_len, :chunk_len]
 
             solved_values = torch.linalg.solve_triangular(
-                system,
-                v_chunk * beta_chunk.unsqueeze(-1),
-                upper=False,
+                system, v_chunk * beta_chunk.unsqueeze(-1), upper=False
             )
             solved_keys = torch.linalg.solve_triangular(
                 system,
@@ -199,9 +181,7 @@ def chunk_gated_delta_rule(
             # Each chunk contributes both from the incoming recurrent state and
             # from its own in-chunk interactions.
             inter_chunk = torch.einsum(
-                "bhvk,bhck->bhcv",
-                seq_state,
-                q_chunk * exp_cum_g.unsqueeze(-1),
+                "bhvk,bhck->bhcv", seq_state, q_chunk * exp_cum_g.unsqueeze(-1)
             )
             intra_chunk = torch.tril((q_chunk @ k_chunk.transpose(-1, -2)) * decay)
             seq_output[:, :, chunk_start:chunk_end] = (

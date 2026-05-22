@@ -59,9 +59,7 @@ def _format_index_ranges(indices: list[int]) -> str:
 
 
 def _format_module_tree(
-    module: nn.Module,
-    name: str = "",
-    indent: int = 0,
+    module: nn.Module, name: str = "", indent: int = 0
 ) -> list[str]:
     """Format a module tree with indentation, grouping identical layers.
 

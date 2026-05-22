@@ -13,10 +13,7 @@ from vllm.config.cache import MambaDType
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import (
-    STR_DTYPE_TO_TORCH_DTYPE,
-    get_kv_cache_torch_dtype,
-)
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_kv_cache_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -51,9 +48,7 @@ def is_conv_state_dim_first() -> bool:
 class MambaStateDtypeCalculator:
     @classmethod
     def linear_attention_state_dtype(
-        cls,
-        model_dtype: ModelDType | torch.dtype,
-        mamba_cache_dtype: MambaDType,
+        cls, model_dtype: ModelDType | torch.dtype, mamba_cache_dtype: MambaDType
     ) -> tuple[torch.dtype, ...]:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype,)
@@ -97,9 +92,7 @@ class MambaStateDtypeCalculator:
 
     @classmethod
     def short_conv_state_dtype(
-        cls,
-        model_dtype: ModelDType | torch.dtype,
-        mamba_cache_dtype: MambaDType,
+        cls, model_dtype: ModelDType | torch.dtype, mamba_cache_dtype: MambaDType
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (conv_state_dtype,)
@@ -117,9 +110,7 @@ class MambaStateDtypeCalculator:
 
     @classmethod
     def kda_state_dtype(
-        cls,
-        model_dtype: ModelDType | torch.dtype,
-        mamba_cache_dtype: MambaDType,
+        cls, model_dtype: ModelDType | torch.dtype, mamba_cache_dtype: MambaDType
     ):
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, state_dtype, state_dtype, torch.float32)
@@ -128,10 +119,7 @@ class MambaStateDtypeCalculator:
 class MambaStateShapeCalculator:
     @classmethod
     def linear_attention_state_shape(
-        cls,
-        num_heads: int,
-        tp_size: int,
-        head_dim: int,
+        cls, num_heads: int, tp_size: int, head_dim: int
     ) -> tuple[tuple[int, int, int], ...]:
         state_shape = (num_heads // tp_size, head_dim, head_dim)
         return (state_shape,)
@@ -188,10 +176,7 @@ class MambaStateShapeCalculator:
 
     @classmethod
     def short_conv_state_shape(
-        cls,
-        tp_world_size: int,
-        intermediate_size: int,
-        conv_kernel: int,
+        cls, tp_world_size: int, intermediate_size: int, conv_kernel: int
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
         conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
@@ -222,8 +207,7 @@ class MambaStateShapeCalculator:
     ):
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
         conv_state_shape = cls._orient_conv_shape(
-            divide(conv_dim, tp_world_size),
-            conv_kernel_size - 1 + num_spec,
+            divide(conv_dim, tp_world_size), conv_kernel_size - 1 + num_spec
         )
 
         temporal_state_shape = (

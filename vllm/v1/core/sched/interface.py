@@ -135,9 +135,7 @@ class SchedulerInterface(ABC):
 
     @abstractmethod
     def finish_requests(
-        self,
-        request_ids: str | Iterable[str] | None,
-        finished_status: "RequestStatus",
+        self, request_ids: str | Iterable[str] | None, finished_status: "RequestStatus"
     ) -> list[tuple[str, int]]:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.

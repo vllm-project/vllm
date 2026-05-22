@@ -15,9 +15,7 @@ from vllm.model_executor.layers.pooler import (
     DispatchPooler,
     Pooler,
 )
-from vllm.model_executor.layers.pooler.seqwise import (
-    pooler_for_embed,
-)
+from vllm.model_executor.layers.pooler.seqwise import pooler_for_embed
 from vllm.model_executor.layers.pooler.tokwise import (
     AllPool,
     pooler_for_token_classify,
@@ -64,8 +62,7 @@ class RobertaEmbedding(nn.Module):
         )
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.register_buffer(
-            "position_ids",
-            torch.arange(config.max_position_embeddings).unsqueeze(0),
+            "position_ids", torch.arange(config.max_position_embeddings).unsqueeze(0)
         )
 
     def forward(
@@ -166,8 +163,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
 
 def filter_secondary_weights(
-    all_weights: Iterable[tuple[str, torch.Tensor]],
-    secondary_weights: list[str],
+    all_weights: Iterable[tuple[str, torch.Tensor]], secondary_weights: list[str]
 ) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str, torch.Tensor]]]:
     all_weights1, all_weights2 = itertools.tee(all_weights)
 
@@ -305,8 +301,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            classifier=self.classifier,
+            pooler_config, classifier=self.classifier
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

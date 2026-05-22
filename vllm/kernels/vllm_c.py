@@ -42,10 +42,7 @@ matching input/weight dtype."""
 
 
 @ir.ops.fused_add_rms_norm.register_impl(
-    "vllm_c",
-    supports_args=rms_add_no_var_size,
-    supported=CUDA_ALIKE,
-    inplace=True,
+    "vllm_c", supports_args=rms_add_no_var_size, supported=CUDA_ALIKE, inplace=True
 )
 def fused_add_rms_norm(
     x: Tensor,

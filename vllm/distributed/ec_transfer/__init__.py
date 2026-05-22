@@ -7,8 +7,4 @@ from vllm.distributed.ec_transfer.ec_transfer_state import (
     has_ec_transfer,
 )
 
-__all__ = [
-    "get_ec_transfer",
-    "ensure_ec_transfer_initialized",
-    "has_ec_transfer",
-]
+__all__ = ["get_ec_transfer", "ensure_ec_transfer_initialized", "has_ec_transfer"]

@@ -73,9 +73,7 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
         )
 
     def to_pooling_params(self):
-        return PoolingParams(
-            task=self.task,
-        )
+        return PoolingParams(task=self.task)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):

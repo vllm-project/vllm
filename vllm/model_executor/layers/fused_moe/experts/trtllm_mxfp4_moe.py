@@ -30,10 +30,7 @@ class TrtLlmMxfp4ExpertsBase:
     """
 
     def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-        **kwargs,
+        self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig, **kwargs
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
@@ -96,13 +93,9 @@ class TrtLlmMxfp4ExpertsBase:
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp8Dynamic),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, None), (kMxfp4Static, kMxfp8Dynamic)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -133,9 +126,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
     """
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
@@ -155,8 +146,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         # Kernel converts to bfloat16 internally
         return True
@@ -236,9 +226,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     """
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     @staticmethod

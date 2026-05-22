@@ -213,8 +213,7 @@ DEFAULT_BLOCK_SHAPE = [128, 128]
 
 
 def per_block_cast_to_int8(
-    x: torch.Tensor,
-    block_shape: list[int] = DEFAULT_BLOCK_SHAPE,
+    x: torch.Tensor, block_shape: list[int] = DEFAULT_BLOCK_SHAPE
 ) -> tuple[torch.Tensor, torch.Tensor]:
     block_m, block_n = block_shape
     assert x.dim() == 2

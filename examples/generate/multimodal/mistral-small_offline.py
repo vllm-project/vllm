@@ -86,7 +86,7 @@ def run_simple_demo(args: argparse.Namespace):
                     },
                 },
             ],
-        },
+        }
     ]
     outputs = llm.chat(messages, sampling_params=sampling_params)
     print("-" * 50)
@@ -126,19 +126,11 @@ def run_advanced_demo(args: argparse.Namespace):
                 {"type": "image_url", "image_url": {"url": url_2}},
             ],
         },
-        {
-            "role": "assistant",
-            "content": "The images show nature.",
-        },
+        {"role": "assistant", "content": "The images show nature."},
+        {"role": "user", "content": "More details please and answer only in French!."},
         {
             "role": "user",
-            "content": "More details please and answer only in French!.",
-        },
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": url_3}},
-            ],
+            "content": [{"type": "image_url", "image_url": {"url": url_3}}],
         },
     ]
 

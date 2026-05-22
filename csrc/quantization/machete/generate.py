@@ -409,10 +409,7 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     sources = []
 
     sources.append(
-        (
-            "machete_mm_dispatch",
-            mm_dispatch_template.render(impl_configs=impl_configs),
-        )
+        ("machete_mm_dispatch", mm_dispatch_template.render(impl_configs=impl_configs))
     )
 
     prepack_types = []
@@ -448,9 +445,7 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     sources.append(
         (
             "machete_prepack",
-            prepack_dispatch_template.render(
-                types=unique_prepack_types,
-            ),
+            prepack_dispatch_template.render(types=unique_prepack_types),
         )
     )
 

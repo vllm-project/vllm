@@ -29,9 +29,7 @@ _PORTS_FMT = "!3I"
 
 
 def _allocate_group_ports(
-    key: str,
-    host: str,
-    coord_store: Store,
+    key: str, host: str, coord_store: Store
 ) -> tuple[list[int], list[socket.socket]]:
     """Bind 3 sockets and publish the ports to *coord_store*.
 
@@ -103,11 +101,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
                 key = f"{group_name}_{idx}"
                 if self.rank_in_group == 0:
-                    ports, socks = _allocate_group_ports(
-                        key,
-                        host,
-                        coord_store,
-                    )
+                    ports, socks = _allocate_group_ports(key, host, coord_store)
                 else:
                     ports = _fetch_group_ports(key, coord_store)
                     socks = []

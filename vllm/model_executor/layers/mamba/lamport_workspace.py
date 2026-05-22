@@ -221,9 +221,7 @@ class LamportWorkspace:
 
     @staticmethod
     def compute_comm_size_for_minimax(
-        max_tokens: int,
-        world_size: int,
-        fused_qk: bool = True,
+        max_tokens: int, world_size: int, fused_qk: bool = True
     ) -> int:
         """
         Return a safe ``comm_size`` (in bytes) for MiniMaxReduceRMSKernel.

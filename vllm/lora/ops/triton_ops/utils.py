@@ -233,10 +233,7 @@ def get_lora_op_configs(
             "max_nreg": None,
         }
     # The default config for fused_moe_lora ops
-    elif op_type in [
-        "fused_moe_lora_w13_shrink",
-        "fused_moe_lora_w2_shrink",
-    ]:
+    elif op_type in ["fused_moe_lora_w13_shrink", "fused_moe_lora_w2_shrink"]:
         default = {
             "block_m": 64,
             "block_n": min(64, next_power_of_2(rank)),
@@ -246,10 +243,7 @@ def get_lora_op_configs(
             "group_size_m": 8,
             "split_k": 1,
         }
-    elif op_type in [
-        "fused_moe_lora_w13_expand",
-        "fused_moe_lora_w2_expand",
-    ]:
+    elif op_type in ["fused_moe_lora_w13_expand", "fused_moe_lora_w2_expand"]:
         default = {
             "block_m": 64,
             "block_n": 64,
@@ -335,9 +329,7 @@ def supports_tma(device: torch.device | None = None) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
 
 
-def _normalize_lora_config_keys(
-    config: dict[str, int | None],
-) -> dict[str, int | None]:
+def _normalize_lora_config_keys(config: dict[str, int | None]) -> dict[str, int | None]:
     """Normalize Triton config dict keys to uppercase BLOCK_SIZE_* format."""
     out: dict[str, int | None] = {}
     for key, val in config.items():

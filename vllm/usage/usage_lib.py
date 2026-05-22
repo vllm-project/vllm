@@ -99,9 +99,7 @@ def _detect_cloud_provider() -> str:
                     return provider
 
     # Try detecting through environment variables
-    env_to_cloud_provider = {
-        "RUNPOD_DC_ID": "RUNPOD",
-    }
+    env_to_cloud_provider = {"RUNPOD_DC_ID": "RUNPOD"}
     for env_var, provider in env_to_cloud_provider.items():
         if os.environ.get(env_var):
             return provider
@@ -254,10 +252,7 @@ class UsageMessage:
         """
         while True:
             time.sleep(600)
-            data = {
-                "uuid": self.uuid,
-                "log_time": _get_current_timestamp_ns(),
-            }
+            data = {"uuid": self.uuid, "log_time": _get_current_timestamp_ns()}
             data.update(_GLOBAL_RUNTIME_DATA)
 
             self._write_to_file(data)

@@ -14,11 +14,7 @@ from typing import Annotated, Literal
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import (
-    BartConfig,
-    BatchFeature,
-    PretrainedConfig,
-)
+from transformers import BartConfig, BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
@@ -41,10 +37,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -176,8 +169,7 @@ class BartDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.encoder_attn(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+            hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states
         )
 
         hidden_states = residual + hidden_states
@@ -216,8 +208,7 @@ class MBartDecoderLayer(BartDecoderLayer):
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
         hidden_states = self.encoder_attn(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+            hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states
         )
 
         hidden_states = residual + hidden_states
@@ -388,9 +379,7 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
         return (final_size[0] // patch_size) * ((final_size[1] // patch_size) // 4) + 1
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         image_tokens = self.get_num_image_tokens()
         return {"image": image_tokens}
@@ -423,9 +412,7 @@ class NemotronParseMultiModalProcessor(
     EncDecMultiModalProcessor[NemotronParseProcessingInfo]
 ):
     def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
+        self, prompt: str | list[int], mm_items: MultiModalDataItems
     ) -> str | list[int]:
         return [0]
 
@@ -449,9 +436,7 @@ class NemotronParseMultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
@@ -465,9 +450,7 @@ class NemotronParseMultiModalProcessor(
 
         return [
             PromptReplacement(
-                modality="image",
-                target=[0],
-                replacement=[0] * num_image_tokens,
+                modality="image", target=[0], replacement=[0] * num_image_tokens
             )
         ]
 
@@ -633,10 +616,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
             return NemotronParsePixelInputs(
                 type="pixel_values",
                 data=pixel_values,
-                resolve_bindings={
-                    "h": h,
-                    "w": w,
-                },
+                resolve_bindings={"h": h, "w": w},
             )
 
         if image_embeds is not None:
@@ -684,10 +664,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

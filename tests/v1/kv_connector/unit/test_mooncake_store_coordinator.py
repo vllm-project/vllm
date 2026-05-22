@@ -175,10 +175,7 @@ def test_coordinator_hybrid_hole_in_full_clips_both():
 def test_coordinator_group_block_size_double_hash():
     """Group block_size=32 over hash_block_size=16 hashes: adjacent
     hashes merge before pool lookup."""
-    groups = [
-        KVCacheGroupSpec(["L0"], _full(16)),
-        KVCacheGroupSpec(["L1"], _full(32)),
-    ]
+    groups = [KVCacheGroupSpec(["L0"], _full(16)), KVCacheGroupSpec(["L1"], _full(32))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     big_hashes = list(BlockHashListWithBlockSize(hs, 16, 32))

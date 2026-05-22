@@ -105,9 +105,7 @@ def _log_retry(
     )
 
 
-def _sync_retry(
-    fn: Callable[_P, _T],
-) -> Callable[_P, _T]:
+def _sync_retry(fn: Callable[_P, _T]) -> Callable[_P, _T]:
     """Add retry logic with exponential backoff to a sync method.
 
     The decorated method must accept ``timeout`` as a keyword argument.
@@ -288,11 +286,7 @@ class HTTPConnection:
 
     @_async_retry
     async def async_get_bytes(
-        self,
-        url: str,
-        *,
-        timeout: float | None = None,
-        allow_redirects: bool = True,
+        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
     ) -> bytes:
         async with await self.get_async_response(
             url, timeout=timeout, allow_redirects=allow_redirects
@@ -307,12 +301,7 @@ class HTTPConnection:
 
             return r.text
 
-    async def async_get_text(
-        self,
-        url: str,
-        *,
-        timeout: float | None = None,
-    ) -> str:
+    async def async_get_text(self, url: str, *, timeout: float | None = None) -> str:
         async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -324,12 +313,7 @@ class HTTPConnection:
 
             return r.json()
 
-    async def async_get_json(
-        self,
-        url: str,
-        *,
-        timeout: float | None = None,
-    ) -> str:
+    async def async_get_json(self, url: str, *, timeout: float | None = None) -> str:
         async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -369,10 +353,7 @@ class HTTPConnection:
         chunk_size: int = 128,
     ) -> Path:
         try:
-            async with await self.get_async_response(
-                url,
-                timeout=timeout,
-            ) as r:
+            async with await self.get_async_response(url, timeout=timeout) as r:
                 r.raise_for_status()
 
                 with save_path.open("wb") as f:

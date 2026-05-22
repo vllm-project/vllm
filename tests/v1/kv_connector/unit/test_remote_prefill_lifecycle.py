@@ -167,14 +167,10 @@ def test_interleaved_lifecycle():
         do_remote_prefill=True,
     )
     request_local_a = create_request(
-        request_id=2,
-        block_size=BLOCK_SIZE,
-        num_tokens=NUM_TOKENS,
+        request_id=2, block_size=BLOCK_SIZE, num_tokens=NUM_TOKENS
     )
     request_local_b = create_request(
-        request_id=3,
-        block_size=BLOCK_SIZE,
-        num_tokens=NUM_TOKENS,
+        request_id=3, block_size=BLOCK_SIZE, num_tokens=NUM_TOKENS
     )
 
     # STEP 1: Regular request is running.
@@ -240,8 +236,7 @@ def test_interleaved_lifecycle():
     # STEP 6: Hit EOS and free.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(
-        [request_local_a, request_local_b, request_remote],
-        use_eos=True,
+        [request_local_a, request_local_b, request_remote], use_eos=True
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     scheduler.schedule()
@@ -602,23 +597,18 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     BLOCK_SIZE = 16
 
     vllm_config = create_vllm_config(
-        max_num_batched_tokens=BATCH_SIZE,
-        block_size=BLOCK_SIZE,
+        max_num_batched_tokens=BATCH_SIZE, block_size=BLOCK_SIZE
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
 
     kv_cache_config = make_kv_cache_config(
-        block_size=BLOCK_SIZE,
-        mamba_enabled=True,
-        num_blocks=10000,
+        block_size=BLOCK_SIZE, mamba_enabled=True, num_blocks=10000
     )
 
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 
     request = create_request(
-        num_tokens=NUM_TOKENS,
-        do_remote_decode=True,
-        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS, do_remote_decode=True, block_size=BLOCK_SIZE
     )
     request.max_tokens = 128
     scheduler.add_request(request)

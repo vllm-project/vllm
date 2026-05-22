@@ -31,10 +31,7 @@ RMS_EPS = 1e-6
 
 
 def unfused_norm_router_gemm(
-    x: torch.Tensor,
-    norm_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    eps: float,
+    x: torch.Tensor, norm_weight: torch.Tensor, gate_weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Call ``_C::rms_norm`` directly (mirroring ``_dsv4_pro_norm_gate``'s
     # fallback path) so the benchmarked baseline doesn't inherit any
@@ -47,10 +44,7 @@ def unfused_norm_router_gemm(
 
 
 def fused_norm_router_gemm(
-    x: torch.Tensor,
-    norm_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    eps: float,
+    x: torch.Tensor, norm_weight: torch.Tensor, gate_weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return vllm_ops.dsv4_norm_router_gemm(x, norm_weight, gate_weight, eps)
 
@@ -92,16 +86,10 @@ def calculate_diff(
     print(f"logits    |fused - unfused| = {_max_abs(logits_fused, logits_unfused):.3e}")
 
     ok_normed = torch.allclose(
-        normed_fused.float(),
-        normed_unfused.float(),
-        atol=normed_atol,
-        rtol=rtol,
+        normed_fused.float(), normed_unfused.float(), atol=normed_atol, rtol=rtol
     )
     ok_logits = torch.allclose(
-        logits_fused.float(),
-        logits_unfused.float(),
-        atol=logits_atol,
-        rtol=rtol,
+        logits_fused.float(), logits_unfused.float(), atol=logits_atol, rtol=rtol
     )
     if ok_normed and ok_logits:
         print(
@@ -155,11 +143,7 @@ def get_benchmark():
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default="./configs/norm_router_gemm/",
-    )
+    parser.add_argument("--save-path", type=str, default="./configs/norm_router_gemm/")
     parser.add_argument(
         "--skip-bench",
         action="store_true",

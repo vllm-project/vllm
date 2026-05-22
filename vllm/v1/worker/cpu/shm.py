@@ -45,10 +45,7 @@ import vllm.utils.torch_utils as torch_utils
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
-    device: str | torch.device,
-    pin_memory: bool = False,
+    data: list, dtype: torch.dtype, device: str | torch.device, pin_memory: bool = False
 ) -> torch.Tensor:
     return torch.tensor(data, dtype=dtype, device="cpu")
 

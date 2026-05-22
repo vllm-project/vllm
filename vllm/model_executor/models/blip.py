@@ -136,10 +136,7 @@ class BlipAttention(nn.Module):
             .contiguous()
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         """Input shape: Batch x Time x Channel"""
 
         qkv_states, _ = self.qkv(hidden_states)
@@ -196,9 +193,7 @@ class BlipEncoderLayer(nn.Module):
 
         # fallback to sdpa attention if tp unavailable
         self.self_attn = BlipAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = BlipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")

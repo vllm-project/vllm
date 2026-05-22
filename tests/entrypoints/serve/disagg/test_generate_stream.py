@@ -12,10 +12,7 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.disagg.protocol import (
-    GenerateRequest,
-    GenerateResponse,
-)
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logprobs import Logprob
@@ -25,9 +22,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
-BASE_MODEL_PATHS = [
-    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
-]
+BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
@@ -77,14 +72,13 @@ class MockVllmConfig:
 
 def _build_renderer(model_config: MockModelConfig):
     return renderer_from_config(
-        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig())
     )
 
 
 def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
     models = OpenAIServingModels(
-        engine_client=engine,
-        base_model_paths=BASE_MODEL_PATHS,
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
     )
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
@@ -396,10 +390,7 @@ async def test_stream_continuous_usage():
         sampling_params=SamplingParams(max_tokens=10),
         model=MODEL_NAME,
         stream=True,
-        stream_options=StreamOptions(
-            include_usage=True,
-            continuous_usage_stats=True,
-        ),
+        stream_options=StreamOptions(include_usage=True, continuous_usage_stats=True),
     )
 
     response = await serving.serve_tokens(request)
@@ -431,9 +422,7 @@ async def test_stream_with_logprobs():
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
-            "req-1",
-            token_ids=[10],
-            logprobs=[{10: Logprob(logprob=-0.5)}],
+            "req-1", token_ids=[10], logprobs=[{10: Logprob(logprob=-0.5)}]
         )
         yield _make_request_output(
             "req-1",

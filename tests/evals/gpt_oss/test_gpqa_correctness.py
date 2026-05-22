@@ -123,11 +123,7 @@ def test_gpqa_correctness(config_filename):
 
     # Add standard server arguments
     server_args.extend(
-        [
-            "--trust-remote-code",
-            "--enforce-eager",
-            "--disable-uvicorn-access-log",
-        ]
+        ["--trust-remote-code", "--enforce-eager", "--disable-uvicorn-access-log"]
     )
 
     # Build server environment with tiktoken path and any config-specified vars

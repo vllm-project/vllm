@@ -199,10 +199,7 @@ class CompleteCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
 
-        kwargs = {
-            "model": model_name,
-            "stream": True,
-        }
+        kwargs = {"model": model_name, "stream": True}
         if args.max_tokens:
             kwargs["max_tokens"] = args.max_tokens
 

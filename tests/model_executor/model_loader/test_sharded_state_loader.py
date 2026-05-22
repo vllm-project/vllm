@@ -23,11 +23,7 @@ prompts = [
 ]
 
 # Create a sampling params object.
-sampling_params = SamplingParams(
-    temperature=0,
-    max_tokens=256,
-    ignore_eos=True,
-)
+sampling_params = SamplingParams(temperature=0, max_tokens=256, ignore_eos=True)
 
 
 def test_filter_subtensors():

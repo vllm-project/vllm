@@ -36,11 +36,7 @@ def _compute_slot_mapping_kernel_impl(
 ) -> None:
     assert TOTAL_CP_WORLD_SIZE == 1, "Context Parallelism is not supported on CPU."
     torch.ops._C.compute_slot_mapping_kernel_impl(
-        query_start_loc,
-        positions,
-        block_table,
-        slot_mapping,
-        block_size,
+        query_start_loc, positions, block_table, slot_mapping, block_size
     )
 
 
@@ -274,12 +270,7 @@ def _rejection_random_sample_kernel_impl(
 
 
 def _expand_kernel_impl(
-    output,
-    input_val,
-    cu_num_tokens,
-    replace_from,
-    replace_to,
-    MAX_NUM_TOKENS=None,
+    output, input_val, cu_num_tokens, replace_from, replace_to, MAX_NUM_TOKENS=None
 ):
     torch.ops._C.expand_kernel_impl(
         _ensure_int64(output),

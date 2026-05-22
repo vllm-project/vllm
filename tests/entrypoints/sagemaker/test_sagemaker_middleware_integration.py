@@ -13,9 +13,7 @@ import pytest
 import requests
 
 from ...utils import RemoteOpenAIServer
-from .conftest import (
-    MODEL_NAME_SMOLLM,
-)
+from .conftest import MODEL_NAME_SMOLLM
 
 
 class TestMiddlewareIntegration:

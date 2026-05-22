@@ -94,11 +94,7 @@ def _fwd_kernel_ep_scatter_1(
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E):
         offs = start_m + off_expert
         mask = offs < cur_expert_token_num
-        tl.store(
-            m_indices_start_ptr + offs,
-            cur_expert,
-            mask=mask,
-        )
+        tl.store(m_indices_start_ptr + offs, cur_expert, mask=mask)
 
 
 @triton.jit
@@ -385,12 +381,7 @@ def deepgemm_moe_permute(
     # initialize expert_ids to -1 so any row that is not explicitly written
     # by the scatter kernel will be treated as invalid and skipped by
     # DeepGEMM's scheduler.
-    expert_ids = torch.full(
-        (M_sum,),
-        fill_value=-1,
-        device=device,
-        dtype=torch.int32,
-    )
+    expert_ids = torch.full((M_sum,), fill_value=-1, device=device, dtype=torch.int32)
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
 
     expert_num_tokens = None

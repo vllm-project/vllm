@@ -178,9 +178,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -230,9 +228,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         return output
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_chunks = hf_inputs.get("audio_num_chunks", torch.zeros(0))
         return dict(
@@ -360,8 +356,7 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
         self.linear_in = nn.Linear(dim_in, projector_audio_config.d_model)
 
         self.embed_positions = nn.Embedding(
-            projector_audio_config.max_source_positions,
-            projector_audio_config.d_model,
+            projector_audio_config.max_source_positions, projector_audio_config.d_model
         )
 
         self.layers = nn.ModuleList(
@@ -405,9 +400,7 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
 
         for layer in self.layers:
             hidden_states = layer(
-                hidden_states,
-                attention_mask=extended_attention_mask,
-                **kwargs,
+                hidden_states, attention_mask=extended_attention_mask, **kwargs
             )
             # BC version that allows for the old tupled output
             if isinstance(hidden_states, tuple):
@@ -471,16 +464,12 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             None, :
         ].lt(audio_feature_len.view(-1, 1))
         attention_mask = self.get_extended_attention_mask(
-            attention_mask,
-            None,
-            dtype=hidden_states.dtype,
+            attention_mask, None, dtype=hidden_states.dtype
         )
         return attention_mask
 
     def forward(
-        self,
-        input_features: torch.Tensor,
-        audio_lens: torch.Tensor | None = None,
+        self, input_features: torch.Tensor, audio_lens: torch.Tensor | None = None
     ):
         expected_seq_length = self.max_context_length
         if input_features.shape[-1] > expected_seq_length:
@@ -511,11 +500,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             kwargs["layer_head_mask"] = None
 
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(
-                hidden_states,
-                attention_mask,
-                **kwargs,
-            )
+            hidden_states = encoder_layer(hidden_states, attention_mask, **kwargs)
             # BC version that allows for the old tupled output
             if isinstance(hidden_states, tuple):
                 hidden_states = hidden_states[0]
@@ -555,8 +540,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         assert self.multi_modal_config
 
         self.configure_mm_token_handling(
-            self.config.vocab_size,
-            [self.config.audio_token_index],
+            self.config.vocab_size, [self.config.audio_token_index]
         )
 
         self.secondary_weights = []
@@ -665,8 +649,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         raise AssertionError("This line should be unreachable.")
 
     def _process_audio_input(
-        self,
-        audio_input: UltravoxAudioInputs,
+        self, audio_input: UltravoxAudioInputs
     ) -> NestedTensors | tuple[torch.Tensor, ...]:
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]

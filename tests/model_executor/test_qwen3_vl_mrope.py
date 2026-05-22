@@ -143,7 +143,7 @@ def test_match_qwen3vl_mrope_evs_on(
                 "video_grid_thw": MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
                     field=None,  # HACK.
-                ),
+                )
             }
         ),
         modality="video",
@@ -151,9 +151,7 @@ def test_match_qwen3vl_mrope_evs_on(
         mm_position=PlaceholderRange(offset=0, length=len(input_tokens)),
     )
     expected_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
-        input_tokens=input_tokens,
-        mm_features=[mm_feature],
-        config=hf_config,
+        input_tokens=input_tokens, mm_features=[mm_feature], config=hf_config
     )
 
     # Compute mrope for a video-only media (unpruned).
@@ -163,7 +161,7 @@ def test_match_qwen3vl_mrope_evs_on(
                 "video_grid_thw": MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
                     field=None,  # HACK.
-                ),
+                )
             }
         ),
         modality="video",
@@ -171,9 +169,7 @@ def test_match_qwen3vl_mrope_evs_on(
         mm_position=PlaceholderRange(offset=0, length=video_tokens.numel()),
     )
     video_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
-        input_tokens=video_tokens.tolist(),
-        mm_features=[mm_feature],
-        config=hf_config,
+        input_tokens=video_tokens.tolist(), mm_features=[mm_feature], config=hf_config
     )
     video_mrope = video_mrope.permute(1, 0)  # [N, 3]
     hidden_size = 16
@@ -204,13 +200,7 @@ def test_match_qwen3vl_mrope_evs_on(
         (len(video_tokens_pruned), hidden_size), device=video_mrope.device
     )
 
-    video_embeddings = torch.cat(
-        [
-            video_embeddings,
-            expanded_positions.float(),
-        ],
-        dim=1,
-    )
+    video_embeddings = torch.cat([video_embeddings, expanded_positions.float()], dim=1)
     multimodal_embeddings = [video_embeddings]
 
     expected_mrope_masked = expected_mrope[:, whole_sequence_retention_mask]

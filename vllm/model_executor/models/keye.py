@@ -21,9 +21,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    MMEncoderAttention,
-)
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -31,9 +29,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -85,26 +81,18 @@ logger = init_logger(__name__)
 
 
 def smart_resize(
-    height: int,
-    width: int,
-    factor: int,
-    min_pixels: int,
-    max_pixels: int,
+    height: int, width: int, factor: int, min_pixels: int, max_pixels: int
 ):
     if height < factor:
         logger.warning(
-            "smart_resize: height=%s < factor=%s, reset height=factor",
-            height,
-            factor,
+            "smart_resize: height=%s < factor=%s, reset height=factor", height, factor
         )
         width = round((width * factor) / height)
         height = factor
 
     if width < factor:
         logger.warning(
-            "smart_resize: width=%s < factor=%s, reset width=factor",
-            width,
-            factor,
+            "smart_resize: width=%s < factor=%s, reset width=factor", width, factor
         )
         height = round((height * factor) / width)
         width = factor
@@ -270,8 +258,7 @@ class KeyeVisionEmbeddings(nn.Module):
 
         if len(self.cache_position_embedding) >= max_cache:
             min_hit_grid = min(
-                self.cache_position_count,
-                key=self.cache_position_count.get,
+                self.cache_position_count, key=self.cache_position_count.get
             )
             self.cache_position_count.pop(min_hit_grid)
             self.cache_position_embedding.pop(min_hit_grid)
@@ -296,13 +283,7 @@ class KeyeVisionEmbeddings(nn.Module):
                 raise ValueError(
                     "position_ids cannot be None when pixel_values.dim() is 5."
                 )
-            (
-                batch_size,
-                sequence_len,
-                channel,
-                height,
-                width,
-            ) = pixel_values.shape
+            (batch_size, sequence_len, channel, height, width) = pixel_values.shape
             target_dtype = self.patch_embedding.weight.dtype
             pixel_values = rearrange(pixel_values, "b l c h w -> (b l) c h w")
             patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
@@ -406,8 +387,7 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            enable_fp32_compute=True,
+            enforce_enable=True, enable_fp32_compute=True
         )
 
     def forward(
@@ -419,48 +399,25 @@ class KeyeSiglipAttention(nn.Module):
         rope_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size, self.kv_size, self.kv_size],
-            dim=-1,
-        )
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         if rope_emb is None:
             q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-            k = k.view(
-                *k.shape[:-1],
-                self.num_kv_heads,
-                self.head_dim,
-            )
-            v = v.view(
-                *v.shape[:-1],
-                self.num_kv_heads,
-                self.head_dim,
-            )
+            k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
+            v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
         else:
             if cu_seqlens is None:
                 raise ValueError("cu_seqlens cannot be None when rope_emb is not None.")
             cos, sin = rope_emb
             q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-            k = k.view(
-                *k.shape[:-1],
-                self.num_kv_heads,
-                self.head_dim,
-            )
+            k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
             q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin, self.apply_rotary_emb)
-            v = v.view(
-                *v.shape[:-1],
-                self.num_kv_heads,
-                self.head_dim,
-            )
+            v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
 
         context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            query=q, key=k, value=v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         context_layer = rearrange(context_layer, "b s h d -> b s (h d)")
 
@@ -483,9 +440,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         seq = torch.arange(
-            seqlen,
-            device=self.inv_freq.device,
-            dtype=self.inv_freq.dtype,
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
@@ -502,16 +457,10 @@ class KeyeSiglipEncoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = KeyeSiglipAttention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = SiglipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -609,10 +558,7 @@ class KeyeSiglipEncoder(nn.Module):
                 width_position_ids = torch.concat(split_wids, dim=0)
                 height_position_ids = torch.concat(split_hids, dim=0)
 
-            pids = torch.stack(
-                [height_position_ids, width_position_ids],
-                dim=-1,
-            )
+            pids = torch.stack([height_position_ids, width_position_ids], dim=-1)
             max_grid_size = pids.max() + 1
             rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
             rope_emb = rope_emb_max_grid[pids].flatten(1)
@@ -649,9 +595,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
 
         self.embeddings = KeyeVisionEmbeddings(config)
         self.encoder = KeyeSiglipEncoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
+            config, quant_config=quant_config, prefix=f"{prefix}.encoder"
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -794,22 +738,14 @@ class KeyeSiglipVisionModel(nn.Module):
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
                 param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = (
                     loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
                 )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            for (
-                param_name,
-                weight_name,
-                shard_id,
-            ) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -830,11 +766,7 @@ class KeyeSiglipVisionModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -916,9 +848,7 @@ class Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-def _keye_field_config(
-    hf_inputs: Mapping[str, torch.Tensor],
-):
+def _keye_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
     image_grid_sizes = image_grid_thw.prod(-1)
 
@@ -939,34 +869,26 @@ def _keye_field_config(
 
 class KeyeMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields={"image_embeds", "image_grid_thw"},
                 fields_factory=_keye_field_config,
             )
 
         return super()._parse_image_data(data)
 
     def _parse_video_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[VideoItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields={"video_embeds", "video_grid_thw"},
                 fields_factory=_keye_field_config,
             )
 
@@ -985,18 +907,14 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
     def get_data_parser(self):
         return KeyeMultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
+            expected_hidden_size=self._get_expected_hidden_size()
         )
 
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
@@ -1138,8 +1056,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1),
-            self.get_max_frame_per_video(),
+            max_total_frames // max(max_videos, 1), self.get_max_frame_per_video()
         )
 
         return max(max_frames_per_video, 1)
@@ -1257,24 +1174,15 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _keye_field_config(hf_inputs)
 
 
 class BaseKeyeModule(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -1500,10 +1408,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1513,9 +1418,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector="mlp_AR.",
-            tower_model="visual.",
+            language_model="language_model", connector="mlp_AR.", tower_model="visual."
         )
 
 
@@ -1667,19 +1570,14 @@ class KeyeForConditionalGeneration(
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list: list = []
         st = 0
 
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-        ) in self.iter_mm_grid_thw(mm_features):
+        for offset, llm_grid_t, llm_grid_h, llm_grid_w in self.iter_mm_grid_thw(
+            mm_features
+        ):
             text_len = offset - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0

@@ -77,7 +77,7 @@ KV_CACHE_MODELS = [
                 "AutoFP8 split K/V case (PR #27717)."
             )
         ),
-    ),
+    )
 ]
 
 
@@ -205,11 +205,7 @@ def test_online_quantization(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_online_quant_peak_mem(
-    vllm_runner,
-    caplog_mp_spawn,
-    monkeypatch,
-) -> None:
+def test_online_quant_peak_mem(vllm_runner, caplog_mp_spawn, monkeypatch) -> None:
     # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
     # 1. it covers both Linear and MoE paths
     # 2. it is already used by other tests in CI, so adding it here
@@ -226,11 +222,7 @@ def test_online_quant_peak_mem(
 
     with (
         caplog_mp_spawn(logging.DEBUG) as log_holder,
-        vllm_runner(
-            model_name,
-            quantization="fp8",
-            enforce_eager=True,
-        ) as llm,
+        vllm_runner(model_name, quantization="fp8", enforce_eager=True) as llm,
     ):
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
@@ -279,11 +271,7 @@ def test_online_quant_peak_mem(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_online_quant_load_format_dummy(
-    vllm_runner,
-    monkeypatch,
-    caplog,
-) -> None:
+def test_online_quant_load_format_dummy(vllm_runner, monkeypatch, caplog) -> None:
     with vllm_runner(
         "ibm-granite/granite-3.0-1b-a400m-base",
         quantization="fp8",
@@ -434,12 +422,7 @@ def test_fp8_reloading(
             method.use_marlin = use_marlin
 
         else:
-            layer = FusedMoE(
-                num_experts=1,
-                top_k=1,
-                hidden_size=1,
-                intermediate_size=1,
-            )
+            layer = FusedMoE(num_experts=1, top_k=1, hidden_size=1, intermediate_size=1)
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,

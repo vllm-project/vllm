@@ -175,10 +175,7 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         )
 
         self.A = nn.Parameter(
-            torch.empty(
-                divide(self.num_heads, self.tp_size),
-                dtype=torch.float32,
-            )
+            torch.empty(divide(self.num_heads, self.tp_size), dtype=torch.float32)
         )
         self.D = nn.Parameter(torch.ones(divide(self.num_heads, self.tp_size)))
         self.dt_bias = nn.Parameter(torch.ones(divide(self.num_heads, self.tp_size)))
@@ -237,24 +234,10 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         dt = self.dt_proj(time_step)
         return B, C, dt
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        **kwargs,
-    ):
-        torch.ops.vllm.plamo2_mamba_mixer(
-            hidden_states,
-            output,
-            self.prefix,
-        )
+    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor, **kwargs):
+        torch.ops.vllm.plamo2_mamba_mixer(hidden_states, output, self.prefix)
 
-    def forward_impl(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        **kwargs,
-    ):
+    def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor, **kwargs):
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -313,9 +296,7 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         hidden_states_d, hidden_states_p = torch.split(
-            hidden_states[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
+            hidden_states[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
         gate_d, gate_p = torch.split(
             gate[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
@@ -331,9 +312,7 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
             device=hidden_states.device,
         )
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-            preallocated_ssm_out,
-            [num_decodes, num_prefill_tokens],
-            dim=0,
+            preallocated_ssm_out, [num_decodes, num_prefill_tokens], dim=0
         )
 
         # Process prefill requests
@@ -484,9 +463,7 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
 
 
 def plamo2_mamba_mixer(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -494,9 +471,7 @@ def plamo2_mamba_mixer(
 
 
 def plamo2_mamba_mixer_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str
 ) -> None:
     return
 
@@ -626,10 +601,7 @@ class Plamo2AttentionMixer(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -689,17 +661,10 @@ class Plamo2DecoderLayer(nn.Module):
         if self.is_mamba:
             # Plamo2MambaMixer writes output to this tensor
             output = torch.empty_like(hidden_states)
-            mixer_kwargs = {
-                "output": output,
-            }
+            mixer_kwargs = {"output": output}
         else:
-            mixer_kwargs = {
-                "positions": positions,
-            }
-        hidden_states = self.mixer(
-            hidden_states=hidden_states,
-            **mixer_kwargs,
-        )
+            mixer_kwargs = {"positions": positions}
+        hidden_states = self.mixer(hidden_states=hidden_states, **mixer_kwargs)
         if self.is_mamba:
             hidden_states = output
         hidden_states = self.post_mixer_norm(hidden_states)
@@ -737,9 +702,7 @@ class Plamo2Decoder(torch.nn.Module):
     ) -> torch.Tensor:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
         return hidden_states, residual
 
@@ -755,9 +718,7 @@ class Plamo2Model(torch.nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            prefix=f"{prefix}.embed_tokens",
+            self.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -787,9 +748,7 @@ class Plamo2Model(torch.nn.Module):
             residual = intermediate_tensors["residual"]
 
         hidden_states, residual = self.layers(
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
+            positions=positions, hidden_states=hidden_states, residual=residual
         )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -905,9 +864,7 @@ class Plamo2ForCausalLM(
         )
         self.vocab_size = self.config.vocab_size
         self.lm_head = ParallelLMHead(
-            self.vocab_size,
-            self.config.hidden_size,
-            prefix=f"{prefix}.lm_head",
+            self.vocab_size, self.config.hidden_size, prefix=f"{prefix}.lm_head"
         )
         if self.config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
@@ -937,8 +894,7 @@ class Plamo2ForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
@@ -948,8 +904,7 @@ class Plamo2ForCausalLM(
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
         Args:
@@ -977,10 +932,7 @@ class Plamo2ForCausalLM(
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

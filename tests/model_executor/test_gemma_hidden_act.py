@@ -16,16 +16,10 @@ from vllm.model_executor.models.gemma4 import Gemma4MLP
 
 @pytest.mark.parametrize(
     ("activation_name", "expected_type"),
-    [
-        ("gelu_pytorch_tanh", GeluAndMul),
-        ("silu", SiluAndMul),
-        ("swish", SiluAndMul),
-    ],
+    [("gelu_pytorch_tanh", GeluAndMul), ("silu", SiluAndMul), ("swish", SiluAndMul)],
 )
 def test_get_act_and_mul_fn_supports_gemma_hidden_act_aliases(
-    activation_name: str,
-    expected_type: type[torch.nn.Module],
-    default_vllm_config,
+    activation_name: str, expected_type: type[torch.nn.Module], default_vllm_config
 ) -> None:
     assert isinstance(get_act_and_mul_fn(activation_name), expected_type)
 
@@ -37,11 +31,7 @@ def test_get_act_fn_supports_swish_alias() -> None:
 @pytest.mark.parametrize("mlp_cls", [Gemma3MLP, Gemma4MLP])
 @pytest.mark.parametrize(
     ("activation_name", "expected_type"),
-    [
-        ("gelu_pytorch_tanh", GeluAndMul),
-        ("silu", SiluAndMul),
-        ("swish", SiluAndMul),
-    ],
+    [("gelu_pytorch_tanh", GeluAndMul), ("silu", SiluAndMul), ("swish", SiluAndMul)],
 )
 def test_gemma_mlp_supports_hidden_act_variants(
     mlp_cls: type[torch.nn.Module],
@@ -51,9 +41,7 @@ def test_gemma_mlp_supports_hidden_act_variants(
     dist_init,
 ) -> None:
     mlp = mlp_cls(
-        hidden_size=16,
-        intermediate_size=32,
-        hidden_activation=activation_name,
+        hidden_size=16, intermediate_size=32, hidden_activation=activation_name
     )
 
     assert isinstance(mlp.act_fn, expected_type)

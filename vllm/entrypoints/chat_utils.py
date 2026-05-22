@@ -412,10 +412,7 @@ class _BatchedSingleItemField(MultiModalSharedField):
     pass
 
 
-def _detect_field(
-    tensors: list[torch.Tensor],
-    mm_processor: BaseMultiModalProcessor,
-):
+def _detect_field(tensors: list[torch.Tensor], mm_processor: BaseMultiModalProcessor):
     first_item = tensors[0]
     hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
 
@@ -444,8 +441,7 @@ def _detect_field(
 
 
 def _merge_embeds(
-    data_items: list[dict[str, "torch.Tensor"]],
-    mm_processor: BaseMultiModalProcessor,
+    data_items: list[dict[str, "torch.Tensor"]], mm_processor: BaseMultiModalProcessor
 ):
     if not data_items:
         return {}
@@ -468,8 +464,7 @@ def _merge_embeds(
     try:
         # TODO: Support per-request mm_processor_kwargs
         parsed_configs = mm_processor._get_mm_fields_config(
-            transformers.BatchFeature(data_merged),
-            {},
+            transformers.BatchFeature(data_merged), {}
         )
         parsed_fields = {key: parsed_configs[key].field for key in first_keys}
         keys_to_update = [
@@ -495,9 +490,7 @@ def _merge_embeds(
 
 
 def _get_embeds_data(
-    modality: str,
-    data_items: list[Any],
-    mm_processor: BaseMultiModalProcessor,
+    modality: str, data_items: list[Any], mm_processor: BaseMultiModalProcessor
 ):
     if len(data_items) == 0:
         return data_items
@@ -787,9 +780,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]
             self.mm_processor if self._model_config.is_multimodal_model else None
         )
         return _resolve_items(
-            dict(self._items_by_modality),
-            mm_processor,
-            self._modality_order,
+            dict(self._items_by_modality), mm_processor, self._modality_order
         )
 
     def create_parser(
@@ -816,9 +807,7 @@ class AsyncMultiModalItemTracker(
             self.mm_processor if self._model_config.is_multimodal_model else None
         )
         return _resolve_items(
-            resolved_items_by_modality,
-            mm_processor,
-            self._modality_order,
+            resolved_items_by_modality, mm_processor, self._modality_order
         )
 
     def create_parser(
@@ -861,9 +850,7 @@ class BaseMultiModalContentParser(ABC):
 
     @abstractmethod
     def parse_image_embeds(
-        self,
-        image_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, image_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         raise NotImplementedError
 
@@ -885,9 +872,7 @@ class BaseMultiModalContentParser(ABC):
 
     @abstractmethod
     def parse_audio_embeds(
-        self,
-        audio_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, audio_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         raise NotImplementedError
 
@@ -945,9 +930,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(
-        self,
-        image_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, image_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -972,9 +955,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio_embeds(
-        self,
-        audio_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, audio_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -1098,9 +1079,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(
-        self,
-        image_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, image_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -1130,9 +1109,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio_embeds(
-        self,
-        audio_embeds: str | dict[str, str] | None,
-        uuid: str | None = None,
+        self, audio_embeds: str | dict[str, str] | None, uuid: str | None = None
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -1162,9 +1139,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("audio", placeholder)
 
     def parse_image_pil(
-        self,
-        image_pil: Image.Image | None,
-        uuid: str | None = None,
+        self, image_pil: Image.Image | None, uuid: str | None = None
     ) -> None:
         future = asyncio.Future[tuple[Image.Image | None, str | None]]()
         if image_pil:
@@ -1265,9 +1240,7 @@ def validate_chat_template(chat_template: Path | str | None):
 
 
 def _load_chat_template(
-    chat_template: Path | str | None,
-    *,
-    is_literal: bool = False,
+    chat_template: Path | str | None, *, is_literal: bool = False
 ) -> str | None:
     if chat_template is None:
         return None
@@ -1316,9 +1289,7 @@ _cached_load_chat_template = lru_cache(_load_chat_template)
 
 
 def load_chat_template(
-    chat_template: Path | str | None,
-    *,
-    is_literal: bool = False,
+    chat_template: Path | str | None, *, is_literal: bool = False
 ) -> str | None:
     return _cached_load_chat_template(chat_template, is_literal=is_literal)
 
@@ -1410,10 +1381,7 @@ _ResponsesInputImageParser = TypeAdapter(ResponseInputImageParam).validate_pytho
 _ContentPart: TypeAlias = str | dict[str, str] | InputAudio | PILImage
 
 # Define a mapping from part types to their corresponding parsing functions.
-MM_PARSER_MAP: dict[
-    str,
-    Callable[[ChatCompletionContentPartParam], _ContentPart],
-] = {
+MM_PARSER_MAP: dict[str, Callable[[ChatCompletionContentPartParam], _ContentPart]] = {
     "text": lambda part: _TextParser(part).get("text", None),
     "thinking": lambda part: _ThinkParser(part).get("thinking", None),
     "input_text": lambda part: _TextParser(part).get("text", None),
@@ -1541,10 +1509,7 @@ def _parse_chat_message_content_mm_part(
     return part_type, "unknown part_type content"
 
 
-PART_TYPES_TO_SKIP_NONE_CONTENT = (
-    "text",
-    "refusal",
-)
+PART_TYPES_TO_SKIP_NONE_CONTENT = ("text", "refusal")
 
 
 def _parse_chat_message_content_parts(
@@ -1833,15 +1798,10 @@ def parse_chat_messages(
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
-    list[ConversationMessage],
-    MultiModalDataDict | None,
-    MultiModalUUIDDict | None,
+    list[ConversationMessage], MultiModalDataDict | None, MultiModalUUIDDict | None
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(
-        model_config,
-        media_io_kwargs=media_io_kwargs,
-    )
+    mm_tracker = MultiModalItemTracker(model_config, media_io_kwargs=media_io_kwargs)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1872,14 +1832,11 @@ async def parse_chat_messages_async(
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
-    list[ConversationMessage],
-    MultiModalDataDict | None,
-    MultiModalUUIDDict | None,
+    list[ConversationMessage], MultiModalDataDict | None, MultiModalUUIDDict | None
 ]:
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(
-        model_config,
-        media_io_kwargs=media_io_kwargs,
+        model_config, media_io_kwargs=media_io_kwargs
     )
 
     for msg in messages:

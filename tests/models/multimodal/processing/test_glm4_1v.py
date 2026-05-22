@@ -36,9 +36,7 @@ def test_processor_override(
 ):
     """Ensure GLM4vMultiModalProcessor can handle video frames properly."""
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs=None,
-        limit_mm_per_prompt={"video": 1},
+        model_id, mm_processor_kwargs=None, limit_mm_per_prompt={"video": 1}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = processor.info.get_tokenizer()
@@ -71,19 +69,13 @@ def test_processor_override(
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
 @pytest.mark.parametrize("backend", ["opencv", "pyav"])
-def test_video_loader_consistency(
-    model_id: str,
-    fps: int,
-    backend: str,
-):
+def test_video_loader_consistency(model_id: str, fps: int, backend: str):
     """
     Ensure dynamic video loader (pre-sampled by loader) and normal video
     loader (post-sampled by processor) produce same video processing outputs.
     """
     ctx = build_model_context(
-        model_id,
-        mm_processor_kwargs=None,
-        limit_mm_per_prompt={"video": 1},
+        model_id, mm_processor_kwargs=None, limit_mm_per_prompt={"video": 1}
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {"fps": fps}
@@ -121,6 +113,5 @@ def test_video_loader_consistency(
 
     assert static_outputs["prompt_token_ids"] == dynamic_outputs["prompt_token_ids"]
     assert batched_tensors_equal(
-        static_outputs["mm_kwargs"].get_data(),
-        dynamic_outputs["mm_kwargs"].get_data(),
+        static_outputs["mm_kwargs"].get_data(), dynamic_outputs["mm_kwargs"].get_data()
     )

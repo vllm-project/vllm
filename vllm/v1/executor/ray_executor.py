@@ -14,11 +14,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import (
-    get_distributed_init_method,
-    get_ip,
-    get_open_port,
-)
+from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
@@ -319,7 +315,7 @@ class RayDistributedExecutor(Executor):
             {
                 current_platform.device_control_env_var: ",".join(
                     map(str, node_gpus[node_id])
-                ),
+                )
             }
             for (node_id, _) in worker_node_and_gpu_ids
         ]
@@ -405,9 +401,7 @@ class RayDistributedExecutor(Executor):
             self.shutdown()
 
     def execute_model(  # type: ignore[override]
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: bool = False,
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if self.scheduler_output is not None:
             raise RuntimeError(
@@ -424,9 +418,7 @@ class RayDistributedExecutor(Executor):
         return COMPLETED_NONE_FUTURE if non_block else None
 
     def sample_tokens(  # type: ignore[override]
-        self,
-        grammar_output: "GrammarOutput | None",
-        non_block: bool = False,
+        self, grammar_output: "GrammarOutput | None", non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         """Execute the model on the Ray workers.
 

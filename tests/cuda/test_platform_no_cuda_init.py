@@ -22,9 +22,7 @@ def run_script(script_name: str) -> subprocess.CompletedProcess:
     """Run a test script in a subprocess with clean CUDA state."""
     script_path = SCRIPTS_DIR / script_name
     return subprocess.run(
-        [sys.executable, str(script_path)],
-        capture_output=True,
-        text=True,
+        [sys.executable, str(script_path)], capture_output=True, text=True
     )
 
 

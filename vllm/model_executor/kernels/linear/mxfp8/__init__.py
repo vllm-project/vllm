@@ -6,7 +6,4 @@ from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
     Mxfp8LinearLayerConfig,
 )
 
-__all__ = [
-    "Mxfp8LinearKernel",
-    "Mxfp8LinearLayerConfig",
-]
+__all__ = ["Mxfp8LinearKernel", "Mxfp8LinearLayerConfig"]

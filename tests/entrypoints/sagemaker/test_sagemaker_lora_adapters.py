@@ -54,7 +54,7 @@ async def test_sagemaker_unload_adapter_happy_path(
     # The SageMaker standards maps this to unload_lora_adapter with:
     # {"lora_name": "path_params.adapter_name"}
     unload_response = requests.delete(
-        basic_server_with_lora.url_for("adapters", adapter_name),
+        basic_server_with_lora.url_for("adapters", adapter_name)
     )
     unload_response.raise_for_status()
 
@@ -77,8 +77,7 @@ async def test_sagemaker_load_adapter_not_found(
 
 @pytest.mark.asyncio
 async def test_sagemaker_load_adapter_invalid_files(
-    basic_server_with_lora: RemoteOpenAIServer,
-    tmp_path,
+    basic_server_with_lora: RemoteOpenAIServer, tmp_path
 ):
     invalid_files = tmp_path / "invalid_adapter"
     invalid_files.mkdir()
@@ -97,15 +96,14 @@ async def test_sagemaker_unload_nonexistent_adapter(
 ):
     # Attempt to unload an adapter that doesn't exist
     unload_response = requests.delete(
-        basic_server_with_lora.url_for("adapters", "nonexistent-adapter-name"),
+        basic_server_with_lora.url_for("adapters", "nonexistent-adapter-name")
     )
     assert unload_response.status_code in (400, 404)
 
 
 @pytest.mark.asyncio
 async def test_sagemaker_invocations_with_adapter(
-    basic_server_with_lora: RemoteOpenAIServer,
-    smollm2_lora_files,
+    basic_server_with_lora: RemoteOpenAIServer, smollm2_lora_files
 ):
     # First, load an adapter via SageMaker endpoint
     adapter_name = "smollm2-lora-invoke-test"
@@ -118,13 +116,8 @@ async def test_sagemaker_invocations_with_adapter(
     # Now test the /invocations endpoint with the adapter
     invocation_response = requests.post(
         basic_server_with_lora.url_for("invocations"),
-        headers={
-            "X-Amzn-SageMaker-Adapter-Identifier": adapter_name,
-        },
-        json={
-            "prompt": "Hello, how are you?",
-            "max_tokens": 10,
-        },
+        headers={"X-Amzn-SageMaker-Adapter-Identifier": adapter_name},
+        json={"prompt": "Hello, how are you?", "max_tokens": 10},
     )
     invocation_response.raise_for_status()
     invocation_output = invocation_response.json()
@@ -160,7 +153,7 @@ async def test_sagemaker_multiple_adapters_load_unload(
     # Unload all adapters
     for adapter_name in adapter_names:
         unload_response = requests.delete(
-            basic_server_with_lora.url_for("adapters", adapter_name),
+            basic_server_with_lora.url_for("adapters", adapter_name)
         )
         unload_response.raise_for_status()
 

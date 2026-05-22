@@ -22,9 +22,7 @@ PROMPT = "On the surface of Mars, we found"
 # The second layer is quantized using bits=8, group_size=32
 # All other layers (layer index >= 2) are not quantized
 # Note: Only symmetric models are supported with Marlin kernels
-MODELS = [
-    "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
-]
+MODELS = ["ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue"]
 
 
 @pytest.mark.parametrize("model_id", MODELS)

@@ -77,10 +77,7 @@ def reference_mla_sparse_prefill(
 
 @pytest.mark.parametrize("device_str", ["xpu"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.skipif(
-    not torch.xpu.is_available(),
-    reason="XPU is required",
-)
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="XPU is required")
 def test_bf16_triton_sparse_mla(device_str, dtype):
     device = torch.device(device_str)
     s_q = 1

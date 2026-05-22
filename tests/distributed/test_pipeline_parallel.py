@@ -80,7 +80,7 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base, pp_size=pp_base, eager_mode=True),
+                ParallelSetup(tp_size=tp_base, pp_size=pp_base, eager_mode=True)
             ],
             distributed_backends=["mp"],
             runner=runner,
@@ -230,11 +230,7 @@ def _compare_tp(
     method: Literal["generate", "encode"],
     is_multimodal: bool,
 ):
-    (
-        tp_size,
-        pp_size,
-        eager_mode,
-    ) = parallel_setup
+    (tp_size, pp_size, eager_mode) = parallel_setup
 
     multi_node_only, load_format = test_options
 
@@ -305,20 +301,14 @@ def _compare_tp(
         common_args.append("--no-enable-prefix-caching")
     if require_embed_inputs:
         common_args.extend(
-            [
-                "--skip-tokenizer-init",
-                "--enable-prompt-embeds",
-                "--enable-mm-embeds",
-            ]
+            ["--skip-tokenizer-init", "--enable-prompt-embeds", "--enable-mm-embeds"]
         )
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
     if distributed_backend == "ray":
         # Test Ray Compiled Graph for all the tests
-        pp_env = {
-            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
-        }
+        pp_env = {"VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1"}
     elif distributed_backend == "mp":
         pp_env = None
     else:

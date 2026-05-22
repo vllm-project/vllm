@@ -102,11 +102,7 @@ def test_extract_tool_calls_no_tools(jamba_tool_parser):
 
 
 @pytest.mark.parametrize(
-    ids=[
-        "single_tool",
-        "single_tool_with_content",
-        "parallel_tools",
-    ],
+    ids=["single_tool", "single_tool_with_content", "parallel_tools"],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
@@ -175,12 +171,7 @@ def test_extract_tool_calls(
 
 
 @pytest.mark.parametrize(
-    ids=[
-        "no_tools",
-        "single_tool",
-        "single_tool_with_content",
-        "parallel_tools",
-    ],
+    ids=["no_tools", "single_tool", "single_tool_with_content", "parallel_tools"],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         ("""This is a test""", [], """This is a test"""),

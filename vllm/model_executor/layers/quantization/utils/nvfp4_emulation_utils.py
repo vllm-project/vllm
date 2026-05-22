@@ -8,11 +8,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 
-__all__ = [
-    "break_fp4_bytes",
-    "dequantize_to_dtype",
-    "ref_nvfp4_quant",
-]
+__all__ = ["break_fp4_bytes", "dequantize_to_dtype", "ref_nvfp4_quant"]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
@@ -215,9 +211,7 @@ def _nvfp4_quant_dequant_kernel(
 
 
 def _triton_nvfp4_quant_dequant(
-    x: torch.Tensor,
-    global_scale: torch.Tensor,
-    block_size: int,
+    x: torch.Tensor, global_scale: torch.Tensor, block_size: int
 ) -> torch.Tensor:
     """Triton-accelerated NVFP4 quantize-dequantize."""
     x_m, x_k = x.shape

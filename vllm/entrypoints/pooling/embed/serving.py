@@ -53,17 +53,13 @@ class ServingEmbedding(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
 
-    def _build_response(
-        self,
-        ctx: PoolingServeContext,
-    ) -> Response:
+    def _build_response(self, ctx: PoolingServeContext) -> Response:
         if isinstance(ctx.request, CohereEmbedRequest):
             return self._build_cohere_response_from_ctx(ctx)
         return self._build_openai_response(ctx)
 
     def _build_openai_response(
-        self,
-        ctx: EmbeddingServeContext,
+        self, ctx: EmbeddingServeContext
     ) -> JSONResponse | StreamingResponse:
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
@@ -111,10 +107,7 @@ class ServingEmbedding(PoolingServing):
             ndarray_items: list[dict[str, object]] = []
 
             for idx, final_res in enumerate(final_res_batch):
-                item_dict = EmbeddingResponseData(
-                    index=idx,
-                    embedding=[],
-                ).model_dump()
+                item_dict = EmbeddingResponseData(index=idx, embedding=[]).model_dump()
                 item_dict["embedding"] = encode_pooling_output_float_or_ndarray(
                     final_res
                 )
@@ -140,8 +133,7 @@ class ServingEmbedding(PoolingServing):
 
         for idx, final_res in enumerate(final_res_batch):
             item = EmbeddingResponseData(
-                index=idx,
-                embedding=cast(list[float] | str, encode_fn(final_res)),
+                index=idx, embedding=cast(list[float] | str, encode_fn(final_res))
             )
 
             items.append(item)
@@ -175,10 +167,7 @@ class ServingEmbedding(PoolingServing):
             endianness=endianness,
         )
 
-    def _build_cohere_response_from_ctx(
-        self,
-        ctx: PoolingServeContext,
-    ) -> JSONResponse:
+    def _build_cohere_response_from_ctx(self, ctx: PoolingServeContext) -> JSONResponse:
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
 
@@ -201,9 +190,8 @@ class ServingEmbedding(PoolingServing):
             texts=texts_echo,
             meta=CohereMeta(
                 billed_units=CohereBilledUnits(
-                    input_tokens=input_tokens,
-                    image_tokens=image_tokens,
-                ),
+                    input_tokens=input_tokens, image_tokens=image_tokens
+                )
             ),
         )
         return self.json_response_cls(content=response.model_dump(exclude_none=True))

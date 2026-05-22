@@ -258,7 +258,7 @@ def test_multi_images_models(
                 for factor in size_factors
             ],
             None,
-        ),
+        )
     ]
 
     run_test(
@@ -294,11 +294,7 @@ def test_vision_speech_models(
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
-        (
-            ["<|user|><|image_1|><|audio_1|><|end|><|assistant|>"],
-            [image],
-            [audio],
-        ),
+        (["<|user|><|image_1|><|audio_1|><|end|><|assistant|>"], [image], [audio])
     ]
 
     run_test(

@@ -155,12 +155,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(
             qweight,
-            {
-                "input_dim": 1,
-                "output_dim": 0,
-                "packed_dim": 1,
-                "pack_factor": 2,
-            }
+            {"input_dim": 1, "output_dim": 0, "packed_dim": 1, "pack_factor": 2}
             | extra_weight_attrs,
         )
         layer.register_parameter("qweight", qweight)
@@ -186,8 +181,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
 
         weight_global_scale = Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(1, dtype=torch.float32), requires_grad=False
         )
         set_weight_attrs(
             weight_global_scale, {"ignore_warning": True} | extra_weight_attrs
@@ -195,8 +189,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         layer.register_parameter("weight_global_scale", weight_global_scale)
 
         act_global_scale = Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(1, dtype=torch.float32), requires_grad=False
         )
         set_weight_attrs(
             act_global_scale, {"ignore_warning": True} | extra_weight_attrs
@@ -230,10 +223,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         layer.register_parameter("backward_hadamard_matrix", backward_hadamard_matrix)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return quantized_forward(
             x,

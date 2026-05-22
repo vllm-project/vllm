@@ -13,9 +13,7 @@ from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesMod
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
-from vllm.model_executor.model_loader.modelexpress_loader import (
-    ModelExpressModelLoader,
-)
+from vllm.model_executor.model_loader.modelexpress_loader import ModelExpressModelLoader
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )

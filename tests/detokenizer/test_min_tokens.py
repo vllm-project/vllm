@@ -29,10 +29,7 @@ def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
 
     # The prompt is "Hello, my name is"
     prompt_token_ids = all_prompt_ids[:4]
-    params = SamplingParams(
-        stop=stop,
-        min_tokens=min_tokens,
-    )
+    params = SamplingParams(stop=stop, min_tokens=min_tokens)
     request = EngineCoreRequest(
         request_id="",
         prompt_token_ids=prompt_token_ids,

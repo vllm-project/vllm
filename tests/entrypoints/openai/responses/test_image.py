@@ -70,21 +70,14 @@ async def test_single_chat_session_image(
         {
             "role": "user",
             "content": [
-                {
-                    "type": "input_image",
-                    "image_url": image_url,
-                    "detail": "auto",
-                },
+                {"type": "input_image", "image_url": image_url, "detail": "auto"},
                 {"type": "input_text", "text": content_text},
             ],
         }
     ]
 
     # test image url
-    response = await client.responses.create(
-        model=model_name,
-        input=messages,
-    )
+    response = await client.responses.create(model=model_name, input=messages)
     assert len(response.output_text) > 0
 
 
@@ -112,10 +105,7 @@ async def test_single_chat_session_image_base64encoded(
         }
     ]
     # test image base64
-    response = await client.responses.create(
-        model=model_name,
-        input=messages,
-    )
+    response = await client.responses.create(model=model_name, input=messages)
     assert len(response.output_text) > 0
 
 
@@ -134,11 +124,7 @@ async def test_multi_image_input(
             "role": "user",
             "content": [
                 *(
-                    {
-                        "type": "input_image",
-                        "image_url": image_url,
-                        "detail": "auto",
-                    }
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"}
                     for image_url in image_urls
                 ),
                 {"type": "input_text", "text": "What's in this image?"},
@@ -148,24 +134,15 @@ async def test_multi_image_input(
 
     if len(image_urls) > MAXIMUM_IMAGES:
         with pytest.raises(openai.BadRequestError):  # test multi-image input
-            await client.responses.create(
-                model=model_name,
-                input=messages,
-            )
+            await client.responses.create(model=model_name, input=messages)
         # the server should still work afterwards
         response = await client.responses.create(
             model=model_name,
             input=[
-                {
-                    "role": "user",
-                    "content": "What's the weather like in Paris today?",
-                }
+                {"role": "user", "content": "What's the weather like in Paris today?"}
             ],
         )
         assert len(response.output_text) > 0
     else:
-        response = await client.responses.create(
-            model=model_name,
-            input=messages,
-        )
+        response = await client.responses.create(model=model_name, input=messages)
         assert len(response.output_text) > 0

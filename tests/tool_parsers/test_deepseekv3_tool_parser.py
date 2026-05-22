@@ -4,10 +4,7 @@
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -87,6 +84,6 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 "test_malformed_input": (
                     "Parser sets tools_called=True even when tool_calls is "
                     "empty (detects start token but fails to parse)"
-                ),
+                )
             },
         )

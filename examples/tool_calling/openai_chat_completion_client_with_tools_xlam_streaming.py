@@ -248,10 +248,7 @@ def run_test_case(query, test_name):
 def main():
     # Initialize OpenAI client
     global client
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     # Run test cases
     test_cases = [

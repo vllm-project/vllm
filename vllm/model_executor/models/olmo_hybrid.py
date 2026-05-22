@@ -29,9 +29,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
-    VllmConfig,
-)
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -63,9 +61,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
@@ -121,13 +117,9 @@ class OlmoHybridAttention(nn.Module):
         self.tp_rank = get_tensor_model_parallel_rank()
 
         self.k_norm = RMSNorm(
-            self.total_num_kv_heads * self.head_dim,
-            eps=self.config.rms_norm_eps,
+            self.total_num_kv_heads * self.head_dim, eps=self.config.rms_norm_eps
         )
-        self.q_norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.q_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
         self.scaling = self.head_dim**-0.5
 
@@ -178,9 +170,7 @@ class OlmoHybridAttention(nn.Module):
         return q, k
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -235,52 +225,35 @@ class OlmoHybridDecoderLayer(nn.Module):
 
         if self.layer_type == "linear_attention":
             self.linear_attn = OlmoHybridGatedDeltaNetAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.linear_attn",
+                config, vllm_config, prefix=f"{prefix}.linear_attn"
             )
-            self.input_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
-            )
+            self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
+                config.hidden_size, eps=config.rms_norm_eps
             )
         else:
             self.self_attn = OlmoHybridAttention(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.self_attn",
+                vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
             )
             # Attention layers use these norm names
             self.post_attention_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
+                config.hidden_size, eps=config.rms_norm_eps
             )
             self.post_feedforward_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
+                config.hidden_size, eps=config.rms_norm_eps
             )
 
-        self.mlp = OlmoHybridMLP(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = OlmoHybridMLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         if self.layer_type == "linear_attention":
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
             attn_output = torch.empty_like(hidden_states)
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=attn_output,
-            )
+            self.linear_attn(hidden_states=hidden_states, output=attn_output)
             hidden_states = residual + attn_output
 
             residual = hidden_states
@@ -320,10 +293,7 @@ class OlmoHybridModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.config.hidden_size
@@ -487,17 +457,13 @@ class OlmoHybridForCausalLM(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,

@@ -15,20 +15,10 @@ class MockSSLContext(SSLContext):
         self.load_cert_chain_count = 0
         self.load_ca_count = 0
 
-    def load_cert_chain(
-        self,
-        certfile,
-        keyfile=None,
-        password=None,
-    ):
+    def load_cert_chain(self, certfile, keyfile=None, password=None):
         self.load_cert_chain_count += 1
 
-    def load_verify_locations(
-        self,
-        cafile=None,
-        capath=None,
-        cadata=None,
-    ):
+    def load_verify_locations(self, cafile=None, capath=None, cadata=None):
         self.load_ca_count += 1
 
 

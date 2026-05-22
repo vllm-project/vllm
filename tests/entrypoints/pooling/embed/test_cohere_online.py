@@ -22,11 +22,7 @@ MODELS: list[tuple[str, list[str]]] = [
     ("intfloat/multilingual-e5-small", []),
     (
         "Snowflake/snowflake-arctic-embed-m-v1.5",
-        [
-            "--trust_remote_code",
-            "--hf_overrides",
-            '{"matryoshka_dimensions":[256]}',
-        ],
+        ["--trust_remote_code", "--hf_overrides", '{"matryoshka_dimensions":[256]}'],
     ),
 ]
 
@@ -125,11 +121,7 @@ def test_unsupported_input_type_rejected(server: RemoteOpenAIServer, model_name:
 
 def test_omitted_input_type_accepted(server: RemoteOpenAIServer, model_name: str):
     """Omitting input_type should always work (no prompt prefix applied)."""
-    body = {
-        "model": model_name,
-        "texts": ["hello world"],
-        "embedding_types": ["float"],
-    }
+    body = {"model": model_name, "texts": ["hello world"], "embedding_types": ["float"]}
     resp = requests.post(server.url_for("/v2/embed"), json=body)
     assert resp.status_code == 200
     data = resp.json()
@@ -209,10 +201,7 @@ def test_missing_input_returns_error(server: RemoteOpenAIServer, model_name: str
 
 def test_base64_embedding_type(server: RemoteOpenAIServer, model_name: str):
     r = _cohere_embed(
-        server,
-        model_name,
-        texts=["test encoding"],
-        embedding_types=["float", "base64"],
+        server, model_name, texts=["test encoding"], embedding_types=["float", "base64"]
     )
     float_emb = r["embeddings"]["float"][0]
     b64_str = r["embeddings"]["base64"][0]
@@ -225,10 +214,7 @@ def test_base64_embedding_type(server: RemoteOpenAIServer, model_name: str):
 # -----------------------------------------------------------
 
 
-def _cohere_embed_raw(
-    server: RemoteOpenAIServer,
-    body: dict,
-) -> requests.Response:
+def _cohere_embed_raw(server: RemoteOpenAIServer, body: dict) -> requests.Response:
     return requests.post(server.url_for("/v2/embed"), json=body)
 
 

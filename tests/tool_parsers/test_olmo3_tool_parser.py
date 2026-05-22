@@ -5,10 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.tool_parsers.utils import (
-    run_tool_extraction,
-    run_tool_extraction_streaming,
-)
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -16,8 +13,7 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"
 SIMPLE_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments='{"city": "San Francisco", "metric": "celsius"}',
+    name="get_weather", arguments='{"city": "San Francisco", "metric": "celsius"}'
 )
 MORE_TYPES_FUNCTION_OUTPUT = (
     "register_user(name='John Doe', "
@@ -45,19 +41,14 @@ MORE_TYPES_FUNCTION_CALL = FunctionCall(
     '"aliases": ["John", "Johnny"]}',
 )
 PARAMETERLESS_FUNCTION_OUTPUT = "get_weather()"
-PARAMETERLESS_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments="{}",
-)
+PARAMETERLESS_FUNCTION_CALL = FunctionCall(name="get_weather", arguments="{}")
 EMPTY_DICT_FUNCTION_OUTPUT = "do_something_cool(additional_data={})"
 EMPTY_DICT_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"additional_data": {}}',
+    name="do_something_cool", arguments='{"additional_data": {}}'
 )
 EMPTY_LIST_FUNCTION_OUTPUT = "do_something_cool(steps=[])"
 EMPTY_LIST_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"steps": []}',
+    name="do_something_cool", arguments='{"steps": []}'
 )
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"

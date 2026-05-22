@@ -65,13 +65,13 @@ def import_triton_kernels():
         import triton_kernels
 
         logger.debug_once(
-            f"Loading module triton_kernels from {triton_kernels.__file__}.",
+            f"Loading module triton_kernels from {triton_kernels.__file__}."
         )
     elif _has_module("vllm.third_party.triton_kernels"):
         import vllm.third_party.triton_kernels as triton_kernels
 
         logger.debug_once(
-            f"Loading module triton_kernels from {triton_kernels.__file__}.",
+            f"Loading module triton_kernels from {triton_kernels.__file__}."
         )
         sys.modules["triton_kernels"] = triton_kernels
     else:
@@ -350,10 +350,7 @@ class LazyLoader(ModuleType):
     """
 
     def __init__(
-        self,
-        local_name: str,
-        parent_module_globals: dict[str, Any],
-        name: str,
+        self, local_name: str, parent_module_globals: dict[str, Any], name: str
     ):
         self._local_name = local_name
         self._parent_module_globals = parent_module_globals

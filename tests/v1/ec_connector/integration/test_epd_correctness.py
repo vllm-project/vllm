@@ -122,10 +122,7 @@ def check_vllm_server(url: str, timeout=5, retries=10) -> bool:
 
 
 def run_chat_completion(
-    base_url: str,
-    model_name: str,
-    messages: list,
-    max_tokens: int = MAX_OUTPUT_LEN,
+    base_url: str, model_name: str, messages: list, max_tokens: int = MAX_OUTPUT_LEN
 ) -> str:
     """Run a chat completion request.
 
@@ -164,12 +161,7 @@ def main():
         help="The vLLM service URL (e.g., http://localhost:8000)",
     )
 
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        required=True,
-        help="Model name",
-    )
+    parser.add_argument("--model_name", type=str, required=True, help="Model name")
 
     parser.add_argument(
         "--mode",

@@ -15,9 +15,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_decode_attention import (
-    _fwd_kernel_stage2,
-)
+from vllm.v1.attention.ops.triton_decode_attention import _fwd_kernel_stage2
 
 _FP8_E4B15: dict[int, int] = {}
 
@@ -140,9 +138,7 @@ def _tq_decode_stage1(
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
         block_nums = tl.load(
-            Block_table_ptr + bt_base + page_idx,
-            mask=kv_mask,
-            other=0,
+            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
         ).to(tl.int64)
 
         slot_bases = (
@@ -157,19 +153,14 @@ def _tq_decode_stage1(
         if KEY_FP8:
             k_addrs = slot_bases[:, None] + d_offs[None, :]
             k_raw = tl.load(
-                KV_cache_ptr + k_addrs,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
+                KV_cache_ptr + k_addrs, mask=kv_mask[:, None] & d_mask[None, :], other=0
             )
             if FP8_E4B15:
                 k_float = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
             else:
                 k_float = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             scores = (
-                tl.sum(
-                    tl.where(d_mask[None, :], q_rot[None, :] * k_float, 0.0),
-                    axis=1,
-                )
+                tl.sum(tl.where(d_mask[None, :], q_rot[None, :] * k_float, 0.0), axis=1)
                 * ATTN_SCALE
             )
             scores = tl.where(kv_mask, scores, -float("inf"))
@@ -199,15 +190,13 @@ def _tq_decode_stage1(
             # Norm correction: re-normalize centroid vector to unit norm
             if NORM_CORRECTION:
                 c_norm_sq = tl.sum(
-                    tl.where(d_mask[None, :], c_vals * c_vals, 0.0),
-                    axis=1,
+                    tl.where(d_mask[None, :], c_vals * c_vals, 0.0), axis=1
                 )
                 c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
                 c_vals = c_vals * c_inv_norm[:, None]
 
             term1 = tl.sum(
-                tl.where(d_mask[None, :], q_rot[None, :] * c_vals, 0.0),
-                axis=1,
+                tl.where(d_mask[None, :], q_rot[None, :] * c_vals, 0.0), axis=1
             )
 
             # Load norms (fp16 -> fp32): norms are at MSE_BYTES offset
@@ -537,12 +526,7 @@ def triton_turboquant_decode_attention(
         mid_o = mid_o_buf[:B, :Hq, :NUM_KV_SPLITS, :]
     else:
         mid_o = torch.empty(
-            B,
-            Hq,
-            NUM_KV_SPLITS,
-            D + 1,
-            dtype=torch.float32,
-            device=device,
+            B, Hq, NUM_KV_SPLITS, D + 1, dtype=torch.float32, device=device
         )
         if buf_holder is not None:
             buf_holder._tq_mid_o_buf = mid_o

@@ -100,10 +100,7 @@ class MambaConvSplitInfo:
             ]
 
 
-def derive_mamba_conv_split(
-    mamba_spec: MambaSpec,
-    local_tp: int,
-) -> MambaConvSplitInfo:
+def derive_mamba_conv_split(mamba_spec: MambaSpec, local_tp: int) -> MambaConvSplitInfo:
     """Derive per-rank sub-projection byte sizes from a MambaSpec.
 
     Called once at init on both P and D.  Decomposes the conv dimension
@@ -119,10 +116,7 @@ def derive_mamba_conv_split(
         MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
         conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
     """
-    _supported = (
-        MambaAttentionBackendEnum.MAMBA2,
-        MambaAttentionBackendEnum.GDN_ATTN,
-    )
+    _supported = (MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN)
     if mamba_spec.mamba_type not in _supported:
         raise NotImplementedError(
             f"3-read conv transfer only supports Mamba2 and GDN models, "

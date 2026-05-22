@@ -44,10 +44,7 @@ class TestDeepseekOCREmptyImagesCrop:
         # Small image: both dims <= IMAGE_SIZE (640) → no crops
         small_image = Image.new("RGB", (100, 100), color="red")
 
-        result = processor(
-            prompt="<image>\nDescribe this image.",
-            images=[small_image],
-        )
+        result = processor(prompt="<image>\nDescribe this image.", images=[small_image])
 
         pixel_values = result["pixel_values"]
         images_crop = result["images_crop"]
@@ -65,10 +62,7 @@ class TestDeepseekOCREmptyImagesCrop:
             data=pixel_values,
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
-            resolve_bindings={
-                "base_size": base_size,
-                "image_size": image_size,
-            },
+            resolve_bindings={"base_size": base_size, "image_size": image_size},
         )
 
         assert schema.data.shape == (1, 3, 1024, 1024)
@@ -79,10 +73,7 @@ class TestDeepseekOCREmptyImagesCrop:
         # Large image: exceeds IMAGE_SIZE (640) → dynamic crop tiles
         large_image = Image.new("RGB", (1200, 800), color="blue")
 
-        result = processor(
-            prompt="<image>\nDescribe this image.",
-            images=[large_image],
-        )
+        result = processor(prompt="<image>\nDescribe this image.", images=[large_image])
 
         pixel_values = result["pixel_values"]
         images_crop = result["images_crop"]
@@ -98,10 +89,7 @@ class TestDeepseekOCREmptyImagesCrop:
             data=pixel_values,
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
-            resolve_bindings={
-                "base_size": base_size,
-                "image_size": image_size,
-            },
+            resolve_bindings={"base_size": base_size, "image_size": image_size},
         )
 
         assert schema.data.shape == (1, 3, 1024, 1024)
@@ -112,10 +100,7 @@ class TestDeepseekOCREmptyImagesCrop:
         by TensorSchema validation."""
         small_image = Image.new("RGB", (100, 100), color="green")
 
-        result = processor(
-            prompt="<image>\nDescribe this image.",
-            images=[small_image],
-        )
+        result = processor(prompt="<image>\nDescribe this image.", images=[small_image])
 
         pixel_values = result["pixel_values"]
         images_crop = result["images_crop"]

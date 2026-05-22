@@ -10,9 +10,7 @@ import torch
 import torch.multiprocessing as mp
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import (
-    init_distributed_environment,
-)
+from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)

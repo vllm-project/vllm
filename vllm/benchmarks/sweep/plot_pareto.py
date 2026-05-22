@@ -27,10 +27,7 @@ def _first_present(run_data: dict[str, object], keys: list[str]):
 
 
 def _get_numeric(
-    run_data: dict[str, object],
-    keys: list[str],
-    *,
-    allow_zero: bool = True,
+    run_data: dict[str, object], keys: list[str], *, allow_zero: bool = True
 ) -> float | None:
     value = _first_present(run_data, keys)
     if value is None:
@@ -51,8 +48,7 @@ def _get_numeric(
 
 
 def _infer_user_count(
-    run_data: dict[str, object],
-    user_count_var: str | None,
+    run_data: dict[str, object], user_count_var: str | None
 ) -> float | None:
     candidates = [user_count_var] if user_count_var else []
     candidates.extend(["request_rate"])
@@ -64,10 +60,7 @@ def _infer_user_count(
     return _get_numeric(run_data, ["max_concurrent_requests"], allow_zero=False)
 
 
-def _infer_gpu_count(
-    run_data: dict[str, object],
-    gpu_count_var: str | None,
-) -> float:
+def _infer_gpu_count(run_data: dict[str, object], gpu_count_var: str | None) -> float:
     direct_candidates = [gpu_count_var] if gpu_count_var else []
     direct_gpu_count = _get_numeric(run_data, direct_candidates, allow_zero=False)
     if direct_gpu_count:
@@ -87,10 +80,7 @@ def _infer_gpu_count(
     return world_size
 
 
-def _get_throughput(
-    run_data: dict[str, object],
-    throughput_var: str,
-) -> float:
+def _get_throughput(run_data: dict[str, object], throughput_var: str) -> float:
     throughput = _get_numeric(run_data, [throughput_var])
     if throughput is None:
         raise ValueError(
@@ -135,11 +125,7 @@ def _prepare_records(
 
 
 def _pareto_frontier(
-    df: "pd.DataFrame",
-    x_col: str,
-    y_col: str,
-    *,
-    epsilon: float = 1e-9,
+    df: "pd.DataFrame", x_col: str, y_col: str, *, epsilon: float = 1e-9
 ) -> "pd.DataFrame":
     sorted_df = df.sort_values([x_col, y_col], ascending=[False, False])
     frontier_indices = []
@@ -154,10 +140,7 @@ def _pareto_frontier(
     return df.loc[frontier_indices]
 
 
-def _get_fig_path(
-    fig_dir: Path,
-    fig_group: tuple[tuple[str, str], ...],
-) -> Path:
+def _get_fig_path(fig_dir: Path, fig_group: tuple[tuple[str, str], ...]) -> Path:
     parts = ["PARETO"]
     if fig_group:
         parts.extend(f"{k}={v}" for k, v in fig_group)
@@ -248,9 +231,7 @@ def _plot_fig(
     fig.savefig(fig_path)
     plt.close(fig)
 
-    print(
-        f"Plotted {len(df)} points; Pareto frontier size: {len(frontier)}.",
-    )
+    print(f"Plotted {len(df)} points; Pareto frontier size: {len(frontier)}.")
     print("[END FIGURE]")
 
 
@@ -275,37 +256,27 @@ def plot_pareto(
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     prepared_data, skipped_missing_users = _prepare_records(
-        raw_data,
-        user_count_var=user_count_var,
-        gpu_count_var=gpu_count_var,
+        raw_data, user_count_var=user_count_var, gpu_count_var=gpu_count_var
     )
 
     if skipped_missing_users:
         print(
             f"Skipped {skipped_missing_users} runs without a user count "
-            "(`max_concurrency` or `max_concurrent_requests`).",
+            "(`max_concurrency` or `max_concurrent_requests`)."
         )
 
     if not prepared_data:
         raise ValueError(
             "No data points with both throughput and user count available "
-            "to plot Pareto frontier.",
+            "to plot Pareto frontier."
         )
 
-    fig_groups = full_groupby(
-        prepared_data,
-        key=lambda item: tuple(),
-    )
+    fig_groups = full_groupby(prepared_data, key=lambda item: tuple())
 
     with DummyExecutor() if len(fig_groups) <= 1 else ProcessPoolExecutor() as executor:
         all(
             executor.map(
-                partial(
-                    _plot_fig,
-                    fig_dir,
-                    label_by=label_by,
-                    dry_run=dry_run,
-                ),
+                partial(_plot_fig, fig_dir, label_by=label_by, dry_run=dry_run),
                 fig_groups,
             )
         )

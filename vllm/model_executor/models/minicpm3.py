@@ -134,9 +134,7 @@ class MiniCPM3Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         q, _ = self.q_a_proj(hidden_states)
         q = self.q_a_layernorm(q)
@@ -222,12 +220,7 @@ class MiniCPM3Model(MiniCPMModel):
 
 
 class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
-    packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPM3Model(vllm_config=vllm_config, prefix=prefix)

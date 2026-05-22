@@ -14,9 +14,7 @@ from vllm.utils.torch_utils import set_random_seed
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-EXPERT_NUM = [
-    8,
-]
+EXPERT_NUM = [8]
 HIDDEN_DIM = [128, 2880]
 INTERMEDIATE_DIM = [128, 2880]
 BATCH_SIZE = [1, 64, 256]
@@ -134,14 +132,7 @@ def test_cpu_fused_moe(
     topk_ids = topk_ids.to(torch.int32)
 
     ref_output = ref_fused_moe(
-        input,
-        w13,
-        w2,
-        w13_bias,
-        w2_bias,
-        topk_weight,
-        topk_ids,
-        act,
+        input, w13, w2, w13_bias, w2_bias, topk_weight, topk_ids, act
     )
 
     packed_w13 = cpu_prepack_moe_weight(w13, isa)

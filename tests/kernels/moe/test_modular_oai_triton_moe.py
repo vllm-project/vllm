@@ -13,8 +13,7 @@ from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(
-        "triton_kernels not found, skipping all related tests",
-        allow_module_level=True,
+        "triton_kernels not found, skipping all related tests", allow_module_level=True
     )
 
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
@@ -39,13 +38,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 from .utils import make_dummy_moe_config, shuffle_weight
 
-MNK = [
-    (1, 512, 384),
-    (1, 2880, 2880),
-    (2, 512, 384),
-    (2, 2880, 2880),
-    (16, 2880, 2880),
-]
+MNK = [(1, 512, 384), (1, 2880, 2880), (2, 512, 384), (2, 2880, 2880), (16, 2880, 2880)]
 
 
 def unshuffle_weight(w: torch.Tensor):
@@ -89,16 +82,12 @@ def make_weights(dtype, k, n, e):
 
     w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout, **w_layout_opts)
     w1_scale_tri = convert_layout(
-        wrap_torch_tensor(w1_scale_tri),
-        w_scale_layout,
-        **w_scale_layout_opts,
+        wrap_torch_tensor(w1_scale_tri), w_scale_layout, **w_scale_layout_opts
     )
 
     w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout, **w_layout_opts)
     w2_scale_tri = convert_layout(
-        wrap_torch_tensor(w2_scale_tri),
-        w_scale_layout,
-        **w_scale_layout_opts,
+        wrap_torch_tensor(w2_scale_tri), w_scale_layout, **w_scale_layout_opts
     )
 
     w1_precision_config = PrecisionConfig(
@@ -170,10 +159,7 @@ def oai_triton_moe_impl(
     unfused: bool = False,
 ) -> torch.Tensor:
     quant_config = mxfp4_w4a16_moe_quant_config(
-        w1_bias=w1_bias,
-        w2_bias=w2_bias,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
+        w1_bias=w1_bias, w2_bias=w2_bias, w1_scale=w1_scale, w2_scale=w2_scale
     )
     moe_config = make_dummy_moe_config()
 

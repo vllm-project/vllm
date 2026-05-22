@@ -72,8 +72,7 @@ def _create_workspace(
             )
         else:
             logger.warning_once(
-                "Failed to initialize FlashInfer All Reduce workspace: %s.",
-                e,
+                "Failed to initialize FlashInfer All Reduce workspace: %s.", e
             )
         return None
     finally:
@@ -229,11 +228,7 @@ atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
-    def __init__(
-        self,
-        group: ProcessGroup,
-        device: int | str | torch.device,
-    ):
+    def __init__(self, group: ProcessGroup, device: int | str | torch.device):
         self.disabled = True
 
         if not fi_ar_available:

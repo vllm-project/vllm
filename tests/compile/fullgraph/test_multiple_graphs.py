@@ -164,18 +164,14 @@ def run_model(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             model(inputs[:2])
         with set_forward_context(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=1,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=1),
         ):
             model(inputs[:1])
 
@@ -184,9 +180,7 @@ def run_model(
             {},
             vllm_config=vllm_config,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=BatchDescriptor(
-                num_tokens=2,
-            ),
+            batch_descriptor=BatchDescriptor(num_tokens=2),
         ):
             output = model(inputs[:2])
 
@@ -259,9 +253,7 @@ def test_multi_graph_piecewise_compile(
 
     # no compile or cudagraph
     vllm_config = VllmConfig(
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.NONE,
-        )
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE)
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE
 

@@ -139,8 +139,7 @@ class RequestOffloadState:
             RequestGroupState() for _ in self.config.kv_group_configs
         )
         self.req_context = ReqContext(
-            req_id=self.req.request_id,
-            kv_transfer_params=self.req.kv_transfer_params,
+            req_id=self.req.request_id, kv_transfer_params=self.req.kv_transfer_params
         )
 
     def update_offload_keys(self) -> None:
@@ -307,8 +306,7 @@ class OffloadingConnectorScheduler:
                     - group_config.sliding_window_size_in_blocks,
                 )
                 self.manager.touch(
-                    group_state.offload_keys[blocks_to_skip:],
-                    req_status.req_context,
+                    group_state.offload_keys[blocks_to_skip:], req_status.req_context
                 )
 
     def _lookup(self, req_status: RequestOffloadState) -> int | None:
@@ -514,9 +512,7 @@ class OffloadingConnectorScheduler:
         group_sizes: list[int] = []
         block_indices: list[int] = []
         for group_config, group_state, group_blocks in zip(
-            self.config.kv_group_configs,
-            req_status.group_states,
-            blocks.blocks,
+            self.config.kv_group_configs, req_status.group_states, blocks.blocks
         ):
             gpu_block_size = group_config.gpu_block_size
             offloaded_block_size = group_config.offloaded_block_size
@@ -585,8 +581,7 @@ class OffloadingConnectorScheduler:
 
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
-            req_id=request.request_id,
-            transfer_spec=(src_spec, dst_spec),
+            req_id=request.request_id, transfer_spec=(src_spec, dst_spec)
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -602,8 +597,7 @@ class OffloadingConnectorScheduler:
             self._blocks_being_loaded.update(keys_to_load)
 
     def _build_store_jobs(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> dict[int, TransferJob]:
         block_size_factor = self.config.block_size_factor
         store_jobs: dict[int, TransferJob] = {}
@@ -849,10 +843,7 @@ class OffloadingConnectorScheduler:
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 del self._req_status[job_status.req_id]
 
-    def request_finished(
-        self,
-        request: Request,
-    ) -> tuple[bool, dict[str, Any] | None]:
+    def request_finished(self, request: Request) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 

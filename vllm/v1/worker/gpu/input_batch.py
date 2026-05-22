@@ -10,12 +10,7 @@ from vllm.utils import random_uuid
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -86,10 +81,7 @@ class InputBatch:
 
     @classmethod
     def make_dummy(
-        cls,
-        num_reqs: int,
-        num_tokens: int,
-        input_buffers: InputBuffers,
+        cls, num_reqs: int, num_tokens: int, input_buffers: InputBuffers
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -323,8 +315,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     if num_draft_tokens > 0:
         mask = block < num_draft_tokens
         draft_tokens = tl.load(
-            draft_tokens_ptr + req_state_idx * draft_tokens_stride + block,
-            mask=mask,
+            draft_tokens_ptr + req_state_idx * draft_tokens_stride + block, mask=mask
         )
         tl.store(
             input_ids_ptr + query_end - num_draft_tokens + block,
@@ -348,11 +339,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -410,12 +397,7 @@ def get_num_sampled_and_rejected(
     num_reqs = idx_mapping.shape[0]
     num_rejected = torch.empty_like(num_sampled)
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
-        num_sampled,
-        num_rejected,
-        seq_lens,
-        cu_num_logits,
-        idx_mapping,
-        prefill_len,
+        num_sampled, num_rejected, seq_lens, cu_num_logits, idx_mapping, prefill_len
     )
     return num_sampled, num_rejected
 
@@ -517,9 +499,7 @@ def post_update(
 
 @triton.jit
 def _post_update_pool_kernel(
-    idx_mapping_ptr,
-    num_computed_tokens_ptr,
-    query_start_loc_ptr,
+    idx_mapping_ptr, num_computed_tokens_ptr, query_start_loc_ptr
 ):
     batch_id = tl.program_id(0)
     query_start = tl.load(query_start_loc_ptr + batch_id)
@@ -541,9 +521,7 @@ def post_update_pool(
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_pool_kernel[(num_reqs,)](
-        idx_mapping,
-        num_computed_tokens,
-        query_start_loc,
+        idx_mapping, num_computed_tokens, query_start_loc
     )
 
 

@@ -7,12 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import (
-    CUDAGraphMode,
-    VllmConfig,
-    get_layers_from_vllm_config,
-    replace,
-)
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -174,9 +169,7 @@ class SpecDecodeBaseProposer:
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_positions,
-                dtype=torch.int64,
-                device=device,
+                self.max_positions, dtype=torch.int64, device=device
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
@@ -232,9 +225,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs: torch.Tensor | None = None
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_positions,
-            dtype=torch.int64,
-            device=device,
+            self.max_positions, dtype=torch.int64, device=device
         )
 
         # Determine allowed attention backends once during initialization.
@@ -354,9 +345,7 @@ class SpecDecodeBaseProposer:
             self.positions[:num_tokens] = positions
 
     def _get_slot_mapping(
-        self,
-        num_tokens: int,
-        slot_mapping: torch.Tensor | None = None,
+        self, num_tokens: int, slot_mapping: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         """Return slot_mapping dict for EAGLE layers.
 
@@ -395,9 +384,7 @@ class SpecDecodeBaseProposer:
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
     def _sample_from_logits(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        self, logits: torch.Tensor, sampling_metadata: SamplingMetadata
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not self._enable_probabilistic_draft_probs:
             return logits.argmax(dim=-1), None
@@ -406,9 +393,7 @@ class SpecDecodeBaseProposer:
         return compute_probs_and_sample_next_token(logits, sampling_metadata)
 
     def _sample_draft_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
@@ -676,8 +661,7 @@ class SpecDecodeBaseProposer:
         else:
             positions = self.positions[:batch_size]
         common_attn_metadata.max_seq_len = min(
-            common_attn_metadata.max_seq_len + 1,
-            self.max_model_len,
+            common_attn_metadata.max_seq_len + 1, self.max_model_len
         )
 
         if common_attn_metadata._seq_lens_cpu is not None:
@@ -1141,8 +1125,7 @@ class SpecDecodeBaseProposer:
             base = replace(
                 base,
                 kernel_config=replace(
-                    base.kernel_config,
-                    moe_backend=spec_cfg.moe_backend,
+                    base.kernel_config, moe_backend=spec_cfg.moe_backend
                 ),
             )
 
@@ -1152,8 +1135,7 @@ class SpecDecodeBaseProposer:
         base = replace(
             base,
             attention_config=replace(
-                base.attention_config,
-                backend=spec_cfg.attention_backend,
+                base.attention_config, backend=spec_cfg.attention_backend
             ),
         )
 
@@ -1595,9 +1577,7 @@ class SpecDecodeBaseProposer:
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(
-        self,
-        num_tokens: int,
-        use_cudagraphs: bool = True,
+        self, num_tokens: int, use_cudagraphs: bool = True
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
@@ -1646,8 +1626,7 @@ class SpecDecodeBaseProposer:
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
+    logits: torch.Tensor, sampling_metadata: SamplingMetadata
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if sampling_metadata.all_greedy:
         # For greedy requests, draft_probs is not used in rejection sampling.

@@ -104,7 +104,7 @@ class BeeDummyInputsBuilder(LlavaDummyInputsBuilder[BeeProcessingInfo]):
                 height=target_height,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 

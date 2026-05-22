@@ -28,8 +28,7 @@ NUM_NODES = 2
 
 
 async def _make_completion_request(
-    client: openai.AsyncOpenAI,
-    model_name: str,
+    client: openai.AsyncOpenAI, model_name: str
 ) -> openai.types.Completion:
     """Make a single completion request and validate the response.
 
@@ -37,10 +36,7 @@ async def _make_completion_request(
     requests for realistic load balancer testing.
     """
     completion = await client.completions.create(
-        model=model_name,
-        prompt="Hello, my name is",
-        max_tokens=5,
-        temperature=1.0,
+        model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=1.0
     )
 
     assert completion.id is not None, (
@@ -467,10 +463,7 @@ def test_multinode_dp_server_info(server_manager):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_multinode_dp_completion(
     client: openai.AsyncOpenAI,
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -503,10 +496,7 @@ async def test_multinode_dp_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_multinode_dp_completion_streaming(
     client: openai.AsyncOpenAI,
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -517,10 +507,7 @@ async def test_multinode_dp_completion_streaming(
     async def make_streaming_request():
         # Perform a non-streaming request to get the expected full output
         single_completion = await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0
         )
         single_output = single_completion.choices[0].text
 
@@ -597,10 +584,7 @@ async def test_multinode_dp_completion_streaming(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_api_only_multinode_dp_completion(
     api_only_client: openai.AsyncOpenAI,
     api_only_servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -635,10 +619,7 @@ async def test_api_only_multinode_dp_completion(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_api_only_multinode_dp_completion_streaming(
     api_only_client: openai.AsyncOpenAI,
     api_only_servers: list[tuple[RemoteOpenAIServer, list[str]]],
@@ -651,10 +632,7 @@ async def test_api_only_multinode_dp_completion_streaming(
     async def make_streaming_request():
         # Perform a non-streaming request to get the expected full output
         single_completion = await api_only_client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0
         )
         single_output = single_completion.choices[0].text
 

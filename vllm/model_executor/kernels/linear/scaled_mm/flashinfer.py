@@ -10,9 +10,7 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
@@ -28,10 +26,7 @@ from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
 from .deep_gemm import DeepGemmFp8BlockScaledMMKernel, fp8_gemm_nt
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -106,10 +101,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             config.weight_quant_key.dtype,
             config.weight_shape,
         ):
-            return (
-                False,
-                "The provided metadata is not supported.",
-            )
+            return (False, "The provided metadata is not supported.")
 
         return True, None
 
@@ -124,11 +116,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         # A is BF16 — FlashInfer handles FP8 conversion internally.
         # As is a placeholder (apply_input_quant=False) and is not used here.
@@ -175,11 +163,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         self.fallback.process_weights_after_loading(layer)
 
     def apply_block_scaled_mm(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
+        self, A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: torch.Tensor
     ) -> torch.Tensor:
         group_size = self.weight_group_shape.col
         use_deep_gemm_e8m0 = self.fallback.use_deep_gemm_e8m0
@@ -190,22 +174,15 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
 
 def _flashinfer_fp8_blockscale_gemm_impl(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
+    input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> torch.Tensor:
     return flashinfer_fp8_blockscale_gemm(
-        input=input,
-        weight=weight,
-        weight_scale=weight_scale,
-        out_dtype=torch.bfloat16,
+        input=input, weight=weight, weight_scale=weight_scale, out_dtype=torch.bfloat16
     )
 
 
 def _flashinfer_fp8_blockscale_gemm_fake(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
+    input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> torch.Tensor:
     """
     Required fake/meta implementation for torch.compile graph tracing.
@@ -256,9 +233,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
     """
 
     def run_flashinfer_deepgemm_swapAB(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
+        input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
     ) -> torch.Tensor:
         return flashinfer_fp8_blockscale_gemm(
             input=input,
@@ -268,9 +243,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
         )
 
     def run_deepgemm(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
+        input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
     ) -> torch.Tensor:
         q_input, input_scale = per_token_group_quant_fp8(
             input,

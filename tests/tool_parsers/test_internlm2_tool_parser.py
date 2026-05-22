@@ -5,10 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.tokenizers import TokenizerLike
 
 
@@ -20,11 +17,7 @@ class TestInternLM2ToolParser(ToolParserTests):
         tokenizer_vocab = default_tokenizer.get_vocab()
         default_tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
-            {
-                "<|action_start|>": 92540,
-                "<|plugin|>": 92541,
-                "<|action_end|>": 92542,
-            }
+            {"<|action_start|>": 92540, "<|plugin|>": 92541, "<|action_end|>": 92542}
         )
         default_tokenizer.get_vocab.return_value = tokenizer_vocab
         return default_tokenizer
@@ -117,6 +110,6 @@ class TestInternLM2ToolParser(ToolParserTests):
                 "test_malformed_input": (
                     "InternLM2 parser raises JSONDecodeError on malformed JSON "
                     "instead of gracefully handling it"
-                ),
+                )
             },
         )

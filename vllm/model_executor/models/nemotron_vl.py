@@ -160,8 +160,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         prefix: str,
     ):
         return AutoModel.from_config(
-            config.vision_config,
-            trust_remote_code=self.model_config.trust_remote_code,
+            config.vision_config, trust_remote_code=self.model_config.trust_remote_code
         )
 
     def _init_mlp1(
@@ -238,10 +237,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             return None
 
         if image_embeds is not None:
-            return InternVLImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
-            )
+            return InternVLImageEmbeddingInputs(type="image_embeds", data=image_embeds)
 
         image_token_id = kwargs["image_token_id"]
         if isinstance(image_token_id, torch.Tensor):
@@ -264,8 +260,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-        self,
-        image_input: InternVLImageInputs,
+        self, image_input: InternVLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -370,10 +365,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -412,24 +404,19 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         processor_config = (
             get_hf_file_to_dict(
-                "processor_config.json",
-                model_config.model,
-                model_config.revision,
+                "processor_config.json", model_config.model, model_config.revision
             )
             or {}
         )
 
         min_dynamic_patch = processor_config.get(
-            "min_input_tiles",
-            getattr(config, "min_dynamic_patch", 1),
+            "min_input_tiles", getattr(config, "min_dynamic_patch", 1)
         )
         max_dynamic_patch = processor_config.get(
-            "max_input_tiles",
-            getattr(config, "max_dynamic_patch", 1),
+            "max_input_tiles", getattr(config, "max_dynamic_patch", 1)
         )
         dynamic_image_size = processor_config.get(
-            "dynamic_image_size",
-            getattr(config, "dynamic_image_size", True),
+            "dynamic_image_size", getattr(config, "dynamic_image_size", True)
         )
 
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
@@ -504,11 +491,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
     def _init_vision_model(
-        self,
-        config: PretrainedConfig,
-        quant_config,
-        *,
-        prefix: str,
+        self, config: PretrainedConfig, quant_config, *, prefix: str
     ) -> nn.Module:
         """Override to use SigLIP instead of C-RADIO."""
         return SiglipVisionModel(

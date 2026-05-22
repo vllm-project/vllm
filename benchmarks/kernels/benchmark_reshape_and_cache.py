@@ -145,26 +145,17 @@ if __name__ == "__main__":
     parser.add_argument("--num-blocks", type=int, default=128 * 128)
 
     parser.add_argument(
-        "--dtype",
-        type=str,
-        choices=["half", "bfloat16", "float"],
-        default="bfloat16",
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="bfloat16"
     )
 
     parser.add_argument(
-        "--kv-cache-dtype",
-        type=str,
-        choices=["auto", "fp8"],
-        default="auto",
+        "--kv-cache-dtype", type=str, choices=["auto", "fp8"], default="auto"
     )
 
     parser.add_argument("--iters", type=int, default=200)
 
     parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["cudagraph", "no_graph"],
-        default="cudagraph",
+        "--mode", type=str, choices=["cudagraph", "no_graph"], default="cudagraph"
     )
 
     args = parser.parse_args()

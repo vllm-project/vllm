@@ -10,10 +10,7 @@ from ...utils import large_gpu_mark, multi_gpu_marks
 
 # A trivial request with a short prompt to ensure we run a mixed batch
 SMALL_MESSAGE = [
-    {
-        "role": "user",
-        "content": "The secret beta value is 64. What is the secret beta?",
-    }
+    {"role": "user", "content": "The secret beta value is 64. What is the secret beta?"}
 ]
 
 # Sample prompt with a bunch of filler in between the critical fact and the request.
@@ -80,10 +77,7 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         enable_prefix_caching=enable_prefix_caching,
         mamba_cache_mode="align" if enable_prefix_caching else "none",
     ) as llm:
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=128,
-        )
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
         # First small message gets prefilled first, under normal conditions since the
         # batch is not yet mixed. Then the second prefill arrives as a mixed batch, but

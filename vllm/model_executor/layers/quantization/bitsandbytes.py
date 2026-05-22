@@ -271,10 +271,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.quant_config.load_in_8bit:
             return self._apply_8bit_weight(layer, x, bias)
@@ -282,10 +279,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             return self._apply_4bit_weight(layer, x, bias)
 
     def _apply_8bit_weight(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         # only load the bitsandbytes module when needed
         from bitsandbytes import MatmulLtState, matmul
@@ -352,10 +346,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         return out
 
     def _apply_4bit_weight(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         original_type = x.dtype
         original_shape = x.shape
@@ -387,10 +378,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
 
 def _apply_bnb_4bit(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    offsets: torch.Tensor,
-    out: torch.Tensor,
+    x: torch.Tensor, weight: torch.Tensor, offsets: torch.Tensor, out: torch.Tensor
 ) -> None:
     # only load the bitsandbytes module when needed
     from bitsandbytes import matmul_4bit
@@ -410,10 +398,7 @@ def _apply_bnb_4bit(
 
 
 def _apply_bnb_4bit_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    offsets: torch.Tensor,
-    out: torch.Tensor,
+    x: torch.Tensor, weight: torch.Tensor, offsets: torch.Tensor, out: torch.Tensor
 ) -> None:
     return
 
@@ -439,11 +424,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
        quant_config: The BitsAndBytes quantization config.
     """
 
-    def __init__(
-        self,
-        quant_config: BitsAndBytesConfig,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, quant_config: BitsAndBytesConfig, moe: FusedMoEConfig):
         super().__init__(moe)
         _check_bitsandbytes_version()
         self.quant_config = quant_config
@@ -520,12 +501,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             hidden_size * 2 * intermediate_size_per_partition
         ) // quant_ratio
         w13_qweight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w13_total_size,
-                1,
-                dtype=torch.uint8,
-            ),
+            torch.empty(num_experts, w13_total_size, 1, dtype=torch.uint8),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight", w13_qweight)
@@ -548,12 +524,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         # down_proj (row parallel)
         w2_total_size = (hidden_size * intermediate_size_per_partition) // quant_ratio
         w2_qweight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w2_total_size,
-                1,
-                dtype=torch.uint8,
-            ),
+            torch.empty(num_experts, w2_total_size, 1, dtype=torch.uint8),
             requires_grad=False,
         )
         set_weight_attrs(
@@ -591,12 +562,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         from bitsandbytes.functional import dequantize_4bit
 
         w13 = dequantize_4bit(
-            layer.w13_weight.reshape(-1, 1),
-            layer.w13_weight.bnb_quant_state,
+            layer.w13_weight.reshape(-1, 1), layer.w13_weight.bnb_quant_state
         )
         w2 = dequantize_4bit(
-            layer.w2_weight.reshape(-1, 1),
-            layer.w2_weight.bnb_quant_state,
+            layer.w2_weight.reshape(-1, 1), layer.w2_weight.bnb_quant_state
         )
         w13 = w13.reshape(layer.w13_weight.experts_shape)
         w2 = w2.reshape(layer.w2_weight.experts_shape)

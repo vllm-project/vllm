@@ -6,13 +6,8 @@ import json
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import (
-    compare_two_settings,
-    create_new_process_for_each_test,
-)
-from vllm.config import (
-    CompilationMode,
-)
+from tests.utils import compare_two_settings, create_new_process_for_each_test
+from vllm.config import CompilationMode
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 

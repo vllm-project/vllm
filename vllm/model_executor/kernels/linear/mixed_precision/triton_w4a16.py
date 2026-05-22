@@ -381,9 +381,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
             # Step 4: repack N into N//8 int32 values → [K, N//8] (vectorized)
             N8 = N_dim // 8
             w_repacked = torch.sum(
-                (w_KN.view(K_dim, N8, 8) & 0xF) << shifts,
-                dim=2,
-                dtype=torch.int32,
+                (w_KN.view(K_dim, N8, 8) & 0xF) << shifts, dim=2, dtype=torch.int32
             )
             x.data = w_repacked.contiguous()
             return x

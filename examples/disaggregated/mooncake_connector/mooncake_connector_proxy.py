@@ -83,8 +83,7 @@ async def lifespan(app: FastAPI):
                     timeout=None,
                     base_url=url,
                     limits=httpx.Limits(
-                        max_connections=None,
-                        max_keepalive_connections=None,
+                        max_connections=None, max_keepalive_connections=None
                     ),
                 ),
                 "url": url,
@@ -103,10 +102,9 @@ async def lifespan(app: FastAPI):
                     timeout=None,
                     base_url=url,
                     limits=httpx.Limits(
-                        max_connections=None,
-                        max_keepalive_connections=None,
+                        max_connections=None, max_keepalive_connections=None
                     ),
-                ),
+                )
             }
         )
 

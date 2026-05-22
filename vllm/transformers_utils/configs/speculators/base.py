@@ -34,9 +34,7 @@ class SpeculatorsConfig(PretrainedConfig):
 
     @classmethod
     def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str | os.PathLike,
-        **kwargs,
+        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""
         config_dict, _ = cls.get_config_dict(

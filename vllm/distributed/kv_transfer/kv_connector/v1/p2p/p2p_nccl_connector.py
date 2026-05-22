@@ -46,9 +46,7 @@ class ReqMeta:
     ) -> "ReqMeta":
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
-            request_id=request_id,
-            block_ids=block_ids_tensor,
-            num_tokens=len(token_ids),
+            request_id=request_id, block_ids=block_ids_tensor, num_tokens=len(token_ids)
         )
 
 
@@ -79,9 +77,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config,
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
@@ -264,8 +260,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert self.p2p_nccl_engine is not None
 
         def extract_kv_from_layer(
-            layer: torch.Tensor,
-            block_ids: torch.Tensor,
+            layer: torch.Tensor, block_ids: torch.Tensor
         ) -> torch.Tensor:
             """
             Extract KV cache slices from a given attention layer tensor.
@@ -335,9 +330,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # ==============================
 
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the
@@ -376,8 +369,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             )
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -476,9 +468,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return meta
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.

@@ -126,9 +126,7 @@ class MistralAttention(LlamaAttention):
         return scaling.unsqueeze(-1)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -287,9 +285,7 @@ class MistralForCausalLM(LlamaForCausalLM):
         )
 
     def maybe_remap_mistral(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
+        self, name: str, loaded_weight: torch.Tensor
     ) -> tuple[str, torch.Tensor]:
         def permute(w: torch.Tensor, n_heads: int, attn_out: int):
             attn_in = self.config.head_dim * n_heads

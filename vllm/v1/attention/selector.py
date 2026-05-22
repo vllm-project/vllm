@@ -11,9 +11,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
-from vllm.v1.attention.backends.registry import (
-    MambaAttentionBackendEnum,
-)
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -104,16 +102,12 @@ def get_attn_backend(
 
 @cache
 def _cached_get_attn_backend(
-    backend,
-    attn_selector_config: AttentionSelectorConfig,
-    num_heads: int | None = None,
+    backend, attn_selector_config: AttentionSelectorConfig, num_heads: int | None = None
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
     attention_cls = current_platform.get_attn_backend_cls(
-        backend,
-        attn_selector_config=attn_selector_config,
-        num_heads=num_heads,
+        backend, attn_selector_config=attn_selector_config, num_heads=num_heads
     )
     if not attention_cls:
         raise ValueError(

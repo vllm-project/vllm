@@ -294,8 +294,7 @@ async def test_session_update_invalid_model_returns_error(
 
             # Send session.update with a model that doesn't exist
             await send_event(
-                ws,
-                {"type": "session.update", "model": "nonexistent-model"},
+                ws, {"type": "session.update", "model": "nonexistent-model"}
             )
 
             event = await receive_event(ws, timeout=10.0)
@@ -326,10 +325,7 @@ async def test_commit_without_session_update_returns_error(
             assert event["type"] == "session.created"
 
             # Send commit without sending session.update first
-            await send_event(
-                ws,
-                {"type": "input_audio_buffer.commit", "final": True},
-            )
+            await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
 
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"

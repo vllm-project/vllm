@@ -76,8 +76,7 @@ structured_outputs_params_grammar = StructuredOutputsParams(
     grammar=simplified_sql_grammar
 )
 sampling_params_grammar = SamplingParams(
-    structured_outputs=structured_outputs_params_grammar,
-    max_tokens=MAX_TOKENS,
+    structured_outputs=structured_outputs_params_grammar, max_tokens=MAX_TOKENS
 )
 prompt_grammar = (
     "Generate an SQL query to show the 'username' and 'email' from the 'users' table."

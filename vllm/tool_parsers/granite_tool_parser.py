@@ -8,9 +8,7 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,10 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
     consume_space,
     find_common_prefix,
@@ -88,9 +83,7 @@ class GraniteToolParser(ToolParser):
             ]
 
             return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=None,
+                tools_called=True, tool_calls=tool_calls, content=None
             )
 
         except Exception as e:

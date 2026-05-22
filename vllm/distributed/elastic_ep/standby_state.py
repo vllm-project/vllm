@@ -91,11 +91,7 @@ def create_standby_groups(
 
     if enable_eplb:
         _STANDBY_EPLB = _init_stateless_group(
-            standby_ep_ranks,
-            "eplb",
-            master_ip,
-            backend,
-            coord_store=coord_store,
+            standby_ep_ranks, "eplb", master_ip, backend, coord_store=coord_store
         )
 
 

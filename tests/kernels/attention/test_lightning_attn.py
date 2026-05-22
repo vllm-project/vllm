@@ -116,10 +116,7 @@ def reference_linear_decode(q, k, v, kv_caches, slope_rate, slot_idx):
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_linear_decode_forward_triton(
-    batch_size: int,
-    num_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
+    batch_size: int, num_heads: int, head_size: int, dtype: torch.dtype
 ):
     torch.set_default_device("cuda")
     set_random_seed(42)
@@ -158,9 +155,7 @@ def test_linear_decode_forward_triton(
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_linear_decode_forward_triton_with_padding(
-    num_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
+    num_heads: int, head_size: int, dtype: torch.dtype
 ):
     torch.set_default_device("cuda")
     set_random_seed(42)
@@ -218,11 +213,7 @@ def test_linear_decode_forward_triton_with_padding(
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_lightning_attention_reference(
-    batch_size: int,
-    num_heads: int,
-    head_size: int,
-    seq_len: int,
-    dtype: torch.dtype,
+    batch_size: int, num_heads: int, head_size: int, seq_len: int, dtype: torch.dtype
 ):
     torch.set_default_device("cuda")
     set_random_seed(42)

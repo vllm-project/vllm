@@ -46,9 +46,7 @@ def test_hf_overrides_model_type_returns_correct_config_class():
             config = get_config(
                 tmpdir,
                 trust_remote_code=False,
-                hf_overrides_kw={
-                    "model_type": "test_custom_model",
-                },
+                hf_overrides_kw={"model_type": "test_custom_model"},
             )
 
             from transformers import AutoConfig

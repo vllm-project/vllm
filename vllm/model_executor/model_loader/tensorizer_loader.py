@@ -59,16 +59,12 @@ class TensorizerLoader(BaseModelLoader):
         self.tensorizer_config.verify_with_model_config(model_config)
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
 
-    def _get_weights_iterator(
-        self,
-    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+    def _get_weights_iterator(self) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 
     def _load_model_serialized_cpu(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, vllm_config: VllmConfig, prefix: str = ""
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
 
@@ -147,7 +143,5 @@ class TensorizerLoader(BaseModelLoader):
         if isinstance(tensorizer_config, dict):
             tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
-            model=model,
-            tensorizer_config=tensorizer_config,
-            model_config=model_config,
+            model=model, tensorizer_config=tensorizer_config, model_config=model_config
         )

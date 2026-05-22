@@ -32,16 +32,13 @@ BLOCK_SIZE = int(os.getenv("BLOCK_SIZE", "128"))
 # ── OpenAI clients ────────────────────────────────────────────────────────
 
 decode_client = openai.OpenAI(
-    api_key="EMPTY",
-    base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1",
+    api_key="EMPTY", base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1"
 )
 prefill_client = openai.OpenAI(
-    api_key="EMPTY",
-    base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1",
+    api_key="EMPTY", base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1"
 )
 proxy_client = openai.OpenAI(
-    api_key="EMPTY",
-    base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1",
+    api_key="EMPTY", base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1"
 )
 
 _MODEL = None
@@ -58,10 +55,7 @@ def _get_model() -> str:
 def _complete(client: openai.OpenAI, prompt: str, max_tokens: int = 20):
     """Send a completion request and return (text, prompt_tokens)."""
     resp = client.completions.create(
-        model=_get_model(),
-        prompt=prompt,
-        max_tokens=max_tokens,
-        temperature=0,
+        model=_get_model(), prompt=prompt, max_tokens=max_tokens, temperature=0
     )
     return resp.choices[0].text, resp.usage.prompt_tokens
 
@@ -77,11 +71,7 @@ _METRIC_RE = re.compile(
 def _fetch_metrics(host: str, port: str) -> dict[str, float]:
     """Scrape prompt_tokens_by_source counters from a vLLM server."""
     body = urllib.request.urlopen(f"http://{host}:{port}/metrics").read().decode()
-    result = {
-        "local_compute": 0.0,
-        "local_cache_hit": 0.0,
-        "external_kv_transfer": 0.0,
-    }
+    result = {"local_compute": 0.0, "local_cache_hit": 0.0, "external_kv_transfer": 0.0}
     for m in _METRIC_RE.finditer(body):
         source, val = m.group(1), float(m.group(2))
         if source in result:

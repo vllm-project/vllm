@@ -155,8 +155,7 @@ class TestBaseThinkingReasoningParserMethods:
         )
         assert (
             parser.is_reasoning_end_streaming(
-                [1, start_token_id, 2, end_token_id, 2, start_token_id, 2],
-                [2],
+                [1, start_token_id, 2, end_token_id, 2, start_token_id, 2], [2]
             )
             is False
         )
@@ -320,13 +319,7 @@ class TestBaseThinkingReasoningParserStreaming:
         """Test streaming with start token included."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        deltas = [
-            "<test:think>",
-            "Some ",
-            "reasoning",
-            "</test:think>",
-            "Answer",
-        ]
+        deltas = ["<test:think>", "Some ", "reasoning", "</test:think>", "Answer"]
 
         reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
@@ -337,13 +330,7 @@ class TestBaseThinkingReasoningParserStreaming:
         """Test streaming when no end token is encountered."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        deltas = [
-            "<test:think>",
-            "Some ",
-            "reasoning ",
-            "without ",
-            "end",
-        ]
+        deltas = ["<test:think>", "Some ", "reasoning ", "without ", "end"]
 
         reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
@@ -354,13 +341,7 @@ class TestBaseThinkingReasoningParserStreaming:
         """Test streaming when only end token appears."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        deltas = [
-            "<test:think>",
-            "Reasoning ",
-            "content",
-            "</test:think>",
-            "Final",
-        ]
+        deltas = ["<test:think>", "Reasoning ", "content", "</test:think>", "Final"]
 
         reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 

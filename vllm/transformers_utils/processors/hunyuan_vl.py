@@ -19,11 +19,7 @@ class HunYuanVLProcessor(ProcessorMixin):
     tokenizer_class = "AutoTokenizer"  # ("AutoTokenizer", None)
 
     def __init__(
-        self,
-        image_processor=None,
-        tokenizer=None,
-        chat_template=None,
-        **kwargs,
+        self, image_processor=None, tokenizer=None, chat_template=None, **kwargs
     ):
         # TODO Fix the init
         self.tokenizer = tokenizer
@@ -124,8 +120,7 @@ class HunYuanVLProcessor(ProcessorMixin):
 
         return_tensors = kwargs.pop("return_tensors", None)
         return BatchFeature(
-            data={**text_inputs, **image_inputs},
-            tensor_type=return_tensors,
+            data={**text_inputs, **image_inputs}, tensor_type=return_tensors
         )
 
     def batch_decode(self, *args, **kwargs):

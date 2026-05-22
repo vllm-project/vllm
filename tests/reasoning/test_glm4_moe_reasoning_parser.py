@@ -74,56 +74,16 @@ ONLY_OPEN_TAG_STREAM = {
 }
 
 TEST_CASES = [
-    pytest.param(
-        False,
-        WITH_THINK,
-        id="with_think",
-    ),
-    pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_THINK,
-        id="without_think",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_THINK_STREAM,
-        id="without_think_stream",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        MULTILINE_REASONING,
-        id="multiline_reasoning",
-    ),
-    pytest.param(
-        True,
-        MULTILINE_REASONING,
-        id="multiline_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        ONLY_OPEN_TAG,
-        id="only_open_tag",
-    ),
-    pytest.param(
-        True,
-        ONLY_OPEN_TAG_STREAM,
-        id="only_open_tag_stream",
-    ),
+    pytest.param(False, WITH_THINK, id="with_think"),
+    pytest.param(True, WITH_THINK_STREAM, id="with_think_stream"),
+    pytest.param(False, WITHOUT_THINK, id="without_think"),
+    pytest.param(True, WITHOUT_THINK_STREAM, id="without_think_stream"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_stream"),
+    pytest.param(False, MULTILINE_REASONING, id="multiline_reasoning"),
+    pytest.param(True, MULTILINE_REASONING, id="multiline_reasoning_stream"),
+    pytest.param(False, ONLY_OPEN_TAG, id="only_open_tag"),
+    pytest.param(True, ONLY_OPEN_TAG_STREAM, id="only_open_tag_stream"),
 ]
 
 STILL_REASONING_PROMPT = """[gMASK]<sop><|system|>
@@ -167,11 +127,7 @@ REASONING_END_TEST_CASES = [
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    glm45_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, glm45_tokenizer):
     output = glm45_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = [
         glm45_tokenizer.convert_tokens_to_string([token]) for token in output

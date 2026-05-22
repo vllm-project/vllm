@@ -79,10 +79,7 @@ def run_chat_completion_prompt_embeds(
     ]
 
     chat_completion = client.chat.completions.create(
-        model=model_name,
-        max_tokens=6,
-        temperature=0.0,
-        messages=api_messages,
+        model=model_name, max_tokens=6, temperature=0.0, messages=api_messages
     )
 
     print("-" * 30)
@@ -126,10 +123,7 @@ def run_completion_prompt_embeds(
 
 
 def main() -> None:
-    client = OpenAI(
-        api_key="EMPTY",
-        base_url="http://localhost:8000/v1",
-    )
+    client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
 
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
 

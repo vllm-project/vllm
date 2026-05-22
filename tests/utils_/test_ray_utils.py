@@ -64,11 +64,7 @@ MOCK_RAY_NODES = [
             [{"GPU": 1}] * 3,
             [(0, NODE_A, IP_A), (1, NODE_A, IP_A), (2, NODE_A, IP_A)],
         ),
-        pytest.param(
-            {},
-            [],
-            [],
-        ),
+        pytest.param({}, [], []),
         pytest.param(
             {0: NODE_A, 1: NODE_B, 2: NODE_A},
             [{"CPU": 1}, {"GPU": 1}, {"GPU": 1}],

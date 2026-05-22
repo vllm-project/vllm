@@ -10,9 +10,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
 def _compute_block_max_and_sumexp(logits):
     block_max = tl.max(logits, axis=0)
     block_sumexp = tl.where(
-        block_max > float("-inf"),
-        tl.sum(tl.exp(logits - block_max)),
-        0.0,
+        block_max > float("-inf"), tl.sum(tl.exp(logits - block_max)), 0.0
     )
     return block_max, block_sumexp
 
@@ -387,18 +385,14 @@ def _resample_kernel(
         # log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
         ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
-            ratio < 1.0,
-            target_log_probs + tl.log(1 - ratio),
-            float("-inf"),
+            ratio < 1.0, target_log_probs + tl.log(1 - ratio), float("-inf")
         ).to(tl.float32)
     else:
         # One-hot draft. The residual is just the target distribution with
         # the rejected draft token probability zeroed out.
         rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
         residual_logits = tl.where(
-            block != rejected_draft_token,
-            target_logits,
-            float("-inf"),
+            block != rejected_draft_token, target_logits, float("-inf")
         ).to(tl.float32)
 
     # Resample the rejected/bonus token.
@@ -482,12 +476,9 @@ def _insert_resampled_kernel(
     resampled = tl.load(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
-        + resampled_max_block_idx,
+        + resampled_max_block_idx
     )
-    tl.store(
-        sampled_ptr + req_idx * sampled_stride + num_sampled,
-        resampled,
-    )
+    tl.store(sampled_ptr + req_idx * sampled_stride + num_sampled, resampled)
 
 
 def rejection_sample(

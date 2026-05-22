@@ -67,9 +67,7 @@ def can_initialize(
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
+        on_fail="skip", check_max_version=False, check_version_reason="vllm"
     )
 
     hf_overrides_fn = partial(
@@ -83,9 +81,7 @@ def can_initialize(
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         kv_cache_configs = get_kv_cache_configs(
-            vllm_config,
-            kv_cache_specs,
-            [10 * GiB_bytes],
+            vllm_config, kv_cache_specs, [10 * GiB_bytes]
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks

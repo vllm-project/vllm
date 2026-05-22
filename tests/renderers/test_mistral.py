@@ -110,10 +110,7 @@ def test_apply_mistral_chat_template_thinking_chunk():
             "content": [
                 {"type": "text", "text": "Let me think about it."},
                 {"type": "thinking", "closed": True, "thinking": "2+2 = 4"},
-                {
-                    "type": "text",
-                    "text": "The answer is 4.",
-                },
+                {"type": "text", "text": "The answer is 4."},
             ],
         },
         {"role": "user", "content": "Thanks, what is 3+3?"},

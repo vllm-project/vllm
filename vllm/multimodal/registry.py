@@ -46,10 +46,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
     instance from the context.
     """
 
-    def __call__(
-        self,
-        ctx: InputProcessingContext,
-    ) -> _I_co: ...
+    def __call__(self, ctx: InputProcessingContext) -> _I_co: ...
 
 
 class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
@@ -164,9 +161,7 @@ class MultiModalRegistry:
                 )
 
             model_cls._processor_factory = _ProcessorFactories(
-                info=info,
-                dummy_inputs=dummy_inputs,
-                processor=processor,
+                info=info, dummy_inputs=dummy_inputs, processor=processor
             )
 
             return model_cls
@@ -186,9 +181,7 @@ class MultiModalRegistry:
         return cast("SupportsMultiModal", model_cls)
 
     def _create_processing_ctx(
-        self,
-        model_config: "ModelConfig",
-        tokenizer: TokenizerLike | None = None,
+        self, model_config: "ModelConfig", tokenizer: TokenizerLike | None = None
     ) -> InputProcessingContext:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
@@ -196,9 +189,7 @@ class MultiModalRegistry:
         return InputProcessingContext(model_config, tokenizer)
 
     def _create_processing_info(
-        self,
-        model_config: "ModelConfig",
-        tokenizer: TokenizerLike | None = None,
+        self, model_config: "ModelConfig", tokenizer: TokenizerLike | None = None
     ) -> BaseProcessingInfo:
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
@@ -249,13 +240,10 @@ class MultiModalRegistry:
 
         mm_config = model_config.get_multimodal_config()
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-            seq_len=seq_len,
-            mm_counts=mm_counts,
-            mm_options=mm_config.limit_per_prompt,
+            seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_config.limit_per_prompt
         )
         mm_inputs = processor.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
+            processor_inputs, timing_ctx=TimingContext(enabled=False)
         )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
@@ -266,8 +254,7 @@ class MultiModalRegistry:
         return mm_inputs
 
     def _get_cache_type(
-        self,
-        vllm_config: "VllmConfig",
+        self, vllm_config: "VllmConfig"
     ) -> Literal[None, "processor_only", "lru", "shm"]:
         model_config = vllm_config.model_config
         if not self.supports_multimodal_inputs(model_config):
@@ -292,8 +279,7 @@ class MultiModalRegistry:
         return mm_config.mm_processor_cache_type
 
     def processor_cache_from_config(
-        self,
-        vllm_config: "VllmConfig",
+        self, vllm_config: "VllmConfig"
     ) -> BaseMultiModalProcessorCache | None:
         """Return a `BaseMultiModalProcessorCache`, if enabled."""
         cache_type = self._get_cache_type(vllm_config)
@@ -309,8 +295,7 @@ class MultiModalRegistry:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
     def processor_only_cache_from_config(
-        self,
-        vllm_config: "VllmConfig",
+        self, vllm_config: "VllmConfig"
     ) -> MultiModalProcessorOnlyCache | None:
         """Return a `MultiModalProcessorOnlyCache`, if enabled."""
         cache_type = self._get_cache_type(vllm_config)
@@ -320,8 +305,7 @@ class MultiModalRegistry:
         return MultiModalProcessorOnlyCache(vllm_config.model_config)
 
     def engine_receiver_cache_from_config(
-        self,
-        vllm_config: "VllmConfig",
+        self, vllm_config: "VllmConfig"
     ) -> BaseMultiModalReceiverCache | None:
         """Return a `BaseMultiModalReceiverCache` for the engine process."""
         cache_type = self._get_cache_type(vllm_config)
@@ -333,9 +317,7 @@ class MultiModalRegistry:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
     def worker_receiver_cache_from_config(
-        self,
-        vllm_config: "VllmConfig",
-        shared_worker_lock: LockType,
+        self, vllm_config: "VllmConfig", shared_worker_lock: LockType
     ) -> BaseMultiModalReceiverCache | None:
         """Return a `BaseMultiModalReceiverCache` for the worker process."""
         cache_type = self._get_cache_type(vllm_config)

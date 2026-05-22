@@ -309,10 +309,7 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
 async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
     """Validate that tool call arguments adhere to their declared JSON schema."""
     response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
-        tools=TOOLS,
-        temperature=0.0,
+        model=MODEL_NAME, messages=MESSAGES_MULTIPLE_CALLS, tools=TOOLS, temperature=0.0
     )
 
     calls = response.choices[0].message.tool_calls
@@ -344,10 +341,7 @@ async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI)
     responses = []
     for temp in [0.0, 0.5, 1.0]:
         resp = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=MESSAGES_CALC,
-            tools=TOOLS,
-            temperature=temp,
+            model=MODEL_NAME, messages=MESSAGES_CALC, tools=TOOLS, temperature=temp
         )
         text = (resp.choices[0].message.content or "").strip()
         responses.append(text)

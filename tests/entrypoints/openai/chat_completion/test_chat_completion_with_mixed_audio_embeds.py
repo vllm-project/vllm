@@ -49,9 +49,7 @@ def qwen2audio_server_args() -> list[str]:
 @pytest.fixture(scope="module")
 def qwen2audio_server(qwen2audio_server_args):
     with RemoteOpenAIServer(
-        QWEN2AUDIO_MODEL,
-        qwen2audio_server_args,
-        max_wait_seconds=600,
+        QWEN2AUDIO_MODEL, qwen2audio_server_args, max_wait_seconds=600
     ) as remote_server:
         yield remote_server
 
@@ -97,10 +95,7 @@ async def test_prompt_embeds_plus_audio_embeds(
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "prompt_embeds",
-                        "data": qwen2audio_prompt_embeds_b64,
-                    },
+                    {"type": "prompt_embeds", "data": qwen2audio_prompt_embeds_b64},
                     {
                         "type": "audio_embeds",
                         "audio_embeds": qwen2audio_audio_embeds_b64,
@@ -156,10 +151,7 @@ async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
     """
     content, encoded_text_embeds = qwen2audio_aligned_content_and_embeds_b64
 
-    audio_part = {
-        "type": "audio_embeds",
-        "audio_embeds": qwen2audio_audio_embeds_b64,
-    }
+    audio_part = {"type": "audio_embeds", "audio_embeds": qwen2audio_audio_embeds_b64}
     text_part = {"type": "text", "text": content}
     embeds_part = {"type": "prompt_embeds", "data": encoded_text_embeds}
 

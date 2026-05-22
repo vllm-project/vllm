@@ -209,10 +209,7 @@ class IPCWeightTransferEngine(
         else:
             assert isinstance(update_info.ipc_handles, list)
             weights = []
-            for name, ipc_handle in zip(
-                update_info.names,
-                update_info.ipc_handles,
-            ):
+            for name, ipc_handle in zip(update_info.names, update_info.ipc_handles):
                 props = torch.cuda.get_device_properties(device_index)
                 physical_gpu_id = str(props.uuid)
 

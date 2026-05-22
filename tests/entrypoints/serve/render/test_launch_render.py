@@ -80,10 +80,7 @@ async def test_chat_render_multi_turn(client):
 async def test_completion_render_basic(client):
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Once upon a time",
-        },
+        json={"model": MODEL_NAME, "prompt": "Once upon a time"},
     )
 
     assert response.status_code == 200
@@ -106,10 +103,7 @@ async def test_completion_render_basic(client):
 async def test_completion_render_multiple_prompts(client):
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "prompt": ["Hello world", "Goodbye world"],
-        },
+        json={"model": MODEL_NAME, "prompt": ["Hello world", "Goodbye world"]},
     )
 
     assert response.status_code == 200
@@ -130,11 +124,7 @@ async def test_completion_render_multiple_prompts(client):
 @pytest.mark.asyncio
 async def test_completion_render_invalid_model(client):
     response = await client.post(
-        "/v1/completions/render",
-        json={
-            "model": "nonexistent-model",
-            "prompt": "Hello",
-        },
+        "/v1/completions/render", json={"model": "nonexistent-model", "prompt": "Hello"}
     )
 
     assert response.status_code == 404
@@ -149,10 +139,7 @@ async def test_render_is_fast(client):
     start = time.perf_counter()
     response = await client.post(
         "/v1/completions/render",
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Tell me a very long story about " * 10,
-        },
+        json={"model": MODEL_NAME, "prompt": "Tell me a very long story about " * 10},
     )
     elapsed = time.perf_counter() - start
 

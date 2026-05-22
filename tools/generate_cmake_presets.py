@@ -132,11 +132,7 @@ def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False)
         "cmakeMinimumRequired": {"major": 3, "minor": 26, "patch": 1},
         "configurePresets": [configure_preset],
         "buildPresets": [
-            {
-                "name": "release",
-                "configurePreset": "release",
-                "jobs": cmake_jobs,
-            }
+            {"name": "release", "configurePreset": "release", "jobs": cmake_jobs}
         ],
     }
 

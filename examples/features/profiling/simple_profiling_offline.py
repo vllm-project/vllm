@@ -21,10 +21,7 @@ def main():
     llm = LLM(
         model="facebook/opt-125m",
         tensor_parallel_size=1,
-        profiler_config={
-            "profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-        },
+        profiler_config={"profiler": "torch", "torch_profiler_dir": "./vllm_profile"},
     )
 
     llm.start_profile()

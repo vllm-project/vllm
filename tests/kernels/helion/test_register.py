@@ -38,9 +38,7 @@ from vllm.kernels.helion.register import (
 
 if _HOP_AVAILABLE:
     from helion._compat import supports_torch_compile_fusion
-    from helion._compiler._dynamo.higher_order_ops import (
-        helion_kernel_wrapper_mutation,
-    )
+    from helion._compiler._dynamo.higher_order_ops import helion_kernel_wrapper_mutation
     from torch._inductor.utils import run_and_get_code
 
 
@@ -56,25 +54,15 @@ def sample_configs():
     """Create real Helion config objects for testing."""
     return {
         CaseKey({"batchsize": 32, "hiddensize": 4096}): helion.Config(
-            block_sizes=[128],
-            num_warps=4,
-            num_stages=3,
+            block_sizes=[128], num_warps=4, num_stages=3
         ),
         CaseKey({"batchsize": 64, "hiddensize": 4096}): helion.Config(
-            block_sizes=[256],
-            num_warps=8,
-            num_stages=4,
+            block_sizes=[256], num_warps=8, num_stages=4
         ),
         CaseKey({"batchsize": 128, "hiddensize": 4096}): helion.Config(
-            block_sizes=[512],
-            num_warps=16,
-            num_stages=2,
+            block_sizes=[512], num_warps=16, num_stages=2
         ),
-        CaseKey.default(): helion.Config(
-            block_sizes=[64],
-            num_warps=2,
-            num_stages=2,
-        ),
+        CaseKey.default(): helion.Config(block_sizes=[64], num_warps=2, num_stages=2),
     }
 
 
@@ -177,8 +165,7 @@ def create_configured_kernel_with_configs(
             return_value=mock_config_manager,
         ),
         patch(
-            "vllm.kernels.helion.utils.get_canonical_gpu_name",
-            return_value=platform,
+            "vllm.kernels.helion.utils.get_canonical_gpu_name", return_value=platform
         ),
         patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
     ):
@@ -612,9 +599,7 @@ class TestHelionKernelWrapper:
                 wraps=get_canonical_gpu_name,
             ) as mock_gpu,
         ):
-            wrapper = register(
-                config_picker=lambda args, keys: None,
-            )(_add_kernel)
+            wrapper = register(config_picker=lambda args, keys: None)(_add_kernel)
 
             mock_gpu.assert_called_once()
             assert wrapper._configured_kernel is not None
@@ -644,9 +629,7 @@ class TestHelionKernelWrapper:
                 wraps=get_canonical_gpu_name,
             ) as mock_gpu,
         ):
-            wrapper = register(
-                config_picker=lambda args, keys: None,
-            )(_add_kernel)
+            wrapper = register(config_picker=lambda args, keys: None)(_add_kernel)
 
             # Init must have detected GPU and built the kernel
             mock_gpu.assert_called_once()
@@ -811,9 +794,7 @@ class TestKernelRegistry:
         ):
             mock_fake = Mock()
             mock_infer.return_value = mock_fake
-            wrapper = register(
-                config_picker=lambda args, keys: None,
-            )(_add_kernel)
+            wrapper = register(config_picker=lambda args, keys: None)(_add_kernel)
 
         mock_infer.assert_called_once_with(_add_kernel, None)
         assert wrapper._fake_impl is mock_fake

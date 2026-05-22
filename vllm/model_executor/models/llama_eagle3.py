@@ -109,10 +109,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # Self Attention
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
@@ -132,11 +129,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 )
 class LlamaModel(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        start_layer_id: int = 0,
-        prefix: str = "",
+        self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = ""
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -187,8 +180,7 @@ class LlamaModel(nn.Module):
 
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
-                    self.fc_input_size,
-                    eps=self.config.rms_norm_eps,
+                    self.fc_input_size, eps=self.config.rms_norm_eps
                 )
             else:
                 self.input_norm = None
@@ -215,10 +207,7 @@ class LlamaModel(nn.Module):
             )
 
         self.norm_output = getattr(self.config, "norm_output", False)
-        self.norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -360,10 +349,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (
@@ -375,19 +361,12 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
-            (
-                logits.shape[0],
-                self.config.vocab_size,
-            ),
-            float("-inf"),
+            (logits.shape[0], self.config.vocab_size), float("-inf")
         )
         logits_new[:, targets] = logits
         return logits_new
 
-    def combine_hidden_states(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if not self.model.use_aux_hidden_state:
             return hidden_states
         # combine multiple auxiliary hidden states returned by eagle3
@@ -400,8 +379,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         if self.model.fc_norm is not None:
             chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
             hidden_states = torch.cat(
-                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
-                dim=-1,
+                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)], dim=-1
             )
 
         return self.model.fc(hidden_states)
@@ -452,9 +430,5 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs.append("fc.")
         if not self.model.norm_before_fc:
             skip_substrs.append("input_norm.")
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=None, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())

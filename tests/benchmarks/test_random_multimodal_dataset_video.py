@@ -191,7 +191,7 @@ def test_sample_video_only_buckets(
 ):
     """Test sampling with only video buckets."""
     bucket_config = {
-        (64, 64, 8): 1.0,  # Only videos
+        (64, 64, 8): 1.0  # Only videos
     }
 
     limit_mm_per_prompt = {"image": 0, "video": 2}
@@ -229,7 +229,7 @@ def test_sample_respects_video_limits(
 ):
     """Test that sampling respects video limits per prompt."""
     bucket_config = {
-        (64, 64, 8): 1.0,  # Only videos
+        (64, 64, 8): 1.0  # Only videos
     }
 
     # Set very low video limit
@@ -358,7 +358,7 @@ def test_sample_different_seeds_produce_different_videos(
     dataset2 = RandomMultiModalDataset(random_seed=456)
 
     bucket_config = {
-        (64, 64, 8): 1.0,  # Only videos
+        (64, 64, 8): 1.0  # Only videos
     }
 
     limit_mm_per_prompt = {"image": 0, "video": 1}

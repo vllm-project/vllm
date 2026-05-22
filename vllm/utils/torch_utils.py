@@ -60,10 +60,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 }
 
 
-MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
-    "fp8": "fp8_e4m3",
-    "nvfp4": "nvfp4",
-}
+MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {"fp8": "fp8_e4m3", "nvfp4": "nvfp4"}
 
 T = TypeVar("T")
 
@@ -259,16 +256,11 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     cast to it without losing any information.
     """
     return max(
-        dtypes,
-        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+        dtypes, key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes)
     )
 
 
-def _generate_random_fp8(
-    tensor: torch.Tensor,
-    low: float,
-    high: float,
-) -> None:
+def _generate_random_fp8(tensor: torch.Tensor, low: float, high: float) -> None:
     # NOTE(zhaoyang): Due to NaN and Inf representation for fp8 data type,
     # it may occur Inf or NaN if we directly use torch.randint
     # to generate random data for fp8 data.
@@ -286,8 +278,7 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: str | torch.dtype | None,
-    model_dtype: str | torch.dtype | None = None,
+    cache_dtype: str | torch.dtype | None, model_dtype: str | torch.dtype | None = None
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -417,9 +408,7 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
-def _nvfp4_split_data_scale(
-    kv_side: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _nvfp4_split_data_scale(kv_side: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Split a single NVFP4 KV-side buffer into data and scale views.
 
     The input is a 4D tensor for one KV side (K or V) whose last
@@ -536,11 +525,7 @@ def create_kv_caches_with_random_flash(
             nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
             inv = [stride_order.index(i) for i in range(len(stride_order))]
             key_value_cache = torch.randint(
-                0,
-                256,
-                nvfp4_phys,
-                dtype=dtype,
-                device=device,
+                0, 256, nvfp4_phys, dtype=dtype, device=device
             ).permute(*inv)
         else:
             key_value_cache = torch.empty(
@@ -617,11 +602,7 @@ def async_tensor_h2d(
 
 
 def make_ndarray_with_pad(
-    x: list[list[T]],
-    pad: T,
-    dtype: npt.DTypeLike,
-    *,
-    max_len: int | None = None,
+    x: list[list[T]], pad: T, dtype: npt.DTypeLike, *, max_len: int | None = None
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.

@@ -17,12 +17,7 @@ def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
     return [
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                },
-            ],
+            "content": [{"type": "image_url", "image_url": {"url": image_url}}],
         }
     ]
 
@@ -57,10 +52,7 @@ def _get_mm_cache_log(llm: LLM, caplog_vllm: pytest.LogCaptureFixture) -> float:
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:2]], indirect=True)
 @pytest.mark.parametrize("mm_processor_cache_type", ["lru", "shm"])
 def test_mm_cache_stats(
-    num_gpus_available,
-    image_urls,
-    mm_processor_cache_type,
-    caplog_vllm,
+    num_gpus_available, image_urls, mm_processor_cache_type, caplog_vllm
 ):
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",

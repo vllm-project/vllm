@@ -152,8 +152,7 @@ def test_tp1_fp8_fusions(
     [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
 )
 @pytest.mark.parametrize(
-    "attn_backend",
-    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
+    "attn_backend", [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN]
 )
 @pytest.mark.parametrize("n_layers", [6])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))

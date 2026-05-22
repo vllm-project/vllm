@@ -7,11 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.entrypoints.cli.launch import (
-    LaunchSubcommand,
-    RenderSubcommand,
-    cmd_init,
-)
+from vllm.entrypoints.cli.launch import LaunchSubcommand, RenderSubcommand, cmd_init
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -63,9 +59,7 @@ def test_cmd_launch_render_calls_run():
 
 def test_cmd_launch_model_tag_overrides():
     args = argparse.Namespace(
-        model_tag="tag-model",
-        model="original-model",
-        launch_command=lambda a: None,
+        model_tag="tag-model", model="original-model", launch_command=lambda a: None
     )
     LaunchSubcommand.cmd(args)
     assert args.model == "tag-model"
@@ -73,9 +67,7 @@ def test_cmd_launch_model_tag_overrides():
 
 def test_cmd_launch_model_tag_none():
     args = argparse.Namespace(
-        model_tag=None,
-        model="original-model",
-        launch_command=lambda a: None,
+        model_tag=None, model="original-model", launch_command=lambda a: None
     )
     LaunchSubcommand.cmd(args)
     assert args.model == "original-model"

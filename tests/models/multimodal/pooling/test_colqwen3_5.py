@@ -12,13 +12,9 @@ import torch
 
 from ....conftest import VllmRunner
 
-MODELS = [
-    "athrael-soju/colqwen3.5-4.5B-v3",
-]
+MODELS = ["athrael-soju/colqwen3.5-4.5B-v3"]
 
-EMBED_DIMS = {
-    "athrael-soju/colqwen3.5-4.5B-v3": 320,
-}
+EMBED_DIMS = {"athrael-soju/colqwen3.5-4.5B-v3": 320}
 
 TEXT_QUERIES = [
     "What is the capital of France?",
@@ -34,18 +30,11 @@ DTYPE = "half"
 
 
 def _run_token_embed_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify per-token embedding shape and L2 normalization."""
     with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
+        model, runner="pooling", dtype=dtype, max_model_len=4096, enforce_eager=True
     ) as vllm_model:
         outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
 
@@ -58,29 +47,17 @@ def _run_token_embed_test(
 
         # Verify L2 normalization
         norms = torch.norm(emb, p=2, dim=-1)
-        torch.testing.assert_close(
-            norms,
-            torch.ones_like(norms),
-            rtol=1e-2,
-            atol=1e-2,
-        )
+        torch.testing.assert_close(norms, torch.ones_like(norms), rtol=1e-2, atol=1e-2)
 
 
 def _run_late_interaction_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
     from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
     with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
+        model, runner="pooling", dtype=dtype, max_model_len=4096, enforce_eager=True
     ) as vllm_model:
         q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
         d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
@@ -97,10 +74,7 @@ def _run_late_interaction_test(
 
 
 def _run_relevance_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_runner: type[VllmRunner], model: str, *, dtype: str
 ) -> None:
     """Verify that relevant documents score higher than irrelevant ones."""
     query = "What is machine learning?"
@@ -111,11 +85,7 @@ def _run_relevance_test(
     ]
 
     with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
+        model, runner="pooling", dtype=dtype, max_model_len=4096, enforce_eager=True
     ) as vllm_model:
         scores = vllm_model.score(query, documents)
 
@@ -126,29 +96,19 @@ def _run_relevance_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_5_token_embed(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_5_token_embed(vllm_runner, model: str, dtype: str) -> None:
     _run_token_embed_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
 def test_colqwen3_5_late_interaction_scoring(
-    vllm_runner,
-    model: str,
-    dtype: str,
+    vllm_runner, model: str, dtype: str
 ) -> None:
     _run_late_interaction_test(vllm_runner, model, dtype=dtype)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_5_relevance_ordering(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
+def test_colqwen3_5_relevance_ordering(vllm_runner, model: str, dtype: str) -> None:
     _run_relevance_test(vllm_runner, model, dtype=dtype)

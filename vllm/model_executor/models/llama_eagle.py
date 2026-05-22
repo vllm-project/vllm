@@ -54,11 +54,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 @support_torch_compile
 class LlamaModel(nn.Module):
     def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        start_layer_id: int = 0,
+        self, *, vllm_config: VllmConfig, prefix: str = "", start_layer_id: int = 0
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -107,11 +103,7 @@ class LlamaModel(nn.Module):
         hidden_states = self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states = hidden_states + residual
         return hidden_states, hidden_states
 
@@ -208,8 +200,5 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             process_eagle_weight(self, name)
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=None)
         loader.load_weights(map(transform, weights))

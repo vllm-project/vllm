@@ -275,16 +275,7 @@ def generate_valid_test_cases(
             continue
 
         cases.append(
-            (
-                k,
-                n,
-                e,
-                dtype,
-                quant_config,
-                combination[0],
-                combination[1],
-                world_size,
-            )
+            (k, n, e, dtype, quant_config, combination[0], combination[1], world_size)
         )
 
     print(f"{len(cases)} of {total} valid configs generated.")

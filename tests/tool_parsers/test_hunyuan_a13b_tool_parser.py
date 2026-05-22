@@ -7,10 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.tool_parsers.utils import (
-    run_tool_extraction,
-    run_tool_extraction_streaming,
-)
+from tests.tool_parsers.utils import run_tool_extraction, run_tool_extraction_streaming
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tool_parsers import ToolParser, ToolParserManager
 

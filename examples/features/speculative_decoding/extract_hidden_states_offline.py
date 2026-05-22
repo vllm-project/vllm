@@ -22,16 +22,14 @@ with tempfile.TemporaryDirectory() as tmpdirname:
                         2,
                         3,
                         4,
-                    ],
+                    ]
                 }
             },
         },
         kv_transfer_config={
             "kv_connector": "ExampleHiddenStatesConnector",
             "kv_role": "kv_producer",
-            "kv_connector_extra_config": {
-                "shared_storage_path": tmpdirname,
-            },
+            "kv_connector_extra_config": {"shared_storage_path": tmpdirname},
         },
     )
 

@@ -198,10 +198,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
     def ops_in_model_before(self):
-        return [
-            torch.ops.vllm.all_reduce.default,
-            torch.ops._C.scaled_fp4_quant.out,
-        ]
+        return [torch.ops.vllm.all_reduce.default, torch.ops._C.scaled_fp4_quant.out]
 
 
 @multi_gpu_test(num_gpus=2)
@@ -214,8 +211,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             True,
             False,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Not supported on ROCm platform",
+                current_platform.is_rocm(), reason="Not supported on ROCm platform"
             ),
         ),
         pytest.param(
@@ -223,8 +219,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             False,
             False,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Not supported on ROCm platform",
+                current_platform.is_rocm(), reason="Not supported on ROCm platform"
             ),
         ),
         pytest.param(
@@ -232,8 +227,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             False,
             False,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Not supported on ROCm platform",
+                current_platform.is_rocm(), reason="Not supported on ROCm platform"
             ),
         ),
     ],
@@ -246,8 +240,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
-    current_platform.is_rocm() and not IS_AITER_FOUND,
-    reason="aiter is not found",
+    current_platform.is_rocm() and not IS_AITER_FOUND, reason="aiter is not found"
 )
 @pytest.mark.skipif(
     current_platform.is_cuda()

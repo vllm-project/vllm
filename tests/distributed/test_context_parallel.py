@@ -80,9 +80,7 @@ class CPTestSettings:
     ):
         parallel_setups = []
         if dcp_multipliers is None:
-            dcp_multipliers = [
-                0.5,
-            ]
+            dcp_multipliers = [0.5]
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
                 for dcp_multiplier in dcp_multipliers:
@@ -102,8 +100,7 @@ class CPTestSettings:
             distributed_backends=["mp"],
             runner=runner,
             test_options=CPTestOptions(
-                multi_node_only=multi_node_only,
-                attn_backend=attn_backend,
+                multi_node_only=multi_node_only, attn_backend=attn_backend
             ),
         )
 
@@ -112,13 +109,7 @@ class CPTestSettings:
 
         for parallel_setup in self.parallel_setups:
             for backend in self.distributed_backends:
-                yield (
-                    model_id,
-                    parallel_setup,
-                    backend,
-                    self.runner,
-                    opts,
-                )
+                yield (model_id, parallel_setup, backend, self.runner, opts)
 
 
 CP_TEXT_GENERATION_MODELS = {
@@ -223,19 +214,14 @@ def _test_cp_gsm8k(
         server_args.append(f"--attention-backend={attn_backend}")
 
     with RemoteOpenAIServer(
-        model_id,
-        server_args,
-        max_wait_seconds=720,
+        model_id, server_args, max_wait_seconds=720
     ) as remote_server:
         host = f"http://{remote_server.host}"
         port = remote_server.port
 
         # Run GSM8K evaluation
         results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_SHOTS,
-            host=host,
-            port=port,
+            num_questions=NUM_QUESTIONS, num_shots=NUM_SHOTS, host=host, port=port
         )
 
         # Validate accuracy is reasonable
@@ -247,13 +233,7 @@ def _test_cp_gsm8k(
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "runner",
-        "test_options",
-    ),
+    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
         params
         for model_id, settings in CP_TEXT_GENERATION_MODELS.items()

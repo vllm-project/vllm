@@ -27,10 +27,7 @@ def test_mp_reducer():
             disable_log_stats=True,
         )
 
-        async_llm = AsyncLLM.from_engine_args(
-            engine_args,
-            start_engine_loop=False,
-        )
+        async_llm = AsyncLLM.from_engine_args(engine_args, start_engine_loop=False)
 
         assert mock_register.called, (
             "multiprocessing.reducer.register should have been called"

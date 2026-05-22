@@ -8,9 +8,7 @@ from typing import Any
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,10 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import extract_intermediate_diff
 
 logger = init_logger(__name__)
@@ -149,9 +144,7 @@ class MinimaxToolParser(ToolParser):
         return delta_text
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from model output for non-streaming mode.
@@ -408,11 +401,7 @@ class MinimaxToolParser(ToolParser):
 
         while len(sent_tools) < tool_count:
             sent_tools.append(
-                {
-                    "sent_name": False,
-                    "sent_arguments": "",
-                    "id": make_tool_call_id(),
-                }
+                {"sent_name": False, "sent_arguments": "", "id": make_tool_call_id()}
             )
 
         while len(tool_ids) < tool_count:

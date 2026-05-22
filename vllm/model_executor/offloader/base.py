@@ -53,8 +53,7 @@ class BaseOffloader(ABC):
 
     @abstractmethod
     def wrap_modules(
-        self,
-        modules_generator: Generator[nn.Module, None, None],
+        self, modules_generator: Generator[nn.Module, None, None]
     ) -> list[nn.Module]:
         """Wrap modules with offloading logic.
 
@@ -97,8 +96,7 @@ class NoopOffloader(BaseOffloader):
     """No-op offloader that returns modules as-is without any offloading."""
 
     def wrap_modules(
-        self,
-        modules_generator: Generator[nn.Module, None, None],
+        self, modules_generator: Generator[nn.Module, None, None]
     ) -> list[nn.Module]:
         """Return modules unchanged."""
         return list(modules_generator)

@@ -219,12 +219,7 @@ async def send_request(
     timeout_sec: int = 120,
     conversation_id: str | None = None,
 ) -> ServerResponse:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "seed": 0,
-        "temperature": 0.0,
-    }
+    payload = {"model": model, "messages": messages, "seed": 0, "temperature": 0.0}
 
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
@@ -248,9 +243,7 @@ async def send_request(
         if token_based_timeout > timeout_sec:
             timeout_sec = token_based_timeout
             logger.info(
-                "Using timeout of %ds based on max_tokens %d",
-                timeout_sec,
-                max_tokens,
+                "Using timeout of %ds based on max_tokens %d", timeout_sec, max_tokens
             )
     timeout = aiohttp.ClientTimeout(total=timeout_sec)
 
@@ -1175,10 +1168,7 @@ def process_statistics(
         # Convert milliseconds to seconds
         runtime_sec = runtime_sec / 1000.0
         requests_per_sec = float(len(df)) / runtime_sec
-        params = {
-            "runtime_sec": runtime_sec,
-            "requests_per_sec": requests_per_sec,
-        }
+        params = {"runtime_sec": runtime_sec, "requests_per_sec": requests_per_sec}
         if warmup_runtime_sec is not None:
             params["warmup_runtime_sec"] = warmup_runtime_sec
             params["total_runtime_incl_warmup_sec"] = runtime_sec + warmup_runtime_sec

@@ -6,9 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -19,10 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
@@ -71,9 +66,7 @@ class Ernie45ToolParser(ToolParser):
         self._buffer = ""
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
@@ -95,8 +88,7 @@ class Ernie45ToolParser(ToolParser):
                         ToolCall(
                             type="function",
                             function=FunctionCall(
-                                name=tool_call_dict.get("name", ""),
-                                arguments=args_str,
+                                name=tool_call_dict.get("name", ""), arguments=args_str
                             ),
                         )
                     )

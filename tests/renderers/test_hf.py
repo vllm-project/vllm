@@ -135,10 +135,7 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
     )
 
     # Build the tokenizer
-    tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    tokenizer = get_tokenizer(model, trust_remote_code=model_config.trust_remote_code)
 
     tools = (
         [
@@ -157,10 +154,7 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=None,
-        tools=tools,
-        model_config=model_config,
+        tokenizer, chat_template=None, tools=tools, model_config=model_config
     )
     assert isinstance(chat_template, str)
 
@@ -237,17 +231,11 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
     )
 
     # Build the tokenizer
-    tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    tokenizer = get_tokenizer(model, trust_remote_code=model_config.trust_remote_code)
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=None,
-        tools=tools,
-        model_config=model_config,
+        tokenizer, chat_template=None, tools=tools, model_config=model_config
     )
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
@@ -311,10 +299,7 @@ def test_resolve_chat_template_resolves_name():
     model_config = MagicMock()
 
     result = resolve_chat_template(
-        tokenizer,
-        chat_template="tool_use",
-        tools=None,
-        model_config=model_config,
+        tokenizer, chat_template="tool_use", tools=None, model_config=model_config
     )
 
     assert result == jinja_content
@@ -387,17 +372,11 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         dtype=model_info.dtype,
     )
 
-    tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
+    tokenizer = get_tokenizer(model, trust_remote_code=model_config.trust_remote_code)
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=None,
-        tools=None,
-        model_config=model_config,
+        tokenizer, chat_template=None, tools=None, model_config=model_config
     )
     assert isinstance(chat_template, str)
 
@@ -448,16 +427,12 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     )
 
     tokenizer = get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code,
+        model_config.tokenizer, trust_remote_code=model_config.trust_remote_code
     )
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_chat_template(
-        tokenizer,
-        chat_template=None,
-        tools=None,
-        model_config=model_config,
+        tokenizer, chat_template=None, tools=None, model_config=model_config
     )
     assert isinstance(chat_template, str)
 
@@ -503,15 +478,10 @@ def test_resolve_content_format_fallbacks(model, expected_format):
 )
 def test_resolve_content_format_examples(template_path, expected_format):
     model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
-    model_config = ModelConfig(
-        model,
-        tokenizer=model,
-        trust_remote_code=True,
-    )
+    model_config = ModelConfig(model, tokenizer=model, trust_remote_code=True)
 
     dummy_tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
+        model, trust_remote_code=model_config.trust_remote_code
     )
     dummy_tokenizer.chat_template = None
 
@@ -524,11 +494,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        chat_template,
-        None,
-        "auto",
-        dummy_tokenizer,
-        model_config=model_config,
+        chat_template, None, "auto", dummy_tokenizer, model_config=model_config
     )
 
     assert resolved_format == expected_format

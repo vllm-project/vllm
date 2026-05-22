@@ -44,10 +44,7 @@ class UvaBuffer:
 
 class UvaBufferPool:
     def __init__(
-        self,
-        size: int | Sequence[int],
-        dtype: torch.dtype,
-        max_concurrency: int = 2,
+        self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
         self.size = size
         self.dtype = dtype
@@ -69,9 +66,7 @@ class UvaBufferPool:
         return buf.uva[:n]
 
     def copy_to_gpu(
-        self,
-        x: torch.Tensor | np.ndarray,
-        out: torch.Tensor | None = None,
+        self, x: torch.Tensor | np.ndarray, out: torch.Tensor | None = None
     ) -> torch.Tensor:
         uva = self.copy_to_uva(x)
         # CPU-to-GPU copy

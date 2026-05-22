@@ -129,9 +129,7 @@ def test_prompt_token_stats_all_computed():
     # Case 1: No caching (All tokens computed locally)
     prefill_stats = PrefillStats()
     prefill_stats.set(
-        num_prompt_tokens=1000,
-        num_local_cached_tokens=0,
-        num_external_cached_tokens=0,
+        num_prompt_tokens=1000, num_local_cached_tokens=0, num_external_cached_tokens=0
     )
     stats.update_from_output(prefill_stats)
 

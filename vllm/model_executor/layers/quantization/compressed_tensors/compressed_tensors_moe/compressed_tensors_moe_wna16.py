@@ -3,16 +3,11 @@
 
 
 import torch
-from compressed_tensors.quantization import (
-    QuantizationArgs,
-)
+from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    RoutedExperts,
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -133,11 +128,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
         w13_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
+            torch.empty(num_experts, hidden_size, dtype=torch.int32),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_g_idx", w13_g_idx)
@@ -145,9 +136,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
+                num_experts, intermediate_size_per_partition, dtype=torch.int32
             ),
             requires_grad=False,
         )
@@ -155,11 +144,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_g_idx, extra_weight_attrs)
 
         w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
+            torch.empty(num_experts, hidden_size, dtype=torch.int32),
             requires_grad=False,
         )
         layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
@@ -167,9 +152,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
+                num_experts, intermediate_size_per_partition, dtype=torch.int32
             ),
             requires_grad=False,
         )

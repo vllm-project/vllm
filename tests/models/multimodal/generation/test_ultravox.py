@@ -160,10 +160,7 @@ def test_models_with_multiple_audios(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 def test_variable_length_audio_batching(
-    vllm_runner,
-    audio_assets: AudioTestAssets,
-    dtype: str,
-    max_tokens: int,
+    vllm_runner, audio_assets: AudioTestAssets, dtype: str, max_tokens: int
 ) -> None:
     """Test batching of requests with different audio durations.
 
@@ -182,10 +179,7 @@ def test_variable_length_audio_batching(
         prompts_and_audios.append((prompt, [audio.audio_and_sample_rate]))
 
     with vllm_runner(
-        MODEL_NAME,
-        dtype=dtype,
-        enforce_eager=True,
-        limit_mm_per_prompt={"audio": 1},
+        MODEL_NAME, dtype=dtype, enforce_eager=True, limit_mm_per_prompt={"audio": 1}
     ) as vllm_model:
         # Generate for all prompts in a single batch
         # This triggers the variable-length batching code path

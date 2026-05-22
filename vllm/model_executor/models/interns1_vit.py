@@ -22,10 +22,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelL
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-NORM2FN = {
-    "rms_norm": RMSNorm,
-    "layer_norm": nn.LayerNorm,
-}
+NORM2FN = {"rms_norm": RMSNorm, "layer_norm": nn.LayerNorm}
 
 
 class InternS1VisionPatchEmbeddings(nn.Module):
@@ -166,11 +163,7 @@ class InternSdpaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
-        self,
-        config: PretrainedConfig,
-        *,
-        num_dummy_heads: int = 0,
-        prefix: str = "",
+        self, config: PretrainedConfig, *, num_dummy_heads: int = 0, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -217,10 +210,7 @@ class InternSdpaAttention(nn.Module):
 
         # Use unified MMEncoderAttention with automatic backend selection
         self.attn = MMEncoderAttention(
-            self.num_heads,
-            self.head_dim,
-            self.scale,
-            prefix=f"{prefix}.attn",
+            self.num_heads, self.head_dim, self.scale, prefix=f"{prefix}.attn"
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -320,15 +310,10 @@ class InternS1VisionLayer(nn.Module):
         prefix: str = "",
     ):
         return InternSdpaAttention(
-            config,
-            num_dummy_heads=num_dummy_heads,
-            prefix=prefix,
+            config, num_dummy_heads=num_dummy_heads, prefix=prefix
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         hidden_states = (
             hidden_states
             + self.attention(self.layernorm_before(hidden_states)) * self.lambda_1

@@ -12,26 +12,18 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    swizzle_blockscale,
-)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import swizzle_blockscale
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutlass_fused_moe,
-)
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-        NvFp4MoeBackend,
-    )
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 
 logger = init_logger(__name__)
 
 
-__all__ = [
-    "reorder_w1w3_to_w3w1",
-]
+__all__ = ["reorder_w1w3_to_w3w1"]
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
@@ -62,9 +54,7 @@ def reorder_w1w3_to_w3w1(
 
 
 def interleave_linear_and_gate(
-    x: torch.Tensor,
-    group_size: int = 64,
-    dim: int = -1,
+    x: torch.Tensor, group_size: int = 64, dim: int = -1
 ) -> torch.Tensor:
     """Interleave gate and linear weight rows for CuteDSL wrapper."""
     sizes = x.size()
@@ -124,11 +114,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     E, M_padded, K_sf_padded = w13_scale.shape
     w13_scale_flat = w13_scale.reshape(E * M_padded, K_sf_padded)
     w13_scale = convert_sf_to_mma_layout(
-        w13_scale_flat,
-        m=M_padded,
-        k=K_sf_padded * 16,
-        num_groups=E,
-        sf_vec_size=16,
+        w13_scale_flat, m=M_padded, k=K_sf_padded * 16, num_groups=E, sf_vec_size=16
     )
 
     # Convert w2 scale factors: linear → swizzled → MMA layout.
@@ -136,23 +122,10 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     E, M_padded, K_sf_padded = w2_scale.shape
     w2_scale_flat = w2_scale.reshape(E * M_padded, K_sf_padded)
     w2_scale = convert_sf_to_mma_layout(
-        w2_scale_flat,
-        m=M_padded,
-        k=K_sf_padded * 16,
-        num_groups=E,
-        sf_vec_size=16,
+        w2_scale_flat, m=M_padded, k=K_sf_padded * 16, num_groups=E, sf_vec_size=16
     )
 
-    return (
-        w13,
-        w13_scale,
-        w13_scale_2,
-        a13_scale,
-        w2,
-        w2_scale,
-        w2_scale_2,
-        a2_scale,
-    )
+    return (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale)
 
 
 def prepare_static_weights_for_trtllm_fp4_moe(

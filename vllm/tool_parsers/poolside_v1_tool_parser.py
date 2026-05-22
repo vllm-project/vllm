@@ -21,9 +21,7 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -32,15 +30,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
@@ -125,9 +118,7 @@ class PoolsideV1ToolParser(ToolParser):
 
     @staticmethod
     def _is_string_type(
-        tool_name: str,
-        arg_name: str,
-        tools: list[Tool] | None,
+        tool_name: str, arg_name: str, tools: list[Tool] | None
     ) -> bool:
         if tools is None:
             return False
@@ -170,9 +161,7 @@ class PoolsideV1ToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         matched_tool_calls = self.func_call_regex.findall(model_output)
         logger.debug("model_output: %s", model_output)
@@ -181,10 +170,7 @@ class PoolsideV1ToolParser(ToolParser):
             for match in matched_tool_calls:
                 tc_detail = self.func_detail_regex.search(match)
                 if not tc_detail:
-                    logger.warning(
-                        "Failed to parse tool call details from: %s",
-                        match,
-                    )
+                    logger.warning("Failed to parse tool call details from: %s", match)
                     continue
                 tc_name = tc_detail.group(1).strip()
                 tc_args = tc_detail.group(2)
@@ -478,10 +464,7 @@ class PoolsideV1ToolParser(ToolParser):
     def _get_or_create_delta(self, pending: dict[int, DeltaToolCall]) -> DeltaToolCall:
         idx = self.current_tool_id
         if idx not in pending:
-            pending[idx] = DeltaToolCall(
-                index=idx,
-                function=DeltaFunctionCall(),
-            )
+            pending[idx] = DeltaToolCall(index=idx, function=DeltaFunctionCall())
         delta = pending[idx]
         assert delta.function is not None
         return delta
@@ -503,8 +486,7 @@ class PoolsideV1ToolParser(ToolParser):
 
     @staticmethod
     def _complete_json_prefix(
-        json_prefix: str,
-        allowed_partial_types: Allow,
+        json_prefix: str, allowed_partial_types: Allow
     ) -> dict | None:
         """Complete a partial JSON prefix into a valid JSON object.
 
@@ -519,8 +501,7 @@ class PoolsideV1ToolParser(ToolParser):
         """
         try:
             _, partial_str_completion = partial_json_parser.core.complete.fix(
-                json_prefix,
-                allowed_partial_types,
+                json_prefix, allowed_partial_types
             )
             return json.loads(json_prefix + partial_str_completion)
         except Exception:
@@ -530,8 +511,7 @@ class PoolsideV1ToolParser(ToolParser):
         self, pending: dict[int, DeltaToolCall], fragment: str
     ) -> None:
         result = self._complete_json_prefix(
-            self.streamed_args_for_tool[self.current_tool_id],
-            Allow.ALL,
+            self.streamed_args_for_tool[self.current_tool_id], Allow.ALL
         )
         if result is not None:
             self.prev_tool_call_arr[self.current_tool_id]["arguments"] = result
@@ -541,12 +521,7 @@ class PoolsideV1ToolParser(ToolParser):
             delta.function.arguments = ""
         delta.function.arguments += fragment
 
-    def _append_arg_fragment(
-        self,
-        *,
-        key: str,
-        raw_val: str,
-    ) -> str | None:
+    def _append_arg_fragment(self, *, key: str, raw_val: str) -> str | None:
         key = key.strip()
         if not key:
             return None

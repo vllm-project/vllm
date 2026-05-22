@@ -26,18 +26,12 @@ if torch.cpu._is_amx_tile_supported():
     torch.cpu._init_amx()
 
 
-NUM_HEADS = [
-    (4, 4),
-    (8, 2),
-    (9, 3),
-]
+NUM_HEADS = [(4, 4), (8, 2), (9, 3)]
 HEAD_SIZES = [96, 128, 512]
 HEAD_SIZES_VEC16 = [96, 80, 112, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]
-NUM_BLOCKS = [
-    1024,
-]
+NUM_BLOCKS = [1024]
 SEQ_LENS = [  # (q_len, kv_len)
     [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode batch
     [(2345, 2345), (5, 5), (3, 16), (134, 5131)],  # prefill batch
@@ -45,26 +39,19 @@ SEQ_LENS = [  # (q_len, kv_len)
 ]
 
 
-def get_attn_isa(
-    block_size: int | None = None,
-    dtype: torch.dtype | None = None,
-):
+def get_attn_isa(block_size: int | None = None, dtype: torch.dtype | None = None):
     # Delegate to _get_attn_isa so the fallback path applies the same arch
     # gating (e.g. RISC-V RVV is only chosen when the build's hardcoded
     # VLEN=128 kernel is actually present; on VLEN=256 / scalar hosts it
     # correctly falls through to vec/vec16).
     return _get_attn_isa(
-        dtype if dtype is not None else torch.bfloat16,
-        block_size if block_size else 32,
+        dtype if dtype is not None else torch.bfloat16, block_size if block_size else 32
     )
 
 
 # rand number generation takes too much time, cache rand tensors
 @functools.lru_cache(maxsize=128, typed=False)
-def tensor_cache(
-    elem_num: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
+def tensor_cache(elem_num: int, dtype: torch.dtype) -> torch.Tensor:
     tensor = torch.randn(elem_num, dtype=dtype)
 
     return tensor
@@ -73,16 +60,14 @@ def tensor_cache(
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     closest_power_of_2 = 2 ** math.floor(math.log2(total_num_heads))
     base = torch.tensor(
-        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))),
-        dtype=torch.float32,
+        2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3))), dtype=torch.float32
     )
     powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
     slopes = torch.pow(base, powers)
 
     if closest_power_of_2 != total_num_heads:
         extra_base = torch.tensor(
-            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))),
-            dtype=torch.float32,
+            2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3))), dtype=torch.float32
         )
         num_remaining_heads = min(
             closest_power_of_2, total_num_heads - closest_power_of_2
@@ -228,27 +213,13 @@ def varlen_with_paged_kv(
     if is_fp8 and current_platform.get_cpu_architecture() != CpuArchEnum.X86:
         pytest.skip("FP8 KV cache only supported on x86")
 
-    query = tensor_cache(
-        elem_num=token_num * num_query_heads * head_size,
-        dtype=dtype,
-    )
-    query = query.view(
-        token_num,
-        num_query_heads,
-        head_size,
-    )
+    query = tensor_cache(elem_num=token_num * num_query_heads * head_size, dtype=dtype)
+    query = query.view(token_num, num_query_heads, head_size)
 
     key_value = tensor_cache(
-        elem_num=2 * num_blocks * num_kv_heads * block_size * head_size,
-        dtype=dtype,
+        elem_num=2 * num_blocks * num_kv_heads * block_size * head_size, dtype=dtype
     )
-    key_value = key_value.view(
-        2,
-        num_blocks,
-        block_size,
-        num_kv_heads,
-        head_size,
-    )
+    key_value = key_value.view(2, num_blocks, block_size, num_kv_heads, head_size)
     if is_fp8:
         # Clamp KV to [-1, 1] so FP8 quantization error (<=12.5% for E4M3,
         # <=25% for E5M2) stays within the test tolerances regardless of
@@ -551,8 +522,7 @@ def test_varlen_with_paged_kv_normal_vec16(
 @pytest.mark.parametrize("use_sink", [False])
 @pytest.mark.parametrize("isa", ["neon"])
 @pytest.mark.skipif(
-    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
-    reason="Not an Arm CPU.",
+    current_platform.get_cpu_architecture() != CpuArchEnum.ARM, reason="Not an Arm CPU."
 )
 def test_varlen_with_paged_kv_normal_neon(
     seq_lens: list[tuple[int, int]],

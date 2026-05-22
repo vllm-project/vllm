@@ -6,7 +6,4 @@ from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearLayerConfig,
 )
 
-__all__ = [
-    "NvFp4LinearKernel",
-    "NvFp4LinearLayerConfig",
-]
+__all__ = ["NvFp4LinearKernel", "NvFp4LinearLayerConfig"]

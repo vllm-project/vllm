@@ -81,11 +81,7 @@ def test_run_dp_sharded_vision_model(batch_size: int):
     # Launch processes
     mp.spawn(
         run_dp_sharded_vision_model_vs_direct,
-        args=(
-            world_size,
-            batch_size,
-            get_open_port(),
-        ),
+        args=(world_size, batch_size, get_open_port()),
         nprocs=world_size,
     )
 
@@ -269,11 +265,7 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
     # Launch processes
     mp.spawn(
         run_dp_sharded_mrope_vision_model_vs_direct,
-        args=(
-            world_size,
-            batch_size,
-            get_open_port(),
-        ),
+        args=(world_size, batch_size, get_open_port()),
         nprocs=world_size,
     )
 

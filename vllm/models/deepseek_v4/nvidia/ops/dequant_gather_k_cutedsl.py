@@ -27,8 +27,7 @@ def dequantize_and_gather_k_cache_cutedsl(
     offset: int,
 ) -> None:
     DequantGatherKCacheKernel.compile(
-        block_size=block_size,
-        has_gather_lens=gather_lens is not None,
+        block_size=block_size, has_gather_lens=gather_lens is not None
     )(out, k_cache, seq_lens, gather_lens, block_table, offset)
 
 
@@ -71,20 +70,13 @@ class DequantGatherKCacheKernel:
         k_scale = cute.make_tensor(
             k_cache.iterator + (self.block_size * self.data_dim),
             layout=cute.make_layout(
-                (k_cache.shape[0], self.block_size, 8),
-                stride=(k_cache.stride[0], 8, 1),
+                (k_cache.shape[0], self.block_size, 8), stride=(k_cache.stride[0], 8, 1)
             ),
         )
 
         grid = (out.shape[0], 1024, 1)
         self.kernel(
-            out,
-            k_data,
-            k_scale,
-            seq_lens,
-            gather_lens,
-            block_table,
-            offset,
+            out, k_data, k_scale, seq_lens, gather_lens, block_table, offset
         ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
 
     @cute.jit
@@ -129,9 +121,7 @@ class DequantGatherKCacheKernel:
             )
         elif idx == cutlass.const_expr(self.data_dim // 16):
             cute.copy(
-                cp8_atom,
-                k_scale[page_id, block_offset, None],
-                s_kscale[None, stage_id],
+                cp8_atom, k_scale[page_id, block_offset, None], s_kscale[None, stage_id]
             )
 
     @cute.kernel
@@ -248,9 +238,7 @@ class DequantGatherKCacheKernel:
             data1 = cute.make_rmem_tensor((2,), Uint32)
             cute.copy(cp8_atom, s_kdata_8B_slice[(None, lane_id), compute_stage], data0)
             cute.copy(
-                cp8_atom,
-                s_kdata_8B_slice[(None, lane_id + 32), compute_stage],
-                data1,
+                cp8_atom, s_kdata_8B_slice[(None, lane_id + 32), compute_stage], data1
             )
 
             # Convert to bf16x2 via bit manipulation. FP8 scales are per 64
@@ -283,9 +271,7 @@ class DequantGatherKCacheKernel:
             if lane_id + 32 >= self.fp8_dim // 8:
                 idx = self.fp8_dim // 16 + (lane_id + 32) - self.fp8_dim // 8
                 cute.copy(
-                    cp16_atom,
-                    s_kdata_16B_slice[(None, idx), compute_stage],
-                    dequant1,
+                    cp16_atom, s_kdata_16B_slice[(None, idx), compute_stage], dequant1
                 )
 
             # Store two 16B BF16 chunks per lane: first half, then second half.
@@ -299,11 +285,7 @@ class DequantGatherKCacheKernel:
 
     @cache
     @staticmethod
-    def compile(
-        fp8_dim: int = 448,
-        block_size: int = 64,
-        has_gather_lens: bool = True,
-    ):
+    def compile(fp8_dim: int = 448, block_size: int = 64, has_gather_lens: bool = True):
         num_reqs = cute.sym_int()
         head_dim = DequantGatherKCacheKernel.head_dim
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8

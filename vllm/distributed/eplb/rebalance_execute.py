@@ -274,10 +274,7 @@ def move_to_buffer(
         srcs = srcs[order]
 
         send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
+            experts, num_local_experts, old_indices, new_indices
         )
 
         for expert, src in zip(experts.tolist(), srcs.tolist()):
@@ -307,10 +304,7 @@ def move_to_buffer(
         dsts = dsts[order]
 
         send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
+            experts, num_local_experts, old_indices, new_indices
         )
 
         for expert, dst in zip(experts.tolist(), dsts.tolist()):
@@ -326,9 +320,7 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             communicator.add_recv(
-                [b[dst] for b in expert_weights_buffers],
-                src,
-                expert_id=int(expert),
+                [b[dst] for b in expert_weights_buffers], src, expert_id=int(expert)
             )
 
     # 4. Execute the P2P operations. The real communication happens here.
@@ -466,15 +458,12 @@ def transfer_layer(
         if len(rank_mapping) == ep_group.size():
             # scale down
             new_layer_indices_2d = _map_new_expert_indices_with_rank_mapping(
-                new_layer_indices_2d,
-                rank_mapping,
+                new_layer_indices_2d, rank_mapping
             )
         else:
             # scale up
             old_layer_indices_2d = _map_old_expert_indices_with_rank_mapping(
-                old_layer_indices_2d,
-                rank_mapping,
-                ep_group.size(),
+                old_layer_indices_2d, rank_mapping, ep_group.size()
             )
 
         # Remove the layer dimension
@@ -535,15 +524,12 @@ def rearrange_expert_weights_inplace(
         if len(rank_mapping) == ep_group.size():
             # scale down
             new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
-                new_global_expert_indices,
-                rank_mapping,
+                new_global_expert_indices, rank_mapping
             )
         else:
             # scale up
             old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
-                old_global_expert_indices,
-                rank_mapping,
-                ep_group.size(),
+                old_global_expert_indices, rank_mapping, ep_group.size()
             )
 
     assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
@@ -572,11 +558,7 @@ def rearrange_expert_weights_inplace(
             for weight, buffer in zip(expert_weights[0], weights_buffer):
                 dummy_recv_buffer = [buffer for _ in range(ep_size)]
                 torch.distributed.barrier()
-                all_gather(
-                    dummy_recv_buffer,
-                    weight,
-                    group=ep_group,
-                )
+                all_gather(dummy_recv_buffer, weight, group=ep_group)
         return
 
     # Buffers to hold the expert weights during the exchange.
@@ -662,8 +644,7 @@ def _map_old_expert_indices_with_rank_mapping(
 
 
 def _map_new_expert_indices_with_rank_mapping(
-    new_global_expert_indices: torch.Tensor,
-    rank_mapping: dict[int, int],
+    new_global_expert_indices: torch.Tensor, rank_mapping: dict[int, int]
 ) -> torch.Tensor:
     num_layers, new_num_physical_experts = new_global_expert_indices.shape
     assert rank_mapping, "Rank mapping is required"

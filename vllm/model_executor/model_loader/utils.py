@@ -72,8 +72,7 @@ def initialize_model(
     warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
     logger.warning(
-        "Trying to guess the arguments for old-style model class %s",
-        model_class,
+        "Trying to guess the arguments for old-style model class %s", model_class
     )
     # try to be compatible with old-style model class
     kwargs: dict[str, Any] = {}
@@ -182,8 +181,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
     architectures = getattr(model_config.hf_config, "architectures", None) or []
 
     model_cls, arch = model_config.registry.resolve_model_cls(
-        architectures,
-        model_config=model_config,
+        architectures, model_config=model_config
     )
 
     if arch == model_config._get_transformers_backend_cls():
@@ -255,10 +253,7 @@ class ParamMapping:
             if len(sub_params) == 1 and sub_params[0] == packed_name:
                 continue
             for index, param_name in enumerate(sub_params):
-                self.inverse_packed_mapping[param_name] = (
-                    packed_name,
-                    index,
-                )
+                self.inverse_packed_mapping[param_name] = (packed_name, index)
 
     def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
         for key, value in self.packed_mapping.items():

@@ -115,10 +115,7 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: AutoGPTQConfig,
-    layer: torch.nn.Module,
-    prefix: str,
-    linear_method_cls: type,
+    config: AutoGPTQConfig, layer: torch.nn.Module, prefix: str, linear_method_cls: type
 ):
     cloned_config = deepcopy(config)
     parallel_lm_head_quantized = (

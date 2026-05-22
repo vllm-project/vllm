@@ -28,10 +28,7 @@ skipif_not_cuda_rocm = pytest.mark.skipif(
         ("is_out_of_tree", UnquantizedMoeBackend.OOT),
     ],
 )
-@patch(
-    "vllm.utils.flashinfer.has_flashinfer",
-    return_value=False,
-)
+@patch("vllm.utils.flashinfer.has_flashinfer", return_value=False)
 @patch(
     "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
     return_value=False,
@@ -84,10 +81,7 @@ def test_select_default_backend_by_platform(
             assert expert_cls is not None
 
 
-@patch(
-    "vllm.utils.flashinfer.has_flashinfer",
-    return_value=False,
-)
+@patch("vllm.utils.flashinfer.has_flashinfer", return_value=False)
 @patch(
     "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
     return_value=True,
@@ -109,7 +103,7 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
         moe_config = make_dummy_moe_config()
         selected_backend, expert_cls = select_unquantized_moe_backend(
-            moe_config=moe_config,
+            moe_config=moe_config
         )
 
         assert selected_backend == UnquantizedMoeBackend.AITER
@@ -149,10 +143,7 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeyp
         assert experts_cls is not None
 
 
-@patch(
-    "vllm.utils.flashinfer.has_flashinfer",
-    return_value=True,
-)
+@patch("vllm.utils.flashinfer.has_flashinfer", return_value=True)
 @patch(
     "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
     return_value=(False, None),

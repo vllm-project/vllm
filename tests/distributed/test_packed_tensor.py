@@ -50,8 +50,7 @@ class MockConsumerCommunicationGroup:
 
 
 def create_mock_model_params(
-    num_layers: int = 3,
-    dtype: torch.dtype = torch.float32,
+    num_layers: int = 3, dtype: torch.dtype = torch.float32
 ) -> list[tuple[str, torch.Tensor]]:
     """Create mock model parameters for testing."""
     params = []
@@ -77,9 +76,7 @@ class TestNCCLWeightTransferUpdateInfoPacked:
     def test_packed_default_false(self):
         """Test that packed defaults to False."""
         info = NCCLWeightTransferUpdateInfo(
-            names=["layer.weight"],
-            dtype_names=["float32"],
-            shapes=[[10, 10]],
+            names=["layer.weight"], dtype_names=["float32"], shapes=[[10, 10]]
         )
         assert info.packed is False
 
@@ -389,9 +386,7 @@ class TestPackTensors:
     def test_pack_empty_iterator(self):
         """Test that an empty iterator returns None."""
         chunk = pack_tensors(
-            iterator=iter([]),
-            post_iter_func=lambda x: x[1],
-            buffer_size_bytes=1000,
+            iterator=iter([]), post_iter_func=lambda x: x[1], buffer_size_bytes=1000
         )
         assert chunk is None
 

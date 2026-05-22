@@ -38,8 +38,7 @@ def harmony_encoding():
 
 
 def assert_tool_calls(
-    actual_tool_calls: list[ToolCall],
-    expected_tool_calls: list[ToolCall],
+    actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
 ):
     assert len(actual_tool_calls) == len(expected_tool_calls)
 
@@ -55,10 +54,7 @@ def assert_tool_calls(
 def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
     convo = Conversation.from_messages(
         [
-            Message.from_role_and_content(
-                Role.SYSTEM,
-                SystemContent.new(),
-            ),
+            Message.from_role_and_content(Role.SYSTEM, SystemContent.new()),
             Message.from_role_and_content(
                 Role.DEVELOPER,
                 DeveloperContent.new().with_instructions("Talk like a pirate!"),
@@ -73,9 +69,7 @@ def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
         convo, Role.ASSISTANT
     )
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert not extracted_info.tools_called
     assert extracted_info.tool_calls == []
@@ -83,11 +77,7 @@ def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
 
 
 @pytest.mark.parametrize(
-    "tool_args",
-    [
-        '{"location": "Tokyo"}',
-        '{\n"location": "Tokyo"\n}',
-    ],
+    "tool_args", ['{"location": "Tokyo"}', '{\n"location": "Tokyo"\n}']
 )
 def test_extract_tool_calls_single_tool(
     openai_tool_parser, harmony_encoding, tool_args
@@ -110,16 +100,13 @@ def test_extract_tool_calls_single_tool(
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="get_current_weather",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_current_weather", arguments=json.dumps({"location": "Tokyo"})
             )
         )
     ]
@@ -127,10 +114,7 @@ def test_extract_tool_calls_single_tool(
     assert extracted_info.content is None
 
 
-def test_extract_tool_calls_multiple_tools(
-    openai_tool_parser,
-    harmony_encoding,
-):
+def test_extract_tool_calls_multiple_tools(openai_tool_parser, harmony_encoding):
     convo = Conversation.from_messages(
         [
             Message.from_role_and_content(
@@ -165,68 +149,45 @@ def test_extract_tool_calls_multiple_tools(
         ]
     )
     token_ids = harmony_encoding.render_conversation_for_completion(
-        convo,
-        Role.ASSISTANT,
+        convo, Role.ASSISTANT
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="get_current_weather",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_current_weather", arguments=json.dumps({"location": "Tokyo"})
             )
         ),
         ToolCall(
             function=FunctionCall(
-                name="get_user_location",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_user_location", arguments=json.dumps({"location": "Tokyo"})
             )
         ),
         ToolCall(
             function=FunctionCall(
-                name="no_content_type",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="no_content_type", arguments=json.dumps({"location": "Tokyo"})
             )
         ),
         ToolCall(
-            function=FunctionCall(
-                name="not_json_no_content_type",
-                arguments="foo",
-            )
+            function=FunctionCall(name="not_json_no_content_type", arguments="foo")
         ),
-        ToolCall(
-            function=FunctionCall(
-                name="empty_args",
-                arguments=json.dumps({}),
-            )
-        ),
-        ToolCall(
-            function=FunctionCall(
-                name="no_args",
-                arguments="",
-            )
-        ),
+        ToolCall(function=FunctionCall(name="empty_args", arguments=json.dumps({}))),
+        ToolCall(function=FunctionCall(name="no_args", arguments="")),
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content is None
 
 
-def test_extract_tool_calls_bare_function_name(
-    openai_tool_parser,
-    harmony_encoding,
-):
+def test_extract_tool_calls_bare_function_name(openai_tool_parser, harmony_encoding):
     convo = Conversation.from_messages(
         [
             Message.from_role_and_content(Role.USER, "What is the weather in Tokyo?"),
             Message.from_role_and_content(
-                Role.ASSISTANT,
-                "We need to use get_current_weather tool.",
+                Role.ASSISTANT, "We need to use get_current_weather tool."
             ).with_channel("analysis"),
             Message.from_role_and_content(Role.ASSISTANT, '{"location": "Tokyo"}')
             .with_channel("commentary")
@@ -239,16 +200,13 @@ def test_extract_tool_calls_bare_function_name(
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="get_current_weather",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_current_weather", arguments=json.dumps({"location": "Tokyo"})
             )
         )
     ]
@@ -257,8 +215,7 @@ def test_extract_tool_calls_bare_function_name(
 
 
 def test_extract_tool_calls_bare_function_name_multiple(
-    openai_tool_parser,
-    harmony_encoding,
+    openai_tool_parser, harmony_encoding
 ):
     convo = Conversation.from_messages(
         [
@@ -266,8 +223,7 @@ def test_extract_tool_calls_bare_function_name_multiple(
                 Role.USER, "What is the weather in Tokyo based on where I'm at?"
             ),
             Message.from_role_and_content(
-                Role.ASSISTANT,
-                "We need to use both tools.",
+                Role.ASSISTANT, "We need to use both tools."
             ).with_channel("analysis"),
             Message.from_role_and_content(Role.ASSISTANT, '{"location": "Tokyo"}')
             .with_channel("commentary")
@@ -284,31 +240,24 @@ def test_extract_tool_calls_bare_function_name_multiple(
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="get_current_weather",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_current_weather", arguments=json.dumps({"location": "Tokyo"})
             )
         ),
         ToolCall(
-            function=FunctionCall(
-                name="get_user_location",
-                arguments=json.dumps({}),
-            )
+            function=FunctionCall(name="get_user_location", arguments=json.dumps({}))
         ),
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
 
 
 def test_extract_tool_calls_assistant_recipient_ignored(
-    openai_tool_parser,
-    harmony_encoding,
+    openai_tool_parser, harmony_encoding
 ):
     convo = Conversation.from_messages(
         [
@@ -326,19 +275,14 @@ def test_extract_tool_calls_assistant_recipient_ignored(
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert not extracted_info.tools_called
     assert extracted_info.tool_calls == []
     assert extracted_info.content == "Here is the answer"
 
 
-def test_extract_tool_calls_dotted_function_name(
-    openai_tool_parser,
-    harmony_encoding,
-):
+def test_extract_tool_calls_dotted_function_name(openai_tool_parser, harmony_encoding):
     convo = Conversation.from_messages(
         [
             Message.from_role_and_content(Role.USER, "Compute 2+3"),
@@ -353,26 +297,20 @@ def test_extract_tool_calls_dotted_function_name(
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="math.sum",
-                arguments=json.dumps({"a": 2, "b": 3}),
+                name="math.sum", arguments=json.dumps({"a": 2, "b": 3})
             )
         )
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
 
 
-def test_extract_tool_calls_with_content(
-    openai_tool_parser,
-    harmony_encoding,
-):
+def test_extract_tool_calls_with_content(openai_tool_parser, harmony_encoding):
     final_content = "This tool call will get the weather."
     convo = Conversation.from_messages(
         [
@@ -393,23 +331,19 @@ def test_extract_tool_calls_with_content(
         ]
     )
     token_ids = harmony_encoding.render_conversation_for_completion(
-        convo,
-        Role.ASSISTANT,
+        convo, Role.ASSISTANT
     )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
-        "",
-        request=None,
-        token_ids=token_ids,
+        "", request=None, token_ids=token_ids
     )
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
             function=FunctionCall(
-                name="get_current_weather",
-                arguments=json.dumps({"location": "Tokyo"}),
+                name="get_current_weather", arguments=json.dumps({"location": "Tokyo"})
             )
-        ),
+        )
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content == final_content

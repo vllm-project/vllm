@@ -84,10 +84,7 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What's in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_url},
-                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
                 ],
             }
         ],
@@ -182,14 +179,8 @@ def run_multi_image(model: str, max_completion_tokens: int) -> None:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What are the animals in these images?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_url_duck},
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_url_lion},
-                    },
+                    {"type": "image_url", "image_url": {"url": image_url_duck}},
+                    {"type": "image_url", "image_url": {"url": image_url_lion}},
                 ],
             }
         ],
@@ -213,10 +204,7 @@ def run_video(model: str, max_completion_tokens: int) -> None:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What's in this video?"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": video_url},
-                    },
+                    {"type": "video_url", "video_url": {"url": video_url}},
                 ],
             }
         ],
@@ -348,17 +336,11 @@ def run_multi_audio(model: str, max_completion_tokens: int) -> None:
                     {"type": "text", "text": "Are these two audios the same?"},
                     {
                         "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": "wav",
-                        },
+                        "input_audio": {"data": audio_base64, "format": "wav"},
                     },
                     {
                         "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64_2,
-                            "format": "wav",
-                        },
+                        "input_audio": {"data": audio_base64_2, "format": "wav"},
                     },
                 ],
             }

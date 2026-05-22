@@ -25,11 +25,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
-from vllm.v1.core.sched.output import (
-    CachedRequestData,
-    NewRequestData,
-    SchedulerOutput,
-)
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -61,10 +57,7 @@ init_none_hash(sha256)
 # ---------------------------------------------------------------------------
 
 
-def _make_kv_cache_config(
-    num_blocks: int,
-    num_groups: int = 1,
-) -> KVCacheConfig:
+def _make_kv_cache_config(num_blocks: int, num_groups: int = 1) -> KVCacheConfig:
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
@@ -82,25 +75,17 @@ def _make_kv_cache_config(
             )
         )
         tensors.append(
-            KVCacheTensor(
-                size=_BYTES_PER_BLOCK * num_blocks,
-                shared_by=layer_names,
-            )
+            KVCacheTensor(size=_BYTES_PER_BLOCK * num_blocks, shared_by=layer_names)
         )
     return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=tensors,
-        kv_cache_groups=groups,
+        num_blocks=num_blocks, kv_cache_tensors=tensors, kv_cache_groups=groups
     )
 
 
 def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
     """Minimal VllmConfig for scheduler tests (no GPU)."""
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        model="facebook/opt-125m", trust_remote_code=True, dtype="float16", seed=42
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
@@ -110,13 +95,10 @@ def _make_vllm_config(block_size: int = BLOCK_SIZE) -> VllmConfig:
         is_encoder_decoder=False,
     )
     cache_config = CacheConfig(
-        block_size=block_size,
-        gpu_memory_utilization=0.9,
-        enable_prefix_caching=True,
+        block_size=block_size, gpu_memory_utilization=0.9, enable_prefix_caching=True
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="SimpleCPUOffloadConnector",
-        kv_role="kv_both",
+        kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -158,9 +140,7 @@ def make_scheduler(
 
     # Build a real GPU block pool and bind it
     gpu_block_pool = BlockPool(
-        num_gpu_blocks=num_gpu_blocks,
-        enable_caching=True,
-        hash_block_size=BLOCK_SIZE,
+        num_gpu_blocks=num_gpu_blocks, enable_caching=True, hash_block_size=BLOCK_SIZE
     )
     sched.bind_gpu_block_pool(gpu_block_pool)
 
@@ -177,9 +157,7 @@ _req_counter = 0
 
 
 def make_request(
-    num_blocks: int = 2,
-    request_id: str | None = None,
-    extra_tokens: int = 1,
+    num_blocks: int = 2, request_id: str | None = None, extra_tokens: int = 1
 ) -> Request:
     """Create a Request with deterministic block hashes."""
     global _req_counter
@@ -264,28 +242,23 @@ def make_scheduler_output(
 
 
 def simulate_store_completion(
-    scheduler: SimpleCPUOffloadScheduler,
-    event_idx: int,
+    scheduler: SimpleCPUOffloadScheduler, event_idx: int
 ) -> None:
     """Simulate worker reporting a store event completion."""
     output = KVConnectorOutput(
         finished_recving=set(),
         kv_connector_worker_meta=SimpleCPUOffloadWorkerMetadata(
-            completed_store_events={event_idx: scheduler._expected_worker_count},
+            completed_store_events={event_idx: scheduler._expected_worker_count}
         ),
     )
     scheduler.update_connector_output(output)
 
 
 def simulate_load_completion(
-    scheduler: SimpleCPUOffloadScheduler,
-    req_ids: set[str],
+    scheduler: SimpleCPUOffloadScheduler, req_ids: set[str]
 ) -> None:
     """Simulate worker reporting load completions for requests."""
-    output = KVConnectorOutput(
-        finished_sending=set(),
-        finished_recving=req_ids,
-    )
+    output = KVConnectorOutput(finished_sending=set(), finished_recving=req_ids)
     scheduler.update_connector_output(output)
 
 
@@ -295,10 +268,7 @@ def get_cpu_free_blocks(scheduler: SimpleCPUOffloadScheduler) -> int:
 
 
 def _allocate_gpu_blocks(
-    gpu_block_pool: BlockPool,
-    request: Request,
-    num_blocks: int,
-    group_id: int = 0,
+    gpu_block_pool: BlockPool, request: Request, num_blocks: int, group_id: int = 0
 ) -> list:
     """Allocate GPU blocks, cache them with hashes, return block list.
 
@@ -361,8 +331,7 @@ def test_eager_store_and_load_roundtrip() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
 
     meta = sched.build_connector_meta(sched_out)
@@ -392,8 +361,7 @@ def test_eager_store_and_load_roundtrip() -> None:
 
     block_ids2 = kv_blocks2.get_block_ids()
     sched_out2 = make_scheduler_output(
-        {req2.request_id: 1},
-        new_reqs={req2.request_id: block_ids2},
+        {req2.request_id: 1}, new_reqs={req2.request_id: block_ids2}
     )
     meta2 = sched.build_connector_meta(sched_out2)
     assert meta2.load_event >= 0, "Expected a load event to be assigned"
@@ -441,10 +409,7 @@ def test_max_hit_len_cap_drops_last_full_block() -> None:
 # ---------------------------------------------------------------------------
 # Test 1c: Lazy store-and-load roundtrip
 # ---------------------------------------------------------------------------
-def _flush_old_blocks_to_lru_head(
-    gpu_pool: BlockPool,
-    num_filler_blocks: int,
-) -> list:
+def _flush_old_blocks_to_lru_head(gpu_pool: BlockPool, num_filler_blocks: int) -> list:
     """Allocate filler blocks so that previously-freed (hashed) blocks migrate
     to the LRU head of the free queue.  Returns the filler blocks (caller must
     free them later to restore pool capacity).
@@ -539,8 +504,7 @@ def test_eager_duplicate_store_skipped() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
 
     meta1 = sched.build_connector_meta(sched_out)
@@ -594,8 +558,7 @@ def test_eager_in_flight_store_dedup_across_steps() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
 
     meta1 = sched.build_connector_meta(sched_out)
@@ -719,14 +682,8 @@ def test_lru_eviction_order() -> None:
     ids_a = kv_a.get_block_ids()
     ids_b = kv_b.get_block_ids()
     sched_out = make_scheduler_output(
-        {
-            req_a.request_id: 2 * BLOCK_SIZE,
-            req_b.request_id: 2 * BLOCK_SIZE,
-        },
-        new_reqs={
-            req_a.request_id: ids_a,
-            req_b.request_id: ids_b,
-        },
+        {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: ids_a, req_b.request_id: ids_b},
     )
     meta = sched.build_connector_meta(sched_out)
     assert meta.store_event >= 0
@@ -757,8 +714,7 @@ def test_lru_eviction_order() -> None:
 
     ids_c = kv_c.get_block_ids()
     sched_out2 = make_scheduler_output(
-        {req_c.request_id: 2 * BLOCK_SIZE},
-        new_reqs={req_c.request_id: ids_c},
+        {req_c.request_id: 2 * BLOCK_SIZE}, new_reqs={req_c.request_id: ids_c}
     )
     meta2 = sched.build_connector_meta(sched_out2)
     assert meta2.store_event >= 0
@@ -806,14 +762,8 @@ def test_touched_blocks_survive_eviction() -> None:
     ids_a = kv_a.get_block_ids()
     ids_b = kv_b.get_block_ids()
     sched_out = make_scheduler_output(
-        {
-            req_a.request_id: 2 * BLOCK_SIZE,
-            req_b.request_id: 2 * BLOCK_SIZE,
-        },
-        new_reqs={
-            req_a.request_id: ids_a,
-            req_b.request_id: ids_b,
-        },
+        {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: ids_a, req_b.request_id: ids_b},
     )
     meta = sched.build_connector_meta(sched_out)
     simulate_store_completion(sched, meta.store_event)
@@ -836,8 +786,7 @@ def test_touched_blocks_survive_eviction() -> None:
 
     ids_c = kv_c.get_block_ids()
     sched_out2 = make_scheduler_output(
-        {req_c.request_id: 2 * BLOCK_SIZE},
-        new_reqs={req_c.request_id: ids_c},
+        {req_c.request_id: 2 * BLOCK_SIZE}, new_reqs={req_c.request_id: ids_c}
     )
     meta2 = sched.build_connector_meta(sched_out2)
     simulate_store_completion(sched, meta2.store_event)
@@ -871,8 +820,7 @@ def test_preemption_no_cpu_block_leak() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
     meta = sched.build_connector_meta(sched_out)
     simulate_store_completion(sched, meta.store_event)
@@ -896,8 +844,7 @@ def test_preemption_no_cpu_block_leak() -> None:
     # Assign load_event via build_connector_meta
     block_ids2 = kv_blocks2.get_block_ids()
     sched_out2 = make_scheduler_output(
-        {req2.request_id: 1},
-        new_reqs={req2.request_id: block_ids2},
+        {req2.request_id: 1}, new_reqs={req2.request_id: block_ids2}
     )
     meta2 = sched.build_connector_meta(sched_out2)
     assert meta2.load_event >= 0
@@ -927,8 +874,7 @@ def test_eager_store_preemption_cleanup() -> None:
 
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
     meta = sched.build_connector_meta(sched_out)
     store_event = meta.store_event
@@ -966,8 +912,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
     meta = sched.build_connector_meta(sched_out)
     simulate_store_completion(sched, meta.store_event)
@@ -990,8 +935,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
 
     block_ids2 = kv_blocks2.get_block_ids()
     sched_out2 = make_scheduler_output(
-        {req2.request_id: 1},
-        new_reqs={req2.request_id: block_ids2},
+        {req2.request_id: 1}, new_reqs={req2.request_id: block_ids2}
     )
     meta2 = sched.build_connector_meta(sched_out2)
     assert meta2.load_event >= 0
@@ -1035,8 +979,7 @@ def test_multi_group_null_blocks_skipped() -> None:
 
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
     meta = sched.build_connector_meta(sched_out)
 
@@ -1107,8 +1050,7 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     # Build connector meta with 2 blocks — stores the first 2
     ids_first = kv_blocks_first.get_block_ids()
     sched_out1 = make_scheduler_output(
-        {req.request_id: 2 * BLOCK_SIZE},
-        new_reqs={req.request_id: ids_first},
+        {req.request_id: 2 * BLOCK_SIZE}, new_reqs={req.request_id: ids_first}
     )
     meta1 = sched.build_connector_meta(sched_out1)
     assert meta1.store_event >= 0
@@ -1172,8 +1114,7 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: block_ids},
+        {req.request_id: num_blocks * BLOCK_SIZE}, new_reqs={req.request_id: block_ids}
     )
     meta = sched.build_connector_meta(sched_out)
     assert meta.store_event >= 0
@@ -1314,10 +1255,7 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
     sched.update_state_after_alloc(req_d, kv_d, num_external_tokens=0)
     sched_out_pressure = make_scheduler_output(
-        {
-            req_c.request_id: 2 * BLOCK_SIZE,
-            req_d.request_id: 2 * BLOCK_SIZE,
-        },
+        {req_c.request_id: 2 * BLOCK_SIZE, req_d.request_id: 2 * BLOCK_SIZE},
         new_reqs={
             req_c.request_id: kv_c.get_block_ids(),
             req_d.request_id: kv_d.get_block_ids(),
@@ -1337,8 +1275,7 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
 
     # --- Step 5: with the fix, the load is queued correctly ---
     sched_out_b = make_scheduler_output(
-        {req_b.request_id: 1},
-        new_reqs={req_b.request_id: kv_blocks_b.get_block_ids()},
+        {req_b.request_id: 1}, new_reqs={req_b.request_id: kv_blocks_b.get_block_ids()}
     )
     meta_b = sched.build_connector_meta(sched_out_b)
     assert meta_b.load_event >= 0, (

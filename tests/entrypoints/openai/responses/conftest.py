@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 BASE_TEST_ENV = {
     # The day vLLM said "hello world" on arxiv 🚀
-    "VLLM_SYSTEM_START_DATE": "2023-09-12",
+    "VLLM_SYSTEM_START_DATE": "2023-09-12"
 }
 DEFAULT_MAX_RETRIES = 3
 
@@ -183,11 +183,7 @@ def _validate_field_consistency(events: list) -> None:
     and verifies that all subsequent events for that item carry matching
     identifiers until ``output_item.done`` closes it.
     """
-    _SESSION_EVENTS = {
-        "response.created",
-        "response.in_progress",
-        "response.completed",
-    }
+    _SESSION_EVENTS = {"response.created", "response.in_progress", "response.completed"}
 
     active_item_id: str | None = None
     active_output_index: int | None = None
@@ -246,10 +242,7 @@ def _validate_field_consistency(events: list) -> None:
             continue
 
         # --- content_part / reasoning_part added: sets content_index
-        if etype in (
-            "response.content_part.added",
-            "response.reasoning_part.added",
-        ):
+        if etype in ("response.content_part.added", "response.reasoning_part.added"):
             _assert_item_fields(event, etype, active_item_id, active_output_index)
             active_content_index = getattr(event, "content_index", None)
             continue
@@ -267,10 +260,7 @@ def _validate_field_consistency(events: list) -> None:
 
 
 def _assert_item_fields(
-    event,
-    etype: str,
-    active_item_id: str | None,
-    active_output_index: int | None,
+    event, etype: str, active_item_id: str | None, active_output_index: int | None
 ) -> None:
     """Check that *event*'s item_id and output_index match the active item."""
     event_item_id = getattr(event, "item_id", None)
@@ -307,9 +297,7 @@ def validate_streaming_event_stack(
 
 
 def log_response_diagnostics(
-    response,
-    *,
-    label: str = "Response Diagnostics",
+    response, *, label: str = "Response Diagnostics"
 ) -> dict[str, Any]:
     """Extract and log diagnostic info from a Responses API response.
 
@@ -329,19 +317,13 @@ def log_response_diagnostics(
     ]
 
     tool_call_attempts = [
-        {
-            "recipient": msg.get("recipient"),
-            "channel": msg.get("channel"),
-        }
+        {"recipient": msg.get("recipient"), "channel": msg.get("channel")}
         for msg in response.output_messages
         if (msg.get("recipient") or "").startswith("python")
     ]
 
     mcp_items = [
-        {
-            "name": getattr(item, "name", None),
-            "status": getattr(item, "status", None),
-        }
+        {"name": getattr(item, "name", None), "status": getattr(item, "status", None)}
         for item in response.output
         if getattr(item, "type", None) == "mcp_call"
     ]
@@ -387,10 +369,7 @@ def server_with_store(default_server_args):
     with RemoteOpenAIServer(
         "Qwen/Qwen3-1.7B",
         default_server_args,
-        env_dict={
-            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
-            "VLLM_SERVER_DEV_MODE": "1",
-        },
+        env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1", "VLLM_SERVER_DEV_MODE": "1"},
     ) as remote_server:
         yield remote_server
 

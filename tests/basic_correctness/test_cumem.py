@@ -214,10 +214,7 @@ def test_deep_sleep_async():
         model = "hmellor/tiny-random-LlamaForCausalLM"
         free, total = torch.cuda.mem_get_info()
         used_bytes_baseline = total - free  # in case other process is running
-        engine_args = AsyncEngineArgs(
-            model=model,
-            enable_sleep_mode=True,
-        )
+        engine_args = AsyncEngineArgs(model=model, enable_sleep_mode=True)
 
         llm = AsyncLLMEngine.from_engine_args(engine_args)
         prompt = "How are you?"

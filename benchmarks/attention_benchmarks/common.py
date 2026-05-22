@@ -92,11 +92,7 @@ class MockKVBProj:
         """
         num_tokens = x.shape[0]
         result = torch.randn(
-            num_tokens,
-            self.num_heads,
-            self.out_dim,
-            device=x.device,
-            dtype=x.dtype,
+            num_tokens, self.num_heads, self.out_dim, device=x.device, dtype=x.dtype
         )
         return (result,)  # Return as tuple to match ColumnParallelLinear API
 
@@ -108,17 +104,10 @@ class MockIndexer:
     which KV cache slots to attend to for each token.
     """
 
-    def __init__(
-        self,
-        max_num_tokens: int,
-        topk_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_tokens: int, topk_tokens: int, device: torch.device):
         self.topk_tokens = topk_tokens
         self.topk_indices_buffer = torch.zeros(
-            (max_num_tokens, topk_tokens),
-            dtype=torch.int32,
-            device=device,
+            (max_num_tokens, topk_tokens), dtype=torch.int32, device=device
         )
 
     def fill_random_indices(self, num_tokens: int, max_kv_len: int):

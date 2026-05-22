@@ -19,12 +19,7 @@ logger = init_logger(__name__)
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        runner=None,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.method == "dflash"
         super().__init__(
@@ -41,24 +36,16 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # Separate context buffers to keep query buffer addresses stable for CUDA graphs
         self._context_slot_mapping_buffer = torch.zeros(
-            self.max_num_tokens,
-            dtype=torch.int64,
-            device=device,
+            self.max_num_tokens, dtype=torch.int64, device=device
         )
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
-            dtype=torch.int64,
-            device=device,
+            self.max_query_tokens, dtype=torch.int64, device=device
         )
         self._context_positions_buffer = torch.zeros(
-            self.max_num_tokens,
-            dtype=torch.int64,
-            device=device,
+            self.max_num_tokens, dtype=torch.int64, device=device
         )
         self.positions = torch.zeros(
-            self.max_query_tokens,
-            dtype=torch.int64,
-            device=device,
+            self.max_query_tokens, dtype=torch.int64, device=device
         )
 
         self.arange = torch.arange(
@@ -72,11 +59,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
         return replace(
-            base,
-            attention_config=replace(
-                base.attention_config,
-                use_non_causal=True,
-            ),
+            base, attention_config=replace(base.attention_config, use_non_causal=True)
         )
 
     @override

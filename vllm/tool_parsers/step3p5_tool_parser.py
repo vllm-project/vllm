@@ -9,9 +9,7 @@ from xml.parsers.expat import ParserCreate
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -1377,9 +1375,7 @@ class Step3p5ToolParser(ToolParser):
         )
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         self.parser.reset_streaming_state()
         # Reset tool call tracking arrays for new extraction
@@ -1389,9 +1385,7 @@ class Step3p5ToolParser(ToolParser):
         result = self.parser.parse_single_streaming_chunks(model_output)
         if not result.tool_calls:
             return ExtractedToolCallInformation(
-                tool_calls=[],
-                tools_called=False,
-                content=result.content,
+                tool_calls=[], tools_called=False, content=result.content
             )
         else:
             tool_calls = []

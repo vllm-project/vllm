@@ -33,10 +33,7 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
         prepare_mxfp8_layer_for_marlin(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
             apply_mxfp8_marlin_linear,

@@ -18,35 +18,15 @@ def ernie45_tokenizer():
 
 
 # 带 </think>，非stream
-WITH_THINK = {
-    "output": "abc</think>def",
-    "reasoning": "abc",
-    "content": "def",
-}
+WITH_THINK = {"output": "abc</think>def", "reasoning": "abc", "content": "def"}
 # 带 </think>，stream
-WITH_THINK_STREAM = {
-    "output": "abc</think>def",
-    "reasoning": "abc",
-    "content": "def",
-}
+WITH_THINK_STREAM = {"output": "abc</think>def", "reasoning": "abc", "content": "def"}
 # without </think>, all is reasoning
-WITHOUT_THINK = {
-    "output": "abc",
-    "reasoning": "abc",
-    "content": None,
-}
+WITHOUT_THINK = {"output": "abc", "reasoning": "abc", "content": None}
 # without </think>, all is reasoning
-WITHOUT_THINK_STREAM = {
-    "output": "abc",
-    "reasoning": "abc",
-    "content": None,
-}
+WITHOUT_THINK_STREAM = {"output": "abc", "reasoning": "abc", "content": None}
 
-COMPLETE_REASONING = {
-    "output": "abc</think>",
-    "reasoning": "abc",
-    "content": None,
-}
+COMPLETE_REASONING = {"output": "abc</think>", "reasoning": "abc", "content": None}
 MULTILINE_REASONING = {
     "output": "abc\nABC</think>def\nDEF",
     "reasoning": "abc\nABC",
@@ -54,55 +34,19 @@ MULTILINE_REASONING = {
 }
 
 TEST_CASES = [
-    pytest.param(
-        False,
-        WITH_THINK,
-        id="with_think",
-    ),
-    pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_THINK,
-        id="without_think",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_THINK_STREAM,
-        id="without_think_stream",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        MULTILINE_REASONING,
-        id="multiline_reasoning",
-    ),
-    pytest.param(
-        True,
-        MULTILINE_REASONING,
-        id="multiline_reasoning_stream",
-    ),
+    pytest.param(False, WITH_THINK, id="with_think"),
+    pytest.param(True, WITH_THINK_STREAM, id="with_think_stream"),
+    pytest.param(False, WITHOUT_THINK, id="without_think"),
+    pytest.param(True, WITHOUT_THINK_STREAM, id="without_think_stream"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_stream"),
+    pytest.param(False, MULTILINE_REASONING, id="multiline_reasoning"),
+    pytest.param(True, MULTILINE_REASONING, id="multiline_reasoning_stream"),
 ]
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    ernie45_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, ernie45_tokenizer):
     output = ernie45_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = []
     for token in output:

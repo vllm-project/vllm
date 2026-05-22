@@ -10,11 +10,7 @@ from typing import Annotated
 import numpy as np
 import torch
 from torch import nn
-from transformers import (
-    BatchFeature,
-    WhisperConfig,
-    WhisperFeatureExtractor,
-)
+from transformers import BatchFeature, WhisperConfig, WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
@@ -45,14 +41,9 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.whisper_utils import (
-    ISO639_1_SUPPORTED_LANGS,
-)
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -66,9 +57,7 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm.v1.attention.backend import (
-    AttentionType,
-)
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -101,20 +90,14 @@ class WhisperAudioInputs(TensorSchema):
         - t: Time frames (M)
     """
 
-    input_features: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b", "nmb", "t"),
-    ]
+    input_features: Annotated[list[torch.Tensor] | None, TensorShape("b", "nmb", "t")]
 
 
 class WhisperEncoderAttention(MMEncoderAttention):
     """Multi-headed attention for Whisper encoder with 2D tensor support."""
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
     ) -> torch.Tensor:
         """
         Input shape: batch_size x seq_len x hidden_size
@@ -238,10 +221,7 @@ class WhisperAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -298,9 +278,7 @@ class WhisperCrossAttention(WhisperAttention):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ):
         q, _ = self.q_proj(hidden_states)
 
@@ -379,10 +357,7 @@ class WhisperEncoderLayer(nn.Module):
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
@@ -431,9 +406,7 @@ class WhisperDecoderLayer(nn.Module):
         self.final_layer_norm = nn.LayerNorm(config.d_model)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -443,8 +416,7 @@ class WhisperDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
         hidden_states = self.encoder_attn(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
+            hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states
         )
         hidden_states = residual + hidden_states
 
@@ -497,10 +469,7 @@ class WhisperEncoder(nn.Module):
             set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
         )
 
-        with (
-            torch.no_grad(),
-            maybe_fp32_init_ctx,
-        ):
+        with torch.no_grad(), maybe_fp32_init_ctx:
             self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
             self.embed_positions.weight.copy_(
                 sinusoids(*self.embed_positions.weight.shape)
@@ -574,8 +543,7 @@ class WhisperDecoder(nn.Module):
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
+                hidden_states, encoder_hidden_states=encoder_hidden_states
             )
 
         hidden_states = self.layer_norm(hidden_states)
@@ -603,15 +571,12 @@ class WhisperModel(nn.Module):
     ) -> torch.Tensor:
         enc_states = torch.cat(encoder_outputs, dim=0) if len(encoder_outputs) else None
         decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_hidden_states=enc_states,
+            input_ids=input_ids, positions=positions, encoder_hidden_states=enc_states
         )
         return decoder_outputs
 
     def get_encoder_outputs(
-        self,
-        input_features: torch.Tensor | list[torch.Tensor] | None,
+        self, input_features: torch.Tensor | list[torch.Tensor] | None
     ) -> torch.Tensor | None:
         if input_features is None:
             return None
@@ -716,18 +681,14 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
+        self, prompt: str | list[int], mm_items: MultiModalDataItems
     ) -> str | list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
@@ -745,10 +706,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
+            mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
         # The HF WhisperProcessor passes **kwargs to both the tokenizer
         # and the feature extractor. Text-tokenizer kwargs like
         # `truncation` and `max_length` must be removed when audio data
@@ -758,19 +716,14 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
         }
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(input_features=MultiModalFieldConfig.batched("audio"))
 
@@ -783,9 +736,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         num_tokens = self.info.get_num_audio_tokens()
         return [
             PromptReplacement(
-                modality="audio",
-                target=[0],
-                replacement=[0] * num_tokens,
+                modality="audio", target=[0], replacement=[0] * num_tokens
             )
         ]
 
@@ -796,10 +747,7 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
     dummy_inputs=WhisperDummyInputsBuilder,
 )
 class WhisperForConditionalGeneration(
-    nn.Module,
-    SupportsTranscription,
-    SupportsMultiModal,
-    SupportsLoRA,
+    nn.Module, SupportsTranscription, SupportsMultiModal, SupportsLoRA
 ):
     # LoRA-specific attributes
     packed_modules_mapping = {
@@ -829,10 +777,7 @@ class WhisperForConditionalGeneration(
         return super().validate_language(language)
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
@@ -857,10 +802,7 @@ class WhisperForConditionalGeneration(
         )
 
     @classmethod
-    def get_language_token_ids(
-        cls,
-        tokenizer: object,
-    ) -> list[int]:
+    def get_language_token_ids(cls, tokenizer: object) -> list[int]:
         """Return token IDs for all supported language tokens.
 
         Used with ``SamplingParams.allowed_token_ids`` to constrain
@@ -874,9 +816,7 @@ class WhisperForConditionalGeneration(
 
     @classmethod
     def get_language_detection_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
+        cls, audio: np.ndarray, stt_config: SpeechToTextConfig
     ) -> PromptType:
         """Return a prompt that elicits a single language token from Whisper.
 
@@ -885,17 +825,14 @@ class WhisperForConditionalGeneration(
         """
         return ExplicitEncoderDecoderPrompt(
             encoder_prompt=TextPrompt(
-                prompt="",
-                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+                prompt="", multi_modal_data={"audio": (audio, stt_config.sample_rate)}
             ),
             decoder_prompt=TextPrompt(prompt="<|startoftranscript|>"),
         )
 
     @classmethod
     def parse_language_detection_output(
-        cls,
-        token_ids: list[int],
-        tokenizer: object,
+        cls, token_ids: list[int], tokenizer: object
     ) -> str | None:
         """Parse the language token predicted by Whisper.
 
@@ -903,10 +840,7 @@ class WhisperForConditionalGeneration(
         ``<|xx|>`` format. Expects a valid language token from constrained generation.
         """
 
-        decoded = tokenizer.decode(
-            [token_ids[0]],
-            skip_special_tokens=False,
-        )
+        decoded = tokenizer.decode([token_ids[0]], skip_special_tokens=False)
         # Whisper language tokens have the form <|xx|>
         assert decoded.startswith("<|") and decoded.endswith("|>")
         lang_code = decoded[2:-2]
@@ -981,9 +915,7 @@ class WhisperForConditionalGeneration(
         if encoder_outputs is None:
             encoder_outputs = []
         decoder_outputs = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_outputs=encoder_outputs,
+            input_ids=input_ids, positions=positions, encoder_outputs=encoder_outputs
         )
         return decoder_outputs
 

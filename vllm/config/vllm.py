@@ -201,9 +201,7 @@ OPTIMIZATION_LEVEL_00 = {
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
     },
-    "kernel_config": {
-        "enable_flashinfer_autotune": False,
-    },
+    "kernel_config": {"enable_flashinfer_autotune": False},
 }
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
@@ -222,9 +220,7 @@ OPTIMIZATION_LEVEL_01 = {
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
     },
-    "kernel_config": {
-        "enable_flashinfer_autotune": True,
-    },
+    "kernel_config": {"enable_flashinfer_autotune": True},
 }
 OPTIMIZATION_LEVEL_02 = {
     "compilation_config": {
@@ -243,9 +239,7 @@ OPTIMIZATION_LEVEL_02 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
-    "kernel_config": {
-        "enable_flashinfer_autotune": True,
-    },
+    "kernel_config": {"enable_flashinfer_autotune": True},
 }
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
@@ -264,9 +258,7 @@ OPTIMIZATION_LEVEL_03 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
-    "kernel_config": {
-        "enable_flashinfer_autotune": True,
-    },
+    "kernel_config": {"enable_flashinfer_autotune": True},
 }
 
 OPTIMIZATION_LEVEL_TO_CONFIG = {
@@ -292,7 +284,7 @@ class VllmConfig:
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
     scheduler_config: SchedulerConfig = Field(
-        default_factory=SchedulerConfig.default_factory,
+        default_factory=SchedulerConfig.default_factory
     )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
@@ -567,10 +559,7 @@ class VllmConfig:
                 f"_thread_{threading.get_ident()}_at_{datetime.now()}.log"
             ).replace(" ", "_")
             log_path = os.path.join(
-                tmp_dir,
-                "vllm",
-                f"vllm-instance-{self.instance_id}",
-                filename,
+                tmp_dir, "vllm", f"vllm-instance-{self.instance_id}", filename
             )
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             enable_trace_function_call(log_path)
@@ -605,8 +594,7 @@ class VllmConfig:
                     f"{supported_dtypes}"
                 )
             quant_config.maybe_update_config(
-                model_config.model,
-                hf_config=model_config.hf_config,
+                model_config.model, hf_config=model_config.hf_config
             )
             return quant_config
         return None
@@ -624,9 +612,7 @@ class VllmConfig:
         )
 
     def with_hf_config(
-        self,
-        hf_config: PretrainedConfig,
-        architectures: list[str] | None = None,
+        self, hf_config: PretrainedConfig, architectures: list[str] | None = None
     ) -> "VllmConfig":
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
@@ -949,7 +935,7 @@ class VllmConfig:
             ):
                 logger.warning_once(
                     "Async scheduling is not compatible with "
-                    "disable_padded_drafter_batch=True and will be disabled.",
+                    "disable_padded_drafter_batch=True and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
@@ -974,7 +960,7 @@ class VllmConfig:
                 ):
                     logger.info_once(
                         "Disabling NCCL for DP synchronization "
-                        "when using async scheduling.",
+                        "when using async scheduling."
                     )
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
@@ -988,7 +974,7 @@ class VllmConfig:
         ):
             logger.warning_once(
                 "Disabling cascade attention (not yet compatible with "
-                "async speculative decoding).",
+                "async speculative decoding)."
             )
             self.model_config.disable_cascade_attn = True
 
@@ -1355,15 +1341,12 @@ class VllmConfig:
         ):
             self.model_config.disable_cascade_attn = True
             logger.warning_once(
-                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled."
             )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in [
-                "deepep_low_latency",
-                "deepep_high_throughput",
-            ], (
+            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
                 "supported. To fix use --all2all-backend=deepep_low_latency or "
@@ -1567,7 +1550,7 @@ class VllmConfig:
                     " the speculative decoding settings. This may lead to suboptimal"
                     " performance. Consider increasing max_num_batched_tokens to"
                     " accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs.",
+                    " num_speculative_tokens or max_num_seqs."
                 )
 
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
@@ -1723,8 +1706,7 @@ class VllmConfig:
                     )
 
                 logger.warning(
-                    "Truncating max_cudagraph_capture_size to %d",
-                    valid_max_size,
+                    "Truncating max_cudagraph_capture_size to %d", valid_max_size
                 )
             # always set the final max_cudagraph_capture_size
             self.compilation_config.max_cudagraph_capture_size = valid_max_size
@@ -2218,9 +2200,7 @@ T = TypeVar("T")
 
 
 def get_layers_from_vllm_config(
-    vllm_config: VllmConfig,
-    layer_type: type[T],
-    layer_names: list[str] | None = None,
+    vllm_config: VllmConfig, layer_type: type[T], layer_names: list[str] | None = None
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.

@@ -15,9 +15,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.linear import (
-    UnquantizedLinearMethod,
-)
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -31,11 +29,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadata,
-    AttentionType,
-)
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -119,9 +113,7 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
 
 
 def _init_kv_cache_quant(
-    layer: nn.Module,
-    quant_config: QuantizationConfig | None,
-    prefix: str,
+    layer: nn.Module, quant_config: QuantizationConfig | None, prefix: str
 ) -> None:
     """Initializes KV cache scaling factors and quantization method.
 
@@ -336,7 +328,7 @@ class Attention(nn.Module, AttentionLayerBase):
         ):
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
-                "with batch invariance, as it is not yet supported.",
+                "with batch invariance, as it is not yet supported."
             )
             cache_config.enable_prefix_caching = False
 
@@ -689,9 +681,7 @@ def get_attention_context(
 
 
 def unified_kv_cache_update(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: LayerNameType,
+    key: torch.Tensor, value: torch.Tensor, layer_name: LayerNameType
 ) -> torch.Tensor:
     """
     Returns a dummy that is passed to unified_attention to signal a side effect and
@@ -704,20 +694,14 @@ def unified_kv_cache_update(
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            attn_layer,
-            key,
-            value,
-            kv_cache,
-            layer_slot_mapping,
+            attn_layer, key, value, kv_cache, layer_slot_mapping
         )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
 
 def unified_kv_cache_update_fake(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: LayerNameType,
+    key: torch.Tensor, value: torch.Tensor, layer_name: LayerNameType
 ) -> torch.Tensor:
     return torch.empty(0, device=key.device, dtype=key.dtype)
 

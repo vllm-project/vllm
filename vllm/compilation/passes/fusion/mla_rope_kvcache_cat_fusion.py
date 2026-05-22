@@ -120,14 +120,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
         cos_sin_cache = self.empty_bf16(L, self.qk_rope_head_dim)
         positions = self.empty(T, dtype=torch.int64)
         k_scale = self.empty(0, dtype=torch.float32)
-        inputs = [
-            q_pe,
-            k_pe,
-            kv_c_normed,
-            positions,
-            cos_sin_cache,
-            k_scale,
-        ]
+        inputs = [q_pe, k_pe, kv_c_normed, positions, cos_sin_cache, k_scale]
         if _USE_LAYERNAME:
             inputs.append(self._ln)
         return inputs
@@ -250,10 +243,7 @@ class MLARoPEKVCacheCatFusionPass(VllmFusionPatternMatcherPass):
                         for use_flashinfer in [False, True]:
                             self.register(
                                 MLARoPEKVCacheCatPattern(
-                                    layer,
-                                    is_neox,
-                                    use_flashinfer,
-                                    use_deepseek_scaling,
+                                    layer, is_neox, use_flashinfer, use_deepseek_scaling
                                 )
                             )
                     else:

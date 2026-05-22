@@ -39,8 +39,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         raise NotImplementedError
 
     def merge_sampling_params(
-        self,
-        params: SamplingParams | None = None,
+        self, params: SamplingParams | None = None
     ) -> SamplingParams:
         if callable(
             validate_or_generate_params := getattr(
@@ -61,8 +60,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         return params or SamplingParams()
 
     def merge_pooling_params(
-        self,
-        params: PoolingParams | None = None,
+        self, params: PoolingParams | None = None
     ) -> PoolingParams:
         if callable(
             validate_or_generate_params := getattr(
@@ -84,18 +82,12 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     @abstractmethod
     def pre_process(
-        self,
-        prompt: IOProcessorInput,
-        request_id: str | None = None,
-        **kwargs,
+        self, prompt: IOProcessorInput, request_id: str | None = None, **kwargs
     ) -> PromptType | Sequence[PromptType]:
         raise NotImplementedError
 
     async def pre_process_async(
-        self,
-        prompt: IOProcessorInput,
-        request_id: str | None = None,
-        **kwargs,
+        self, prompt: IOProcessorInput, request_id: str | None = None, **kwargs
     ) -> PromptType | Sequence[PromptType]:
         return self.pre_process(prompt, request_id, **kwargs)
 

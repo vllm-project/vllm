@@ -214,10 +214,7 @@ class CrossAttention(Attention):
             )
 
         underlying_attn_backend = get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            attn_type=AttentionType.ENCODER_DECODER,
+            head_size, dtype, kv_cache_dtype, attn_type=AttentionType.ENCODER_DECODER
         )
         attn_backend = create_cross_attention_backend(underlying_attn_backend)
 

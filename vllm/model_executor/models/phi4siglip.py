@@ -18,14 +18,8 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.multimodal.parse import (
-    ImageSize,
-    MultiModalDataItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     PromptReplacement,
@@ -86,12 +80,7 @@ class Phi4SiglipProcessingInfo(BaseProcessingInfo):
     def _get_min_num_patches(self) -> int:
         return getattr(self.get_hf_config(), "min_num_patches", 256)
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         patch_size = self._get_patch_size()
         min_patches = self._get_min_num_patches()
         max_patches = self._get_max_num_patches()
@@ -114,9 +103,7 @@ class Phi4SiglipProcessingInfo(BaseProcessingInfo):
         return {"image": self._get_max_num_patches()}
 
 
-class Phi4SiglipDummyInputsBuilder(
-    BaseDummyInputsBuilder[Phi4SiglipProcessingInfo],
-):
+class Phi4SiglipDummyInputsBuilder(BaseDummyInputsBuilder[Phi4SiglipProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         return DEFAULT_IMAGE_TOKEN * num_images
@@ -135,13 +122,11 @@ class Phi4SiglipDummyInputsBuilder(
                 height=size.height,
                 num_images=num_images,
                 overrides=mm_options.get("image"),
-            ),
+            )
         }
 
 
-class Phi4SiglipMultiModalProcessor(
-    BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
-):
+class Phi4SiglipMultiModalProcessor(BaseMultiModalProcessor[Phi4SiglipProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -150,10 +135,7 @@ class Phi4SiglipMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         # The HF processor's tokenizer_image_token() replaces the "<image>"
@@ -185,9 +167,7 @@ class Phi4SiglipMultiModalProcessor(
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -217,7 +197,7 @@ class Phi4SiglipMultiModalProcessor(
                 modality="image",
                 target=DEFAULT_IMAGE_TOKEN,
                 replacement=get_replacement,
-            ),
+            )
         ]
 
 
@@ -259,7 +239,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             "model.mm_projector.2.": "multi_modal_projector.linear_2.",
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
-        },
+        }
     )
 
     @classmethod
@@ -333,18 +313,11 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         valid_counts = pixel_attention_mask.sum(dim=1).to(torch.int32)
         pixel_values_packed = pixel_values[pixel_attention_mask.bool()]
         cu_seqlens = torch.zeros(
-            len(valid_counts) + 1,
-            dtype=torch.int32,
-            device=pixel_values.device,
+            len(valid_counts) + 1, dtype=torch.int32, device=pixel_values.device
         )
         cu_seqlens[1:] = valid_counts.cumsum(0)
         max_seqlen = valid_counts.max()
-        return (
-            pixel_values_packed,
-            spatial_shapes,
-            cu_seqlens,
-            max_seqlen,
-        )
+        return (pixel_values_packed, spatial_shapes, cu_seqlens, max_seqlen)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -369,12 +342,9 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         pixel_attention_mask = image_input["pixel_attention_mask"]
         spatial_shapes = image_input["spatial_shapes"]
 
-        (
-            pixel_values_packed,
-            spatial_shapes_packed,
-            cu_seqlens,
-            max_seqlen,
-        ) = self._packed_from_padded(pixel_values, pixel_attention_mask, spatial_shapes)
+        (pixel_values_packed, spatial_shapes_packed, cu_seqlens, max_seqlen) = (
+            self._packed_from_padded(pixel_values, pixel_attention_mask, spatial_shapes)
+        )
 
         vision_features = self.vision_tower(
             pixel_values_packed=pixel_values_packed,
@@ -411,17 +381,11 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
 
         hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

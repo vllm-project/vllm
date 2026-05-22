@@ -146,11 +146,7 @@ def test_silu_and_mul_with_clamp(
     out = layer(x)
     ref_out = layer.forward_native(x)
 
-    rtol = {
-        torch.float16: 2e-3,
-        torch.bfloat16: 2e-2,
-        torch.float: 1.3e-6,
-    }
+    rtol = {torch.float16: 2e-3, torch.bfloat16: 2e-2, torch.float: 1.3e-6}
     torch.testing.assert_close(
         out, ref_out, atol=get_default_atol(out), rtol=rtol[out.dtype]
     )

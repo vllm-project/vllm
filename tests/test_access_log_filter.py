@@ -279,12 +279,7 @@ class TestIntegration:
         # Log using uvicorn's format with args tuple
         # Format: '%s - "%s %s HTTP/%s" %d'
         logger.info(
-            '%s - "%s %s HTTP/%s" %d',
-            "127.0.0.1:12345",
-            "GET",
-            "/health",
-            "1.1",
-            200,
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1:12345", "GET", "/health", "1.1", 200
         )
         logger.info(
             '%s - "%s %s HTTP/%s" %d',
@@ -295,12 +290,7 @@ class TestIntegration:
             200,
         )
         logger.info(
-            '%s - "%s %s HTTP/%s" %d',
-            "127.0.0.1:12345",
-            "GET",
-            "/metrics",
-            "1.1",
-            200,
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1:12345", "GET", "/metrics", "1.1", 200
         )
         logger.info(
             '%s - "%s %s HTTP/%s" %d',

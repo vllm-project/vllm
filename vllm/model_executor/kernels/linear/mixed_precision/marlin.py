@@ -171,10 +171,7 @@ class MarlinLinearKernel(MPLinearKernel):
             layer.bias.data = marlin_permute_bias(layer.bias)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)

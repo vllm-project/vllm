@@ -79,7 +79,7 @@ def test_openvla_config_converts_text_config_dict() -> None:
             "intermediate_size": 128,
             "num_hidden_layers": 2,
             "num_attention_heads": 4,
-        },
+        }
     )
 
     assert isinstance(config.text_config, LlamaConfig)
@@ -102,11 +102,7 @@ def test_openvla_config_converts_text_config_dict() -> None:
             (2, 2),
             (255, 0, 0),
         ),
-        (
-            np.full((4, 5, 1), 128, dtype=np.uint8),
-            (5, 4),
-            (128, 128, 128),
-        ),
+        (np.full((4, 5, 1), 128, dtype=np.uint8), (5, 4), (128, 128, 128)),
     ],
 )
 def test_openvla_to_rgb_image(
@@ -123,8 +119,7 @@ def test_openvla_to_rgb_image(
 
 def test_openvla_preprocess_image_matches_expected_normalization() -> None:
     image = Image.fromarray(
-        np.arange(12 * 10 * 3, dtype=np.uint8).reshape(10, 12, 3),
-        mode="RGB",
+        np.arange(12 * 10 * 3, dtype=np.uint8).reshape(10, 12, 3), mode="RGB"
     )
 
     pixel_values = preprocess_openvla_image(image, image_size=224)
@@ -148,9 +143,7 @@ def test_openvla_processor_outputs_pixel_values() -> None:
     image = Image.new("RGB", (8, 8), color=(255, 0, 0))
 
     batch = processor(
-        text="In: test\nOut:",
-        images=image,
-        text_kwargs={"add_special_tokens": True},
+        text="In: test\nOut:", images=image, text_kwargs={"add_special_tokens": True}
     )
 
     assert batch["input_ids"] == [[1, 10, 11]]

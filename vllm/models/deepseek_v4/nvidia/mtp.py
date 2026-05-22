@@ -30,9 +30,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import HCHeadOp
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
@@ -40,10 +38,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import (
-    DeepseekV4DecoderLayer,
-    make_deepseek_v4_expert_params_mapping,
-)
+from .model import DeepseekV4DecoderLayer, make_deepseek_v4_expert_params_mapping
 
 logger = init_logger(__name__)
 
@@ -102,12 +97,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             requires_grad=False,
         )
         self.hc_head_base = nn.Parameter(
-            torch.empty(self.hc_mult, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(self.hc_mult, dtype=torch.float32), requires_grad=False
         )
         self.hc_head_scale = nn.Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(1, dtype=torch.float32), requires_grad=False
         )
 
         self.shared_head = SharedHead(
@@ -226,9 +219,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         )
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -279,9 +270,7 @@ class DeepSeekV4MTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
@@ -447,8 +436,7 @@ class DeepSeekV4MTP(nn.Module):
                         # ``e_score_correction_bias`` lives on
                         # ``norm_gate`` directly (not on the inner gate).
                         name = name.replace(
-                            ".ffn.gate.bias",
-                            ".ffn.norm_gate.e_score_correction_bias",
+                            ".ffn.gate.bias", ".ffn.norm_gate.e_score_correction_bias"
                         )
                     param = params_dict[name]
                     weight_loader = getattr(

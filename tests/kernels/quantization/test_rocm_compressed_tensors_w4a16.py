@@ -18,7 +18,7 @@ from vllm.platforms import current_platform
     "model_path",
     [
         # Listed in tests/weight_loading/models.txt
-        "nm-testing/tinyllama-oneshot-w4a16-group128-v2",
+        "nm-testing/tinyllama-oneshot-w4a16-group128-v2"
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])

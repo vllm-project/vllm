@@ -70,11 +70,7 @@ def score_text():
         "Python is a programming language.",
     ]
 
-    data = {
-        "model": MODEL,
-        "text_1": query,
-        "text_2": documents,
-    }
+    data = {"model": MODEL, "text_1": query, "text_2": documents}
 
     response = requests.post(f"{BASE_URL}/score", headers=headers, json=data)
 

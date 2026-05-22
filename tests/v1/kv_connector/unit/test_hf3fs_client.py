@@ -29,8 +29,7 @@ except Exception:
     HF3FS_AVAILABLE = False
 
 requires_hf3fs = pytest.mark.skipif(
-    not HF3FS_AVAILABLE,
-    reason="hf3fs_fuse.io is not available on this machine",
+    not HF3FS_AVAILABLE, reason="hf3fs_fuse.io is not available on this machine"
 )
 
 
@@ -135,10 +134,7 @@ class TestHf3fsClientResourceManagement:
         once, all handles set to None, shm.close() invoked."""
         client, shm_r, shm_w = self._make_client(tmp_path)
 
-        with (
-            patch(f"{self._MOD}.deregister_fd") as mock_dereg,
-            patch("os.close"),
-        ):
+        with patch(f"{self._MOD}.deregister_fd") as mock_dereg, patch("os.close"):
             client.close()  # first close
             client.close()  # second close — must be no-op
             client.close()  # third close — must be no-op
@@ -268,10 +264,7 @@ class TestHf3fsClientResourceManagement:
         """_release_resources() on a fully-cleared client must not raise."""
         client, _, _ = self._make_client(tmp_path)
 
-        with (
-            patch(f"{self._MOD}.deregister_fd"),
-            patch("os.close"),
-        ):
+        with patch(f"{self._MOD}.deregister_fd"), patch("os.close"):
             client.close()  # clears all handles
 
         with (

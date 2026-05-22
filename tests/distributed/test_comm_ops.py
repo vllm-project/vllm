@@ -286,9 +286,7 @@ def test_async_intermediate_tensors_lazy_wait() -> None:
         post_calls["n"] += 1
 
     it = AsyncIntermediateTensors(
-        {"x": torch.tensor([1])},
-        comm_handles=[work],
-        comm_postprocess=[post],
+        {"x": torch.tensor([1])}, comm_handles=[work], comm_postprocess=[post]
     )
 
     # accessing non-tensor attributes should not trigger wait.
@@ -340,9 +338,7 @@ def send_recv_test_worker(
     [all_reduce_test_worker, all_gather_test_worker, broadcast_tensor_dict_test_worker],
 )
 def test_multi_process_tensor_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int,
-    test_target: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch, tp_size: int, test_target: Callable[..., Any]
 ):
     multi_process_parallel(monkeypatch, tp_size, 1, test_target)
 
@@ -353,9 +349,7 @@ def test_multi_process_tensor_parallel(
     "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker]
 )
 def test_multi_process_pipeline_parallel(
-    monkeypatch: pytest.MonkeyPatch,
-    pp_size: int,
-    test_target: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch, pp_size: int, test_target: Callable[..., Any]
 ):
     multi_process_parallel(monkeypatch, 1, pp_size, test_target)
 

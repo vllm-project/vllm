@@ -32,20 +32,15 @@ def _make_vllm_config(
     accesses, avoiding any model download / HF config inspection."""
     speculative_config = (
         SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens,
-            parallel_drafting=False,
+            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
         )
         if num_speculative_tokens > 0
         else None
     )
     return SimpleNamespace(
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode="all",
-        ),
+        cache_config=SimpleNamespace(block_size=block_size, mamba_cache_mode="all"),
         compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.FULL,
-            max_cudagraph_capture_size=None,
+            cudagraph_mode=CUDAGraphMode.FULL, max_cudagraph_capture_size=None
         ),
         speculative_config=speculative_config,
         num_speculative_tokens=num_speculative_tokens,
@@ -164,13 +159,9 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
 
     # Values must be correct (copied from metadata_a).
     torch.testing.assert_close(
-        metadata_b.block_idx_last_scheduled_token,
-        block_idx_vals,
+        metadata_b.block_idx_last_scheduled_token, block_idx_vals
     )
-    torch.testing.assert_close(
-        metadata_b.block_idx_last_computed_token,
-        block_idx_vals,
-    )
+    torch.testing.assert_close(metadata_b.block_idx_last_computed_token, block_idx_vals)
 
 
 def test_state_indices_tensor_d_includes_num_speculative_blocks():
@@ -188,9 +179,7 @@ def test_state_indices_tensor_d_includes_num_speculative_blocks():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        max_model_len,
-        max_num_seqs,
-        num_speculative_tokens=num_speculative_tokens,
+        max_model_len, max_num_seqs, num_speculative_tokens=num_speculative_tokens
     )
 
     spec = MambaSpec(
@@ -221,9 +210,7 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        max_model_len,
-        max_num_seqs,
-        num_speculative_tokens=num_speculative_tokens,
+        max_model_len, max_num_seqs, num_speculative_tokens=num_speculative_tokens
     )
 
     spec = MambaSpec(
@@ -301,9 +288,7 @@ def test_block_idx_prev_step_persistent_buffer_allocated():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        max_model_len,
-        max_num_seqs,
-        num_speculative_tokens=num_speculative_tokens,
+        max_model_len, max_num_seqs, num_speculative_tokens=num_speculative_tokens
     )
     spec = MambaSpec(
         block_size=block_size,
@@ -353,9 +338,7 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
     device = torch.device("cpu")
 
     vllm_config = _make_vllm_config(
-        max_model_len,
-        max_num_seqs,
-        num_speculative_tokens=num_speculative_tokens,
+        max_model_len, max_num_seqs, num_speculative_tokens=num_speculative_tokens
     )
     spec = MambaSpec(
         block_size=block_size,
@@ -423,8 +406,7 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     # First num_decodes values: input values copied through.
     torch.testing.assert_close(
-        out.block_idx_last_scheduled_token_prev_step[:num_decodes],
-        prev_step_vals,
+        out.block_idx_last_scheduled_token_prev_step[:num_decodes], prev_step_vals
     )
 
     # Tail values past num_decodes: zero-filled padding for cudagraph capture.

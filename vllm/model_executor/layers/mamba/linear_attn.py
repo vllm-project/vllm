@@ -77,10 +77,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         shard = slice(shard_rank * shard_size, (shard_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
 
-    def _forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
@@ -91,9 +88,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         return x
 
     def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
@@ -193,13 +188,7 @@ def linear_attention_prefill_and_mix(
         vs = v[_start:_end].transpose(0, 1).contiguous()
         slice_layer_cache = kv_cache[slot_id, ...]
         out_slice = prefix_fn(
-            qs,
-            ks,
-            vs,
-            slice_layer_cache,
-            slope_rate,
-            block_size,
-            layer_idx=layer_idx,
+            qs, ks, vs, slice_layer_cache, slope_rate, block_size, layer_idx=layer_idx
         )
         hidden.append(out_slice.contiguous())
 
@@ -254,8 +243,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         assert self.model_config is not None
         assert self.cache_config is not None
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
+            self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
 
     def get_state_shape(self) -> tuple[tuple[int, int, int], ...]:
@@ -320,10 +308,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
-        self.norm = MiniMaxText01RMSNormTP(
-            self.hidden_inner_size,
-            eps=1e-5,
-        )
+        self.norm = MiniMaxText01RMSNormTP(self.hidden_inner_size, eps=1e-5)
 
         slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
         if num_hidden_layer <= 1:
@@ -405,12 +390,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def forward(
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
-        torch.ops.vllm.linear_attention(
-            hidden_states,
-            output,
-            positions,
-            self.prefix,
-        )
+        torch.ops.vllm.linear_attention(hidden_states, output, positions, self.prefix)
 
     def _forward(
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor

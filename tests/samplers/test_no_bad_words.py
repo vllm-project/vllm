@@ -18,10 +18,7 @@ def _generate(
     temperature: float = 0,
     bad_words: list[str] | None = None,
 ) -> list[int]:
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        bad_words=bad_words,
-    )
+    sampling_params = SamplingParams(temperature=temperature, bad_words=bad_words)
 
     # [([output_token_ids, ], [output_text, ]), ]
     output = llm.generate([prompt], sampling_params=sampling_params)

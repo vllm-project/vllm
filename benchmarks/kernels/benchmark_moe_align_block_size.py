@@ -71,10 +71,7 @@ def benchmark(num_tokens, num_experts, topk, ep_size, provider):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--num_experts",
-        type=int,
-        default=64,
-        choices=[8, 16, 32, 64, 128, 256],
+        "--num_experts", type=int, default=64, choices=[8, 16, 32, 64, 128, 256]
     )
     parser.add_argument(
         "--topk",

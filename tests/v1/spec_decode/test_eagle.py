@@ -210,15 +210,10 @@ def test_prepare_inputs():
     # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
 
-    batch_spec = BatchSpec(
-        seq_lens=[4, 7, 5],
-        query_lens=[4, 7, 5],
-    )
+    batch_spec = BatchSpec(seq_lens=[4, 7, 5], query_lens=[4, 7, 5])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
+        batch_spec, block_size=BLOCK_SIZE, device=device
     )
 
     # If there are `k` sampled tokens, then `k-1` tokens are draft tokens
@@ -305,15 +300,10 @@ def test_prepare_inputs_padded():
     )
 
     num_speculative_tokens = 2
-    batch_spec = BatchSpec(
-        seq_lens=[3, 3, 3],
-        query_lens=[3, 3, 3],
-    )
+    batch_spec = BatchSpec(seq_lens=[3, 3, 3], query_lens=[3, 3, 3])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
+        batch_spec, block_size=BLOCK_SIZE, device=device
     )
 
     # Needed for cu_num_draft_tokens, which is expected to be [3, 6, 9]
@@ -321,8 +311,7 @@ def test_prepare_inputs_padded():
         [0, 3, 6, 9], dtype=torch.int32, device=device
     )
     spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        draft_token_ids=[[0] * num_speculative_tokens] * 3,
-        device=device,
+        draft_token_ids=[[0] * num_speculative_tokens] * 3, device=device
     )
 
     # num_rejected_tokens = [1, 0, 2]
@@ -380,9 +369,7 @@ def test_set_inputs_first_pass_default_eagle():
     )
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
+        batch_spec, block_size=BLOCK_SIZE, device=device
     )
 
     # Input tensors
@@ -494,10 +481,7 @@ def test_set_inputs_first_pass_draft_model():
     proposer.draft_attn_groups = [mock_attn_group]
 
     # Request 0: query_len=3 (but 1 rejected), Request 1: query_len=2
-    batch_spec = BatchSpec(
-        seq_lens=[3, 2],
-        query_lens=[3, 2],
-    )
+    batch_spec = BatchSpec(seq_lens=[3, 2], query_lens=[3, 2])
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -549,10 +533,7 @@ def test_set_inputs_first_pass_draft_model():
     expected_positions = torch.tensor(
         [0, 1, 2, 0, 0, 1, 2], dtype=torch.int64, device=device
     )
-    assert torch.equal(
-        proposer.positions[:num_tokens],
-        expected_positions,
-    )
+    assert torch.equal(proposer.positions[:num_tokens], expected_positions)
 
     # Verify rejection mask
     expected_is_rejected = torch.zeros(7, dtype=torch.bool, device=device)
@@ -634,16 +615,10 @@ def test_set_inputs_first_pass_parallel_drafting():
     proposer.draft_attn_groups = [mock_attn_group]
 
     # Request 0: query_len=4 (1 rejected), Request 1: query_len=4 (all valid)
-    batch_spec = BatchSpec(
-        seq_lens=[9, 14],
-        query_lens=[4, 4],
-    )
+    batch_spec = BatchSpec(seq_lens=[9, 14], query_lens=[4, 4])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=block_size,
-        device=device,
-        arange_block_indices=True,
+        batch_spec, block_size=block_size, device=device, arange_block_indices=True
     )
 
     # Input tensors
@@ -689,10 +664,7 @@ def test_set_inputs_first_pass_parallel_drafting():
     expected_positions = torch.tensor(
         [5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15], dtype=torch.int64, device=device
     )
-    assert torch.equal(
-        proposer.positions[:num_tokens],
-        expected_positions,
-    )
+    assert torch.equal(proposer.positions[:num_tokens], expected_positions)
 
     # Verify rejection mask
     expected_is_rejected = torch.zeros(12, dtype=torch.bool, device=device)
@@ -917,15 +889,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     proposer._draft_attn_layer_names = {"layer.0"}
 
     # Create input tensors
-    batch_spec = BatchSpec(
-        seq_lens=seq_lens,
-        query_lens=seq_lens,
-    )
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
+        batch_spec, block_size=BLOCK_SIZE, device=device
     )
 
     target_token_ids = torch.randint(0, vocab_size, (total_tokens,), device=device)
@@ -1045,9 +1012,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
 
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
+        batch_spec, block_size=BLOCK_SIZE, device=device
     )
 
     attn_metadata_builder_cls, _ = try_get_attention_backend(
@@ -1093,8 +1058,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     assert draft_probs.shape == (batch_size, num_speculative_tokens, vocab_size)
     for step, expected_logits in enumerate(logits_returns):
         assert torch.allclose(
-            draft_probs[:, step, :],
-            torch.softmax(expected_logits, dim=-1),
+            draft_probs[:, step, :], torch.softmax(expected_logits, dim=-1)
         )
 
 
@@ -1136,16 +1100,10 @@ def test_set_inputs_first_pass_dflash():
     mask_token_id = proposer.parallel_drafting_token_id
 
     # Setup batch with 3 requests
-    batch_spec = BatchSpec(
-        seq_lens=[10, 8, 12],
-        query_lens=[3, 2, 4],
-    )
+    batch_spec = BatchSpec(seq_lens=[10, 8, 12], query_lens=[3, 2, 4])
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
-        arange_block_indices=True,
+        batch_spec, block_size=BLOCK_SIZE, device=device, arange_block_indices=True
     )
 
     # Input tensors
@@ -1183,9 +1141,7 @@ def test_set_inputs_first_pass_dflash():
     # Each request: [next_token, mask, mask, mask]
     M = mask_token_id
     expected_input_ids = torch.tensor(
-        [100, M, M, M, 200, M, M, M, 300, M, M, M],
-        dtype=torch.int32,
-        device=device,
+        [100, M, M, M, 200, M, M, M, 300, M, M, M], dtype=torch.int32, device=device
     )
     assert torch.equal(proposer.input_ids[:num_tokens], expected_input_ids)
 
@@ -1199,14 +1155,9 @@ def test_set_inputs_first_pass_dflash():
     # req1: last_pos=7,  query=[8, 9, 10, 11]
     # req2: last_pos=11, query=[12, 13, 14, 15]
     expected_query_positions = torch.tensor(
-        [10, 11, 12, 13, 8, 9, 10, 11, 12, 13, 14, 15],
-        dtype=torch.int64,
-        device=device,
+        [10, 11, 12, 13, 8, 9, 10, 11, 12, 13, 14, 15], dtype=torch.int64, device=device
     )
-    assert torch.equal(
-        proposer.positions[:num_tokens],
-        expected_query_positions,
-    )
+    assert torch.equal(proposer.positions[:num_tokens], expected_query_positions)
 
     # Verify token_indices_to_sample (mask tokens only, skip bonus at offset 0)
     # req0: query indices 0-3, mask at 1,2,3

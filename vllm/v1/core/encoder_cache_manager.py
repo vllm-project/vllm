@@ -267,8 +267,7 @@ class EncoderCacheManager:
 
 
 def compute_mm_encoder_budget(
-    scheduler_config: "SchedulerConfig",
-    mm_max_toks_per_item: Mapping[str, int],
+    scheduler_config: "SchedulerConfig", mm_max_toks_per_item: Mapping[str, int]
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.

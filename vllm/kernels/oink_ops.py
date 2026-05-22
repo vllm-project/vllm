@@ -77,10 +77,7 @@ and no variance_size override.
     "oink", supports_args=oink_rms_supported, supported=has_oink_op("rmsnorm")
 )
 def rms_norm(
-    x: Tensor,
-    weight: Tensor | None,
-    epsilon: float,
-    variance_size: int | None = None,
+    x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
     assert variance_size is None
     x_2d = x.view(-1, x.shape[-1])

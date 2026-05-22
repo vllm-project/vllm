@@ -17,11 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.v1.kv_offload.base import (
-    OffloadKey,
-    ReqContext,
-    make_offload_key,
-)
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,

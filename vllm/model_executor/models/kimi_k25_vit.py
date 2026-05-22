@@ -64,9 +64,7 @@ def get_rope_shape_decorate(func):
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
-            org.permute((2, 0, 1)).unsqueeze(0),
-            size=shape,
-            mode=interpolation_mode,
+            org.permute((2, 0, 1)).unsqueeze(0), size=shape, mode=interpolation_mode
         )
         .squeeze(0)
         .permute((1, 2, 0))
@@ -282,11 +280,7 @@ class Rope2DPosEmbRepeated(nn.Module):
         shapes = grid_thws.tolist()
         assert all(
             1 <= h <= self.max_height and 1 <= w <= self.max_width for t, h, w in shapes
-        ), (
-            shapes,
-            self.max_height,
-            self.max_width,
-        )
+        ), (shapes, self.max_height, self.max_width)
         freqs_cis = torch.cat(
             [
                 self.freqs_cis[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1)
@@ -494,9 +488,7 @@ class MoonViT3dEncoder(nn.Module):
         self.final_layernorm = nn.LayerNorm(hidden_dim)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        grid_thws: torch.Tensor,
+        self, hidden_states: torch.Tensor, grid_thws: torch.Tensor
     ) -> torch.Tensor:
         rope_freqs_cis = self.rope_2d.get_freqs_cis(
             grid_thws=grid_thws, device=hidden_states.device

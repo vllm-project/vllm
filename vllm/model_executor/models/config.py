@@ -92,9 +92,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             and max_head_dim > 256
             and vllm_config.attention_config.backend is None
         ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+            from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(

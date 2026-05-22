@@ -25,15 +25,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 # (h, w) configurations to benchmark
-h_w_configs = [
-    (16, 16),
-    (32, 32),
-    (48, 48),
-    (64, 64),
-    (128, 128),
-    (32, 48),
-    (60, 80),
-]
+h_w_configs = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (32, 48), (60, 80)]
 
 # Temporal dimensions
 t_range = [1]
@@ -85,13 +77,7 @@ def get_benchmark(
         if provider == "native":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: pos_embed_interpolate_native(
-                    embed_weight,
-                    t,
-                    h,
-                    w,
-                    num_grid_per_side,
-                    spatial_merge_size,
-                    dtype,
+                    embed_weight, t, h, w, num_grid_per_side, spatial_merge_size, dtype
                 ),
                 quantiles=quantiles,
             )
@@ -99,13 +85,7 @@ def get_benchmark(
             assert HAS_TRITON, "Triton not available"
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: triton_pos_embed_interpolate(
-                    embed_weight,
-                    t,
-                    h,
-                    w,
-                    num_grid_per_side,
-                    spatial_merge_size,
-                    dtype,
+                    embed_weight, t, h, w, num_grid_per_side, spatial_merge_size, dtype
                 ),
                 quantiles=quantiles,
             )
@@ -138,16 +118,9 @@ if __name__ == "__main__":
         help="Embedding hidden dimension (default: 1152 for Qwen3-VL)",
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        choices=["cuda:0", "cuda:1"],
-        default="cuda:0",
+        "--device", type=str, choices=["cuda:0", "cuda:1"], default="cuda:0"
     )
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default="./vit_pos_embed/",
-    )
+    parser.add_argument("--save-path", type=str, default="./vit_pos_embed/")
     args = parser.parse_args()
 
     dtype = torch.bfloat16

@@ -39,11 +39,7 @@ def test_backend_guidance_rollback_terminated():
     vllm_config = VllmConfig(structured_outputs_config=structured_outputs_config)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
 
-    backend = GuidanceBackend(
-        vllm_config,
-        tokenizer=tokenizer,
-        vocab_size=50257,
-    )
+    backend = GuidanceBackend(vllm_config, tokenizer=tokenizer, vocab_size=50257)
 
     grammar = backend.compile_grammar(
         StructuredOutputOptions.JSON, '{"type": "object"}'
@@ -87,9 +83,7 @@ def test_grammar_bitmask_with_specdec():
 
     for i in range(1, 2):
         sampling_params = SamplingParams(
-            structured_outputs=StructuredOutputsParams(
-                json='{"type": "object"}',
-            ),
+            structured_outputs=StructuredOutputsParams(json='{"type": "object"}')
         )
         sampling_params.structured_outputs._backend = "guidance"
         sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
@@ -151,9 +145,7 @@ def test_grammar_init_async_and_sync(async_grammar):
     structured_output_manager = StructuredOutputManager(vllm_config)
 
     sampling_params = SamplingParams(
-        structured_outputs=StructuredOutputsParams(
-            json='{"type": "object"}',
-        ),
+        structured_outputs=StructuredOutputsParams(json='{"type": "object"}')
     )
     sampling_params.structured_outputs._backend = "guidance"
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
@@ -201,25 +193,17 @@ def test_grammar_init_async_and_sync(async_grammar):
 @pytest.mark.parametrize(
     "request_type,grammar_spec",
     [
+        pytest.param(StructuredOutputOptions.JSON, '{"type": "object"}', id="json"),
         pytest.param(
-            StructuredOutputOptions.JSON,
-            '{"type": "object"}',
-            id="json",
-        ),
-        pytest.param(
-            StructuredOutputOptions.GRAMMAR,
-            'start: "hello" | "world"',
-            id="lark",
+            StructuredOutputOptions.GRAMMAR, 'start: "hello" | "world"', id="lark"
         ),
     ],
 )
 def test_mistral_tokenizer_compile_grammar(
-    mistral_tokenizer,
-    request_type: StructuredOutputOptions,
-    grammar_spec: str,
+    mistral_tokenizer, request_type: StructuredOutputOptions, grammar_spec: str
 ) -> None:
     vllm_config = VllmConfig(
-        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance")
     )
     backend = GuidanceBackend(
         vllm_config,

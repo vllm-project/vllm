@@ -238,12 +238,7 @@ async def handle_request(api: str, request: Request):
             "Service Unavailable: No prefill or decode instances are registered."
         )
         if not prefill_instances or not decode_instances:
-            return await make_response(
-                (
-                    error_msg,
-                    503,
-                )
-            )
+            return await make_response((error_msg, 503))
         pid = request_nums % len(prefill_instances)
         did = request_nums % len(decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
@@ -330,12 +325,7 @@ async def handle_request(api: str, request: Request):
         return response
     except Exception as e:
         logger.exception("An error occurred while handling the request: %s", e)
-        return await make_response(
-            (
-                f"Internal Server Error: {e!s}",
-                500,
-            )
-        )
+        return await make_response((f"Internal Server Error: {e!s}", 500))
 
 
 async def send_profile_cmd(req_data: dict, profiler_cmd: str):
@@ -350,9 +340,7 @@ async def send_profile_cmd(req_data: dict, profiler_cmd: str):
             "Service Unavailable: No prefill or decode instances are registered."
         )
 
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-    }
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
     tasks = []
 
@@ -364,13 +352,7 @@ async def send_profile_cmd(req_data: dict, profiler_cmd: str):
                 _p = urlparse(inst["request_address"])
                 url = f"http://{_p.hostname}:{_p.port}/{profiler_cmd}_profile"
 
-                tasks.append(
-                    session.post(
-                        url,
-                        json=req_data,
-                        headers=headers,
-                    )
-                )
+                tasks.append(session.post(url, json=req_data, headers=headers))
 
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 

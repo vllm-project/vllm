@@ -10,11 +10,7 @@ from typing_extensions import TypeVar
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.inputs import (
-    DataPrompt,
-    EngineInput,
-    PromptType,
-)
+from vllm.inputs import DataPrompt, EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -460,16 +456,14 @@ class PoolingOfflineMixin(ABC):
 
         outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries),
+            ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries)
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
 
     @abstractmethod
     def _params_to_seq(
-        self,
-        params: _P | Sequence[_P],
-        num_requests: int,
+        self, params: _P | Sequence[_P], num_requests: int
     ) -> Sequence[_P]:
         raise NotImplementedError
 
@@ -483,9 +477,7 @@ class PoolingOfflineMixin(ABC):
 
     @abstractmethod
     def _priority_to_seq(
-        self,
-        priority: list[int] | None,
-        num_requests: int,
+        self, priority: list[int] | None, num_requests: int
     ) -> Sequence[int]:
         raise NotImplementedError
 

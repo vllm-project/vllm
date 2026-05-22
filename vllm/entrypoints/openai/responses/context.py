@@ -17,15 +17,11 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-)
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -205,8 +201,7 @@ class SimpleContext(ConversationContext):
             output_prompt_token_ids = output.prompt_token_ids or []
             self.input_messages.append(
                 ResponseRawMessageAndToken(
-                    message=output_prompt,
-                    tokens=output_prompt_token_ids,
+                    message=output_prompt, tokens=output_prompt_token_ids
                 )
             )
 
@@ -221,8 +216,7 @@ class SimpleContext(ConversationContext):
             return []
         return [
             ResponseRawMessageAndToken(
-                message=self._accumulated_text,
-                tokens=list(self._accumulated_token_ids),
+                message=self._accumulated_text, tokens=list(self._accumulated_token_ids)
             )
         ]
 
@@ -331,21 +325,18 @@ class ParsableContext(ConversationContext):
             if len(self.input_messages) == 0:
                 self.input_messages.append(
                     ResponseRawMessageAndToken(
-                        message=output_prompt,
-                        tokens=output_prompt_token_ids,
+                        message=output_prompt, tokens=output_prompt_token_ids
                     )
                 )
             else:
                 self.output_messages.append(
                     ResponseRawMessageAndToken(
-                        message=output_prompt,
-                        tokens=output_prompt_token_ids,
+                        message=output_prompt, tokens=output_prompt_token_ids
                     )
                 )
             self.output_messages.append(
                 ResponseRawMessageAndToken(
-                    message=output.outputs[0].text,
-                    tokens=output.outputs[0].token_ids,
+                    message=output.outputs[0].text, tokens=output.outputs[0].token_ids
                 )
             )
 
@@ -373,9 +364,7 @@ class ParsableContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
         args = json.loads(last_msg.arguments)
-        param = {
-            "code": args["code"],
-        }
+        param = {"code": args["code"]}
         result = await tool_session.call_tool("python", param)
         result_str = result.content[0].text
 
@@ -747,9 +736,7 @@ class HarmonyContext(ConversationContext):
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        param = {
-            "code": last_msg.content[0].text,
-        }
+        param = {"code": last_msg.content[0].text}
         result = await tool_session.call_tool("python", param)
         result_str = result.content[0].text
 

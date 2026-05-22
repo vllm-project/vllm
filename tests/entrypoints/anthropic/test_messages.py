@@ -126,10 +126,7 @@ async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
         model="claude-3-7-sonnet-latest",
         max_tokens=1024,
         messages=[
-            {
-                "role": "user",
-                "content": "What's the weather like in New York today?",
-            }
+            {"role": "user", "content": "What's the weather like in New York today?"}
         ],
         tools=[
             {

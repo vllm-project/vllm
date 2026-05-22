@@ -92,7 +92,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         trust_remote_code=True,
         fully_sharded_loras=False,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-            cudagraph_specialize_lora=False,
+            cudagraph_specialize_lora=False
         ),
     )
 
@@ -120,7 +120,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
         fully_sharded_loras=True,
         gpu_memory_utilization=0.8,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-            cudagraph_specialize_lora=False,
+            cudagraph_specialize_lora=False
         ),
     )
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)

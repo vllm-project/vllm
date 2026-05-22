@@ -14,9 +14,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -26,10 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -67,15 +62,9 @@ class AriaImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("bn", 3, "h", "w"),
-    ]
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
-    pixel_mask: Annotated[
-        torch.Tensor | None,
-        TensorShape("bn", "h", "w"),
-    ]
+    pixel_mask: Annotated[torch.Tensor | None, TensorShape("bn", "h", "w")]
 
 
 class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
@@ -125,11 +114,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
 
 class AriaProjectorMLP(nn.Module):
     def __init__(
-        self,
-        in_features: int,
-        hidden_features: int,
-        output_dim: int,
-        prefix: str = "",
+        self, in_features: int, hidden_features: int, output_dim: int, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -188,9 +173,7 @@ class AriaProjector(nn.Module):
         )
 
     def forward(
-        self,
-        x: torch.Tensor,
-        attn_mask: torch.Tensor | None = None,
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         batch_size, num_patches = x.shape[0], x.shape[1]
 
@@ -461,9 +444,7 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
 
 class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
@@ -513,9 +494,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             "language_model.model": "language_model",
             "language_model.lm_head": "lm_head",
         },
-        orig_to_new_suffix={
-            "router.weight": "router_weight",
-        },
+        orig_to_new_suffix={"router.weight": "router_weight"},
     )
 
     @classmethod
@@ -525,11 +504,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         raise ValueError("Only image modality is supported")
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -574,14 +549,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             return None
 
         return AriaImagePixelInputs(
-            type="pixel_values",
-            pixel_values=pixel_values,
-            pixel_mask=pixel_mask,
+            type="pixel_values", pixel_values=pixel_values, pixel_mask=pixel_mask
         )
 
     def _create_patch_attention_mask(
-        self,
-        pixel_mask: torch.Tensor | None,
+        self, pixel_mask: torch.Tensor | None
     ) -> torch.Tensor | None:
         if pixel_mask is None:
             return None
@@ -606,8 +578,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
         image_outputs = self.vision_tower(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
+            pixel_values=pixel_values, patch_attention_mask=patch_attention_mask
         )
         image_attn_mask = None
         if patch_attention_mask is not None:
@@ -635,18 +606,12 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds = None
 
         hidden_states = self.language_model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -260,9 +260,7 @@ class Platform:
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
-        return [
-            AttentionBackendEnum.TORCH_SDPA,
-        ]
+        return [AttentionBackendEnum.TORCH_SDPA]
 
     @classmethod
     def get_vit_attn_backend(
@@ -296,18 +294,13 @@ class Platform:
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
-    def get_device_capability(
-        cls,
-        device_id: int = 0,
-    ) -> DeviceCapability | None:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         """Stateless version of [torch.cuda.get_device_capability][]."""
         return None
 
     @classmethod
     def has_device_capability(
-        cls,
-        capability: tuple[int, int] | int,
-        device_id: int = 0,
+        cls, capability: tuple[int, int] | int, device_id: int = 0
     ) -> bool:
         """
         Test whether this platform is compatible with a device capability.
@@ -329,9 +322,7 @@ class Platform:
 
     @classmethod
     def is_device_capability(
-        cls,
-        capability: tuple[int, int] | int,
-        device_id: int = 0,
+        cls, capability: tuple[int, int] | int, device_id: int = 0
     ) -> bool:
         """
         Test whether this platform has exactly the specified device capability.
@@ -352,11 +343,7 @@ class Platform:
         return current_capability.to_int() == capability
 
     @classmethod
-    def is_device_capability_family(
-        cls,
-        capability: int,
-        device_id: int = 0,
-    ) -> bool:
+    def is_device_capability_family(cls, capability: int, device_id: int = 0) -> bool:
         """
         Returns True if the device capability is any <major>.x.
         Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
@@ -452,9 +439,7 @@ class Platform:
     ) -> "type[AttentionBackend] | None":
         """Find the first non-SSM attention backend from model layers."""
         from vllm.config.vllm import get_layers_from_vllm_config
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
+        from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
@@ -507,9 +492,7 @@ class Platform:
 
     @classmethod
     def _align_hybrid_block_size(
-        cls,
-        vllm_config: "VllmConfig",
-        backend_cls: "type[AttentionBackend]",
+        cls, vllm_config: "VllmConfig", backend_cls: "type[AttentionBackend]"
     ) -> None:
         """
         For hybrid attention/mamba models, ensure that the attention page
@@ -596,8 +579,7 @@ class Platform:
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
+            model_config.architecture, model_config=model_config
         )
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
@@ -640,8 +622,7 @@ class Platform:
             # Without prefix caching, use minimum block size that satisfies
             # both backend alignment and mamba page size compatibility
             attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
 
         if cache_config.block_size < attn_block_size:
@@ -850,9 +831,7 @@ class Platform:
 
     @classmethod
     def validate_request(
-        cls,
-        processed_inputs: "EngineInput",
-        params: "SamplingParams | PoolingParams",
+        cls, processed_inputs: "EngineInput", params: "SamplingParams | PoolingParams"
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -871,9 +850,7 @@ class Platform:
                 return attr
 
         logger.warning(
-            "Current platform %s does not have '%s' attribute.",
-            self.device_type,
-            key,
+            "Current platform %s does not have '%s' attribute.", self.device_type, key
         )
         return None
 

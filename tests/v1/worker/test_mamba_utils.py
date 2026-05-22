@@ -132,10 +132,7 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         resumed_req_ids={"resumed"},
     )
 
-    with patch(
-        "vllm.v1.worker.mamba_utils.get_mamba_groups",
-        return_value=([0], spec),
-    ):
+    with patch("vllm.v1.worker.mamba_utils.get_mamba_groups", return_value=([0], spec)):
         preprocess_mamba(
             sched,
             MagicMock(),  # kv_cache_config
@@ -240,11 +237,7 @@ def _make_dual_states(
     n_blocks = num_blocks if num_blocks is not None else cfg.num_blocks
     conv_py = [
         torch.randn(
-            n_blocks,
-            cfg.conv_width,
-            cfg.conv_inner_dim,
-            dtype=cfg.dtype,
-            device=device,
+            n_blocks, cfg.conv_width, cfg.conv_inner_dim, dtype=cfg.dtype, device=device
         )
         for _ in layer_names
     ]
@@ -290,28 +283,18 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
     """Create a KVCacheConfig with mamba groups."""
     mamba_spec = MambaSpec(
         block_size=cfg.block_size,
-        shapes=(
-            (cfg.conv_width, cfg.conv_inner_dim),
-            (cfg.temporal_state_dim,),
-        ),
+        shapes=((cfg.conv_width, cfg.conv_inner_dim), (cfg.temporal_state_dim,)),
         dtypes=(cfg.dtype, cfg.dtype),
         mamba_cache_mode="all",
     )
-    group = KVCacheGroupSpec(
-        layer_names=layer_names,
-        kv_cache_spec=mamba_spec,
-    )
+    group = KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=mamba_spec)
     return KVCacheConfig(
-        num_blocks=cfg.num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[group],
+        num_blocks=cfg.num_blocks, kv_cache_tensors=[], kv_cache_groups=[group]
     )
 
 
 def _make_input_batch(
-    req_ids: list[str],
-    num_accepted_tokens: list[int],
-    mamba_state_idx: list[int],
+    req_ids: list[str], num_accepted_tokens: list[int], mamba_state_idx: list[int]
 ) -> MagicMock:
     """Create a mock GPUInputBatch."""
     batch = MagicMock()
@@ -948,9 +931,7 @@ class TestPostprocessMambaFusedKernel:
 
         # --- Verify GPU matches Python ---
         torch.testing.assert_close(
-            conv_state_gpu,
-            conv_state_py,
-            msg="GPU conv state should match Python",
+            conv_state_gpu, conv_state_py, msg="GPU conv state should match Python"
         )
         torch.testing.assert_close(
             temporal_state_gpu,
@@ -1097,9 +1078,7 @@ class TestPostprocessMambaFusedKernel:
 
         # --- Verify GPU matches Python ---
         torch.testing.assert_close(
-            conv_state_gpu,
-            conv_state_py,
-            msg="GPU conv state should match Python",
+            conv_state_gpu, conv_state_py, msg="GPU conv state should match Python"
         )
         torch.testing.assert_close(
             temporal_state_gpu,
@@ -1230,9 +1209,7 @@ class TestPostprocessMambaFusedKernel:
 
         # --- Verify GPU matches Python ---
         torch.testing.assert_close(
-            conv_state_gpu,
-            conv_state_py,
-            msg="GPU conv state should match Python",
+            conv_state_gpu, conv_state_py, msg="GPU conv state should match Python"
         )
         torch.testing.assert_close(
             temporal_state_gpu,
@@ -1365,9 +1342,7 @@ class TestPostprocessMambaFusedKernel:
 
         # --- Verify GPU matches Python ---
         torch.testing.assert_close(
-            conv_state_gpu,
-            conv_state_py,
-            msg="GPU conv state should match Python",
+            conv_state_gpu, conv_state_py, msg="GPU conv state should match Python"
         )
         torch.testing.assert_close(
             temporal_state_gpu,
@@ -1825,9 +1800,7 @@ class TestPostprocessMambaFusedKernel:
 
         # Also verify state tensors match Python
         torch.testing.assert_close(
-            conv_state_gpu,
-            conv_state_py,
-            msg="GPU conv state should match Python",
+            conv_state_gpu, conv_state_py, msg="GPU conv state should match Python"
         )
         torch.testing.assert_close(
             temporal_state_gpu,
@@ -1934,13 +1907,7 @@ class TestPostprocessMambaFusedKernel:
         copy_bufs = _make_copy_bufs(cfg, kv_cache_config, device)
 
         postprocess_mamba(
-            sched,
-            kv_cache_config,
-            batch_py,
-            requests,
-            fwd_py,
-            _COPY_FUNCS,
-            copy_bufs,
+            sched, kv_cache_config, batch_py, requests, fwd_py, _COPY_FUNCS, copy_bufs
         )
         torch.accelerator.synchronize()
 
@@ -1977,11 +1944,7 @@ class TestPostprocessMambaFusedKernel:
                 "state_block_stride instead of inner_size * elem_size"
             ),
         )
-        torch.testing.assert_close(
-            temp_gpu,
-            temp_py,
-            msg="Temporal state mismatch",
-        )
+        torch.testing.assert_close(temp_gpu, temp_py, msg="Temporal state mismatch")
 
         expected_accepted = torch.tensor(
             batch_py.num_accepted_tokens_cpu[:num_reqs],
@@ -2063,13 +2026,7 @@ class TestPostprocessMambaFusedKernel:
         copy_bufs = _make_copy_bufs(cfg, kv_cache_config, device)
 
         postprocess_mamba(
-            sched,
-            kv_cache_config,
-            batch_py,
-            requests,
-            fwd_py,
-            _COPY_FUNCS,
-            copy_bufs,
+            sched, kv_cache_config, batch_py, requests, fwd_py, _COPY_FUNCS, copy_bufs
         )
         torch.accelerator.synchronize()
 

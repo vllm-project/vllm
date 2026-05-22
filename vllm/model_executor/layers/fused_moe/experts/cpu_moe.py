@@ -23,8 +23,7 @@ from vllm.platforms import current_platform
 
 
 def prepare_fp8_moe_layer_for_cpu(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
+    w13: torch.Tensor, w2: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """VNNI-prepack FP8 MoE weights for CPU kernel."""
     packed_w13 = torch.ops._C.convert_weight_packed(w13)
@@ -35,15 +34,8 @@ def prepare_fp8_moe_layer_for_cpu(
 class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
     """CPU FP8 W8A16 block-quantized monolithic MoE experts."""
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(
-            moe_config,
-            quant_config,
-        )
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config, quant_config)
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -66,19 +58,14 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
         return activation == MoEActivation.SILU
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-        ]
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -95,8 +82,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 
@@ -120,9 +106,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
-            select_experts,
-        )
+        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
 
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
@@ -130,10 +114,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             use_grouped_topk=num_expert_group is not None,
             top_k=self.moe_config.experts_per_token,
             renormalize=self.moe_config.routing_method
-            in (
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ),
+            in (RoutingMethodType.Renormalize, RoutingMethodType.RenormalizeNaive),
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func="softmax",
@@ -175,10 +156,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
 
 
 def prepare_mxfp4_moe_layer_for_cpu(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
+    w13: torch.Tensor, w2: torch.Tensor, w13_scale: torch.Tensor, w2_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """VNNI-prepack MXFP4 MoE weights and repack scales for CPU AMX kernel."""
     packed_w13 = torch.ops._C.convert_weight_packed(w13)
@@ -191,15 +169,8 @@ def prepare_mxfp4_moe_layer_for_cpu(
 class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
     """CPU MXFP4 W4A16 monolithic MoE experts."""
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(
-            moe_config,
-            quant_config,
-        )
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config, quant_config)
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -222,19 +193,14 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
         return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
 
     @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, None)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -251,8 +217,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
+        router_logits_dtype: torch.dtype | None, routing_method: RoutingMethodType
     ) -> bool:
         return True
 
@@ -276,9 +241,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
-            select_experts,
-        )
+        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
 
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
@@ -286,10 +249,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
             use_grouped_topk=num_expert_group is not None,
             top_k=self.moe_config.experts_per_token,
             renormalize=self.moe_config.routing_method
-            in (
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ),
+            in (RoutingMethodType.Renormalize, RoutingMethodType.RenormalizeNaive),
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func="softmax",

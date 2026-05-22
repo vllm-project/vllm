@@ -25,8 +25,7 @@ def cdiv(a: int, b: int) -> int:
 
 
 def quantize_weight_block_fp8(
-    weight: torch.Tensor,
-    block_size: list[int],
+    weight: torch.Tensor, block_size: list[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize weight [N, K] to FP8 with block scales.
 
@@ -149,13 +148,7 @@ def test_cpu_fp8_scaled_mm(M: int, N: int, K: int, use_bias: bool):
 
     packed_weight = torch.ops._C.convert_weight_packed(fp8_weight)
     kernel_out = ops.fp8_scaled_mm_cpu(
-        x,
-        packed_weight,
-        scales,
-        block_size,
-        bias,
-        out_dtype,
-        True,
+        x, packed_weight, scales, block_size, bias, out_dtype, True
     )
 
     assert kernel_out.dtype == out_dtype

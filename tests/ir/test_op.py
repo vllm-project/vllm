@@ -274,10 +274,7 @@ class TestIrOpImplDispatch:
 
     @pytest.mark.parametrize(
         "default,override",
-        [
-            (["impl_even", "impl_b"], ["impl_a"]),
-            (["impl_a"], ["impl_even", "impl_b"]),
-        ],
+        [(["impl_even", "impl_b"], ["impl_a"]), (["impl_a"], ["impl_even", "impl_b"])],
     )
     def test_set_default_priority(
         self, custom_add_op, default: list[str], override: list[str]
@@ -379,10 +376,7 @@ class TestIrOpImplDispatch:
         assert torch.all(out2 == 1 + 2)
 
     def test_default_priority(
-        self,
-        custom_add_op,
-        caplog_vllm: pytest.LogCaptureFixture,
-        disable_log_dedup,
+        self, custom_add_op, caplog_vllm: pytest.LogCaptureFixture, disable_log_dedup
     ):
         _custom_add = custom_add_op
         # Make sure logs are not deduplicated to properly test the warning

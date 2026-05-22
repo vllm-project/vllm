@@ -11,10 +11,7 @@ from torch.utils.data import DataLoader
 from tests.conftest import HfRunner
 from tests.models.utils import RerankModelInfo
 
-from .mteb_score_utils import (
-    MtebCrossEncoderMixin,
-    mteb_test_rerank_models,
-)
+from .mteb_score_utils import MtebCrossEncoderMixin, mteb_test_rerank_models
 
 RERANK_MODELS = [
     RerankModelInfo(
@@ -31,7 +28,7 @@ RERANK_MODELS = [
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
         chat_template_name="bge-reranker-v2-gemma.jinja",
-    ),
+    )
 ]
 
 PROMPT = "Given a query A and a passage B, determine whether the passage contains an answer to the query by providing a prediction of either 'Yes' or 'No'."  # noqa: E501
@@ -102,11 +99,7 @@ class GemmaRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
                 item["input_ids"] = item["input_ids"] + sep_inputs + prompt_inputs
                 item["attention_mask"] = [1] * len(item["input_ids"])
                 inputs.append(item)
-            return tokenizer.pad(
-                inputs,
-                padding=True,
-                return_tensors="pt",
-            )
+            return tokenizer.pad(inputs, padding=True, return_tensors="pt")
 
         scores = []
         for query, document in zip(queries, corpus):
@@ -115,22 +108,11 @@ class GemmaRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
             inputs = inputs.to(self.model.device)
             _n_tokens = inputs["input_ids"].shape[1]
             logits = self.model(**inputs, return_dict=True).logits
-            _scores = (
-                logits[:, -1, self.yes_loc]
-                .view(
-                    -1,
-                )
-                .float()
-                .sigmoid()
-            )
+            _scores = logits[:, -1, self.yes_loc].view(-1).float().sigmoid()
             scores.append(_scores[0].item())
         return torch.Tensor(scores)
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
-    mteb_test_rerank_models(
-        vllm_runner,
-        model_info,
-        hf_runner=GemmaRerankerHfRunner,
-    )
+    mteb_test_rerank_models(vllm_runner, model_info, hf_runner=GemmaRerankerHfRunner)

@@ -11,8 +11,7 @@ from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(
-        "triton_kernels not found, skipping all related tests",
-        allow_module_level=True,
+        "triton_kernels not found, skipping all related tests", allow_module_level=True
     )
 
 import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
@@ -112,16 +111,10 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
         x_pad = w1_bottom_pad
 
         w1_tri = F.pad(
-            w1_tri,
-            (0, w1_right_pad, 0, w1_bottom_pad, 0, 0),
-            mode="constant",
-            value=0,
+            w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0), mode="constant", value=0
         )
         w2_tri = F.pad(
-            w2_tri,
-            (0, w2_right_pad, 0, w2_bottom_pad, 0, 0),
-            mode="constant",
-            value=0,
+            w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0), mode="constant", value=0
         )
 
         w1_bias_tri = F.pad(
@@ -150,18 +143,14 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
             wrap_torch_tensor(w1_tri, FP4), w_layout, **w_layout_opts
         )
         w1_scale_tri = convert_layout(
-            wrap_torch_tensor(w1_scale_tri),
-            w_scale_layout,
-            **w_scale_layout_opts,
+            wrap_torch_tensor(w1_scale_tri), w_scale_layout, **w_scale_layout_opts
         )
 
         w2_tri = convert_layout(
             wrap_torch_tensor(w2_tri, FP4), w_layout, **w_layout_opts
         )
         w2_scale_tri = convert_layout(
-            wrap_torch_tensor(w2_scale_tri),
-            w_scale_layout,
-            **w_scale_layout_opts,
+            wrap_torch_tensor(w2_scale_tri), w_scale_layout, **w_scale_layout_opts
         )
 
         pc1 = PrecisionConfig(
@@ -310,17 +299,12 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
     if current_platform.is_device_capability_family(100):
-        constraints = {
-            "is_persistent": True,
-        }
+        constraints = {"is_persistent": True}
         opt_flags.update_opt_flags_constraints(constraints)
 
     if a_dtype == "bf16" and w_dtype == "mx4":
         quant_config = mxfp4_w4a16_moe_quant_config(
-            w1_scale=pc1,
-            w2_scale=pc2,
-            w1_bias=w1_bias_tri,
-            w2_bias=w2_bias_tri,
+            w1_scale=pc1, w2_scale=pc2, w1_bias=w1_bias_tri, w2_bias=w2_bias_tri
         )
     else:
         raise NotImplementedError(

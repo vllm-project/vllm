@@ -24,10 +24,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -335,10 +332,7 @@ class CheersVAEDecoderProjector(nn.Module):
         m = self.bn.running_mean.view(1, -1, 1, 1)
         z = z * s + m
         z = rearrange(
-            z,
-            "... (c pi pj) i j -> ... c (i pi) (j pj)",
-            pi=self.ps[0],
-            pj=self.ps[1],
+            z, "... (c pi pj) i j -> ... c (i pi) (j pj)", pi=self.ps[0], pj=self.ps[1]
         )
         return self.decoder(z)
 
@@ -392,10 +386,7 @@ class CheersUndProjector(nn.Module):
             2, self.compression_factor[0], self.compression_factor[0]
         ).unfold(3, self.compression_factor[1], self.compression_factor[1])
         unfolded = unfolded.contiguous().view(
-            batch_size,
-            dim,
-            -1,
-            self.compression_factor[0] * self.compression_factor[1],
+            batch_size, dim, -1, self.compression_factor[0] * self.compression_factor[1]
         )
         unfolded = (
             unfolded.permute(0, 2, 3, 1)
@@ -424,18 +415,14 @@ class CheersProcessingInfo(BaseProcessingInfo):
         tokenizer = self.get_tokenizer()
 
         return CheersProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            **kwargs,
+            image_processor=image_processor, tokenizer=tokenizer, **kwargs
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         vit_config = hf_config.vision_representation_config
@@ -446,12 +433,7 @@ class CheersProcessingInfo(BaseProcessingInfo):
         num_tokens = num_patches // 4
         return {"image": num_tokens}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         hf_config = self.get_hf_config()
         vit_config = hf_config.vision_representation_config
         patch_size = vit_config.patch_size
@@ -485,7 +467,7 @@ class CheersDummyInputsBuilder(BaseDummyInputsBuilder[CheersProcessingInfo]):
                 height=image_size,
                 num_images=num_images,
                 overrides=image_overrides,
-            ),
+            )
         }
 
 
@@ -542,13 +524,9 @@ class CheersMultiModalProcessor(BaseMultiModalProcessor[CheersProcessingInfo]):
         ]
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: Any,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: Any, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return {
-            "pixel_values": MultiModalFieldConfig.batched("image"),
-        }
+        return {"pixel_values": MultiModalFieldConfig.batched("image")}
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -666,10 +644,7 @@ class CheersForConditionalGeneration(
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
-        return CheersImagePixelInputs(
-            type="pixel_values",
-            pixel_values=pixel_values,
-        )
+        return CheersImagePixelInputs(type="pixel_values", pixel_values=pixel_values)
 
     def _process_image_input(
         self, image_input: CheersImageInputs
@@ -722,10 +697,7 @@ class CheersForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -737,9 +709,7 @@ class CheersForConditionalGeneration(
             "model.hi_projector.",
             "model.vae_model.decoder.",
         ]
-        skip_keywords = [
-            "text_loss_fc",
-        ]
+        skip_keywords = ["text_loss_fc"]
 
         filtered_weights = []
         for name, tensor in weights:

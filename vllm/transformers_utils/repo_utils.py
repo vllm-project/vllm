@@ -32,10 +32,7 @@ _R = TypeVar("_R")
 
 
 def with_retry(
-    func: Callable[[], _R],
-    log_msg: str,
-    max_retries: int = 2,
-    retry_delay: int = 2,
+    func: Callable[[], _R], log_msg: str, max_retries: int = 2, retry_delay: int = 2
 ) -> _R:
     for attempt in range(max_retries):
         try:

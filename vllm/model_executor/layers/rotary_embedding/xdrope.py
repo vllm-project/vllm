@@ -67,22 +67,14 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = self.apply_rotary_emb.forward_native(
-            query_rot,
-            cos,
-            sin,
-        )
+        query_rot = self.apply_rotary_emb.forward_native(query_rot, cos, sin)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = self.apply_rotary_emb.forward_native(
-            key_rot,
-            cos,
-            sin,
-        )
+        key_rot = self.apply_rotary_emb.forward_native(key_rot, cos, sin)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -118,43 +110,26 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = self.apply_rotary_emb(
-            query_rot,
-            cos,
-            sin,
-        )
+        query_rot = self.apply_rotary_emb(query_rot, cos, sin)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = self.apply_rotary_emb(
-            key_rot,
-            cos,
-            sin,
-        )
+        key_rot = self.apply_rotary_emb(key_rot, cos, sin)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     @staticmethod
     def get_next_input_positions(
-        context_len: int,
-        seq_len: int,
-        xd_sections: int = 4,
+        context_len: int, seq_len: int, xd_sections: int = 4
     ) -> list[list[int]]:
         return [list(range(context_len, seq_len)) for _ in range(xd_sections)]
 
     @staticmethod
     def get_next_input_positions_tensor(
-        out: np.ndarray,
-        out_offset: int,
-        context_len: int,
-        num_new_tokens: int,
+        out: np.ndarray, out_offset: int, context_len: int, num_new_tokens: int
     ):
-        values = np.arange(
-            context_len,
-            context_len + num_new_tokens,
-            dtype=out.dtype,
-        )
+        values = np.arange(context_len, context_len + num_new_tokens, dtype=out.dtype)
         out[:, out_offset : out_offset + num_new_tokens] = values

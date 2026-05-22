@@ -43,8 +43,7 @@ class TopKTopPSampler(nn.Module):
                 assert capability is not None
                 if FlashInferBackend.supports_compute_capability(capability):
                     logger.info_once(
-                        "Using FlashInfer for top-p & top-k sampling.",
-                        scope="global",
+                        "Using FlashInfer for top-p & top-k sampling.", scope="global"
                     )
                     self.forward = self.forward_cuda
                 elif envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
@@ -203,10 +202,9 @@ class TopKTopPSampler(nn.Module):
                     "falling back to PyTorch-native."
                 )
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in (
-            "processed_logits",
-            "processed_logprobs",
-        ), "aiter sampler does not support returning logits/logprobs."
+        assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
+            "aiter sampler does not support returning logits/logprobs."
+        )
         if DISABLE_AITER_SAMPLER:
             return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
@@ -392,8 +390,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 
 
 def random_sample(
-    probs: torch.Tensor,
-    generators: dict[int, torch.Generator],
+    probs: torch.Tensor, generators: dict[int, torch.Generator]
 ) -> torch.Tensor:
     """Randomly sample from the probabilities.
 

@@ -218,9 +218,7 @@ class CohereAttention(nn.Module):
         return q, k
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -266,8 +264,7 @@ class CohereDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states_attention = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
+            positions=positions, hidden_states=hidden_states
         )
         hidden_states_mlp = self.mlp(hidden_states)
         # Add everything together
@@ -328,11 +325,7 @@ class CohereModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -398,15 +391,8 @@ class CohereModel(nn.Module):
 
 class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
@@ -448,10 +434,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         is_not_lora = hasattr(self.model.embed_tokens, "weight")
         if is_not_lora:
             logits = self.logits_processor(self.model.embed_tokens, hidden_states)

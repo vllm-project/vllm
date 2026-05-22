@@ -35,21 +35,11 @@ def causal_conv1d_torch(
             initial_state = conv_states[slot, :, :state_len].unsqueeze(0)
         else:
             initial_state = torch.zeros(
-                1,
-                weight.shape[0],
-                state_len,
-                device=seq_x.device,
-                dtype=seq_x.dtype,
+                1, weight.shape[0], state_len, device=seq_x.device, dtype=seq_x.dtype
             )
 
         conv_input = torch.cat([initial_state, seq_x], dim=-1).to(weight.dtype)
-        seq_out = F.conv1d(
-            conv_input,
-            weight,
-            bias,
-            padding=0,
-            groups=weight.shape[0],
-        )
+        seq_out = F.conv1d(conv_input, weight, bias, padding=0, groups=weight.shape[0])
         seq_out = seq_out[..., -seq_x.shape[-1] :].to(dtype=x.dtype)
         if activation in ("silu", "swish"):
             seq_out = F.silu(seq_out)
@@ -76,13 +66,9 @@ def causal_conv1d_update_torch(
     x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)
     conv_state.copy_(x_new[:, :, -state_len:])
 
-    out = F.conv1d(
-        x_new,
-        weight.unsqueeze(1),
-        bias,
-        padding=0,
-        groups=dim,
-    )[:, :, -seq_len:]
+    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
+        :, :, -seq_len:
+    ]
     if activation in ("silu", "swish"):
         out = F.silu(out)
     return out

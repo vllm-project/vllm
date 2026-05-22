@@ -82,17 +82,10 @@ def unfused_groupwise_fp8_impl(
     )
 
 
-def fused_impl(
-    x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    group_size: int,
-):
+def fused_impl(x: torch.Tensor, quant_dtype: torch.dtype, group_size: int):
     """Fused: SiLU+Mul+Block Quantization in single kernel."""
     out, _ = ops.silu_and_mul_per_block_quant(
-        x,
-        group_size=group_size,
-        quant_dtype=quant_dtype,
-        is_scale_transposed=False,
+        x, group_size=group_size, quant_dtype=quant_dtype, is_scale_transposed=False
     )
 
 
@@ -108,12 +101,7 @@ def bench_fn(
 ) -> TMeasurement:
     min_run_time = 1
 
-    globals = {
-        "x": x,
-        "quant_dtype": quant_dtype,
-        "group_size": group_size,
-        "fn": fn,
-    }
+    globals = {"x": x, "quant_dtype": quant_dtype, "group_size": group_size, "fn": fn}
     return TBenchmark.Timer(
         stmt="fn(x, quant_dtype, group_size)",
         globals=globals,
@@ -129,10 +117,7 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
     scale = 1 / params.hidden_size
     x = (
         torch.randn(
-            params.num_tokens,
-            params.hidden_size * 2,
-            dtype=params.dtype,
-            device="cuda",
+            params.num_tokens, params.hidden_size * 2, dtype=params.dtype, device="cuda"
         )
         * scale
     )

@@ -6,9 +6,7 @@ import pytest
 
 import vllm.plugins as plugins_module
 from tests.v1.core.utils import create_requests, create_scheduler
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory,
-)
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -47,9 +45,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         assert block_hashes_by_req is not None, (
             "DummyKVConnector expected 'block_hashes_by_req' on scheduler_output"
         )
-        return DummyConnectorMetadata(
-            block_hashes_by_req=block_hashes_by_req,
-        )
+        return DummyConnectorMetadata(block_hashes_by_req=block_hashes_by_req)
 
     def start_load_kv(self, kv_caches, finished_req_ids):
         pass
@@ -67,9 +63,7 @@ class DummyKVConnector(KVConnectorBase_V1):
 def _my_plugin():
     """Registers the dummy KV connector and overrides _build_kv_connector_meta"""
     KVConnectorFactory.register_connector(
-        "DummyKVConnector",
-        __name__,
-        DummyKVConnector.__name__,
+        "DummyKVConnector", __name__, DummyKVConnector.__name__
     )
 
     def _custom_build_kv_connector_meta(

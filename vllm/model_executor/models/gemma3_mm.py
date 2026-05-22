@@ -17,10 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
@@ -268,10 +265,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
@@ -297,9 +291,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
 
@@ -330,16 +322,12 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         return [
             PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_replacement_gemma3,
+                modality="image", target=image_token, replacement=get_replacement_gemma3
             )
         ]
 
     def _apply_token_matches(
-        self,
-        prompt: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
+        self, prompt: list[int], mm_prompt_updates: MultiModalPromptUpdates
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
         token_ids, res = super()._apply_token_matches(prompt, mm_prompt_updates)
 
@@ -355,27 +343,19 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         newline_4 = vocab["\n\n\n\n"]
 
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_1, newline_2],
-            [newline_3],
+            token_ids, [newline_1, newline_2], [newline_3]
         )
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_1],
-            [newline_3],
+            token_ids, [newline_2, newline_1], [newline_3]
         )
         token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_2],
-            [newline_4],
+            token_ids, [newline_2, newline_2], [newline_4]
         )
 
         return token_ids, res
 
     def _find_mm_placeholders(
-        self,
-        new_token_ids: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
+        self, new_token_ids: list[int], mm_prompt_updates: MultiModalPromptUpdates
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
         tokenizer = self.info.get_tokenizer()
@@ -470,15 +450,8 @@ class Gemma3ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -558,23 +531,17 @@ class Gemma3ForConditionalGeneration(
         )
 
     def _image_pixels_to_features(
-        self,
-        vision_tower: SiglipVisionModel,
-        pixel_values: torch.Tensor,
+        self, vision_tower: SiglipVisionModel, pixel_values: torch.Tensor
     ) -> torch.Tensor:
         return vision_tower(pixel_values)
 
     def _process_image_input(
-        self,
-        image_input: Gemma3ImageInputs,
+        self, image_input: Gemma3ImageInputs
     ) -> list[torch.Tensor]:
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
-        image_features = self._image_pixels_to_features(
-            self.vision_tower,
-            pixel_values,
-        )
+        image_features = self._image_pixels_to_features(self.vision_tower, pixel_values)
         image_embeds = self.multi_modal_projector(image_features)
 
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
@@ -625,10 +592,7 @@ class Gemma3ForConditionalGeneration(
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

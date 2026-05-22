@@ -78,10 +78,7 @@ def test_basic_interface():
     )
     request_id = request.request_id
     request.kv_transfer_params.update(
-        {
-            "transfer_id": request_id,
-            "remote_bootstrap_addr": 54321,
-        }
+        {"transfer_id": request_id, "remote_bootstrap_addr": 54321}
     )
 
     scheduler.add_request(request)
@@ -128,10 +125,7 @@ def test_prompt_less_than_block_size():
         num_remote_blocks=1,
     )
     request.kv_transfer_params.update(
-        {
-            "transfer_id": request.request_id,
-            "remote_bootstrap_addr": 54321,
-        }
+        {"transfer_id": request.request_id, "remote_bootstrap_addr": 54321}
     )
 
     scheduler.add_request(request)
@@ -327,9 +321,7 @@ async def test_kv_producer(monkeypatch):
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         prefill_worker = prefill_connector.connector_worker
         prefill_worker.kv_caches_base_addr = [0x1000]
@@ -483,9 +475,7 @@ async def test_kv_consumuer(monkeypatch):
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies() as mocks:
         decode_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         decode_worker = decode_connector.connector_worker
         decode_worker.kv_caches_base_addr = [0x1000]
@@ -547,9 +537,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
     )
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         prefill_worker = prefill_connector.connector_worker
 
@@ -597,9 +585,7 @@ def test_register_kv_caches():
         ) as mock_thread,
     ):
         connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
@@ -650,9 +636,7 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         ) as mock_thread,
     ):
         connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
@@ -714,9 +698,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         )
         prefill_worker = prefill_connector.connector_worker
 
@@ -766,12 +748,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     remote_port=54321,
                     remote_tp_size=d_tp_size,
                     remote_tp_rank=d_rank,
-                    req_blocks={
-                        f"d-req-h1-r{d_rank}": (
-                            transfer_id,
-                            remote_block_ids,
-                        )
-                    },
+                    req_blocks={f"d-req-h1-r{d_rank}": (transfer_id, remote_block_ids)},
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
                 )

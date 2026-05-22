@@ -147,11 +147,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     swa = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=32,
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
     )
     cfg = KVCacheConfig(
         num_blocks=4,
@@ -159,10 +155,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
             KVCacheTensor(size=8192, shared_by=["L0"]),
             KVCacheTensor(size=8192, shared_by=["L1"]),
         ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["L0"], full),
-            KVCacheGroupSpec(["L1"], swa),
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)],
     )
     vllm_config = _minimal_vllm_config(cache_block_size=16)
     store = _DictStore()
@@ -175,10 +168,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # Register kv_caches using mocked thread classes so register_kv_caches
     # doesn't try to start real background threads (which set ready_event).
-    kv_caches = {
-        "L0": torch.zeros(2, 4, 8, 8, 64),
-        "L1": torch.zeros(2, 4, 8, 8, 64),
-    }
+    kv_caches = {"L0": torch.zeros(2, 4, 8, 8, 64), "L1": torch.zeros(2, 4, 8, 8, 64)}
 
     def _fake_thread_init(*args, **kwargs):
         """Mock thread that sets all threading.Event args so waits don't block."""
@@ -259,16 +249,9 @@ def test_recv_skips_swa_blocks_before_window():
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     # sliding_window=32, block_size=16 → 2 contiguous blocks within window.
     swa = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=None,
-        sliding_window=32,
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
     )
-    groups = [
-        KVCacheGroupSpec(["L0"], full),
-        KVCacheGroupSpec(["L1"], swa),
-    ]
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
     md0 = KeyMetadata("m", 0, 0, 0, 0, group_id=0)
     md1 = KeyMetadata("m", 0, 0, 0, 0, group_id=1)
     db_full = ChunkedTokenDatabase(md0, block_size=16, hash_block_size=16)

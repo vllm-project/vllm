@@ -24,10 +24,7 @@ from ..utils import multi_gpu_test
 
 ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
-MODELS = [
-    "hmellor/tiny-random-Gemma2ForCausalLM",
-    "meta-llama/Llama-3.2-1B-Instruct",
-]
+MODELS = ["hmellor/tiny-random-Gemma2ForCausalLM", "meta-llama/Llama-3.2-1B-Instruct"]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
@@ -122,10 +119,7 @@ def test_models(
             vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 
@@ -203,10 +197,7 @@ def test_models_distributed(
                     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 

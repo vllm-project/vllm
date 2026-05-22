@@ -43,11 +43,7 @@ class Granite4VisionProcessor(LlavaNextProcessor):
         self.downsample_rate = downsample_rate
 
     def _get_number_of_features(
-        self,
-        orig_height: int,
-        orig_width: int,
-        height: int,
-        width: int,
+        self, orig_height: int, orig_width: int, height: int, width: int
     ) -> int:
         image_grid_pinpoints = self.image_processor.image_grid_pinpoints
 

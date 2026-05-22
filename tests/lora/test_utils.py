@@ -103,10 +103,7 @@ def test_parse_fine_tuned_lora_name_valid():
 
 
 def test_parse_fine_tuned_lora_name_invalid():
-    fixture = {
-        "base_model.weight",
-        "base_model.model.weight",
-    }
+    fixture = {"base_model.weight", "base_model.model.weight"}
     for name in fixture:
         with pytest.raises(ValueError, match="unsupported LoRA weight"):
             parse_fine_tuned_lora_name(name)
@@ -195,7 +192,6 @@ def test_get_adapter_absolute_path_huggingface_error(
     path = "org/repo"
     mock_exist.return_value = False
     mock_snapshot_download.side_effect = HfHubHTTPError(
-        "failed to query model info",
-        response=MagicMock(),
+        "failed to query model info", response=MagicMock()
     )
     assert get_adapter_absolute_path(path) == path

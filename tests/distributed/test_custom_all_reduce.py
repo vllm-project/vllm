@@ -25,11 +25,7 @@ for i, v in enumerate(test_sizes):
 
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size,
-    pp_size,
-    rank,
-    distributed_init_port,
+    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -83,11 +79,7 @@ def graph_allreduce(
 
 @ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size,
-    pp_size,
-    rank,
-    distributed_init_port,
+    monkeypatch: pytest.MonkeyPatch, tp_size, pp_size, rank, distributed_init_port
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -121,10 +113,7 @@ def eager_allreduce(
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
 def test_custom_allreduce(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size,
-    pipeline_parallel_size,
-    test_target,
+    monkeypatch: pytest.MonkeyPatch, tp_size, pipeline_parallel_size, test_target
 ):
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.accelerator.device_count():

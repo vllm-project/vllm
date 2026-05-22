@@ -8,10 +8,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -227,10 +224,7 @@ class KimiMLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.q_proj",
         )
-        self.kv_a_layernorm = RMSNorm(
-            self.kv_lora_rank,
-            eps=config.rms_norm_eps,
-        )
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -276,20 +270,14 @@ class KimiMLAAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor
     ) -> None:
         output[:] = self.mla_attn(positions, hidden_states)
 
 
 class KimiDecoderLayer(nn.Module):
     def __init__(
-        self,
-        config: KimiLinearConfig,
-        vllm_config: VllmConfig,
-        prefix: str = "",
+        self, config: KimiLinearConfig, vllm_config: VllmConfig, prefix: str = ""
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -302,9 +290,7 @@ class KimiDecoderLayer(nn.Module):
 
         if config.is_kda_layer(layer_idx):
             self.self_attn = KimiGatedDeltaNetAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.self_attn",
+                config, vllm_config, prefix=f"{prefix}.self_attn"
             )
         else:
             self.self_attn = KimiMLAAttention(
@@ -365,9 +351,7 @@ class KimiDecoderLayer(nn.Module):
 
         attn_output = torch.empty_like(hidden_states)
         self.self_attn(
-            hidden_states=hidden_states,
-            positions=positions,
-            output=attn_output,
+            hidden_states=hidden_states, positions=positions, output=attn_output
         )
         hidden_states = attn_output
 
@@ -389,24 +373,16 @@ class KimiLinearModel(nn.Module):
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=f"{prefix}.embed_tokens",
+                config.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str):
-            return KimiDecoderLayer(
-                config,
-                vllm_config,
-                prefix,
-            )
+            return KimiDecoderLayer(config, vllm_config, prefix)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            get_layer,
-            prefix=f"{prefix}.layers",
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
 
         if get_pp_group().is_last_rank:
@@ -443,9 +419,7 @@ class KimiLinearModel(nn.Module):
 
         for _, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
+                positions=positions, hidden_states=hidden_states, residual=residual
             )
 
         if not get_pp_group().is_last_rank:
@@ -598,8 +572,7 @@ class KimiLinearForCausalLM(
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
+        cls, vllm_config: "VllmConfig"
     ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
@@ -633,10 +606,7 @@ class KimiLinearForCausalLM(
     ]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

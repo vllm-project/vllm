@@ -98,15 +98,7 @@ def vit_flash_attn_wrapper(
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q,
-        k,
-        v,
-        batch_size,
-        is_rocm_aiter,
-        fa_version,
-        scale,
-        cu_seqlens,
-        max_seqlen,
+        q, k, v, batch_size, is_rocm_aiter, fa_version, scale, cu_seqlens, max_seqlen
     )
 
 
@@ -177,13 +169,7 @@ def vit_triton_attn_wrapper(
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.triton_attn_wrapper(
-        q,
-        k,
-        v,
-        batch_size,
-        scale,
-        cu_seqlens,
-        max_seqlen,
+        q, k, v, batch_size, scale, cu_seqlens, max_seqlen
     )
 
 

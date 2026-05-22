@@ -158,12 +158,7 @@ def generate_continuous_batched_examples(
         seq_idx = torch.zeros(
             cu_seqlens[-1], dtype=torch.int32, device=cu_seqlens.device
         )
-        for i, (srt, end) in enumerate(
-            zip(
-                cu_seqlens,
-                cu_seqlens[1:],
-            )
-        ):
+        for i, (srt, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
             seq_idx[srt:end] = i
 
         # for cont batch
@@ -347,10 +342,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, 
 
 
 @pytest.mark.parametrize("chunk_size", [8, 256])
-@pytest.mark.parametrize(
-    "seqlens",
-    [(16, 20), (270, 88, 212, 203)],
-)
+@pytest.mark.parametrize("seqlens", [(16, 20), (270, 88, 212, 203)])
 def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
     # This test verifies the correctness of the chunked prefill implementation
     # in the mamba2 ssd kernels, by comparing concatenation (in the sequence

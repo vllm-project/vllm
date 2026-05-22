@@ -176,9 +176,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
     # Scheduler-side methods
     # ==============================
     def get_num_new_matched_tokens(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
+        self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         """Get the number of new tokens that can be loaded from the
         external KV cache beyond ``num_computed_tokens``.
@@ -228,9 +226,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         self._flexkv_connector.update_connector_output(connector_output)
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         """Called when a request has finished, before its blocks are freed.
 

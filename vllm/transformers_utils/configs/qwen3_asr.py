@@ -400,9 +400,7 @@ class Qwen3ASRConfig(PretrainedConfig):
     ```"""
 
     model_type = "qwen3_asr"
-    sub_configs = {
-        "thinker_config": Qwen3ASRThinkerConfig,
-    }
+    sub_configs = {"thinker_config": Qwen3ASRThinkerConfig}
 
     def __init__(
         self,

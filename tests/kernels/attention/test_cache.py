@@ -352,9 +352,7 @@ def test_reshape_and_cache_flash(
         # Verify NVFP4 by dequantizing the entire cache and comparing
         # the written positions against original bf16 values.
         # Same pattern as FP8: dequant whole cache, then extract and compare.
-        from tests.kernels.quantization.nvfp4_utils import (
-            dequant_nvfp4_kv_cache,
-        )
+        from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
 
         def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
             # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
@@ -395,10 +393,7 @@ def test_reshape_and_cache_flash(
         convert_fp8_local(result_key_cache, key_cache_compact, k_scale, kv_cache_dtype)
         result_value_cache = torch.empty_like(value_cache_compact, dtype=torch.float16)
         convert_fp8_local(
-            result_value_cache,
-            value_cache_compact,
-            v_scale,
-            kv_cache_dtype,
+            result_value_cache, value_cache_compact, v_scale, kv_cache_dtype
         )
 
     # Run the reference implementation.
@@ -530,10 +525,7 @@ def test_swap_blocks(
     )
 
     ops.swap_blocks(
-        src_key_caches[0],
-        dist_key_caches[0],
-        block_size_in_bytes,
-        block_mapping_tensor,
+        src_key_caches[0], dist_key_caches[0], block_size_in_bytes, block_mapping_tensor
     )
     ops.swap_blocks(
         src_value_caches[0],

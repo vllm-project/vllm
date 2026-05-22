@@ -112,8 +112,7 @@ class Olmo2Attention(nn.Module):
 
         self.tp_rank = get_tensor_model_parallel_rank()
         self.k_norm = RMSNorm(
-            self.total_num_kv_heads * self.head_dim,
-            eps=self.config.rms_norm_eps,
+            self.total_num_kv_heads * self.head_dim, eps=self.config.rms_norm_eps
         )
         self.q_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
@@ -173,9 +172,7 @@ class Olmo2Attention(nn.Module):
         return q, k
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -221,10 +218,7 @@ class Olmo2MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -260,9 +254,7 @@ class Olmo2DecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Attention block.
         residual = hidden_states
@@ -295,10 +287,7 @@ class Olmo2Model(nn.Module):
             lambda prefix: Olmo2DecoderLayer(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
-        self.norm = RMSNorm(
-            self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.config.hidden_size
         )
@@ -385,15 +374,8 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     """
 
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -436,10 +418,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

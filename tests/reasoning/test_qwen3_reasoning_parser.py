@@ -138,16 +138,8 @@ TRUNCATED_NO_START_TOKEN_STREAM = {
 }
 
 TEST_CASES = [
-    pytest.param(
-        False,
-        WITHOUT_START_TOKEN,
-        id="without_start_token",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_START_TOKEN_STREAM,
-        id="without_start_token_stream",
-    ),
+    pytest.param(False, WITHOUT_START_TOKEN, id="without_start_token"),
+    pytest.param(True, WITHOUT_START_TOKEN_STREAM, id="without_start_token_stream"),
     pytest.param(
         False,
         WITHOUT_START_TOKEN_COMPLETE_REASONING,
@@ -158,95 +150,31 @@ TEST_CASES = [
         WITHOUT_START_TOKEN_COMPLETE_REASONING,
         id="without_start_token_complete_reasoning_stream",
     ),
+    pytest.param(False, WITH_THINK, id="with_think"),
+    pytest.param(True, WITH_THINK_STREAM, id="with_think_stream"),
+    pytest.param(False, WITHOUT_THINK, id="without_think"),
+    pytest.param(True, WITHOUT_THINK_STREAM, id="without_think_stream"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_stream"),
+    pytest.param(False, MULTILINE_REASONING, id="multiline_reasoning"),
+    pytest.param(True, MULTILINE_REASONING, id="multiline_reasoning_stream"),
+    pytest.param(False, ONLY_OPEN_TAG, id="only_open_tag"),
+    pytest.param(True, ONLY_OPEN_TAG_STREAM, id="only_open_tag_stream"),
+    pytest.param(False, TRUNCATED_NO_START_TOKEN, id="truncated_no_start_token"),
     pytest.param(
-        False,
-        WITH_THINK,
-        id="with_think",
+        True, TRUNCATED_NO_START_TOKEN_STREAM, id="truncated_no_start_token_stream"
     ),
+    pytest.param(False, TOOL_CALL_NO_THINK_END, id="tool_call_no_think_end"),
+    pytest.param(True, TOOL_CALL_NO_THINK_END, id="tool_call_no_think_end_stream"),
+    pytest.param(False, TOOL_CALL_WITH_THINK_NO_END, id="tool_call_with_think_no_end"),
     pytest.param(
-        True,
-        WITH_THINK_STREAM,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_THINK,
-        id="without_think",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_THINK_STREAM,
-        id="without_think_stream",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        MULTILINE_REASONING,
-        id="multiline_reasoning",
-    ),
-    pytest.param(
-        True,
-        MULTILINE_REASONING,
-        id="multiline_reasoning_stream",
-    ),
-    pytest.param(
-        False,
-        ONLY_OPEN_TAG,
-        id="only_open_tag",
-    ),
-    pytest.param(
-        True,
-        ONLY_OPEN_TAG_STREAM,
-        id="only_open_tag_stream",
-    ),
-    pytest.param(
-        False,
-        TRUNCATED_NO_START_TOKEN,
-        id="truncated_no_start_token",
-    ),
-    pytest.param(
-        True,
-        TRUNCATED_NO_START_TOKEN_STREAM,
-        id="truncated_no_start_token_stream",
-    ),
-    pytest.param(
-        False,
-        TOOL_CALL_NO_THINK_END,
-        id="tool_call_no_think_end",
-    ),
-    pytest.param(
-        True,
-        TOOL_CALL_NO_THINK_END,
-        id="tool_call_no_think_end_stream",
-    ),
-    pytest.param(
-        False,
-        TOOL_CALL_WITH_THINK_NO_END,
-        id="tool_call_with_think_no_end",
-    ),
-    pytest.param(
-        True,
-        TOOL_CALL_WITH_THINK_NO_END,
-        id="tool_call_with_think_no_end_stream",
+        True, TOOL_CALL_WITH_THINK_NO_END, id="tool_call_with_think_no_end_stream"
     ),
 ]
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    qwen3_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, qwen3_tokenizer):
     output = qwen3_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = [
         qwen3_tokenizer.convert_tokens_to_string([token]) for token in output
@@ -362,8 +290,7 @@ def test_reasoning_thinking_disabled(
 ):
     """When enable_thinking=False, output without </think> is all content."""
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        qwen3_tokenizer,
-        chat_template_kwargs={"enable_thinking": False},
+        qwen3_tokenizer, chat_template_kwargs={"enable_thinking": False}
     )
 
     reasoning, content = parser.extract_reasoning(

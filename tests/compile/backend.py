@@ -12,10 +12,7 @@ from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
 from vllm.compilation.passes.fx_utils import find_op_nodes
-from vllm.compilation.passes.inductor_pass import (
-    InductorPass,
-    pass_context,
-)
+from vllm.compilation.passes.inductor_pass import InductorPass, pass_context
 from vllm.compilation.passes.ir.inplace_functionalization import (
     VllmIRInplaceFunctionalizationPass,
 )

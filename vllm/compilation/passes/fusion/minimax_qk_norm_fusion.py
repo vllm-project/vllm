@@ -139,9 +139,7 @@ class MiniMaxQKNormPattern:
     def get_inputs(self) -> list[torch.Tensor]:
         T = 4
         qkv = torch.empty(
-            [T, self.q_size + 2 * self.kv_size],
-            device=self.device,
-            dtype=self.dtype,
+            [T, self.q_size + 2 * self.kv_size], device=self.device, dtype=self.dtype
         )
         q_weight = torch.empty([self.q_size], device=self.device, dtype=self.dtype)
         k_weight = torch.empty([self.kv_size], device=self.device, dtype=self.dtype)
@@ -157,9 +155,7 @@ class MiniMaxQKNormPattern:
         dtype = self.dtype
 
         def pattern(
-            qkv: torch.Tensor,
-            q_weight: torch.Tensor,
-            k_weight: torch.Tensor,
+            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
             q_fp32 = q.to(torch.float32)
@@ -174,9 +170,7 @@ class MiniMaxQKNormPattern:
             return q_out, k_out, v
 
         def replacement(
-            qkv: torch.Tensor,
-            q_weight: torch.Tensor,
-            k_weight: torch.Tensor,
+            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             assert _MINIMAX_QK_NORM_FUSED_OP is not None
             q_out, k_out = torch.ops.vllm.minimax_qk_norm_fused(
@@ -202,9 +196,7 @@ class MiniMaxQKNormPattern:
         # functional GEMM kernel (e.g. cutlass_scaled_mm via auto_functionalized),
         # which causes inductor to generate one split per consumer.
         def pattern_split3(
-            qkv: torch.Tensor,
-            q_weight: torch.Tensor,
-            k_weight: torch.Tensor,
+            qkv: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             q = qkv.split([q_size, kv_size, kv_size], dim=-1)[0]
             k = qkv.split([q_size, kv_size, kv_size], dim=-1)[1]
@@ -305,12 +297,7 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def _register_patterns(
-        self,
-        q_size: int,
-        kv_size: int,
-        eps: float,
-        tp_world: int,
-        tp_rank: int,
+        self, q_size: int, kv_size: int, eps: float, tp_world: int, tp_rank: int
     ) -> None:
         MiniMaxQKNormPattern(
             q_size=q_size,

@@ -22,9 +22,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
-from vllm.model_executor.layers.fused_moe.router.norm_gate_linear import (
-    NormGateLinear,
-)
+from vllm.model_executor.layers.fused_moe.router.norm_gate_linear import NormGateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -175,18 +173,11 @@ def _deepseek_v4_stage_mega_moe_inputs_kernel(
     scaled = hidden_groups * (1.0 / rounded_scale)[:, None]
     scaled = tl.reshape(scaled, [BLOCK_K])
     fp8 = scaled.to(tl.float8e4nv)
-    tl.store(
-        x_fp8 + token_id * x_stride_m + k_offsets * x_stride_k,
-        fp8,
-        mask=k_mask,
-    )
+    tl.store(x_fp8 + token_id * x_stride_m + k_offsets * x_stride_k, fp8, mask=k_mask)
 
     scale_offsets = tl.arange(0, num_groups)
     packed_scale = tl.sum(scale_exp << (scale_offsets * 8), axis=0).to(tl.int32)
-    tl.store(
-        x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
-        packed_scale,
-    )
+    tl.store(x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k, packed_scale)
 
     if k_block_id == 0:
         topk_offsets = tl.arange(0, BLOCK_TOPK)
@@ -290,11 +281,7 @@ def make_deepseek_v4_expert_params_mapping(
             shard_id,
         )
         for expert_id in range(num_experts)
-        for shard_id, weight_name in [
-            ("w1", "w1"),
-            ("w2", "w2"),
-            ("w3", "w3"),
-        ]
+        for shard_id, weight_name in [("w1", "w1"), ("w2", "w2"), ("w3", "w3")]
     ]
 
 
@@ -584,12 +571,7 @@ def _deepseek_v4_mega_moe_experts_op(
 ) -> None:
     self = get_forward_context().no_compile_layers[layer_name]
     self._run_mega_moe(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        out,
-        activation_clamp,
-        fast_math,
+        hidden_states, topk_weights, topk_ids, out, activation_clamp, fast_math
     )
 
 
@@ -614,11 +596,7 @@ direct_register_custom_op(
 
 
 class DeepseekV4MoE(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -707,10 +685,7 @@ class DeepseekV4MoE(nn.Module):
             self._init_fused_moe_experts(config, quant_config, prefix)
 
     def _init_mega_moe_experts(
-        self,
-        vllm_config: VllmConfig,
-        config,
-        prefix: str,
+        self, vllm_config: VllmConfig, config, prefix: str
     ) -> None:
         self.ep_group = get_ep_group()
         self.ep_size = self.ep_group.world_size
@@ -732,12 +707,7 @@ class DeepseekV4MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-    def _init_fused_moe_experts(
-        self,
-        config,
-        quant_config,
-        prefix: str,
-    ) -> None:
+    def _init_fused_moe_experts(self, config, quant_config, prefix: str) -> None:
         self.tp_rank = get_tensor_model_parallel_rank()
         assert config.n_routed_experts % self.tp_size == 0
 
@@ -791,10 +761,7 @@ class DeepseekV4MoE(nn.Module):
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
         final_hidden_states = self.experts(
-            normed_x,
-            topk_weights,
-            topk_ids,
-            activation_clamp=activation_clamp,
+            normed_x, topk_weights, topk_ids, activation_clamp=activation_clamp
         )
 
         if self.shared_experts is not None:
@@ -810,9 +777,7 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         normed_x, router_logits = self.norm_gate(hidden_states)
         final_hidden_states = self.experts(
-            hidden_states=normed_x,
-            router_logits=router_logits,
-            input_ids=input_ids,
+            hidden_states=normed_x, router_logits=router_logits, input_ids=input_ids
         )
 
         return final_hidden_states.view(org_shape)
@@ -1026,46 +991,22 @@ class DeepseekV4DecoderLayer(nn.Module):
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
         self.hc_attn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty((mix_hc, hc_dim), dtype=torch.float32), requires_grad=False
         )
         self.hc_ffn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty((mix_hc, hc_dim), dtype=torch.float32), requires_grad=False
         )
         self.hc_attn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty(mix_hc, dtype=torch.float32), requires_grad=False
         )
         self.hc_ffn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty(mix_hc, dtype=torch.float32), requires_grad=False
         )
         self.hc_attn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty(3, dtype=torch.float32), requires_grad=False
         )
         self.hc_ffn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty(3, dtype=torch.float32), requires_grad=False
         )
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
@@ -1271,23 +1212,14 @@ class DeepseekV4Model(nn.Module):
             self.norm = PPMissingLayer()
 
         self.hc_head_fn = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                self.hc_dim,
-                dtype=torch.float32,
-            ),
+            torch.empty(self.hc_mult, self.hc_dim, dtype=torch.float32),
             requires_grad=False,
         )
         self.hc_head_base = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
+            torch.empty(self.hc_mult, dtype=torch.float32), requires_grad=False
         )
         self.hc_head_scale = nn.Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
+            torch.empty(1, dtype=torch.float32), requires_grad=False
         )
         self.hc_head_op = HCHeadOp()
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
@@ -1310,10 +1242,7 @@ class DeepseekV4Model(nn.Module):
         return self.embed_tokens(input_ids)
 
     def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         # PP intermediate tensors carry the multi-stream hidden_states
         # of shape (num_tokens, hc_mult, hidden_size) — V4 expands the
@@ -1325,7 +1254,7 @@ class DeepseekV4Model(nn.Module):
                     (batch_size, self.hc_mult, self.config.hidden_size),
                     dtype=dtype,
                     device=device,
-                ),
+                )
             }
         )
 
@@ -1352,12 +1281,7 @@ class DeepseekV4Model(nn.Module):
         residual, post_mix, res_mix = None, None, None
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual, post_mix, res_mix = layer(
-                hidden_states,
-                positions,
-                input_ids,
-                post_mix,
-                res_mix,
-                residual,
+                hidden_states, positions, input_ids, post_mix, res_mix, residual
             )
         if layer is not None and current_platform.is_cuda():
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
@@ -1512,9 +1436,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
-        scale_regex = {
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
+        scale_regex = {re.compile(r"\.scale$"): ".weight_scale_inv"}
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
@@ -1577,10 +1499,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

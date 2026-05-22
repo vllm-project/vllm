@@ -29,8 +29,7 @@ ToolChoice = (
     Literal["none", "auto", "required"] | ChatCompletionNamedToolChoiceParam | None
 )
 StructuralTagBuilder = Callable[
-    [list[ChatCompletionToolsParam], SimplifiedToolChoice, bool],
-    StructuralTag,
+    [list[ChatCompletionToolsParam], SimplifiedToolChoice, bool], StructuralTag
 ]
 
 _structural_tag_registry: dict[str, StructuralTagBuilder] = {}
@@ -60,8 +59,7 @@ def get_model_structural_tag(
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
 
     normalized_tools, simplified_tool_choice = _normalize_tool_choice(
-        tools=tools,
-        tool_choice=tool_choice,
+        tools=tools, tool_choice=tool_choice
     )
     if not normalized_tools:
         return None
@@ -70,8 +68,7 @@ def get_model_structural_tag(
 
 
 def _normalize_tool_choice(
-    tools: list[ChatCompletionToolsParam] | None,
-    tool_choice: ToolChoice,
+    tools: list[ChatCompletionToolsParam] | None, tool_choice: ToolChoice
 ) -> tuple[list[ChatCompletionToolsParam], SimplifiedToolChoice]:
     """Normalize vLLM ChatCompletion tool_choice for structural tag builders."""
 
@@ -161,19 +158,14 @@ def get_deepseek_v4_structural_tag(
             tags.append(
                 TagFormat(
                     begin=invoke_begin_prefix + function.name + invoke_begin_suffix,
-                    content=JSONSchemaFormat(
-                        json_schema=parameters,
-                        style=xml_style,
-                    ),
+                    content=JSONSchemaFormat(json_schema=parameters, style=xml_style),
                     end=invoke_end,
                 )
             )
 
         if tags:
             function_calling_tags = TagsWithSeparatorFormat(
-                tags=tags,
-                separator="\n",
-                at_least_one=True,
+                tags=tags, separator="\n", at_least_one=True
             )
             suffix_tag = TriggeredTagsFormat(
                 triggers=[function_calls_trigger],
@@ -199,8 +191,7 @@ def get_deepseek_v4_structural_tag(
                 TagFormat(
                     begin=invoke_begin_prefix + function.name + invoke_begin_suffix,
                     content=JSONSchemaFormat(
-                        json_schema=_get_function_parameters(function),
-                        style=xml_style,
+                        json_schema=_get_function_parameters(function), style=xml_style
                     ),
                     end=invoke_end,
                 ),
@@ -216,10 +207,7 @@ def get_deepseek_v4_structural_tag(
             tags.append(
                 TagFormat(
                     begin=invoke_begin_prefix + function.name + invoke_begin_suffix,
-                    content=JSONSchemaFormat(
-                        json_schema=parameters,
-                        style=xml_style,
-                    ),
+                    content=JSONSchemaFormat(json_schema=parameters, style=xml_style),
                     end=invoke_end,
                 )
             )
@@ -227,11 +215,7 @@ def get_deepseek_v4_structural_tag(
         suffix_tag = SequenceFormat(
             elements=[
                 ConstStringFormat(value=tool_calls_prefix + function_calls_begin),
-                TagsWithSeparatorFormat(
-                    tags=tags,
-                    separator="\n",
-                    at_least_one=True,
-                ),
+                TagsWithSeparatorFormat(tags=tags, separator="\n", at_least_one=True),
                 ConstStringFormat(value=function_calls_end),
             ]
         )
@@ -277,9 +261,7 @@ def get_qwen_3_5_structural_tag(
 
         if tags:
             suffix_tag = TriggeredTagsFormat(
-                triggers=[tool_call_trigger],
-                tags=tags,
-                excludes=think_exclude_tokens,
+                triggers=[tool_call_trigger], tags=tags, excludes=think_exclude_tokens
             )
         else:
             suffix_tag = AnyTextFormat(excludes=think_exclude_tokens)
@@ -291,8 +273,7 @@ def get_qwen_3_5_structural_tag(
         suffix_tag = TagFormat(
             begin=f"{tool_call_begin_prefix}{function.name}{tool_call_begin_suffix}",
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(function),
-                style="qwen_xml",
+                json_schema=_get_function_parameters(function), style="qwen_xml"
             ),
             end=tool_call_end,
         )
@@ -310,11 +291,7 @@ def get_qwen_3_5_structural_tag(
                 )
             )
         assert len(tags) > 0
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=tags,
-            separator="",
-            at_least_one=True,
-        )
+        suffix_tag = TagsWithSeparatorFormat(tags=tags, separator="", at_least_one=True)
 
     if not reasoning:
         result = StructuralTag(format=suffix_tag)

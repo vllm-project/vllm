@@ -148,12 +148,7 @@ def _parse_size(value: Any) -> int:
     if not cleaned:
         raise ValueError("Size cannot be empty.")
 
-    unit_multipliers = {
-        "gb": 1024**3,
-        "mb": 1024**2,
-        "kb": 1024,
-        "b": 1,
-    }
+    unit_multipliers = {"gb": 1024**3, "mb": 1024**2, "kb": 1024, "b": 1}
     match = re.match(r"^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$", cleaned)
     if not match:
         raise ValueError(f"Invalid format: '{value}'")
@@ -576,10 +571,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         try:
             res = self.store.batch_put_from_multi_buffers(
-                keys,
-                addrs,
-                sizes,
-                self.replicate_config,
+                keys, addrs, sizes, self.replicate_config
             )
             failed = [i for i, v in enumerate(res) if v < 0]
             if failed:
@@ -767,11 +759,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-    ):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         try:
             from mooncake.store import (  # type: ignore
                 MooncakeDistributedStore,
@@ -846,8 +834,7 @@ class MooncakeStoreWorker:
             else {}
         )
         store_config.device_name = rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
+            protocol=store_config.protocol, configured_device=store_config.device_name
         )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
@@ -971,8 +958,7 @@ class MooncakeStoreWorker:
         self.register_kv_caches({"__cross_layer__": kv_cache})
 
     def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
         if not kv_caches:
@@ -1073,24 +1059,16 @@ class MooncakeStoreWorker:
         self.kv_recv_thread.start()
         ready_event_recving.wait()
 
-    def start_load_kv(
-        self,
-        metadata: MooncakeStoreConnectorMetadata,
-    ):
+    def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
         """No-op: loads are issued in get_finished() for overlap."""
         pass
 
-    def wait_for_save(
-        self,
-        metadata: MooncakeStoreConnectorMetadata,
-    ):
+    def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
         """No-op: stores are issued in get_finished() for overlap."""
         pass
 
     def get_finished(
-        self,
-        finished_req_ids: set[str],
-        meta: MooncakeStoreConnectorMetadata,
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
     ) -> tuple[set[str], set[str]]:
         """Issue all I/O and get completed send/recv request IDs.
 
@@ -1156,9 +1134,7 @@ class MooncakeStoreWorker:
         return done_sending, done_recving
 
     def _get_and_clear_finished_sending(
-        self,
-        finished_req_ids: set[str],
-        meta: MooncakeStoreConnectorMetadata,
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
     ) -> set[str]:
         assert self.kv_send_thread is not None
         finished_sending: set[str] = set()
@@ -1249,11 +1225,7 @@ class MooncakeStoreWorker:
 class LookupKeyServer:
     """ZMQ server on worker rank 0 for handling prefix lookup queries."""
 
-    def __init__(
-        self,
-        store_worker: MooncakeStoreWorker,
-        vllm_config: VllmConfig,
-    ):
+    def __init__(self, store_worker: MooncakeStoreWorker, vllm_config: VllmConfig):
         self.decoder = MsgpackDecoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)

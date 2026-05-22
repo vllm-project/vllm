@@ -233,10 +233,7 @@ class P2pNcclEngine:
         return self.socks[remote_address], self.comms[remote_address]
 
     def send_tensor(
-        self,
-        tensor_id: str,
-        tensor: torch.Tensor,
-        remote_address: str | None = None,
+        self, tensor_id: str, tensor: torch.Tensor, remote_address: str | None = None
     ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
@@ -306,9 +303,7 @@ class P2pNcclEngine:
         return True
 
     def recv_tensor(
-        self,
-        tensor_id: str,
-        remote_address: str | None = None,
+        self, tensor_id: str, remote_address: str | None = None
     ) -> torch.Tensor:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()

@@ -23,8 +23,7 @@ logger = init_logger(__name__)
 
 
 def start_async_worker(
-    state: "EplbState",
-    is_profile: bool = False,
+    state: "EplbState", is_profile: bool = False
 ) -> threading.Thread:
     eplb_group = get_eplb_group().device_group
     rank = eplb_group.rank()
@@ -102,8 +101,7 @@ def transfer_run_periodically(
                 model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
             logger.info(
-                "Async worker computed new indices for model %s",
-                model_state.model_name,
+                "Async worker computed new indices for model %s", model_state.model_name
             )
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration

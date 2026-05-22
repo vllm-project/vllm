@@ -27,9 +27,7 @@ class WhisperAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
-        self,
-        kv_cache_group_id: int,
-        num_reqs: int,
+        self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
         encoder_seq_lens = self.encoder_seq_lens.get(kv_cache_group_id)
         if encoder_seq_lens is None:
@@ -70,9 +68,7 @@ class WhisperModelState(ModelState):
         )
 
         self.max_encoder_len = getattr(
-            self.model_config.hf_config,
-            "max_source_positions",
-            self.max_model_len,
+            self.model_config.hf_config, "max_source_positions", self.max_model_len
         )
         self.encoder_seq_lens_gpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device

@@ -109,9 +109,7 @@ def _fused_marlin_moe(
 
     if intermediate_cache2 is None:
         intermediate_cache2 = torch.empty(
-            (M * num_topk, N),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
+            (M * num_topk, N), device=hidden_states.device, dtype=hidden_states.dtype
         )
 
     intermediate_cache1 = _resize_cache(
@@ -606,8 +604,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         # TODO(rob): add int4, int8 as integrations
         # are migrated to use the oracle one-by-one.
@@ -808,9 +805,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         lora_state: dict = {}
 
         def activation_with_lora(
-            act_enum: MoEActivation,
-            act_output: torch.Tensor,
-            act_input: torch.Tensor,
+            act_enum: MoEActivation, act_output: torch.Tensor, act_input: torch.Tensor
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)

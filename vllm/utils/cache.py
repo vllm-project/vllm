@@ -42,10 +42,7 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
     def __sub__(self, other: "CacheInfo"):
-        return CacheInfo(
-            hits=self.hits - other.hits,
-            total=self.total - other.total,
-        )
+        return CacheInfo(hits=self.hits - other.hits, total=self.total - other.total)
 
 
 class LRUCache(cachetools.LRUCache[_K, _V]):

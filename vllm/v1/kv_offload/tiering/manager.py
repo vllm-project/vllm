@@ -37,11 +37,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.tiering.base import (
-    JobId,
-    JobMetadata,
-    SecondaryTierManager,
-)
+from vllm.v1.kv_offload.tiering.base import JobId, JobMetadata, SecondaryTierManager
 
 logger = init_logger(__name__)
 
@@ -256,10 +252,7 @@ class TieringOffloadingManager(OffloadingManager):
         return False
 
     def _initiate_promotion(
-        self,
-        tier: SecondaryTierManager,
-        key: OffloadKey,
-        req_context: ReqContext,
+        self, tier: SecondaryTierManager, key: OffloadKey, req_context: ReqContext
     ) -> bool:
         """
         Queue a block for promotion from a secondary tier to the primary tier.

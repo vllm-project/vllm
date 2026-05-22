@@ -10,22 +10,13 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe import (
-        FusedMoEQuantConfig,
-        RoutedExperts,
-    )
+    from vllm.model_executor.layers.fused_moe import FusedMoEQuantConfig, RoutedExperts
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
-from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
-    select_mxfp8_moe_backend,
-)
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
-)
-from vllm.model_executor.layers.quantization.online.moe_base import (
-    OnlineMoEMethodBase,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import select_mxfp8_moe_backend
+from vllm.model_executor.layers.quantization.online.fp8 import _Fp8OnlineLinearBase
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
@@ -86,10 +77,7 @@ class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 

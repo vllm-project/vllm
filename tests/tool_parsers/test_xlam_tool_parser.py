@@ -7,11 +7,7 @@ from collections.abc import Generator
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall, ToolCall
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.xlam_tool_parser import xLAMToolParser
@@ -123,11 +119,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -135,11 +127,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Orlando",
-                                "state": "FL",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -153,11 +141,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -171,11 +155,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -189,11 +169,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -207,11 +183,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -244,17 +216,13 @@ def test_extract_tool_calls(
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Seattle",
-                                "state": "WA",
-                                "unit": "celsius",
-                            }
+                            {"city": "Seattle", "state": "WA", "unit": "celsius"}
                         ),
                     )
                 )
             ],
             None,
-        ),
+        )
     ],
 )
 def test_extract_tool_calls_list_structure(
@@ -379,11 +347,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -391,11 +355,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Orlando",
-                                "state": "FL",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
                         ),
                     )
                 ),
@@ -409,11 +369,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -427,11 +383,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -445,11 +397,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )
@@ -463,11 +411,7 @@ def test_streaming_with_list_structure(xlam_tool_parser):
                     function=FunctionCall(
                         name="get_current_weather",
                         arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
+                            {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
                         ),
                     )
                 )

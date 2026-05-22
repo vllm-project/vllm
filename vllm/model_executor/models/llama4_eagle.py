@@ -99,11 +99,7 @@ class LlamaModel(nn.Module):
         hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
@@ -208,10 +204,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax without all-gathering full logits.
 
         Falls back to full logits when draft_id_to_target_id remapping is

@@ -90,10 +90,7 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
         # Non-NUMA systems (e.g. many RISC-V boards) don't expose per-node
         # meminfo. Fall back to system-wide numbers from psutil.
         vm = psutil.virtual_memory()
-        return MemoryNodeInfo(
-            total_memory=vm.total,
-            available_memory=vm.available,
-        )
+        return MemoryNodeInfo(total_memory=vm.total, available_memory=vm.available)
 
     meminfo = {}
     with open(meminfo_path) as f:
@@ -114,10 +111,7 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
         free_memory + active_file_memory + inactive_file_memory + reclaimable_memory
     )
 
-    return MemoryNodeInfo(
-        total_memory=total_memory,
-        available_memory=available_memory,
-    )
+    return MemoryNodeInfo(total_memory=total_memory, available_memory=available_memory)
 
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
@@ -176,9 +170,7 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
     # for cpu/core.  Quote them so the JSON parses; they will decode to
     # -1 and be filtered out below, triggering the synthesized fallback.
     lscpu_output = re.sub(
-        r'("(?:cpu|core)":\s*)-\s*(,|\n|\})',
-        r'\1"-"\2',
-        lscpu_output,
+        r'("(?:cpu|core)":\s*)-\s*(,|\n|\})', r'\1"-"\2', lscpu_output
     )
 
     logical_cpu_list: list[LogicalCPUInfo] = json.loads(

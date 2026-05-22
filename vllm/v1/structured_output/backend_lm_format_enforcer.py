@@ -129,8 +129,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             )
 
         token_enforcer = lmformatenforcer.TokenEnforcer(
-            tokenizer_data=self.tokenizer_data,
-            parser=character_level_parser,
+            tokenizer_data=self.tokenizer_data, parser=character_level_parser
         )
         return LMFormatEnforcerGrammar(token_enforcer)
 

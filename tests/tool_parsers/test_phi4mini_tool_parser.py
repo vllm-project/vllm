@@ -5,10 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.tool_parsers.common_tests import (
-    ToolParserTestConfig,
-    ToolParserTests,
-)
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.tokenizers import TokenizerLike
 
 
@@ -20,11 +17,7 @@ class TestPhi4MiniToolParser(ToolParserTests):
         tokenizer = default_tokenizer
         tokenizer_vocab = tokenizer.get_vocab()
         tokenizer.get_vocab = MagicMock()
-        tokenizer_vocab.update(
-            {
-                "functools": 32000,
-            }
-        )
+        tokenizer_vocab.update({"functools": 32000})
         tokenizer.get_vocab.return_value = tokenizer_vocab
         return tokenizer
 

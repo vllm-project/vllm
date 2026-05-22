@@ -9,9 +9,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
@@ -55,8 +53,7 @@ async def scale_elastic_ep(raw_request: Request):
 
     if not isinstance(new_data_parallel_size, int) or new_data_parallel_size <= 0:
         raise HTTPException(
-            status_code=400,
-            detail="new_data_parallel_size must be a positive integer",
+            status_code=400, detail="new_data_parallel_size must be a positive integer"
         )
 
     if not isinstance(drain_timeout, int) or drain_timeout <= 0:
@@ -70,9 +67,7 @@ async def scale_elastic_ep(raw_request: Request):
     try:
         await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
         return JSONResponse(
-            {
-                "message": f"Scaled to {new_data_parallel_size} data parallel engines",
-            }
+            {"message": f"Scaled to {new_data_parallel_size} data parallel engines"}
         )
     except TimeoutError as e:
         raise HTTPException(

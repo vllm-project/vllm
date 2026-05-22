@@ -103,10 +103,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
         w_q, w_s, _, _ = self._get_weight_params(layer)

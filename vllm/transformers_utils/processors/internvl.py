@@ -78,10 +78,7 @@ def resolve_internvl_min_max_num(
     return min_dynamic_patch, max_dynamic_patch
 
 
-def get_internvl_target_ratios(
-    min_num: int,
-    max_num: int,
-) -> list[tuple[int, int]]:
+def get_internvl_target_ratios(min_num: int, max_num: int) -> list[tuple[int, int]]:
     target_ratios = {
         (i, j)
         for n in range(min_num, max_num + 1)
@@ -313,15 +310,11 @@ class InternVLImageProcessor:
 
 
 class InternVLVideoProcessor:
-    def __init__(
-        self,
-        image_size: int,
-    ) -> None:
+    def __init__(self, image_size: int) -> None:
         self.image_size = image_size
 
     def _videos_to_pixel_values_lst(
-        self,
-        videos: list[npt.NDArray],
+        self, videos: list[npt.NDArray]
     ) -> list[torch.Tensor]:
         return [
             video_to_pixel_values_internvl(
@@ -414,15 +407,10 @@ class InternVLProcessor(ProcessorMixin):
 
         return get_internvl_target_ratios(min_num, max_num)
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         image_processor = self.image_processor
         target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,  # Applied in calculate_targets
+            use_thumbnail=False  # Applied in calculate_targets
         )
 
         num_patches, _, _ = calculate_internvl_targets(
@@ -436,9 +424,7 @@ class InternVLProcessor(ProcessorMixin):
         return num_patches * self.image_seq_length
 
     def get_image_repl(
-        self,
-        num_patches: int | None,
-        num_features: int | None = None,
+        self, num_patches: int | None, num_features: int | None = None
     ) -> PromptUpdateDetails[str]:
         if num_patches is None:
             assert num_features is not None
@@ -494,8 +480,7 @@ class InternVLProcessor(ProcessorMixin):
                 raise ValueError("This model does not support video inputs")
 
             video_inputs = self.video_processor(
-                videos=videos,
-                return_tensors=return_tensors,
+                videos=videos, return_tensors=return_tensors
             )
             video_num_patches = video_inputs["video_num_patches"]
         else:

@@ -64,16 +64,13 @@ class GenerativeScoringRequest(OpenAIBaseModel):
 
     model: str | None = None
     query: str | list[int] = Field(
-        ...,
-        description="The query text or pre-tokenized query token IDs.",
+        ..., description="The query text or pre-tokenized query token IDs."
     )
     items: list[str] | list[list[int]] = Field(
-        ...,
-        description="List of item texts or pre-tokenized item token IDs.",
+        ..., description="List of item texts or pre-tokenized item token IDs."
     )
     label_token_ids: list[int] = Field(
-        ...,
-        description="List of token IDs to compute probabilities for.",
+        ..., description="List of token IDs to compute probabilities for."
     )
     apply_softmax: bool = Field(
         default=True,
@@ -88,8 +85,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
         description="If True, prepend items to query. Otherwise append items to query.",
     )
     add_special_tokens: bool = Field(
-        default=True,
-        description="Whether to add special tokens when tokenizing.",
+        default=True, description="Whether to add special tokens when tokenizing."
     )
     priority: int = Field(
         default=0,
@@ -164,15 +160,11 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         request_logger: RequestLogger | None,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
-            models=models,
-            request_logger=request_logger,
+            engine_client=engine_client, models=models, request_logger=request_logger
         )
 
     async def create_generative_scoring(
-        self,
-        request: GenerativeScoringRequest,
-        raw_request: Request | None = None,
+        self, request: GenerativeScoringRequest, raw_request: Request | None = None
     ) -> GenerativeScoringResponse | ErrorResponse:
         """Create generative scoring for the given request.
 
@@ -343,20 +335,14 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
 
             # Compute probabilities based on apply_softmax setting
             token_probs = self._compute_probabilities(
-                label_logprobs,
-                apply_softmax=request.apply_softmax,
+                label_logprobs, apply_softmax=request.apply_softmax
             )
 
             # Use the first label token's probability as the score
             first_label_id = request.label_token_ids[0]
             score = token_probs[first_label_id]
 
-            item_results.append(
-                GenerativeScoringItemResult(
-                    index=i,
-                    score=score,
-                )
-            )
+            item_results.append(GenerativeScoringItemResult(index=i, score=score))
 
             # Update token counts
             total_prompt_tokens += prompt_token_counts[i]
@@ -400,8 +386,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         # Tokenize query if it's a string
         if isinstance(request.query, str):
             query_token_ids = tokenizer.encode(
-                request.query,
-                add_special_tokens=request.add_special_tokens,
+                request.query, add_special_tokens=request.add_special_tokens
             )
         else:
             query_token_ids = request.query
@@ -413,10 +398,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             # Tokenize item if it's a string
             if isinstance(item, str):
                 # Don't add special tokens for items to avoid duplicate BOS/EOS
-                item_token_ids = tokenizer.encode(
-                    item,
-                    add_special_tokens=False,
-                )
+                item_token_ids = tokenizer.encode(item, add_special_tokens=False)
             else:
                 item_token_ids = item
 
@@ -437,9 +419,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         return engine_inputs, prompt_token_counts
 
     def _compute_probabilities(
-        self,
-        label_logprobs: dict[int, float],
-        apply_softmax: bool,
+        self, label_logprobs: dict[int, float], apply_softmax: bool
     ) -> dict[int, float]:
         """Compute probabilities from logprobs.
 
@@ -477,8 +457,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             }
 
     async def _get_trace_headers(
-        self,
-        headers: Mapping[str, str],
+        self, headers: Mapping[str, str]
     ) -> Mapping[str, str] | None:
         """Extract trace headers from request headers."""
         if not contains_trace_headers(headers):

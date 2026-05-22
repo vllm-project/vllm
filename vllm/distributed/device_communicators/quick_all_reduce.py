@@ -226,8 +226,7 @@ class QuickAllReduce:
         self.qr_min_size = qr_min_size
         if qr_min_size is not None:
             logger.info(
-                "Custom quick allreduce: min size override = %d MB",
-                qr_min_size // MB,
+                "Custom quick allreduce: min size override = %d MB", qr_min_size // MB
             )
         if self.qr_quantization_min_size is not None:
             logger.info(

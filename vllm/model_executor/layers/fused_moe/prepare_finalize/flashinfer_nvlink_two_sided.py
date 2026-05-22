@@ -25,10 +25,7 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
     all2all_manager: All2AllManagerBase
 
-    def __init__(
-        self,
-        num_dispatchers: int = 1,
-    ):
+    def __init__(self, num_dispatchers: int = 1):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
         device_communicator = get_ep_group().device_communicator

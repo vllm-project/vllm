@@ -322,7 +322,7 @@ def test_fusion_silu_and_mul_quant(
             custom_ops=custom_ops,
             backend="eager",  # avoid compilation for SiluAndMul and QuantFP8
             pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
-        ),
+        )
     )
 
     with set_current_vllm_config(config), monkeypatch.context() as m:

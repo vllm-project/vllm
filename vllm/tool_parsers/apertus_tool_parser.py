@@ -28,14 +28,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
-from vllm.tool_parsers.utils import (
-    find_common_prefix,
-    partial_json_loads,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.utils import find_common_prefix, partial_json_loads
 
 logger = init_logger(__name__)
 
@@ -174,9 +168,7 @@ class ApertusToolParser(ToolParser):
         return text
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """
         Extracts tool calls from a completely generated model response (Non-Streaming).

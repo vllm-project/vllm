@@ -23,9 +23,7 @@ from tests.v1.logits_processors.utils import (
 
 
 def _server_with_logitproc_entrypoint(
-    env_dict: dict[str, str] | None,
-    model: str,
-    vllm_serve_args: list[str],
+    env_dict: dict[str, str] | None, model: str, vllm_serve_args: list[str]
 ) -> None:
     """Start vLLM server with dummy logitproc entrypoint."""
     from vllm.entrypoints.cli import main
@@ -39,9 +37,7 @@ def _server_with_logitproc_entrypoint(
 
 
 def _server_with_logitproc_fqcn(
-    env_dict: dict[str, str] | None,
-    model: str,
-    vllm_serve_args: list[str],
+    env_dict: dict[str, str] | None, model: str, vllm_serve_args: list[str]
 ) -> None:
     """Start vLLM server with dummy logitproc specified by FQCN."""
     from vllm.entrypoints.cli import main
@@ -113,10 +109,7 @@ api_keyword_args = {
 }
 
 
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_custom_logitsprocs(server, model_name: str):
     """Test custom logitsprocs when starting OpenAI server from CLI
 
@@ -141,9 +134,7 @@ def test_custom_logitsprocs(server, model_name: str):
         use_dummy_logitproc = True
         for prompt in prompts:
             # Build request arguments
-            request_keyword_args: dict[str, Any] = {
-                **api_keyword_args,
-            }
+            request_keyword_args: dict[str, Any] = {**api_keyword_args}
             if use_dummy_logitproc:
                 # 50% of requests pass target_token custom arg
                 target_token = random.choice([128, 67])
@@ -153,9 +144,7 @@ def test_custom_logitsprocs(server, model_name: str):
                     "vllm_xargs": {DUMMY_LOGITPROC_ARG: target_token}
                 }
             batch = await client.completions.create(
-                model=model_name,
-                prompt=prompt,
-                **request_keyword_args,
+                model=model_name, prompt=prompt, **request_keyword_args
             )
 
             if use_dummy_logitproc:
@@ -173,10 +162,7 @@ def test_custom_logitsprocs(server, model_name: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_invalid_custom_logitsproc_arg(
     client: openai.AsyncOpenAI, model_name: str
 ):
@@ -193,9 +179,7 @@ async def test_invalid_custom_logitsproc_arg(
 
     with pytest.raises(openai.OpenAIError) as exc_info:
         await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            **request_keyword_args,
+            model=model_name, prompt=prompt, **request_keyword_args
         )
 
     assert "is not int" in str(exc_info.value)

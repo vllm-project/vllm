@@ -159,12 +159,7 @@ class OAIAttention(nn.Module):
 
 
 class MLPBlock(torch.nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        layer_idx: int,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, layer_idx: int, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -265,26 +260,18 @@ class TransformerBlock(torch.nn.Module):
 
 @support_torch_compile
 class GptOssModel(nn.Module, EagleModelMixin):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
         self.embedding = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
+            self.config.vocab_size, self.config.hidden_size
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: TransformerBlock(
-                vllm_config,
-                prefix=prefix,
-                quant_config=self.quant_config,
+                vllm_config, prefix=prefix, quant_config=self.quant_config
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1177,9 +1164,7 @@ class GptOssForCausalLM(
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".self_attn.": ".attn.",
-        },
+        orig_to_new_substr={".self_attn.": ".attn."},
         orig_to_new_suffix={
             ".embed_tokens.weight": ".embedding.weight",
             # MoE MXFP4 weights
@@ -1205,18 +1190,13 @@ class GptOssForCausalLM(
         },
     )
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
 
         self.model = GptOssModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,

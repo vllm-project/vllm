@@ -569,8 +569,7 @@ def _combine_topk_swa_indices_kernel(
         offset = tl.arange(0, PADDED_TOP_K)
         mask = offset < topk_len
         topk_indices = tl.load(
-            topk_indices_ptr + token_idx * topk_indices_stride + offset,
-            mask=mask,
+            topk_indices_ptr + token_idx * topk_indices_stride + offset, mask=mask
         )
         tl.store(
             combined_indices_ptr + token_idx * combined_indices_stride + offset,

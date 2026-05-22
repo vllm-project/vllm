@@ -101,13 +101,7 @@ class StructuredOutputsParams:
         """
         return all(
             getattr(self, field) is None
-            for field in (
-                "json",
-                "regex",
-                "choice",
-                "grammar",
-                "json_object",
-            )
+            for field in ("json", "regex", "choice", "grammar", "json_object")
         )
 
 
@@ -554,9 +548,7 @@ class SamplingParams(
             raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
 
     def update_from_generation_config(
-        self,
-        generation_config: dict[str, Any],
-        eos_token_id: int | None = None,
+        self, generation_config: dict[str, Any], eos_token_id: int | None = None
     ) -> None:
         """Update if there are non-default values from generation_config"""
         if not self.ignore_eos:
@@ -778,8 +770,7 @@ class SamplingParams(
                 )
 
     def _validate_spec_decode(
-        self,
-        speculative_config: SpeculativeConfig | None,
+        self, speculative_config: SpeculativeConfig | None
     ) -> None:
         if speculative_config is None:
             return
@@ -866,10 +857,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(
-                self,
-                tokenizer=_get_llg_tokenizer(tokenizer),
-            )
+            validate_guidance_grammar(self, tokenizer=_get_llg_tokenizer(tokenizer))
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
@@ -916,8 +904,7 @@ class SamplingParams(
                 else:
                     # Fall back to guidance by default.
                     validate_guidance_grammar(
-                        self,
-                        tokenizer=_get_llg_tokenizer(tokenizer),
+                        self, tokenizer=_get_llg_tokenizer(tokenizer)
                     )
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically

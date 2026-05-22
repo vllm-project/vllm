@@ -29,10 +29,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
-from vllm.config.vllm import (
-    OPTIMIZATION_LEVEL_TO_CONFIG,
-    OptimizationLevel,
-)
+from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -51,12 +48,7 @@ def test_compile_config_repr_succeeds():
 
 
 @pytest.mark.parametrize(
-    ("env_value", "expected"),
-    [
-        (None, None),
-        ("0", False),
-        ("1", True),
-    ],
+    ("env_value", "expected"), [(None, None), ("0", False), ("1", True)]
 )
 def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     if env_value is None:
@@ -153,9 +145,7 @@ def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        vllm_config_module,
-        "replace",
-        lambda self, **kwargs: SimpleNamespace(**kwargs),
+        vllm_config_module, "replace", lambda self, **kwargs: SimpleNamespace(**kwargs)
     )
     cfg = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -175,9 +165,7 @@ def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
     monkeypatch.setattr(
-        vllm_config_module,
-        "replace",
-        lambda self, **kwargs: SimpleNamespace(**kwargs),
+        vllm_config_module, "replace", lambda self, **kwargs: SimpleNamespace(**kwargs)
     )
     cfg = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -189,22 +177,16 @@ def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
     hf_config = SimpleNamespace(model_type="mistral", architectures=None)
 
     updated = VllmConfig.with_hf_config(
-        cfg,
-        hf_config,
-        architectures=["Ministral3ForCausalLM"],
+        cfg, hf_config, architectures=["Ministral3ForCausalLM"]
     )
 
     assert updated.model_config.hf_config.architectures == ["Ministral3ForCausalLM"]
 
 
 @pytest.mark.skip_global_cleanup
-def test_with_hf_config_leaves_unknown_model_type_without_architectures(
-    monkeypatch,
-):
+def test_with_hf_config_leaves_unknown_model_type_without_architectures(monkeypatch):
     monkeypatch.setattr(
-        vllm_config_module,
-        "replace",
-        lambda self, **kwargs: SimpleNamespace(**kwargs),
+        vllm_config_module, "replace", lambda self, **kwargs: SimpleNamespace(**kwargs)
     )
     cfg = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -213,10 +195,7 @@ def test_with_hf_config_leaves_unknown_model_type_without_architectures(
             get_model_arch_config=lambda: "arch-config",
         )
     )
-    hf_config = SimpleNamespace(
-        model_type="not_a_real_model",
-        architectures=None,
-    )
+    hf_config = SimpleNamespace(model_type="not_a_real_model", architectures=None)
 
     updated = VllmConfig.with_hf_config(cfg, hf_config)
 
@@ -226,14 +205,10 @@ def test_with_hf_config_leaves_unknown_model_type_without_architectures(
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     cfg = VllmConfig(
         scheduler_config=SchedulerConfig(
-            max_model_len=8192,
-            is_encoder_decoder=False,
-            async_scheduling=True,
+            max_model_len=8192, is_encoder_decoder=False, async_scheduling=True
         ),
         parallel_config=ParallelConfig(
-            pipeline_parallel_size=2,
-            distributed_executor_backend="mp",
-            nnodes=2,
+            pipeline_parallel_size=2, distributed_executor_backend="mp", nnodes=2
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
@@ -323,9 +298,7 @@ def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
 
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_convert_type"),
-    [
-        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none"),
-    ],
+    [("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none")],
 )
 def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     config = ModelConfig(model_id, runner="draft")
@@ -483,10 +456,7 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
-        "lmsys/longchat-13b-16k",
-        hf_overrides={
-            "rope_parameters": TEST_ROPE_PARAMETERS,
-        },
+        "lmsys/longchat-13b-16k", hf_overrides={"rope_parameters": TEST_ROPE_PARAMETERS}
     )
     assert (
         getattr(longchat_model_config.hf_config, "rope_parameters", None)
@@ -499,12 +469,7 @@ def test_nested_hf_overrides():
     """Test that nested hf_overrides work correctly."""
     # Test with a model that has text_config
     model_config = ModelConfig(
-        "Qwen/Qwen2-VL-2B-Instruct",
-        hf_overrides={
-            "text_config": {
-                "hidden_size": 1024,
-            },
-        },
+        "Qwen/Qwen2-VL-2B-Instruct", hf_overrides={"text_config": {"hidden_size": 1024}}
     )
     assert model_config.hf_config.text_config.hidden_size == 1024
 
@@ -512,13 +477,8 @@ def test_nested_hf_overrides():
     model_config = ModelConfig(
         "Qwen/Qwen2-VL-2B-Instruct",
         hf_overrides={
-            "text_config": {
-                "hidden_size": 2048,
-                "num_attention_heads": 16,
-            },
-            "vision_config": {
-                "hidden_size": 512,
-            },
+            "text_config": {"hidden_size": 2048, "num_attention_heads": 16},
+            "vision_config": {"hidden_size": 512},
         },
     )
     assert model_config.hf_config.text_config.hidden_size == 2048
@@ -545,10 +505,7 @@ def test_is_encoder_decoder(model_id, is_encoder_decoder):
 
 @pytest.mark.parametrize(
     ("model_id", "uses_mrope"),
-    [
-        ("facebook/opt-125m", False),
-        ("Qwen/Qwen2-VL-2B-Instruct", True),
-    ],
+    [("facebook/opt-125m", False), ("Qwen/Qwen2-VL-2B-Instruct", True)],
 )
 def test_uses_mrope(model_id, uses_mrope):
     config = ModelConfig(model_id)
@@ -602,13 +559,7 @@ def test_generation_config_loading():
     assert model_config.get_diff_sampling_param() == override_generation_config
 
 
-@pytest.mark.parametrize(
-    "pt_load_map_location",
-    [
-        DEVICE_TYPE,
-        {"": DEVICE_TYPE},
-    ],
-)
+@pytest.mark.parametrize("pt_load_map_location", [DEVICE_TYPE, {"": DEVICE_TYPE}])
 def test_load_config_pt_load_map_location(pt_load_map_location):
     load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
     config = VllmConfig(load_config=load_config)
@@ -650,11 +601,7 @@ class MockConfig:
 
 
 @pytest.mark.parametrize(
-    "s3_url",
-    [
-        "s3://example-bucket-1/model/",
-        "s3://example-bucket-2/model/",
-    ],
+    "s3_url", ["s3://example-bucket-1/model/", "s3://example-bucket-2/model/"]
 )
 @patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
 def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
@@ -1089,8 +1036,7 @@ def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
         )
     else:
         vllm_config = VllmConfig(
-            compilation_config=compilation_config,
-            optimization_level=optimization_level,
+            compilation_config=compilation_config, optimization_level=optimization_level
         )
     # Use the global optimization level defaults
     default_config = OPTIMIZATION_LEVEL_TO_CONFIG[optimization_level]
@@ -1175,8 +1121,7 @@ def test_vllm_config_explicit_overrides():
     # Explicit compilation mode override on O0 (where default is NONE)
     compilation_config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
     config = VllmConfig(
-        optimization_level=OptimizationLevel.O0,
-        compilation_config=compilation_config,
+        optimization_level=OptimizationLevel.O0, compilation_config=compilation_config
     )
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
@@ -1185,8 +1130,7 @@ def test_vllm_config_explicit_overrides():
     pass_config = PassConfig(eliminate_noops=True, fuse_attn_quant=True)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
-        optimization_level=OptimizationLevel.O0,
-        compilation_config=compilation_config,
+        optimization_level=OptimizationLevel.O0, compilation_config=compilation_config
     )
     assert config.compilation_config.pass_config.eliminate_noops is True
     assert config.compilation_config.pass_config.fuse_attn_quant is True
@@ -1269,9 +1213,7 @@ def test_fusion_pass_op_priority():
     # rms_norm manually enabled, O1, rms_norm+quant fusion enabled
     cfg2 = VllmConfig(
         optimization_level=OptimizationLevel.O1,
-        compilation_config=CompilationConfig(
-            custom_ops=["+rms_norm"],
-        ),
+        compilation_config=CompilationConfig(custom_ops=["+rms_norm"]),
     )
     assert cfg2.compilation_config.pass_config.fuse_norm_quant
 
@@ -1303,12 +1245,7 @@ def test_scheduler_config_init():
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "data_parallel_size",
-        "external_lb",
-        "expected_needs_coordinator",
-    ),
+    ("model_id", "data_parallel_size", "external_lb", "expected_needs_coordinator"),
     [
         # Non-MoE model with DP=1 should not need coordinator
         ("facebook/opt-125m", 1, False, False),
@@ -1325,18 +1262,14 @@ def test_scheduler_config_init():
     ],
 )
 def test_needs_dp_coordination(
-    model_id,
-    data_parallel_size,
-    external_lb,
-    expected_needs_coordinator,
+    model_id, data_parallel_size, external_lb, expected_needs_coordinator
 ):
     """Test that DP coordinator and wave coordination are configured correctly."""
     from vllm.config import ParallelConfig
 
     model_config = ModelConfig(model_id)
     parallel_config = ParallelConfig(
-        data_parallel_size=data_parallel_size,
-        data_parallel_external_lb=external_lb,
+        data_parallel_size=data_parallel_size, data_parallel_external_lb=external_lb
     )
     vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
 
@@ -1387,9 +1320,7 @@ def test_eagle_draft_model_config():
 
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
-        draft_sample_method="probabilistic",
+        method="ngram", num_speculative_tokens=1, draft_sample_method="probabilistic"
     )
     assert speculative_config.draft_sample_method == "probabilistic"
 
@@ -1397,9 +1328,7 @@ def test_draft_sample_method_probabilistic_is_accepted():
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
-            method="ngram",
-            num_speculative_tokens=1,
-            draft_sample_method="gumbel",
+            method="ngram", num_speculative_tokens=1, draft_sample_method="gumbel"
         )
 
 

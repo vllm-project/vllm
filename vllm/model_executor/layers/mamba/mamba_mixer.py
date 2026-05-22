@@ -140,9 +140,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         tp_size = get_tensor_model_parallel_world_size()
         self.A = nn.Parameter(
             torch.empty(
-                intermediate_size // tp_size,
-                ssm_state_size,
-                dtype=torch.float32,
+                intermediate_size // tp_size, ssm_state_size, dtype=torch.float32
             )
         )
         self.D = nn.Parameter(torch.ones(intermediate_size // tp_size))
@@ -159,31 +157,19 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
         self.dt_layernorm = (
-            RMSNorm(
-                time_step_rank,
-                eps=rms_norm_eps,
-                has_weight=rms_norm_has_weight,
-            )
+            RMSNorm(time_step_rank, eps=rms_norm_eps, has_weight=rms_norm_has_weight)
             if use_rms_norm
             else None
         )
 
         self.b_layernorm = (
-            RMSNorm(
-                ssm_state_size,
-                eps=rms_norm_eps,
-                has_weight=rms_norm_has_weight,
-            )
+            RMSNorm(ssm_state_size, eps=rms_norm_eps, has_weight=rms_norm_has_weight)
             if use_rms_norm
             else None
         )
 
         self.c_layernorm = (
-            RMSNorm(
-                ssm_state_size,
-                eps=rms_norm_eps,
-                has_weight=rms_norm_has_weight,
-            )
+            RMSNorm(ssm_state_size, eps=rms_norm_eps, has_weight=rms_norm_has_weight)
             if use_rms_norm
             else None
         )
@@ -231,9 +217,7 @@ class MambaMixer(MambaBase, PluggableLayer):
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         torch.ops.vllm.mamba_mixer(
-            hidden_states,
-            output,
-            _encode_layer_name(self.prefix),
+            hidden_states, output, _encode_layer_name(self.prefix)
         )
 
     def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor):
@@ -306,10 +290,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
         prefill_decode_split = split_batch_to_prefill_and_decode(
-            hidden_states_BC,
-            gate,
-            num_prefill_tokens,
-            num_decode_tokens,
+            hidden_states_BC, gate, num_prefill_tokens, num_decode_tokens
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
@@ -521,9 +502,7 @@ def split_batch_to_prefill_and_decode(
 
 
 def mamba_mixer(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: LayerNameType
 ) -> None:
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -532,9 +511,7 @@ def mamba_mixer(
 
 
 def mamba_mixer_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
+    hidden_states: torch.Tensor, output: torch.Tensor, layer_name: LayerNameType
 ) -> None:
     return
 

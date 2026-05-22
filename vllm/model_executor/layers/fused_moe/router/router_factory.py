@@ -7,18 +7,14 @@ import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import (
-    RoutingMethodType,
-)
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
     AiterSharedRoutedFusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
 )

@@ -159,8 +159,7 @@ def test_use_spec_decode_enables(_mock):
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
 @patch(
-    "vllm.utils.flashinfer.current_platform.fp8_dtype",
-    return_value=torch.float8_e4m3fn,
+    "vllm.utils.flashinfer.current_platform.fp8_dtype", return_value=torch.float8_e4m3fn
 )
 def test_use_fp8_query_forces_trtllm(_fp8, _sup):
     assert _call(q_dtype=torch.float8_e4m3fn) is True

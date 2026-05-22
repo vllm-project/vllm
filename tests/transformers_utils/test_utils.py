@@ -10,12 +10,7 @@ from vllm.transformers_utils.gguf_utils import (
     is_remote_gguf,
     split_remote_gguf,
 )
-from vllm.transformers_utils.utils import (
-    is_azure,
-    is_cloud_storage,
-    is_gcs,
-    is_s3,
-)
+from vllm.transformers_utils.utils import is_azure, is_cloud_storage, is_gcs, is_s3
 
 
 def test_is_gcs():

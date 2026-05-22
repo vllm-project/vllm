@@ -160,11 +160,7 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("clean_logits", [True, False])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
-def test_top_k_per_row(
-    num_rows: int,
-    top_k: int,
-    clean_logits: bool,
-) -> None:
+def test_top_k_per_row(num_rows: int, top_k: int, clean_logits: bool) -> None:
     """
     Test top_k_per_row.
     """
@@ -276,11 +272,7 @@ def _run_top_k_per_row_decode_test(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
 def test_top_k_per_row_decode(
-    top_k: int,
-    batch_size: int,
-    next_n: int,
-    clean_logits: bool,
-    data_generation: str,
+    top_k: int, batch_size: int, next_n: int, clean_logits: bool, data_generation: str
 ) -> None:
     """
     Test top_k_per_row with seq_lens tensor.
@@ -628,30 +620,18 @@ def test_persistent_topk_correctness(test_config: dict) -> None:
     "test_config",
     [
         # ==================== CATEGORY: Batch Size Scalability ====================
+        pytest.param({"batch_size": 1, "seq_len": 5000, "top_k": 2048}, id="batch_1"),
+        pytest.param({"batch_size": 4, "seq_len": 5000, "top_k": 2048}, id="batch_4"),
+        pytest.param({"batch_size": 32, "seq_len": 5000, "top_k": 2048}, id="batch_32"),
         pytest.param(
-            {"batch_size": 1, "seq_len": 5000, "top_k": 2048},
-            id="batch_1",
-        ),
-        pytest.param(
-            {"batch_size": 4, "seq_len": 5000, "top_k": 2048},
-            id="batch_4",
-        ),
-        pytest.param(
-            {"batch_size": 32, "seq_len": 5000, "top_k": 2048},
-            id="batch_32",
-        ),
-        pytest.param(
-            {"batch_size": 256, "seq_len": 5000, "top_k": 2048},
-            id="batch_256",
+            {"batch_size": 256, "seq_len": 5000, "top_k": 2048}, id="batch_256"
         ),
         # ==================== CATEGORY: Single-CTA vs Multi-CTA ====================
         pytest.param(
-            {"batch_size": 2, "seq_len": 4096, "top_k": 2048},
-            id="single_cta_4k",
+            {"batch_size": 2, "seq_len": 4096, "top_k": 2048}, id="single_cta_4k"
         ),
         pytest.param(
-            {"batch_size": 2, "seq_len": 8192, "top_k": 2048},
-            id="single_cta_8k",
+            {"batch_size": 2, "seq_len": 8192, "top_k": 2048}, id="single_cta_8k"
         ),
         pytest.param(
             {"batch_size": 2, "seq_len": 163840, "top_k": 2048},
@@ -703,10 +683,7 @@ def test_persistent_topk_stress() -> None:
         seq_lens = torch.randint(100, 163840, (batch_size,)).tolist()
 
         run_large_context_topk_test(
-            batch_size=batch_size,
-            seq_lens=seq_lens,
-            top_k=top_k,
-            seed=seed,
+            batch_size=batch_size, seq_lens=seq_lens, top_k=top_k, seed=seed
         )
 
 
@@ -716,59 +693,35 @@ def test_persistent_topk_stress() -> None:
     [
         # Mixed batch: rows spanning all four paths (trivial, decode, medium, large)
         pytest.param(
-            {
-                "seq_lens": [2000, 6000, 30000, 80000],
-                "data_type": "random",
-            },
+            {"seq_lens": [2000, 6000, 30000, 80000], "data_type": "random"},
             id="mixed_all_paths",
         ),
         # All decode/medium rows (typical decode scenario)
         pytest.param(
-            {
-                "seq_lens": [2048, 4096, 8192, 16000],
-                "data_type": "random",
-            },
+            {"seq_lens": [2048, 4096, 8192, 16000], "data_type": "random"},
             id="all_decode_medium",
         ),
         # All large rows
         pytest.param(
-            {
-                "seq_lens": [70000, 100000, 163840],
-                "data_type": "random",
-            },
-            id="all_large",
+            {"seq_lens": [70000, 100000, 163840], "data_type": "random"}, id="all_large"
         ),
         # Boundary around LARGE_THRESHOLD (32K)
         pytest.param(
-            {
-                "seq_lens": [32767, 32768, 32769, 32772],
-                "data_type": "random",
-            },
+            {"seq_lens": [32767, 32768, 32769, 32772], "data_type": "random"},
             id="large_threshold_boundary",
         ),
         # Single row medium
         pytest.param(
-            {
-                "seq_lens": [5000],
-                "data_type": "random",
-            },
-            id="single_row_medium",
+            {"seq_lens": [5000], "data_type": "random"}, id="single_row_medium"
         ),
         # Single row large
         pytest.param(
-            {
-                "seq_lens": [100000],
-                "top_k": 2048,
-                "data_type": "random",
-            },
+            {"seq_lens": [100000], "top_k": 2048, "data_type": "random"},
             id="single_row_large",
         ),
         # Trivial rows mixed with medium and large
         pytest.param(
-            {
-                "seq_lens": [100, 2048, 10000, 80000],
-                "data_type": "random",
-            },
+            {"seq_lens": [100, 2048, 10000, 80000], "data_type": "random"},
             id="trivial_medium_large_mix",
         ),
     ],
@@ -808,10 +761,7 @@ def test_persistent_topk_padded_stride(top_k: int) -> None:
 
     # Create padded logits tensor (like fp8_paged_mqa_logits output)
     logits = torch.full(
-        (batch_size, padded_stride),
-        float("-inf"),
-        dtype=torch.float32,
-        device="cuda",
+        (batch_size, padded_stride), float("-inf"), dtype=torch.float32, device="cuda"
     )
     for i, sl in enumerate(actual_seq_lens):
         logits[i, :sl] = torch.randn(sl, dtype=torch.float32, device="cuda")

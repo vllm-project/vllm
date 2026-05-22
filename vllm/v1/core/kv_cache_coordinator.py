@@ -17,11 +17,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.request import Request
 
 
@@ -261,9 +257,7 @@ class KVCacheCoordinator(ABC):
 
     @abstractmethod
     def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
+        self, block_hashes: list[BlockHash], max_cache_hit_length: int
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
@@ -311,9 +305,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
+        self, block_hashes: list[BlockHash], max_cache_hit_length: int
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -371,9 +363,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         )
 
     def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
+        self, block_hashes: list[BlockHash], max_cache_hit_length: int
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -464,8 +454,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
         self.attention_groups = sorted(
-            attention_groups,
-            key=lambda x: not isinstance(x[0], FullAttentionSpec),
+            attention_groups, key=lambda x: not isinstance(x[0], FullAttentionSpec)
         )
 
         # The LCM of the block sizes of all attention types.
@@ -495,15 +484,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         for manager in self.single_type_managers:
             manager.cache_blocks(
-                request,
-                num_computed_tokens,
-                alignment_tokens=self.lcm_block_size,
+                request, num_computed_tokens, alignment_tokens=self.lcm_block_size
             )
 
     def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
+        self, block_hashes: list[BlockHash], max_cache_hit_length: int
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.

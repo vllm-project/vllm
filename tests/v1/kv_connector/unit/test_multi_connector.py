@@ -26,9 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
-    NixlKVConnectorStats,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlKVConnectorStats
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
@@ -139,7 +137,7 @@ def mc() -> MultiConnector:
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
         kv_connector_extra_config={
-            "connectors": [mock_connector_config, mock_connector_config],
+            "connectors": [mock_connector_config, mock_connector_config]
         },
     )
 
@@ -393,10 +391,7 @@ def test_multi_connector_handle_preemptions_integration():
     This test directly calls handle_preemptions on a MultiConnector with
     TestExampleConnector sub-connectors and verifies the calls are logged.
     """
-    from tests.v1.kv_connector.unit.utils import (
-        create_scheduler,
-        create_vllm_config,
-    )
+    from tests.v1.kv_connector.unit.utils import create_scheduler, create_vllm_config
 
     storage_path = Path(tempfile.mkdtemp())
 
@@ -576,10 +571,7 @@ class TestMultiConnectorStats:
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
 
-        data_with_objects = {
-            "NixlConnector": nixl_stats,
-            "MockConnector": mock_stats,
-        }
+        data_with_objects = {"NixlConnector": nixl_stats, "MockConnector": mock_stats}
 
         stats = MultiConnector.build_kv_connector_stats(data=data_with_objects)
 
@@ -785,9 +777,7 @@ class TestMultiConnectorStats:
         """Test is_empty() returns correct value with multiple connectors."""
         # All empty
         stats = MultiKVConnectorStats(
-            data={
-                "NixlConnector": NixlKVConnectorStats(data={}),
-            }
+            data={"NixlConnector": NixlKVConnectorStats(data={})}
         )
         # Initialize empty stats
         stats.data["NixlConnector"].reset()
@@ -979,9 +969,7 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
         kv_connector_extra_config={"connectors": connectors},
     )
     kv_cache_config = KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=[],
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
     )
     return MultiConnector(
         vllm_config=vllm_config,
@@ -1048,10 +1036,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
         kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [
-                {
-                    "kv_connector": "NixlConnector",
-                    "kv_role": "kv_both",
-                },
+                {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
                 {
                     "kv_connector": "MockConnector",
                     "kv_role": "kv_both",
@@ -1059,7 +1044,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
                         "tests.v1.kv_connector.unit.test_multi_connector"
                     ),
                 },
-            ],
+            ]
         },
     )
 

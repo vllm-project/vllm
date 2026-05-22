@@ -12,10 +12,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = logging.getLogger(__name__)
 
 
-def has_io_processor(
-    vllm_config: VllmConfig,
-    plugin_from_init: str | None = None,
-):
+def has_io_processor(vllm_config: VllmConfig, plugin_from_init: str | None = None):
     if plugin_from_init:
         model_plugin = plugin_from_init
     else:
@@ -30,9 +27,7 @@ def has_io_processor(
 
 
 def get_io_processor(
-    vllm_config: VllmConfig,
-    renderer: BaseRenderer,
-    plugin_from_init: str | None = None,
+    vllm_config: VllmConfig, renderer: BaseRenderer, plugin_from_init: str | None = None
 ) -> IOProcessor | None:
     # Input.Output processors are loaded as plugins under the
     # 'vllm.io_processor_plugins' group. Similar to platform

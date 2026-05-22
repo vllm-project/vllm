@@ -13,16 +13,8 @@ from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
-from vllm.config import (
-    CompilationMode,
-    set_current_vllm_config,
-)
-from vllm.distributed import (
-    get_dp_group,
-    get_ep_group,
-    get_pcp_group,
-    get_tp_group,
-)
+from vllm.config import CompilationMode, set_current_vllm_config
+from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group, get_tp_group
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
@@ -117,9 +109,7 @@ def broadcast_expert_mapping(
     if dp_group.rank_in_group != src_rank:
         assert device is not None
         physical_to_logical = torch.empty(
-            tuple(shape_tensor.tolist()),
-            dtype=torch.int64,
-            device=device,
+            tuple(shape_tensor.tolist()), dtype=torch.int64, device=device
         )
 
     assert physical_to_logical is not None

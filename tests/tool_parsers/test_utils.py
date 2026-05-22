@@ -3,10 +3,7 @@
 
 import pytest
 
-from vllm.tool_parsers.utils import (
-    coerce_to_schema_type,
-    extract_types_from_schema,
-)
+from vllm.tool_parsers.utils import coerce_to_schema_type, extract_types_from_schema
 
 
 class TestCoerceToSchemaType:

@@ -43,11 +43,7 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     mixed_qkv = torch.rand(num_tokens, mixed_qkv_dim, dtype=dtype)
     query, key, value = torch.split(
         mixed_qkv,
-        [
-            key_dim // tp_size,
-            key_dim // tp_size,
-            value_dim // tp_size,
-        ],
+        [key_dim // tp_size, key_dim // tp_size, value_dim // tp_size],
         dim=-1,
     )
     query = query.view(1, num_tokens, num_k_heads, head_k_dim)
@@ -129,11 +125,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     mixed_qkv = torch.rand(num_tokens, mixed_qkv_dim, dtype=dtype)
     query, key, value = torch.split(
         mixed_qkv,
-        [
-            key_dim // tp_size,
-            key_dim // tp_size,
-            value_dim // tp_size,
-        ],
+        [key_dim // tp_size, key_dim // tp_size, value_dim // tp_size],
         dim=-1,
     )
     query = query.view(1, num_tokens, num_k_heads, head_k_dim)
@@ -147,10 +139,9 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     ssm_state = torch.rand(
         total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
-    state_indices = torch.randperm(
-        total_entries,
-        dtype=torch.int32,
-    )[:num_tokens].view(num_reqs, num_speculative_tokens + 1)
+    state_indices = torch.randperm(total_entries, dtype=torch.int32)[:num_tokens].view(
+        num_reqs, num_speculative_tokens + 1
+    )
     num_accepted_tokens = torch.randint(
         1, num_speculative_tokens + 1, (num_reqs,), dtype=torch.int32
     )

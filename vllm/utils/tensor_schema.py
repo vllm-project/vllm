@@ -11,11 +11,7 @@ logger = init_logger(__name__)
 
 
 class TensorShape:
-    def __init__(
-        self,
-        *dims: int | str,
-        dynamic_dims: set[str] | None = None,
-    ) -> None:
+    def __init__(self, *dims: int | str, dynamic_dims: set[str] | None = None) -> None:
         super().__init__()
 
         self.dims = dims
@@ -137,10 +133,7 @@ class TensorSchema:
             if i == 0:
                 first_shape = shape
             elif not self._match_shape_with_dynamic(
-                shape,
-                first_shape,
-                expected_shape,
-                dynamic_dims,
+                shape, first_shape, expected_shape, dynamic_dims
             ):
                 raise ValueError(
                     f"{field_name}{self._fmt_indexer(leading_idxs)} "
@@ -228,10 +221,7 @@ class TensorSchema:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.resolve(**self._resolve_bindings)
                         actual_shape = self._validate_field(
-                            value,
-                            field_name,
-                            expected_shape,
-                            arg.dynamic_dims,
+                            value, field_name, expected_shape, arg.dynamic_dims
                         )
 
                         self._validate_tensor_shape_expected(

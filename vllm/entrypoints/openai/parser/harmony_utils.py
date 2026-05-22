@@ -28,8 +28,7 @@ logger = init_logger(__name__)
 
 
 def is_function_recipient(
-    recipient: str,
-    allowed_function_tool_names: frozenset[str] | None = None,
+    recipient: str, allowed_function_tool_names: frozenset[str] | None = None
 ) -> bool:
     """Check whether *recipient* refers to a function tool call.
 
@@ -153,9 +152,7 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
             parameters=tool.function.parameters,
         )
     return ToolDescription.new(
-        name=tool.name,
-        description=tool.description,
-        parameters=tool.parameters,
+        name=tool.name, description=tool.description, parameters=tool.parameters
     )
 
 
@@ -169,11 +166,7 @@ def get_developer_message(
     if tools is not None:
         function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:
-            if tool.type in (
-                "web_search_preview",
-                "code_interpreter",
-                "container",
-            ):
+            if tool.type in ("web_search_preview", "code_interpreter", "container"):
                 pass
 
             elif tool.type == "function":
@@ -380,9 +373,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     return parser
 
 
-def parse_chat_output(
-    token_ids: Sequence[int],
-) -> tuple[str | None, str | None, bool]:
+def parse_chat_output(token_ids: Sequence[int]) -> tuple[str | None, str | None, bool]:
     """
     Parse the output of a Harmony chat completion into reasoning and final content.
     Note that when the `openai` tool parser is used, serving_chat only uses this

@@ -98,8 +98,7 @@ class MiMoMultiTokenPredictor(nn.Module):
         self.num_mtp_layers = config.num_nextn_predict_layers
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
 
         self.mtp_layers = torch.nn.ModuleDict(
@@ -134,10 +133,7 @@ class MiMoMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         return self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)](
-            inputs_embeds,
-            positions,
-            previous_hidden_states,
-            spec_step_idx,
+            inputs_embeds, positions, previous_hidden_states, spec_step_idx
         )
 
     def compute_logits(
@@ -183,9 +179,7 @@ class MiMoMTP(nn.Module):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 

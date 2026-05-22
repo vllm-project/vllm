@@ -17,15 +17,9 @@ input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [0, 3293, 12996, 509, 40881, 136, 204839, 297, 759, 202702, 2]
 
 
-TEXTS_1 = [
-    "What is the capital of France?",
-    "What is the capital of Germany?",
-]
+TEXTS_1 = ["What is the capital of France?", "What is the capital of Germany?"]
 
-TEXTS_2 = [
-    "The capital of France is Paris.",
-    "The capital of Germany is Berlin.",
-]
+TEXTS_2 = ["The capital of France is Paris.", "The capital of Germany is Berlin."]
 
 
 @pytest.fixture(scope="module")
@@ -54,8 +48,7 @@ async def test_basic(server: RemoteOpenAIServer):
 
     # test /tokenize
     response = requests.post(
-        server.url_for("/tokenize"),
-        json={"model": MODEL_NAME, "prompt": input_text},
+        server.url_for("/tokenize"), json={"model": MODEL_NAME, "prompt": input_text}
     )
     assert response.json()["tokens"] == input_tokens
 
@@ -66,11 +59,7 @@ async def test_score_api_queries_str_1_documents_str_1(
 ):
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1[0],
-            "documents": TEXTS_2[0],
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1[0], "documents": TEXTS_2[0]},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -90,18 +79,11 @@ async def test_score_api_queries_str_1_documents_str_1(
 async def test_score_api_queries_str_1_documents_str_n(
     hf_model, server: RemoteOpenAIServer
 ):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[0], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[0], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1[0],
-            "documents": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1[0], "documents": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -121,18 +103,11 @@ async def test_score_api_queries_str_1_documents_str_n(
 async def test_score_api_queries_str_n_documents_str_n(
     hf_model, server: RemoteOpenAIServer
 ):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "documents": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1, "documents": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -150,18 +125,11 @@ async def test_score_api_queries_str_n_documents_str_n(
 
 @pytest.mark.asyncio
 async def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "documents": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1, "documents": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -179,18 +147,11 @@ async def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServ
 
 @pytest.mark.asyncio
 async def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": TEXTS_1,
-            "items": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "queries": TEXTS_1, "items": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -208,18 +169,11 @@ async def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 async def test_score_api_text_1_vs_text_2(hf_model, server: RemoteOpenAIServer):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "text_1": TEXTS_1,
-            "text_2": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "text_1": TEXTS_1, "text_2": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -237,18 +191,11 @@ async def test_score_api_text_1_vs_text_2(hf_model, server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 async def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
+    text_pairs = [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "data_1": TEXTS_1,
-            "data_2": TEXTS_2,
-        },
+        json={"model": MODEL_NAME, "data_1": TEXTS_1, "data_2": TEXTS_2},
     )
     score_response.raise_for_status()
     score = ScoreResponse.model_validate(score_response.json())
@@ -274,11 +221,7 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
 
     rerank_response = requests.post(
         server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "query": query, "documents": documents},
     )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
@@ -340,11 +283,7 @@ async def test_score_api_max_model_len(server: RemoteOpenAIServer):
 
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": MODEL_NAME,
-            "queries": queries,
-            "documents": documents,
-        },
+        json={"model": MODEL_NAME, "queries": queries, "documents": documents},
     )
     assert score_response.status_code == 400
     # Assert just a small fragments of the response
@@ -372,11 +311,7 @@ async def test_invocations(server: RemoteOpenAIServer):
         "The capital of France is Paris.",
     ]
 
-    request_args = {
-        "model": MODEL_NAME,
-        "query": query,
-        "documents": documents,
-    }
+    request_args = {"model": MODEL_NAME, "query": query, "documents": documents}
 
     rerank_response = requests.post(server.url_for("rerank"), json=request_args)
     rerank_response.raise_for_status()
@@ -453,9 +388,7 @@ async def test_pooling_classify(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_rerank_max_tokens_per_doc(
-    server: RemoteOpenAIServer,
-):
+async def test_rerank_max_tokens_per_doc(server: RemoteOpenAIServer):
     """Test that max_tokens_per_doc actually reduces the token count."""
     query = "What is the capital of France?"
     # Use a doc that fits within max_model_len=100 (query ~8 tokens + 4 special)
@@ -491,9 +424,7 @@ async def test_rerank_max_tokens_per_doc(
 
 
 @pytest.mark.asyncio
-async def test_rerank_max_tokens_per_doc_validation(
-    server: RemoteOpenAIServer,
-):
+async def test_rerank_max_tokens_per_doc_validation(server: RemoteOpenAIServer):
     """Test that max_tokens_per_doc validation works correctly."""
     query = "What is the capital of France?"
     documents = ["The capital of France is Paris."]

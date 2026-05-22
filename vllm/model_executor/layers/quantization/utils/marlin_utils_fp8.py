@@ -360,11 +360,7 @@ def apply_mxfp8_marlin_linear(
     out_shape = input.shape[:-1] + (size_n,)
 
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=size_n,
-        k=size_k,
-        device=input.device,
-        dtype=input.dtype,
+        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
     )
 
     output = ops.marlin_gemm(
@@ -432,10 +428,7 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # Permute scales to Marlin layout
     marlin_scales = marlin_permute_scales(
-        s=scales,
-        size_k=part_size_k,
-        size_n=part_size_n,
-        group_size=group_size,
+        s=scales, size_k=part_size_k, size_n=part_size_n, group_size=group_size
     )
 
     # Reorder for e8m0 kernel layout and convert back to e8m0fnu
@@ -493,11 +486,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
             qweight = pack_fp8_to_int32(weight[i], size_k_first=False)
             qweight = qweight.T.contiguous()
             marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=8,
+                b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=8
             )
             tensor_list.append(marlin_qweight)
         return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
@@ -517,10 +506,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
             s = s.view(torch.float8_e8m0fnu).to(param_dtype)
             s = s.T.contiguous()
             marlin_s = marlin_permute_scales(
-                s=s,
-                size_k=size_k,
-                size_n=size_n,
-                group_size=group_size,
+                s=s, size_k=size_k, size_n=size_n, group_size=group_size
             )
             marlin_s = mxfp8_marlin_process_scales(marlin_s)
             tensor_list.append(marlin_s)

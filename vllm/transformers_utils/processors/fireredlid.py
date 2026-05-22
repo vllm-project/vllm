@@ -18,10 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import (
-    AutoFeatureExtractor,
-    BatchFeature,
-)
+from transformers import AutoFeatureExtractor, BatchFeature
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 from transformers.utils import TensorType
@@ -194,8 +191,7 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
             #   pad context frames, then mask[:, :, :-2:2][:, :, :-2:2].sum()
             padded_input = F.pad(feat, (0, 0, 0, self.context - 1), "constant", 0.0)
             src_mask = padding_position_is_0(
-                padded_input[None, :, :],
-                torch.tensor([length], dtype=torch.int32),
+                padded_input[None, :, :], torch.tensor([length], dtype=torch.int32)
             )
             mask = src_mask[:, :, :-2:2][:, :, :-2:2]
             enc_len = mask[:, -1, :].sum(dim=-1)

@@ -141,9 +141,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -341,10 +339,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
-    worker.kv_cache_config = make_kv_cache_config(
-        block_size=16,
-        mamba_enabled=True,
-    )
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
     worker._has_mamba = True
     worker._group_spec_types = tuple(
         type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
@@ -354,9 +349,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids,
-        remote_block_ids,
-        remote_physical_per_logical,
+        local_block_ids, remote_block_ids, remote_physical_per_logical
     )
 
     assert (
@@ -375,8 +368,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     when sequence exceeds the sliding window.
     """
     kv_transfer_config = KVTransferConfig(
-        kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_connector="NixlConnector", kv_role="kv_both"
     )
     block_size = 16
     llm_kwargs = {
@@ -620,11 +612,7 @@ def test_nixl_metadata_hybrid_ssm_block_ids():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "has_mamba,is_hma_required,expected_count",
-    [
-        (True, True, 9),
-        (False, False, 10),
-        (False, True, 10),
-    ],
+    [(True, True, 9), (False, False, 10), (False, True, 10)],
     ids=["mamba", "fa_only", "swa_only"],
 )
 def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
@@ -708,11 +696,7 @@ def test_mamba_n1_p_side_truncation():
 )
 @patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_has_mamba_init(
-    mock_platform,
-    swa_enabled,
-    mamba_enabled,
-    expected_has_mamba,
-    expected_is_hma,
+    mock_platform, swa_enabled, mamba_enabled, expected_has_mamba, expected_is_hma
 ):
     """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
@@ -727,9 +711,7 @@ def test_has_mamba_init(
     # is set; override so we can test the scheduler's own derivation.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(
-        block_size=block_size,
-        swa_enabled=swa_enabled,
-        mamba_enabled=mamba_enabled,
+        block_size=block_size, swa_enabled=swa_enabled, mamba_enabled=mamba_enabled
     )
 
     scheduler = NixlConnectorScheduler(
@@ -951,13 +933,7 @@ def test_derive_mamba_conv_split(
         ),
         # Pure FA (no mamba): single group expanded with remote stride
         pytest.param(
-            False,
-            False,
-            2,
-            4,
-            ([0, 1],),
-            [[0, 1, 2, 3, 4, 5, 6, 7]],
-            id="pure_fa",
+            False, False, 2, 4, ([0, 1],), [[0, 1, 2, 3, 4, 5, 6, 7]], id="pure_fa"
         ),
         # FA + SWA (no mamba): both groups expanded
         pytest.param(
@@ -995,14 +971,11 @@ def test_logical_to_remote_kernel_block_ids(
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16,
-        mamba_enabled=mamba_enabled,
-        swa_enabled=swa_enabled,
+        block_size=16, mamba_enabled=mamba_enabled, swa_enabled=swa_enabled
     )
 
     result = worker._logical_to_remote_kernel_block_ids(
-        logical_block_ids,
-        remote_physical_per_logical,
+        logical_block_ids, remote_physical_per_logical
     )
     assert list(result) == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {result}"

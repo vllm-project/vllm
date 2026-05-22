@@ -48,10 +48,7 @@ def test_query_text_vs_docs_image(llm):
     blue_image = make_base64_image(64, 64, color=(0, 0, 255))
 
     query = "Describe the red object"
-    image_docs = [
-        make_image_mm_param(red_image),
-        make_image_mm_param(blue_image),
-    ]
+    image_docs = [make_image_mm_param(red_image), make_image_mm_param(blue_image)]
 
     scores = llm.score(query, image_docs)
 
@@ -82,10 +79,7 @@ def test_query_image_vs_docs_text(llm) -> None:
     red_image = make_base64_image(64, 64, color=(255, 0, 0))
     image_query = make_image_mm_param(red_image, text="red color")
 
-    documents = [
-        "Describe the red object.",
-        "The capital of France is Paris.",
-    ]
+    documents = ["Describe the red object.", "The capital of France is Paris."]
 
     scores = llm.score(image_query, documents)
 

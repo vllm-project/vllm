@@ -173,11 +173,7 @@ def _fwd_kernel_stage1(
             + offs_dv
         )
 
-        tl.store(
-            Att_Out + offs_mid_o,
-            acc / e_sum,
-            mask=(mask_dv),
-        )
+        tl.store(Att_Out + offs_mid_o, acc / e_sum, mask=(mask_dv))
 
         offs_mid_o_1 = (
             cur_batch * stride_mid_ob
@@ -186,10 +182,7 @@ def _fwd_kernel_stage1(
             + Lv
         )
 
-        tl.store(
-            Att_Out + offs_mid_o_1,
-            e_max + tl.log(e_sum),
-        )
+        tl.store(Att_Out + offs_mid_o_1, e_max + tl.log(e_sum))
 
 
 def _decode_att_m_fwd(
@@ -435,11 +428,7 @@ def _fwd_grouped_kernel_stage1(
             + Lv
         )
 
-        tl.store(
-            Att_Out + offs_mid_o_1,
-            e_max + tl.log(e_sum),
-            mask=mask_h,
-        )
+        tl.store(Att_Out + offs_mid_o_1, e_max + tl.log(e_sum), mask=mask_h)
 
 
 def _decode_grouped_att_m_fwd(
@@ -487,11 +476,7 @@ def _decode_grouped_att_m_fwd(
 
     BLOCK_H = 16
     NUM_KV_SPLITS = num_kv_splits
-    grid = (
-        batch,
-        triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
-        NUM_KV_SPLITS,
-    )
+    grid = (batch, triton.cdiv(head_num, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
 
     extra_kargs = {}
     num_stages = 2
@@ -601,26 +586,13 @@ def _fwd_kernel_stage2(
     if OUTPUT_FP16:
         result = result.to(tl.float16)
     tl.store(
-        o + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
-        result,
-        mask=mask_d,
+        o + cur_batch * stride_obs + cur_head * stride_oh + offs_d, result, mask=mask_d
     )
     lse_val = e_max + tl.log(e_sum)
-    tl.store(
-        lse + cur_batch * stride_lse_bs + cur_head,
-        lse_val,
-    )
+    tl.store(lse + cur_batch * stride_lse_bs + cur_head, lse_val)
 
 
-def _decode_softmax_reducev_fwd(
-    logits,
-    q,
-    o,
-    lse,
-    v_buffer,
-    b_seq_len,
-    num_kv_splits,
-):
+def _decode_softmax_reducev_fwd(logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits):
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)

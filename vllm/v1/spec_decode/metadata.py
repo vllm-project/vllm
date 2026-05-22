@@ -28,9 +28,7 @@ class SpecDecodeMetadata:
 
     @classmethod
     def make_dummy(
-        cls,
-        draft_token_ids: list[list[int]],
-        device: torch.device,
+        cls, draft_token_ids: list[list[int]], device: torch.device
     ) -> "SpecDecodeMetadata":
         batch_size = len(draft_token_ids)
         num_draft_tokens = [len(ids) for ids in draft_token_ids]

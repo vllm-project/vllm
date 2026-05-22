@@ -14,9 +14,7 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def _quantize_and_setup_dispatch(
-    a1: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    defer_input_quant: bool = False,
+    a1: torch.Tensor, quant_config: FusedMoEQuantConfig, defer_input_quant: bool = False
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
     # Defer input quantization to the MoE kernel.
     if defer_input_quant:
@@ -53,8 +51,7 @@ def _quantize_and_setup_dispatch(
 
 
 def _unwrap_scale_and_prepare_for_moe(
-    scales: list[torch.Tensor] | None,
-    quant_config: FusedMoEQuantConfig,
+    scales: list[torch.Tensor] | None, quant_config: FusedMoEQuantConfig
 ) -> torch.Tensor:
     assert scales is not None and len(scales) == 1
     a1q_scale = scales[0]
@@ -77,9 +74,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
     """
 
     def __init__(
-        self,
-        is_sequence_parallel: bool = False,
-        num_dispatchers: int = 1,
+        self, is_sequence_parallel: bool = False, num_dispatchers: int = 1
     ) -> None:
         super().__init__()
         self.is_sequence_parallel = is_sequence_parallel
@@ -217,9 +212,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
     """
 
     def __init__(
-        self,
-        is_sequence_parallel: bool = False,
-        num_dispatchers: int = 1,
+        self, is_sequence_parallel: bool = False, num_dispatchers: int = 1
     ) -> None:
         super().__init__()
         self.is_sequence_parallel = is_sequence_parallel
@@ -270,10 +263,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
         return a1q, a1q_scale, router_logits
 
-    def finalize(
-        self,
-        fused_expert_output: torch.Tensor,
-    ) -> torch.Tensor:
+    def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         out = get_ep_group().combine(
             fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
         )
@@ -281,18 +271,14 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
 
 
 def make_moe_prepare_and_finalize_naive_dp_ep(
-    use_monolithic: bool,
-    is_sequence_parallel: bool = False,
-    num_dispatchers: int = 1,
+    use_monolithic: bool, is_sequence_parallel: bool = False, num_dispatchers: int = 1
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
+            is_sequence_parallel=is_sequence_parallel, num_dispatchers=num_dispatchers
         )
         if use_monolithic
         else MoEPrepareAndFinalizeNaiveDPEPModular(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
+            is_sequence_parallel=is_sequence_parallel, num_dispatchers=num_dispatchers
         )
     )

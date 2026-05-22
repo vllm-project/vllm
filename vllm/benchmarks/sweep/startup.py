@@ -167,11 +167,7 @@ def run_benchmark(
         return None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        cmd,
-        stdout=None if show_stdout else subprocess.DEVNULL,
-        check=True,
-    )
+    subprocess.run(cmd, stdout=None if show_stdout else subprocess.DEVNULL, check=True)
 
     with output_path.open("r", encoding="utf-8") as f:
         run_data = json.load(f)

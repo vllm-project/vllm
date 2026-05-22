@@ -27,8 +27,7 @@ if current_platform.is_xpu():
 
 
 def prepare_fp8_moe_layer_for_xpu(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
+    w13: torch.Tensor, w2: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return w13.transpose(-1, -2).contiguous(), w2.transpose(-1, -2).contiguous()
 
@@ -41,12 +40,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        super().__init__(
-            moe_config,
-            quant_config,
-            max_num_tokens,
-            num_dispatchers,
-        )
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
         self.is_fp8 = False
         self.is_mxfp4 = False
         self.is_mxfp8 = False
@@ -82,8 +76,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         SUPPORTED_W_A = [
             (None, None),
@@ -163,18 +156,12 @@ class XPUExpertsFp8(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        super().__init__(
-            moe_config,
-            quant_config,
-            max_num_tokens,
-            num_dispatchers,
-        )
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
         self.is_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
@@ -191,24 +178,15 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        super().__init__(
-            moe_config,
-            quant_config,
-            max_num_tokens,
-            num_dispatchers,
-        )
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
         assert quant_config.quant_dtype == "mxfp8"
         self.is_mxfp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp8Static, None),
-            (kMxfp8Static, kMxfp8Dynamic),
-        ]
+        SUPPORTED_W_A = [(kMxfp8Static, None), (kMxfp8Static, kMxfp8Dynamic)]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
@@ -220,20 +198,12 @@ class XPUExpertsMXFp4(XPUExperts):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        super().__init__(
-            moe_config,
-            quant_config,
-            max_num_tokens,
-            num_dispatchers,
-        )
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
         self.is_mxfp4 = True
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
+        weight_key: QuantKey | None, activation_key: QuantKey | None
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-        ]
+        SUPPORTED_W_A = [(kMxfp4Static, None)]
         return (weight_key, activation_key) in SUPPORTED_W_A

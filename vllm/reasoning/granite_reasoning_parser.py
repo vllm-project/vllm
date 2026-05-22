@@ -165,9 +165,7 @@ class GraniteReasoningParser(ReasoningParser):
         )
 
     def _get_delta_message_with_no_reasoning_bounds(
-        self,
-        current_text: str,
-        delta_text: str,
+        self, current_text: str, delta_text: str
     ) -> DeltaMessage:
         """Parse the delta message when the current text has not yet completed
         its start of reasoning sequence.
@@ -187,10 +185,7 @@ class GraniteReasoningParser(ReasoningParser):
         # if so, add everything that we previously skipped with this delta
         # message and append everything to content in the future.
         if was_substr and not is_substr:
-            return DeltaMessage(
-                reasoning=None,
-                content=current_text,
-            )
+            return DeltaMessage(reasoning=None, content=current_text)
         if is_substr:
             # Might still be in the special token sequence; return nothing
             return DeltaMessage(reasoning=None, content=None)
@@ -199,10 +194,7 @@ class GraniteReasoningParser(ReasoningParser):
         return DeltaMessage(reasoning=None, content=delta_text)
 
     def _get_delta_message_with_no_response_bounds(
-        self,
-        current_text: str,
-        reasoning: str,
-        delta_text: str,
+        self, current_text: str, reasoning: str, delta_text: str
     ) -> DeltaMessage:
         """Parse the delta message when the current text has both reasoning
         content with no (response) content. NOTE that we may have overlapping
@@ -272,8 +264,7 @@ class GraniteReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning=reasoning, content=None)
         # No new substring yet, and we broke our old one; take the whole delta
         return DeltaMessage(
-            reasoning=previous_text[prev_idx:] + delta_text,
-            content=None,
+            reasoning=previous_text[prev_idx:] + delta_text, content=None
         )
 
     def _get_delta_message_with_both_bounds(
@@ -314,10 +305,7 @@ class GraniteReasoningParser(ReasoningParser):
                 start_offset = 0
             delta_reasoning = delta_text[start_offset:reasoning_end_idx]
 
-        return DeltaMessage(
-            reasoning=delta_reasoning,
-            content=delta_content,
-        )
+        return DeltaMessage(reasoning=delta_reasoning, content=delta_content)
 
     def _get_content_sections(
         self, current_text: str

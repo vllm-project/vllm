@@ -16,20 +16,14 @@ import regex as re
 from mistral_common.protocol.instruct.tool_calls import (
     NamedToolChoice as MistralNamedToolChoice,
 )
-from mistral_common.protocol.instruct.tool_calls import (
-    Tool as MistralTool,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoice as MistralToolChoice,
-)
+from mistral_common.protocol.instruct.tool_calls import Tool as MistralTool
+from mistral_common.protocol.instruct.tool_calls import ToolChoice as MistralToolChoice
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoiceEnum as MistralToolChoiceEnum,
 )
 from pydantic import Field
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -44,10 +38,7 @@ from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
@@ -424,9 +415,7 @@ class MistralToolParser(ToolParser):
         ]
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
@@ -465,10 +454,7 @@ class MistralToolParser(ToolParser):
                     continue
 
                 end_name = raw_tool_call.find("{")
-                tool_name, args = (
-                    raw_tool_call[:end_name],
-                    raw_tool_call[end_name:],
-                )
+                tool_name, args = (raw_tool_call[:end_name], raw_tool_call[end_name:])
 
                 # HF tokenizers may include [ARGS] in the text
                 tool_name = tool_name.replace("[ARGS]", "")
@@ -497,8 +483,7 @@ class MistralToolParser(ToolParser):
                         {
                             "name": tool_call["name"],
                             "arguments": json.dumps(
-                                tool_call.get("arguments", {}),
-                                ensure_ascii=False,
+                                tool_call.get("arguments", {}), ensure_ascii=False
                             ),
                         }
                         for tool_call in tool_calls
@@ -515,8 +500,7 @@ class MistralToolParser(ToolParser):
                     {
                         "name": tool_call["name"],
                         "arguments": json.dumps(
-                            tool_call.get("arguments", {}),
-                            ensure_ascii=False,
+                            tool_call.get("arguments", {}), ensure_ascii=False
                         ),
                     }
                     for tool_call in tool_calls
@@ -526,8 +510,7 @@ class MistralToolParser(ToolParser):
             MistralToolCall(
                 type="function",
                 function=FunctionCall(
-                    name=tool_call["name"],
-                    arguments=tool_call.get("arguments", "{}"),
+                    name=tool_call["name"], arguments=tool_call.get("arguments", "{}")
                 ),
             )
             for tool_call in tool_calls
@@ -562,8 +545,7 @@ class MistralToolParser(ToolParser):
         try:
             if self._is_pre_v11:
                 return self._extract_tool_calls_streaming_pre_v11_tokenizer(
-                    delta_text=delta_text,
-                    delta_token_ids=delta_token_ids,
+                    delta_text=delta_text, delta_token_ids=delta_token_ids
                 )
             else:
                 return self._extract_tool_calls_streaming(
@@ -574,9 +556,7 @@ class MistralToolParser(ToolParser):
             return None
 
     def _extract_tool_calls_streaming(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
+        self, delta_text: str, delta_token_ids: Sequence[int]
     ) -> DeltaMessage | None:
         """
         Extracts tool calls for Mistral models
@@ -711,9 +691,7 @@ class MistralToolParser(ToolParser):
                 self.streaming_state = StreamingState.ALL_TOOLS_COMPLETE
 
     def _extract_tool_calls_streaming_pre_v11_tokenizer(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
+        self, delta_text: str, delta_token_ids: Sequence[int]
     ) -> DeltaMessage | None:
         """
         Extracts tool calls for Mistral models
@@ -742,8 +720,7 @@ class MistralToolParser(ToolParser):
 
             if self.streaming_state == StreamingState.WAITING_FOR_TOOL_START:
                 delta_to_be_parsed, delta_text = self._split_delta(
-                    delta_text=delta_text,
-                    stop_after_opening_curly_braces=1,
+                    delta_text=delta_text, stop_after_opening_curly_braces=1
                 )
             elif self.streaming_state == StreamingState.WAITING_FOR_TOOL_KEY:
                 # Wait until another key is sent
@@ -763,8 +740,7 @@ class MistralToolParser(ToolParser):
                 )
             elif self.streaming_state == StreamingState.WAITING_FOR_ARGUMENTS_START:
                 delta_to_be_parsed, delta_text = self._split_delta(
-                    delta_text=delta_text,
-                    stop_after_opening_curly_braces=1,
+                    delta_text=delta_text, stop_after_opening_curly_braces=1
                 )
             elif self.streaming_state == StreamingState.PARSING_ARGUMENTS:
                 delta_to_be_parsed, delta_text = self._split_delta(
@@ -825,8 +801,7 @@ class MistralToolParser(ToolParser):
                 self.prev_tool_call_arr.append({})
                 self.current_tool_mistral_id = MistralToolCall.generate_random_id()
                 current_tool_call = DeltaToolCall(
-                    index=self.current_tool_id,
-                    type="function",
+                    index=self.current_tool_id, type="function"
                 )
             if current_tool_call.function is None:
                 current_tool_call.function = DeltaFunctionCall()

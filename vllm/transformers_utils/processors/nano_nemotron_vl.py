@@ -51,10 +51,7 @@ Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
 # Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
 
 
-def calculate_timestamps(
-    indices: list[int] | torch.Tensor,
-    frame_duration_ms: int,
-):
+def calculate_timestamps(indices: list[int] | torch.Tensor, frame_duration_ms: int):
     if not isinstance(indices, list):
         indices = indices.tolist()
 
@@ -294,8 +291,7 @@ class DynamicResolutionImageTiler:
         return num_tokens
 
     def width_and_height_for_max_num_tokens_available(
-        self,
-        target_num_tokens_post_shuffle: int,
+        self, target_num_tokens_post_shuffle: int
     ) -> tuple[int, int]:
         """
         TODO: optimize this so it squeezes closer to target number of tokens.
@@ -316,7 +312,7 @@ class DynamicResolutionImageTiler:
         ...     max_num_patches=0,
         ... )
         >>> width, height = tiler.width_and_height_for_max_num_tokens_available(
-        ...     target_num_tokens_post_shuffle=8192,
+        ...     target_num_tokens_post_shuffle=8192
         ... )
         >>> assert width, height == (2880, 2880)
         >>> assert (width // PATCH_SIZE) * (
@@ -361,9 +357,7 @@ class DynamicResolutionImageTiler:
         patch_size: tuple[int, int]
 
     def apply_params(
-        self,
-        params: DynamicResolutionParams,
-        dtype: torch.dtype = torch.float32,
+        self, params: DynamicResolutionParams, dtype: torch.dtype = torch.float32
     ) -> list[torch.Tensor]:
         target_size = (
             params.patch_size[1] * self._patch_size,
@@ -380,9 +374,7 @@ class DynamicResolutionImageTiler:
         return list(resized_img)
 
     def process_media(
-        self,
-        media: Image.Image,
-        num_tokens_available: int,
+        self, media: Image.Image, num_tokens_available: int
     ) -> tuple[DynamicResolutionParams, int]:
         """Process a single media item and return its parameters.
 
@@ -467,9 +459,7 @@ class DynamicResolutionImageTiler:
         ), token_count
 
     def compute_params(
-        self,
-        media_list: list[Image.Image],
-        num_tokens_available: int,
+        self, media_list: list[Image.Image], num_tokens_available: int
     ) -> list[DynamicResolutionParams]:
         """Compute parameters for all media with iterative token budgeting.
 
@@ -635,18 +625,12 @@ class BaseNanoNemotronVLProcessor(ABC):
 
     @abstractmethod
     def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: int | None,
+        self, feature_size: int, num_patches: int | None
     ) -> PromptUpdateDetails[str]:
         raise NotImplementedError
 
     def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        max_num_tiles: int,
+        self, *, image_width: int, image_height: int, max_num_tiles: int
     ) -> int:
         target_ratios = get_internvl_target_ratios(1, max_num_tiles)
 
@@ -661,9 +645,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         return num_patches * self.num_image_token
 
     def _images_to_pixel_values_lst(
-        self,
-        images: list[Image.Image],
-        max_num_tiles: int,
+        self, images: list[Image.Image], max_num_tiles: int
     ) -> list[torch.Tensor]:
         return [
             dynamic_preprocess(
@@ -679,10 +661,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         ]
 
     def _preprocess_image(
-        self,
-        text: list[str],
-        images: list[Image.Image],
-        max_num_tiles: int,
+        self, text: list[str], images: list[Image.Image], max_num_tiles: int
     ) -> tuple[list[str], dict[str, Any]]:
         if len(images) == 0:
             return text, {}
@@ -694,9 +673,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 self.tokenizer(sans_images, add_special_tokens=False).input_ids
             )
             pixel_values_lst, num_tokens_per_image = tiler._images_to_pixel_values_lst(
-                text_prompt_length=text_prompt_length,
-                images=images,
-                dtype=self.dtype,
+                text_prompt_length=text_prompt_length, images=images, dtype=self.dtype
             )
             imgs_sizes = [(pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst]
             image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
@@ -866,10 +843,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT)
 
     def _videos_to_pixel_values_lst(
-        self,
-        videos: list[npt.NDArray],
-        *,
-        dtype: torch.dtype = torch.float32,
+        self, videos: list[npt.NDArray], *, dtype: torch.dtype = torch.float32
     ) -> list[torch.Tensor]:
         return [
             video_to_pixel_values(
@@ -887,9 +861,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         ]
 
     def _preprocess_video(
-        self,
-        text: list[str],
-        videos: list[tuple[npt.NDArray, dict[str, Any]]],
+        self, text: list[str], videos: list[tuple[npt.NDArray, dict[str, Any]]]
     ) -> tuple[list[str], dict[str, Any]]:
         if len(videos) == 0 or not self.supports_video:
             return text, {}
@@ -898,8 +870,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         video_metadata_lst = [v[1] for v in videos]
 
         pixel_values_lst_video = self._videos_to_pixel_values_lst(
-            videos_lst,
-            dtype=self.dtype,
+            videos_lst, dtype=self.dtype
         )
 
         # We use frame duration in milliseconds (as integer) to ensure
@@ -985,9 +956,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return text, video_inputs
 
     def _preprocess_audio(
-        self,
-        text: list[str],
-        audios: list[npt.NDArray],
+        self, text: list[str], audios: list[npt.NDArray]
     ) -> tuple[list[str], dict[str, Any]]:
         if len(audios) == 0:
             return text, {"audio_num_clips": []}
@@ -1035,20 +1004,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         audios = self._make_batch_input(audios)
 
         text, image_inputs = self._preprocess_image(
-            text=text,
-            images=images,
-            max_num_tiles=max_num_tiles,
+            text=text, images=images, max_num_tiles=max_num_tiles
         )
 
-        text, video_inputs = self._preprocess_video(
-            text=text,
-            videos=videos,
-        )
+        text, video_inputs = self._preprocess_video(text=text, videos=videos)
 
-        text, audio_inputs = self._preprocess_audio(
-            text=text,
-            audios=audios,
-        )
+        text, audio_inputs = self._preprocess_audio(text=text, audios=audios)
 
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
@@ -1063,8 +1024,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
-                {**combined_inputs, **image_inputs},
-                tensor_type=return_tensors,
+                {**combined_inputs, **image_inputs}, tensor_type=return_tensors
             )
         else:
             batch = BatchFeature(combined_inputs, tensor_type=return_tensors)
@@ -1080,19 +1040,14 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return batch
 
     def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: int | None,
+        self, feature_size: int, num_patches: int | None
     ) -> PromptUpdateDetails[str]:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
-    def get_audio_repl(
-        self,
-        audio: npt.NDArray,
-    ) -> PromptUpdateDetails[str]:
+    def get_audio_repl(self, audio: npt.NDArray) -> PromptUpdateDetails[str]:
         assert self.audio_extractor is not None
         num_tokens = self.audio_extractor.audio_token_count(len(audio))
         repl_full = f"{AUDIO_START}{AUDIO_CONTEXT * num_tokens}{AUDIO_END}"
@@ -1188,9 +1143,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # Batch-tokenize all frame separators at once — the HuggingFace
         # tokenizers Rust backend parallelizes batch encoding across threads.
         batch_encoded = tokenizer(
-            frame_separators,
-            add_special_tokens=False,
-            return_attention_mask=False,
+            frame_separators, add_special_tokens=False, return_attention_mask=False
         )
         frame_separators_tokenized: list[list[int]] = batch_encoded["input_ids"]
 

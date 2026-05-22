@@ -96,11 +96,7 @@ async def test_streaming_input_bunched(engine: AsyncLLM):
         yield StreamingInput(prompt=" to code in Python")
 
     outputs, full_text = await collect_outputs(
-        engine.generate(
-            bunched_input_generator(),
-            sampling_params,
-            request_id,
-        )
+        engine.generate(bunched_input_generator(), sampling_params, request_id)
     )
 
     # Verify we got outputs
@@ -163,9 +159,7 @@ async def test_streaming_input_spaced(engine: AsyncLLM):
     full_text = ""
 
     async for output in engine.generate(
-        spaced_input_generator(),
-        sampling_params,
-        request_id,
+        spaced_input_generator(), sampling_params, request_id
     ):
         outputs.append(output)
         if output.outputs and output.outputs[0].text:

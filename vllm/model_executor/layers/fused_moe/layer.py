@@ -26,9 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.expert_map_manager import (
-    ExpertMapManager,
-)
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -38,24 +36,16 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
-    MoERunner,
-)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
     MoERunnerInterface,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -551,8 +541,7 @@ class FusedMoE(PluggableLayer):
         # Note: ExpertMapManager.update() recalculates expert maps and
         # reinitializes routing tables internally.
         self.expert_map_manager.update(
-            self.moe_parallel_config,
-            global_num_experts=self.global_num_experts,
+            self.moe_parallel_config, global_num_experts=self.global_num_experts
         )
 
         # Update local attributes from ExpertMapManager
@@ -642,10 +631,7 @@ class FusedMoE(PluggableLayer):
         if shard_id == "w2":
             hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
             expert_data = self._narrow_expert_data_for_padding(
-                expert_data,
-                loaded_weight,
-                hidden_dim=hidden_dim,
-                shard_dim=shard_dim,
+                expert_data, loaded_weight, hidden_dim=hidden_dim, shard_dim=shard_dim
             )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -753,10 +739,7 @@ class FusedMoE(PluggableLayer):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data,
-            loaded_weight,
-            hidden_dim=hidden_dim,
-            shard_dim=shard_dim,
+            expert_data, loaded_weight, hidden_dim=hidden_dim, shard_dim=shard_dim
         )
         expert_data.copy_(loaded_weight)
 
@@ -789,10 +772,7 @@ class FusedMoE(PluggableLayer):
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data,
-            loaded_weight,
-            hidden_dim=hidden_dim,
-            shard_dim=shard_dim,
+            expert_data, loaded_weight, hidden_dim=hidden_dim, shard_dim=shard_dim
         )
         expert_data.copy_(loaded_weight)
 
@@ -1309,11 +1289,7 @@ class FusedMoE(PluggableLayer):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.runner.forward(
-            hidden_states,
-            router_logits,
-            input_ids,
-        )
+        return self.runner.forward(hidden_states, router_logits, input_ids)
 
     @property
     def expert_map(self) -> torch.Tensor | None:

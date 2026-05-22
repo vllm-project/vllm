@@ -139,14 +139,7 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
         w2_scale=w2_s,
     )
 
-    out = fused_experts(
-        a,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        quant_config=quant_config,
-    )
+    out = fused_experts(a, w1, w2, topk_weights, topk_ids, quant_config=quant_config)
 
     # Check results
     rel_diff = torch.mean(

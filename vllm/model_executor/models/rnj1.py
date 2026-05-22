@@ -176,10 +176,7 @@ class Rnj1Attention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -251,9 +248,7 @@ class Rnj1DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            **kwargs,
+            positions=positions, hidden_states=hidden_states, **kwargs
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
 
@@ -319,10 +314,7 @@ class Rnj1Model(nn.Module):
             residual = intermediate_tensors["residual"]
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                **kwargs,
+                positions, hidden_states, residual, **kwargs
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -401,15 +393,8 @@ class Rnj1Model(nn.Module):
 
 class Rnj1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -455,10 +440,7 @@ class Rnj1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

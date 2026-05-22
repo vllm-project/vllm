@@ -34,12 +34,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
         Include a learned scaling and shift term after normalization.
     """
 
-    def __init__(
-        self,
-        normalized_shape,
-        eps=1e-06,
-        elementwise_scale_and_shift=True,
-    ):
+    def __init__(self, normalized_shape, eps=1e-06, elementwise_scale_and_shift=True):
         super().__init__()
         self.elementwise_scale_and_shift = elementwise_scale_and_shift
         if self.elementwise_scale_and_shift:
@@ -118,10 +113,7 @@ class MLPSpeculator(nn.Module):
         else:
             self.emb = nn.ModuleList(
                 [
-                    VocabParallelEmbedding(
-                        config.vocab_size,
-                        self.inner_dim,
-                    )
+                    VocabParallelEmbedding(config.vocab_size, self.inner_dim)
                     for _ in range(self.max_speculative_tokens)
                 ]
             )

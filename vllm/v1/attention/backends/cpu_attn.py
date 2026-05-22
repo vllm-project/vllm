@@ -161,10 +161,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.block_size = vllm_config.cache_config.block_size
         kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
-            self.dtype,
-            self.block_size,
-            self.head_dim,
-            kv_cache_dtype_str,
+            self.dtype, self.block_size, self.head_dim, kv_cache_dtype_str
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
@@ -410,9 +407,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         if attn_masks is None:
             if self.alibi_slopes is not None:
                 attn_masks = _make_alibi_bias(
-                    self.alibi_slopes,
-                    query.dtype,
-                    attn_metadata.sdpa_start_loc,
+                    self.alibi_slopes, query.dtype, attn_metadata.sdpa_start_loc
                 )
             elif self.sliding_window[0] != -1 or self.sliding_window[1] != -1:
                 assert attn_metadata.seq_lens is not None
@@ -456,9 +451,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
 
 def _make_alibi_bias(
-    alibi_slopes: torch.Tensor,
-    dtype: torch.dtype,
-    sdpa_start_loc: torch.Tensor,
+    alibi_slopes: torch.Tensor, dtype: torch.dtype, sdpa_start_loc: torch.Tensor
 ) -> list[torch.Tensor]:
     attn_biases: list[torch.Tensor] = []
     seq_num = sdpa_start_loc.size(0) - 1

@@ -39,9 +39,7 @@ def without_trust_remote_code(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def modelscope_list_repo_files(
-    repo_id: str,
-    revision: str | None = None,
-    token: str | bool | None = None,
+    repo_id: str, revision: str | None = None, token: str | bool | None = None
 ) -> list[str]:
     """List files in a modelscope repo."""
     from modelscope.hub.api import HubApi

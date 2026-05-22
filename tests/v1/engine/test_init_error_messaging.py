@@ -15,10 +15,7 @@ def test_kv_cache_oom_no_memory():
 
     spec = {
         "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype="float16",
+            block_size=16, num_kv_heads=8, head_size=128, dtype="float16"
         )
     }
 
@@ -43,10 +40,7 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
 
     spec = {
         "layer_0": FullAttentionSpec(
-            block_size=16,
-            num_kv_heads=8,
-            head_size=128,
-            dtype="float16",
+            block_size=16, num_kv_heads=8, head_size=128, dtype="float16"
         )
     }
 

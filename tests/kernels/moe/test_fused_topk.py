@@ -146,11 +146,7 @@ def test_fused_topk_bias(
 @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
 def test_fused_topk_nan_inf_clamp(
-    num_experts: int,
-    topk: int,
-    scoring_func: str,
-    bad_value: float,
-    dtype: torch.dtype,
+    num_experts: int, topk: int, scoring_func: str, bad_value: float, dtype: torch.dtype
 ):
     """Regression test for the NaN/Inf clamp in topk_softmax_kernels.cu.
 
@@ -213,11 +209,7 @@ def test_fused_topk_nan_inf_clamp(
 @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
 def test_fused_topk_bias_nan_inf_clamp(
-    num_experts: int,
-    topk: int,
-    scoring_func: str,
-    bad_value: float,
-    dtype: torch.dtype,
+    num_experts: int, topk: int, scoring_func: str, bad_value: float, dtype: torch.dtype
 ):
     """Regression test: NaN/Inf in gating logits must not produce duplicate
     expert IDs or non-finite weights when e_score_correction_bias is present.

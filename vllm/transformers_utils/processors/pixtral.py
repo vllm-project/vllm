@@ -38,9 +38,7 @@ class MistralCommonImageProcessor:
         return BatchFeature({"images": images_processed}, tensor_type=return_tensors)
 
     def get_number_of_image_patches(
-        self,
-        height: int,
-        width: int,
+        self, height: int, width: int
     ) -> tuple[int, int, int]:
         image = Image.new("RGB", (width, height))
         ncols, nrows = self.mm_encoder._image_to_num_tokens(image)
@@ -51,9 +49,7 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
     def __init__(
-        self,
-        tokenizer: MistralTokenizer,
-        image_processor: MistralCommonImageProcessor,
+        self, tokenizer: MistralTokenizer, image_processor: MistralCommonImageProcessor
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
 

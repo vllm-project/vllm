@@ -87,9 +87,7 @@ class EAGLEConfig(PretrainedConfig):
 
     @classmethod
     def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str | os.PathLike,
-        **kwargs,
+        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
     ) -> "EAGLEConfig":
         config_dict, kwargs = cls.get_config_dict(
             pretrained_model_name_or_path, **without_trust_remote_code(kwargs)

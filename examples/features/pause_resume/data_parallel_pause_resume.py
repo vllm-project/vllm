@@ -60,10 +60,7 @@ def main():
     parser.add_argument("--model", default=MODEL_NAME)
     args = parser.parse_args()
 
-    client = OpenAI(
-        base_url=f"{args.base_url}/v1",
-        api_key="EMPTY",
-    )
+    client = OpenAI(base_url=f"{args.base_url}/v1", api_key="EMPTY")
 
     prompt = "Write a long story about a dragon. Once upon a time"
     token_times: list[float] = []
@@ -73,10 +70,7 @@ def main():
     def generator_thread():
         """Stream tokens and record timestamps."""
         stream = client.completions.create(
-            model=args.model,
-            prompt=prompt,
-            max_tokens=50,
-            stream=True,
+            model=args.model, prompt=prompt, max_tokens=50, stream=True
         )
         for chunk in stream:
             if chunk.choices[0].text:

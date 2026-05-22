@@ -77,9 +77,7 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-)
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     MultiModalPromptUpdates,
@@ -115,10 +113,7 @@ logger = init_logger(__name__)
 
 
 def check_interleaved_audio_video(
-    is_video: torch.Tensor,
-    is_audio: torch.Tensor,
-    num_video: int,
-    num_audio: int,
+    is_video: torch.Tensor, is_audio: torch.Tensor, num_video: int, num_audio: int
 ) -> bool:
     """
     Check if video and audio positions are interleaved in the multimodal region.
@@ -299,8 +294,7 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
         super().__init__(self._spatial_merge_size, *args, **kwargs)
 
     def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -323,9 +317,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
         return self.ctx.get_hf_processor(
-            Qwen2_5OmniProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            Qwen2_5OmniProcessor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
     def get_feature_extractor(self, **kwargs: object):
@@ -352,9 +344,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
         return {"audio": None, "image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
+        self, seq_len: int, mm_counts: Mapping[str, int] | None = None
     ) -> Mapping[str, int] | None:
         mm_counts = mm_counts or {}
         requested_modalities = {m for m, c in mm_counts.items() if c > 0}
@@ -362,9 +352,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
         if requested_modalities & {"image", "video"}:
             vl_tokens = Qwen2_5_VLProcessingInfo.get_mm_max_tokens_per_item(
-                self,
-                seq_len=seq_len,
-                mm_counts=mm_counts,
+                self, seq_len=seq_len, mm_counts=mm_counts
             )
             mm_max_tokens.update(
                 {
@@ -376,9 +364,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
         if "audio" in requested_modalities:
             audio_tokens = Qwen2AudioProcessingInfo.get_mm_max_tokens_per_item(
-                self,
-                seq_len=seq_len,
-                mm_counts=mm_counts,
+                self, seq_len=seq_len, mm_counts=mm_counts
             )
             mm_max_tokens["audio"] = audio_tokens["audio"]
 
@@ -418,11 +404,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         feature_extractor = self.info.get_feature_extractor()
 
         target_audio_length = (
-            min(
-                feature_extractor.chunk_length,
-                30,
-            )
-            * feature_extractor.sampling_rate
+            min(feature_extractor.chunk_length, 30) * feature_extractor.sampling_rate
         )
 
         target_width, target_height = self.info.get_image_size_with_most_features()
@@ -475,15 +457,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         if audios:
             # NOTE: Qwen2.5-Omni processor accept "audio"
             mm_data["audio"] = audios
-            mm_kwargs = dict(
-                **mm_kwargs,
-            )
+            mm_kwargs = dict(**mm_kwargs)
 
         hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         input_features = hf_inputs.pop("input_features", None)
@@ -510,9 +487,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         return hf_inputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return create_qwen2_5_omni_thinker_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
@@ -616,14 +591,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     use_audio_in_video = True
 
         if is_update_applied:
-            mm_placeholders = self._find_mm_placeholders(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
+            mm_placeholders = self._find_mm_placeholders(prompt_ids, mm_prompt_updates)
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
         else:
             if use_audio_in_video and "audio" in mm_prompt_updates:
                 # Filter out audio updates - they are embedded in video
@@ -631,8 +600,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     k: v for k, v in mm_prompt_updates.items() if k != "audio"
                 }
                 prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    filtered_updates,
+                    prompt_ids, filtered_updates
                 )
                 # Derive audio placeholders from video placeholders
                 mm_placeholders = self._derive_audio_from_video_placeholders(
@@ -640,14 +608,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 )
             else:
                 prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    mm_prompt_updates,
+                    prompt_ids, mm_prompt_updates
                 )
 
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         return prompt_ids, mm_placeholders
 
@@ -790,8 +754,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
             # Only video tokens should receive video embeddings
             return PromptUpdateDetails.select_token_id(
-                seq=updates,
-                embed_token_id=video_token_id,
+                seq=updates, embed_token_id=video_token_id
             )
 
         video_replacement_fn = (
@@ -812,9 +775,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 replacement=partial(get_replacement_qwen2_vision, modality="image"),
             ),
             PromptReplacement(
-                modality="video",
-                target=video_token,
-                replacement=video_replacement_fn,
+                modality="video", target=video_token, replacement=video_replacement_fn
             ),
         ]
 
@@ -895,8 +856,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         )
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: dict[str, Any],
+        self, **kwargs: dict[str, Any]
     ) -> Qwen2_5_VLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -920,8 +880,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
             )
 
     def _parse_and_validate_video_input(
-        self,
-        **kwargs: dict[str, Any],
+        self, **kwargs: dict[str, Any]
     ) -> Qwen2_5_VLVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -950,8 +909,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
             )
 
     def _process_audio_input(
-        self,
-        audio_input: Qwen2_5OmniAudioFeatureInputs,
+        self, audio_input: Qwen2_5OmniAudioFeatureInputs
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -985,10 +943,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
         return image_embeds.split(sizes.tolist())
 
-    def _process_video_input(
-        self,
-        video_input: Qwen2_5_VLVideoInputs,
-    ) -> torch.Tensor:
+    def _process_video_input(self, video_input: Qwen2_5_VLVideoInputs) -> torch.Tensor:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)
 
@@ -1026,20 +981,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         }
     )
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "attn.qkv": [
-            "attn.q",
-            "attn.k",
-            "attn.v",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "attn.qkv": ["attn.q", "attn.k", "attn.v"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
@@ -1318,9 +1262,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         return np.concatenate(pos_ids_list, axis=1), total_tokens
 
     def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
+        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[torch.Tensor, int]:
         """
         Compute M-RoPE input positions using mm_features directly.
@@ -1496,10 +1438,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

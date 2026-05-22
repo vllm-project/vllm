@@ -23,10 +23,7 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
-from vllm.compilation.codegen import (
-    compile_execution_fn,
-    generate_execution_code,
-)
+from vllm.compilation.codegen import compile_execution_fn, generate_execution_code
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -45,10 +42,7 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
+from .partition_rules import inductor_partition_rule_context, should_split
 from .passes.inductor_pass import InductorPass, pass_context
 from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
@@ -435,8 +429,7 @@ def _is_empty_allocation_node(node: fx.Node) -> bool:
 
 
 def _merge_empty_only_subgraphs(
-    node_to_subgraph_id: dict[fx.Node, int],
-    split_op_graphs: list[int],
+    node_to_subgraph_id: dict[fx.Node, int], split_op_graphs: list[int]
 ) -> None:
     """
     Merge a partition that only contains an empty allocation op into the
@@ -826,10 +819,7 @@ class VllmBackend:
     inductor_config: dict[str, Any]
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        is_encoder: bool = False,
+        self, vllm_config: VllmConfig, prefix: str = "", is_encoder: bool = False
     ) -> None:
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
@@ -985,10 +975,7 @@ class VllmBackend:
 
         trace_structured(
             "artifact",
-            metadata_fn=lambda: {
-                "name": "vllm_compilation_config",
-                "encoding": "json",
-            },
+            metadata_fn=lambda: {"name": "vllm_compilation_config", "encoding": "json"},
             payload_fn=lambda: json.dumps(
                 {
                     "model": self.vllm_config.model_config.model,
@@ -1013,9 +1000,7 @@ class VllmBackend:
 
     @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
-        from .caching import (
-            VllmSerializableFunction,
-        )
+        from .caching import VllmSerializableFunction
 
         vllm_config = self.vllm_config
 
@@ -1087,8 +1072,7 @@ class VllmBackend:
             logger.info_once("vLLM's torch.compile cache is disabled.")
         else:
             logger.info_once(
-                "Using cache directory: %s for vLLM's torch.compile",
-                local_cache_dir,
+                "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
             )
 
         self.compiler_manager.initialize_cache(
@@ -1145,10 +1129,7 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
-        logger.info_once(
-            "Dynamo bytecode transform time: %.2f s",
-            dynamo_time,
-        )
+        logger.info_once("Dynamo bytecode transform time: %.2f s", dynamo_time)
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
@@ -1220,10 +1201,7 @@ class VllmBackend:
         self.compiler_manager.save_to_file()
         elapsed = time.perf_counter() - time_before_saving
         if elapsed > 1:
-            logger.info_once(
-                "Saved compiler manager cache in %.2f seconds.",
-                elapsed,
-            )
+            logger.info_once("Saved compiler manager cache in %.2f seconds.", elapsed)
 
         from torch._guards import detect_fake_mode
 

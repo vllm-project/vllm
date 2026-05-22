@@ -54,10 +54,7 @@ def main(args):
     prompt = {
         "model": model,
         "messages": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "vLLM is great!"}],
-            }
+            {"role": "user", "content": [{"type": "text", "text": "vLLM is great!"}]}
         ],
     }
     pooling_response = post_http_request(prompt=prompt, api_url=pooing_url)

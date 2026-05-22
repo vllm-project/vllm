@@ -141,12 +141,7 @@ class MHCPostOp(CustomOp):
         #         comb_res_mix,
         #     )
         # else:
-        return mhc_kernels.mhc_post_torch(
-            x,
-            residual,
-            post_layer_mix,
-            comb_res_mix,
-        )
+        return mhc_kernels.mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_post is not available")

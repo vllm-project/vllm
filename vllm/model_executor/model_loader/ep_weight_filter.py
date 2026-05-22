@@ -29,10 +29,7 @@ def parse_expert_id(weight_name: str) -> int | None:
 
 
 def compute_local_expert_ids(
-    num_experts: int,
-    ep_size: int,
-    ep_rank: int,
-    placement: str = "linear",
+    num_experts: int, ep_size: int, ep_rank: int, placement: str = "linear"
 ) -> set[int] | None:
     """Compute the set of global expert ids owned by *ep_rank*.
 
@@ -61,10 +58,7 @@ def compute_local_expert_ids(
         raise ValueError(f"Unknown expert placement strategy: {placement}")
 
 
-def should_skip_weight(
-    weight_name: str,
-    local_expert_ids: set[int] | None,
-) -> bool:
+def should_skip_weight(weight_name: str, local_expert_ids: set[int] | None) -> bool:
     """Return ``True`` if *weight_name* is an expert weight that does not
     belong to the local rank and should be skipped during loading."""
     if local_expert_ids is None:

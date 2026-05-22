@@ -59,18 +59,9 @@ USE_FP32_REDUCE_OPTS = [True]
 MARLIN_K_CHUNKS = [128]
 MARLIN_N_CHUNKS = [64, 256]
 
-MARLIN_REPACK_NK_FACTORS = [
-    (4, 8),
-    (7, 5),
-    (13, 11),
-]
+MARLIN_REPACK_NK_FACTORS = [(4, 8), (7, 5), (13, 11)]
 
-MNK_FACTORS = [
-    (1, 1, 1),
-    (1, 4, 8),
-    (26, 37, 13),
-    (257, 13, 11),
-]
+MNK_FACTORS = [(1, 1, 1), (1, 4, 8), (26, 37, 13), (257, 13, 11)]
 
 DTYPES = [torch.float16, torch.bfloat16]
 

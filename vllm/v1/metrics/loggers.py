@@ -246,10 +246,7 @@ class LoggingStatLogger(StatLoggerBase):
             log_args.append(self.num_preemptions)
 
         log_parts.extend(
-            [
-                "GPU KV cache usage: %.1f%%",
-                "Prefix cache hit rate: %.1f%%",
-            ]
+            ["GPU KV cache usage: %.1f%%", "Prefix cache hit rate: %.1f%%"]
         )
         log_args.extend(
             [
@@ -268,10 +265,7 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
 
-        log_fn(
-            self.log_prefix + ", ".join(log_parts),
-            *log_args,
-        )
+        log_fn(self.log_prefix + ", ".join(log_parts), *log_args)
 
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_connector_logging.log(log_fn=log_fn)
@@ -291,11 +285,7 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        engine_indexes: list[int],
-    ):
+    def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
         self.engine_indexes = engine_indexes
         self.last_scheduler_stats_dict: dict[int, SchedulerStats] = {
             idx: SchedulerStats() for idx in self.engine_indexes
@@ -1311,8 +1301,7 @@ class StatLoggerManager:
                 stat_logger_factory, AggregateStatLoggerBase
             ):
                 global_stat_logger = stat_logger_factory(
-                    vllm_config=vllm_config,
-                    engine_indexes=self.engine_indexes,
+                    vllm_config=vllm_config, engine_indexes=self.engine_indexes
                 )
                 if isinstance(global_stat_logger, PrometheusStatLogger):
                     custom_prometheus_logger = True

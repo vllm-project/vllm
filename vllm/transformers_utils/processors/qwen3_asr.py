@@ -30,10 +30,7 @@ from transformers.tokenization_utils_base import TextInput
 
 class Qwen3ASRProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
-        "text_kwargs": {
-            "padding": False,
-            "padding_side": "left",
-        },
+        "text_kwargs": {"padding": False, "padding_side": "left"},
         "audio_kwargs": {
             "sampling_rate": 16000,
             "padding": True,
@@ -81,10 +78,7 @@ class Qwen3ASRProcessor(ProcessorMixin):
         self.audio_eos_token = self.tokenizer.audio_eos_token
 
     def __call__(
-        self,
-        text: TextInput = None,
-        audio: AudioInput = None,
-        **kwargs,
+        self, text: TextInput = None, audio: AudioInput = None, **kwargs
     ) -> BatchFeature:
         """
         Main method to prepare for the model one or several sequences(s) and audio(s). This method forwards the `text`
@@ -135,10 +129,7 @@ class Qwen3ASRProcessor(ProcessorMixin):
         if not isinstance(text, list):
             text = [text]
 
-        text = self.replace_multimodal_special_tokens(
-            text,
-            audio_lengths,
-        )
+        text = self.replace_multimodal_special_tokens(text, audio_lengths)
 
         texts_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
 
@@ -147,11 +138,7 @@ class Qwen3ASRProcessor(ProcessorMixin):
             tensor_type=kwargs.get("return_tensors"),
         )
 
-    def replace_multimodal_special_tokens(
-        self,
-        text,
-        audio_lengths,
-    ):
+    def replace_multimodal_special_tokens(self, text, audio_lengths):
         processed_text = []
         for sample in text:
             positions = []

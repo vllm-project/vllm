@@ -14,10 +14,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-) -> None:
+def _run_test(vllm_runner: type[VllmRunner], model: str) -> None:
     prompt = [
         {
             # This model deals with no text input
@@ -52,13 +49,5 @@ MODELS = ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
-def test_models_image(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-) -> None:
-    _run_test(
-        vllm_runner,
-        model,
-    )
+def test_models_image(hf_runner, vllm_runner, image_assets, model: str) -> None:
+    _run_test(vllm_runner, model)

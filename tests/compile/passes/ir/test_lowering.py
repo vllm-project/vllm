@@ -6,9 +6,7 @@ from torch import nn
 
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm import ir
-from vllm.compilation.passes.ir.lowering_pass import (
-    VllmIRLoweringPass,
-)
+from vllm.compilation.passes.ir.lowering_pass import VllmIRLoweringPass
 from vllm.config import get_current_vllm_config
 from vllm.ir import ops
 from vllm.platforms import current_platform

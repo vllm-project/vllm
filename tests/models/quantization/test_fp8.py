@@ -127,7 +127,7 @@ def test_models(
             "fp8_e5m2",
             "meta-llama/Llama-3.2-1B-Instruct",
             "meta-llama/Llama-3.2-1B-Instruct",
-        ),
+        )
     ],
 )
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens

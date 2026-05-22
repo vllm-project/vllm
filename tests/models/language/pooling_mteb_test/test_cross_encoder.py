@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from tests.models.utils import (
-    RerankModelInfo,
-)
+from tests.models.utils import RerankModelInfo
 
 from .mteb_score_utils import mteb_test_rerank_models
 

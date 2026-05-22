@@ -30,7 +30,7 @@ MODELS = [
         # STS16: 0.7340
         # STSBenchmark: 0.7063
         # Average score: 0.7054
-    ),
+    )
 ]
 
 

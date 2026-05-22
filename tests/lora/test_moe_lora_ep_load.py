@@ -64,10 +64,7 @@ def test_moe_lora_ep2_real_qwen3moe(qwen3moe_lora_files, ep_rank):
         global_num_experts=GLOBAL_NUM_EXPERTS,
     )
     sliced = _load(
-        qwen3moe_lora_files,
-        peft_helper,
-        moe_ep_spec=spec,
-        lora_id=100 + ep_rank,
+        qwen3moe_lora_files, peft_helper, moe_ep_spec=spec, lora_id=100 + ep_rank
     )
 
     expected_sliced = (

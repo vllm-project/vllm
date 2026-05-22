@@ -31,9 +31,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     kE2M1ToFloat_handle,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -72,9 +70,7 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
     return backend in FLASHINFER_NVFP4_MOE_BACKENDS
 
 
-def backend_to_kernel_cls(
-    backend: NvFp4MoeBackend,
-) -> list[type[mk.FusedMoEExperts]]:
+def backend_to_kernel_cls(backend: NvFp4MoeBackend) -> list[type[mk.FusedMoEExperts]]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
             TrtLlmNvFp4ExpertsModular,
@@ -82,10 +78,7 @@ def backend_to_kernel_cls(
         )
 
         # NOTE: prefer Monolthic > Modular, so return Monolithic first.
-        return [
-            TrtLlmNvFp4ExpertsMonolithic,
-            TrtLlmNvFp4ExpertsModular,
-        ]
+        return [TrtLlmNvFp4ExpertsMonolithic, TrtLlmNvFp4ExpertsModular]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
@@ -158,9 +151,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
 
 
 def select_nvfp4_moe_backend(
-    config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
+    config: FusedMoEConfig, weight_key: QuantKey | None, activation_key: QuantKey | None
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary NvFP4 MoE backend
@@ -181,9 +172,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
 
-    NVFP4_BACKENDS_WITH_CLAMP = {
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    }
+    NVFP4_BACKENDS_WITH_CLAMP = {NvFp4MoeBackend.FLASHINFER_TRTLLM}
 
     if config.swiglu_limit is not None:
         AVAILABLE_BACKENDS = [
@@ -289,11 +278,7 @@ def select_nvfp4_moe_backend(
             for backend in fi_backends:
                 for k_cls in backend_to_kernel_cls(backend):
                     supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
+                        k_cls, config, weight_key, activation_key, activation_format
                     )
                     if supported:
                         logger.info_once(_make_log_backend(backend))
@@ -316,11 +301,7 @@ def select_nvfp4_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
+                k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -356,71 +337,52 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
 ]:
     if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            a13_scale,
-            w2,
-            w2_scale,
-            w2_scale_2,
-            a2_scale,
-        ) = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
-            layer=layer,
-            w13=w13,
-            w13_scale=w13_scale,
-            w13_scale_2=w13_scale_2,
-            a13_scale=a13_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            w2_scale_2=w2_scale_2,
-            a2_scale=a2_scale,
+        (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale) = (
+            prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
+                layer=layer,
+                w13=w13,
+                w13_scale=w13_scale,
+                w13_scale_2=w13_scale_2,
+                a13_scale=a13_scale,
+                w2=w2,
+                w2_scale=w2_scale,
+                w2_scale_2=w2_scale_2,
+                a2_scale=a2_scale,
+            )
         )
     elif (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
     ):
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            a13_scale,
-            w2,
-            w2_scale,
-            w2_scale_2,
-            a2_scale,
-        ) = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
-            backend=nvfp4_backend,
-            layer=layer,
-            w13=w13,
-            w13_scale=w13_scale,
-            w13_scale_2=w13_scale_2,
-            a13_scale=a13_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            w2_scale_2=w2_scale_2,
-            a2_scale=a2_scale,
-            is_act_and_mul=is_act_and_mul,
+        (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale) = (
+            prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+                backend=nvfp4_backend,
+                layer=layer,
+                w13=w13,
+                w13_scale=w13_scale,
+                w13_scale_2=w13_scale_2,
+                a13_scale=a13_scale,
+                w2=w2,
+                w2_scale=w2_scale,
+                w2_scale_2=w2_scale_2,
+                a2_scale=a2_scale,
+                is_act_and_mul=is_act_and_mul,
+            )
         )
     elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
         a13_scale = None
         a2_scale = None
-        (
-            w13,
-            w13_scale,
-            w13_scale_2,
-            w2,
-            w2_scale,
-            w2_scale_2,
-        ) = prepare_nvfp4_moe_layer_for_marlin(
-            layer=layer,
-            w13=w13,
-            w13_scale=w13_scale,
-            w13_scale_2=w13_scale_2,
-            w2=w2,
-            w2_scale=w2_scale,
-            w2_scale_2=w2_scale_2,
-            is_act_and_mul=is_act_and_mul,
+        (w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2) = (
+            prepare_nvfp4_moe_layer_for_marlin(
+                layer=layer,
+                w13=w13,
+                w13_scale=w13_scale,
+                w13_scale_2=w13_scale_2,
+                w2=w2,
+                w2_scale=w2_scale,
+                w2_scale_2=w2_scale_2,
+                is_act_and_mul=is_act_and_mul,
+            )
         )
     elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
         # Move the E2M1 lookup table to the device now, because
@@ -453,16 +415,7 @@ def convert_to_nvfp4_moe_kernel_format(
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
-    return (
-        w13,
-        w13_scale,
-        w13_scale_2,
-        a13_scale,
-        w2,
-        w2_scale,
-        w2_scale_2,
-        a2_scale,
-    )
+    return (w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale)
 
 
 def make_nvfp4_moe_quant_config(
@@ -547,16 +500,9 @@ def make_nvfp4_moe_kernel(
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
+        experts = experts_cls(moe_config=moe_config, quant_config=moe_quant_config)
 
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-        inplace=False,
-    )
+    kernel = mk.FusedMoEKernel(prepare_finalize, experts, inplace=False)
 
     # TODO(rob): update inplace logic to be part of the kernel.
     return kernel

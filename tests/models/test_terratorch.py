@@ -23,19 +23,13 @@ pytestmark = pytest.mark.skipif(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars",
     ],
 )
-def test_inference(
-    vllm_runner: type[VllmRunner],
-    model: str,
-) -> None:
+def test_inference(vllm_runner: type[VllmRunner], model: str) -> None:
     pixel_values = torch.full((6, 512, 512), 1.0, dtype=torch.float16)
     location_coords = torch.full((1, 2), 1.0, dtype=torch.float16)
     prompt = dict(
         prompt_token_ids=[1],
         multi_modal_data={
-            "image": {
-                "pixel_values": pixel_values,
-                "location_coords": location_coords,
-            }
+            "image": {"pixel_values": pixel_values, "location_coords": location_coords}
         },
     )
 

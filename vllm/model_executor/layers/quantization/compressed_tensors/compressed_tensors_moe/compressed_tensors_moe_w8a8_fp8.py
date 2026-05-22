@@ -3,10 +3,7 @@
 
 
 import torch
-from compressed_tensors.quantization import (
-    QuantizationArgs,
-    QuantizationStrategy,
-)
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -131,10 +128,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
-            block_n, block_k = (
-                self.weight_block_size[0],
-                self.weight_block_size[1],
-            )
+            block_n, block_k = (self.weight_block_size[0], self.weight_block_size[1])
             # NOTE: To ensure proper alignment of the block-wise quantization
             # scales, the output_size of the weights for both the gate and up
             # layers must be divisible by block_n.

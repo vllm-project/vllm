@@ -54,10 +54,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
@@ -123,10 +120,7 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
@@ -183,10 +177,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
@@ -248,20 +239,14 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
 
         x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="b12x",
+            x, layer.input_global_scale_inv, is_sf_swizzled_layout=True, backend="b12x"
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(

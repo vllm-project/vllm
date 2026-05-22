@@ -99,8 +99,7 @@ def assert_executor(executor, tp_size, pp_size):
 def test_ray_v2_executor(tp_size, pp_size):
     """Validate RayExecutorV2 with various TP/PP configs."""
     vllm_config = create_vllm_config(
-        tensor_parallel_size=tp_size,
-        pipeline_parallel_size=pp_size,
+        tensor_parallel_size=tp_size, pipeline_parallel_size=pp_size
     )
     executor = RayExecutorV2(vllm_config=vllm_config)
     try:
@@ -129,9 +128,7 @@ def test_ray_v2_executor_pg(tp_size, pp_size, create_placement_group):
 
 
 @pytest.mark.parametrize(
-    "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
-    indirect=True,
+    "executor", [create_vllm_config(tensor_parallel_size=2)], indirect=True
 )
 def test_ray_v2_executor_failure_callback(executor):
     """Validate failure callback registration."""
@@ -150,9 +147,7 @@ def test_ray_v2_executor_failure_callback(executor):
 
 
 @pytest.mark.parametrize(
-    "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
-    indirect=True,
+    "executor", [create_vllm_config(tensor_parallel_size=2)], indirect=True
 )
 def test_ray_v2_executor_collective_rpc(executor):
     """Validate collective RPC calls through MessageQueue."""
@@ -162,9 +157,7 @@ def test_ray_v2_executor_collective_rpc(executor):
 
 
 @pytest.mark.parametrize(
-    "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
-    indirect=True,
+    "executor", [create_vllm_config(tensor_parallel_size=2)], indirect=True
 )
 def test_ray_v2_executor_driver_node_rank_0(executor):
     """Validate that driver node workers get the lowest ranks."""
@@ -178,9 +171,7 @@ def test_ray_v2_executor_driver_node_rank_0(executor):
 
 
 @pytest.mark.parametrize(
-    "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
-    indirect=True,
+    "executor", [create_vllm_config(tensor_parallel_size=2)], indirect=True
 )
 def test_ray_v2_executor_worker_death(executor):
     """Validate executor detects worker death via ray.wait()."""
@@ -220,9 +211,7 @@ def test_ray_v2_executor_shutdown():
 
 
 @pytest.mark.parametrize(
-    "executor",
-    [create_vllm_config(tensor_parallel_size=2)],
-    indirect=True,
+    "executor", [create_vllm_config(tensor_parallel_size=2)], indirect=True
 )
 def test_ray_v2_run_refs_stored_for_monitoring(executor):
     """Validate worker handles store run_ref for monitoring."""
@@ -274,8 +263,7 @@ def test_ray_v2_bundle_indices_env(
     """Validate explicit VLLM_RAY_BUNDLE_INDICES bundle placement."""
     monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", bundle_indices)
     vllm_config = create_vllm_config(
-        tensor_parallel_size=2,
-        placement_group=create_placement_group,
+        tensor_parallel_size=2, placement_group=create_placement_group
     )
     executor = RayExecutorV2(vllm_config=vllm_config)
     try:

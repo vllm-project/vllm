@@ -126,9 +126,7 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
 
 def validate_embedding_ndim(
-    tensor: torch.Tensor,
-    modality: str,
-    index: int | None = None,
+    tensor: torch.Tensor, modality: str, index: int | None = None
 ) -> None:
     """Validate tensor ndim for multimodal embeddings.
 
@@ -251,8 +249,7 @@ class DictEmbeddingItems(
         modality: str,
         required_fields: set[str],
         fields_factory: Callable[
-            [Mapping[str, torch.Tensor]],
-            Mapping[str, MultiModalFieldConfig],
+            [Mapping[str, torch.Tensor]], Mapping[str, MultiModalFieldConfig]
         ],
     ) -> None:
         from transformers.feature_extraction_utils import BatchFeature
@@ -279,8 +276,7 @@ class DictEmbeddingItems(
         self.required_fields = required_fields
 
         self._kwargs = MultiModalKwargsItems.from_hf_inputs(
-            BatchFeature(dict(data)),
-            fields_config,
+            BatchFeature(dict(data)), fields_config
         )
 
     def get_count(self) -> int:
@@ -441,11 +437,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         """Get the number of items belonging to each modality."""
         return {m: items.get_count() for m, items in self.items()}
 
-    def get_items(
-        self,
-        modality: str,
-        typ: type[_D] | tuple[type[_D], ...],
-    ) -> _D:
+    def get_items(self, modality: str, typ: type[_D] | tuple[type[_D], ...]) -> _D:
         """
         Get the data items belonging to a modality,
         requiring that they belong to a certain type.
@@ -502,8 +494,7 @@ class MultiModalDataParser:
         super().__init__()
 
         self.audio_resampler = AudioResampler(
-            target_sr=target_sr,
-            method=audio_resample_method,
+            target_sr=target_sr, method=audio_resample_method
         )
         self.target_channels = target_channels
         self.video_needs_metadata = video_needs_metadata
@@ -520,10 +511,7 @@ class MultiModalDataParser:
 
         return False
 
-    def _get_audio_with_sr(
-        self,
-        audio: AudioItem,
-    ) -> tuple[np.ndarray, float | None]:
+    def _get_audio_with_sr(self, audio: AudioItem) -> tuple[np.ndarray, float | None]:
         if isinstance(audio, tuple):
             return audio
         if isinstance(audio, list):
@@ -536,8 +524,7 @@ class MultiModalDataParser:
         assert_never(audio)
 
     def _get_video_with_metadata(
-        self,
-        video: VideoItem,
+        self, video: VideoItem
     ) -> tuple[np.ndarray, dict[str, Any] | None]:
         if isinstance(video, tuple):
             return video
@@ -551,8 +538,7 @@ class MultiModalDataParser:
         assert_never(video)
 
     def _parse_audio_data(
-        self,
-        data: ModalityData[AudioItem],
+        self, data: ModalityData[AudioItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if data is None:
             return None
@@ -590,8 +576,7 @@ class MultiModalDataParser:
         return AudioProcessorItems(new_audios)
 
     def _parse_image_data(
-        self,
-        data: ModalityData[ImageItem],
+        self, data: ModalityData[ImageItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if data is None:
             return None
@@ -611,8 +596,7 @@ class MultiModalDataParser:
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
-        self,
-        data: ModalityData[VideoItem],
+        self, data: ModalityData[VideoItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if data is None:
             return None
@@ -653,8 +637,7 @@ class MultiModalDataParser:
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
     def _parse_vision_chunk_data(
-        self,
-        data: ModalityData[Any],
+        self, data: ModalityData[Any]
     ) -> ModalityDataItems[Any, Any] | None:
         """Parse vision chunk data (unified image and video chunks)."""
         if data is None:

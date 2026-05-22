@@ -32,9 +32,7 @@ def is_layer_moe_router_gate(prefix: str) -> bool:
 
 
 def get_token_bin_counts_and_mask(
-    tokens: torch.Tensor,
-    vocab_size: int,
-    num_seqs: int,
+    tokens: torch.Tensor, vocab_size: int, num_seqs: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
@@ -224,10 +222,7 @@ def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     )
 
 
-def dispatch_cpu_unquantized_gemm(
-    layer: torch.nn.Module,
-    remove_weight: bool,
-) -> None:
+def dispatch_cpu_unquantized_gemm(layer: torch.nn.Module, remove_weight: bool) -> None:
     # skip for missing layers
     if layer.weight.is_meta:
         layer.cpu_linear = torch.nn.functional.linear
@@ -239,10 +234,7 @@ def dispatch_cpu_unquantized_gemm(
         if torch.cpu._is_amx_tile_supported():
             # prepack conv weight
             layer.weight.data = ops.causal_conv1d_weight_pack(
-                layer.weight.view(
-                    layer.weight.size(0),
-                    layer.weight.size(2),
-                )
+                layer.weight.view(layer.weight.size(0), layer.weight.size(2))
             )
         return
 

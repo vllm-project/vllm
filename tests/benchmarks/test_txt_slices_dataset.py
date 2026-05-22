@@ -58,10 +58,7 @@ def test_create_txt_slices_jsonl(
     # Verify the JSONL file can be loaded by CustomDataset
     dataset = CustomDataset(dataset_path=str(jsonl_path))
     samples = dataset.sample(
-        tokenizer=hf_tokenizer,
-        num_requests=10,
-        output_len=10,
-        skip_chat_template=True,
+        tokenizer=hf_tokenizer, num_requests=10, output_len=10, skip_chat_template=True
     )
 
     assert len(samples) == 10

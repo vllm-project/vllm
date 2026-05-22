@@ -88,10 +88,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         ]
 
     def ops_in_model(self):
-        return [
-            torch.ops.vllm_ir.rms_norm,
-            torch.ops.vllm_ir.fused_add_rms_norm,
-        ]
+        return [torch.ops.vllm_ir.rms_norm, torch.ops.vllm_ir.fused_add_rms_norm]
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
@@ -141,9 +138,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         ]
 
     def ops_in_model_before(self):
-        return [
-            torch.ops.vllm.all_reduce.default,
-        ]
+        return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model(self):
         if self.vllm_config.compilation_config.pass_config.fuse_norm_quant:
@@ -226,8 +221,7 @@ def test_sequence_parallelism_pass_requires_full_graph_compilation():
     sequence_parallelism_pass.min_token_num = 1
 
     with pytest.raises(
-        AssertionError,
-        match="SequenceParallelismPass requires full-graph compilation",
+        AssertionError, match="SequenceParallelismPass requires full-graph compilation"
     ):
         sequence_parallelism_pass.is_applicable_for_range(Range(start=8, end=8))
 
@@ -271,9 +265,7 @@ def sequence_parallelism_pass_on_test_model(
         cudagraph_mode=CUDAGraphMode.NONE,  # avoid piecewise warnings
         custom_ops=custom_ops_list,
         pass_config=PassConfig(
-            enable_sp=True,
-            fuse_norm_quant=fuse_norm_quant,
-            eliminate_noops=True,
+            enable_sp=True, fuse_norm_quant=fuse_norm_quant, eliminate_noops=True
         ),
     )  # NoOp needed for fusion
     device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))

@@ -71,10 +71,7 @@ class ServingScores(PoolingServing):
 
         return await self.flash_late_interaction(*args, **kwargs)
 
-    def _build_response(
-        self,
-        ctx: ScoringServeContext,
-    ) -> JSONResponse:
+    def _build_response(self, ctx: ScoringServeContext) -> JSONResponse:
         final_res_batch = ctx.final_res_batch
         request_id = ctx.request_id
         created_time = ctx.created_time
@@ -82,10 +79,7 @@ class ServingScores(PoolingServing):
 
         if isinstance(ctx.request, ScoreRequest):
             return self._request_output_to_score_response(
-                final_res_batch,
-                request_id,
-                created_time,
-                model_name,
+                final_res_batch, request_id, created_time, model_name
             )
         elif isinstance(ctx.request, RerankRequest):
             return self._request_output_to_rerank_response(
@@ -111,18 +105,14 @@ class ServingScores(PoolingServing):
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
-            item = ScoreResponseData(
-                index=idx,
-                score=classify_res.outputs.score,
-            )
+            item = ScoreResponseData(index=idx, score=classify_res.outputs.score)
             prompt_token_ids = final_res.prompt_token_ids
 
             items.append(item)
             num_prompt_tokens += len(prompt_token_ids)
 
         usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
+            prompt_tokens=num_prompt_tokens, total_tokens=num_prompt_tokens
         )
 
         response = ScoreResponse(
@@ -216,8 +206,7 @@ class ServingScores(PoolingServing):
             pooling_params = ctx.pooling_params.clone()
             pooling_params.late_interaction_params = (
                 build_late_interaction_query_params(
-                    query_key=query_keys[i],
-                    query_uses=query_uses[i],
+                    query_key=query_keys[i], query_uses=query_uses[i]
                 )
             )
             query_pooling_params_list.append(pooling_params)

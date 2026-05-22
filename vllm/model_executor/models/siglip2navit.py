@@ -23,9 +23,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -83,9 +81,7 @@ class Siglip2VisionEmbeddings(nn.Module):
                 self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
     def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor | None = None,
+        self, pixel_values: torch.FloatTensor, grid_thws: torch.LongTensor | None = None
     ) -> torch.Tensor:
         """
         Args:
@@ -227,8 +223,7 @@ class Siglip2Attention(nn.Module):
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            enable_fp32_compute=True,
+            enforce_enable=True, enable_fp32_compute=True
         )
 
     def forward(
@@ -321,16 +316,10 @@ class Siglip2EncoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = Siglip2Attention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = Siglip2MLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = Siglip2MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -381,9 +370,7 @@ class Siglip2Encoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 Siglip2EncoderLayer(
-                    config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{idx}",
+                    config, quant_config=quant_config, prefix=f"{prefix}.layers.{idx}"
                 )
                 for idx in range(config.num_hidden_layers)
             ]
@@ -482,9 +469,7 @@ class Siglip2Encoder(nn.Module):
         return window_index, cu_window_seqlens
 
     def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        grid_thws: torch.Tensor,
+        self, inputs_embeds: torch.Tensor, grid_thws: torch.Tensor
     ) -> torch.Tensor:
         r"""
         Args:
@@ -564,16 +549,12 @@ class Siglip2VisionTransformer(nn.Module):
 
         self.embeddings = Siglip2VisionEmbeddings(config)
         self.encoder = Siglip2Encoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
+            config, quant_config=quant_config, prefix=f"{prefix}.encoder"
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
     def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
+        self, pixel_values: torch.FloatTensor, grid_thws: torch.LongTensor
     ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
@@ -603,14 +584,9 @@ class Siglip2NavitModel(torch.nn.Module):
         )
 
     def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
+        self, pixel_values: torch.FloatTensor, grid_thws: torch.LongTensor
     ) -> torch.Tensor:
-        return self.vision_model(
-            pixel_values=pixel_values,
-            grid_thws=grid_thws,
-        )
+        return self.vision_model(pixel_values=pixel_values, grid_thws=grid_thws)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [

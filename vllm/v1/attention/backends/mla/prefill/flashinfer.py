@@ -46,9 +46,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
     @classmethod
     def is_available(cls) -> bool:
         try:
-            from flashinfer import (
-                BatchPrefillWithRaggedKVCacheWrapper,  # noqa: F401
-            )
+            from flashinfer import BatchPrefillWithRaggedKVCacheWrapper  # noqa: F401
 
             return True
         except ImportError:
@@ -78,14 +76,10 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         self._global_hyperparameters: PerLayerParameters | None = None
         (self._workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8),
+            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8)
         )
 
-    def _ensure_chunks(
-        self,
-        num_chunks: int,
-        workspace_buffer: torch.Tensor,
-    ) -> None:
+    def _ensure_chunks(self, num_chunks: int, workspace_buffer: torch.Tensor) -> None:
         if len(self._prefill_chunks) < num_chunks:
             for _ in range(len(self._prefill_chunks), num_chunks):
                 self._prefill_chunks.append(
@@ -119,10 +113,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         )
         return self._global_hyperparameters
 
-    def prepare_metadata(
-        self,
-        prefill_metadata: "MLACommonPrefillMetadata",
-    ) -> None:
+    def prepare_metadata(self, prefill_metadata: "MLACommonPrefillMetadata") -> None:
         global_hyperparameters = self._resolve_global_hyperparameters()
         qo_indptr = prefill_metadata.query_start_loc
         has_context = prefill_metadata.chunked_context is not None
@@ -191,12 +182,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self._prefill_main is not None
 
-        ret = self._prefill_main.run(
-            q=q,
-            k=k,
-            v=v,
-            return_lse=return_softmax_lse,
-        )
+        ret = self._prefill_main.run(q=q, k=k, v=v, return_lse=return_softmax_lse)
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
@@ -204,17 +190,10 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         return ret
 
     def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        self, chunk_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         attn_out, lse = self._prefill_chunks[chunk_idx].run(
-            q=q,
-            k=k,
-            v=v,
-            return_lse=True,
+            q=q, k=k, v=v, return_lse=True
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)

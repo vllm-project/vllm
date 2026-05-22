@@ -92,8 +92,7 @@ def _build_renderer(
             None
             if model_config.skip_tokenizer_init
             else DummyTokenizer(
-                truncation_side=truncation_side,
-                max_chars_per_token=max_chars_per_token,
+                truncation_side=truncation_side, max_chars_per_token=max_chars_per_token
             )
         ),
     )
@@ -140,8 +139,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, tokens)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 1
@@ -155,8 +153,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, token_lists)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 3
@@ -172,8 +169,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, text_input)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 1
@@ -187,8 +183,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, text_list_input)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 3
@@ -202,8 +197,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, "x" * 200)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=0),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=0)
         )
 
         assert len(results) == 1
@@ -216,8 +210,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, "x" * 200)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=50),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=50)
         )
 
         assert len(results) == 1
@@ -230,8 +223,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, "x" * 200)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=-1),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=-1)
         )
 
         assert len(results) == 1
@@ -245,8 +237,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, long_tokens)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5)
         )
 
         assert len(results) == 1
@@ -261,8 +252,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, long_tokens)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=5)
         )
 
         assert len(results) == 1
@@ -278,14 +268,8 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, long_tokens)
         )
 
-        with pytest.raises(
-            ValueError,
-            match="maximum context length is",
-        ):
-            renderer.tokenize_prompts(
-                prompts,
-                TokenizeParams(max_total_tokens=100),
-            )
+        with pytest.raises(ValueError, match="maximum context length is"):
+            renderer.tokenize_prompts(prompts, TokenizeParams(max_total_tokens=100))
 
         # Should not even attempt tokenization
         assert renderer.tokenizer._captured_encode_kwargs == {}
@@ -299,14 +283,8 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, long_tokens)
         )
 
-        with pytest.raises(
-            ValueError,
-            match="maximum context length is",
-        ):
-            renderer.tokenize_prompts(
-                prompts,
-                TokenizeParams(max_total_tokens=100),
-            )
+        with pytest.raises(ValueError, match="maximum context length is"):
+            renderer.tokenize_prompts(prompts, TokenizeParams(max_total_tokens=100))
 
         # Should only tokenize the first max_total_tokens + 1 tokens
         assert renderer.tokenizer._captured_encode_kwargs["truncation"] is True
@@ -320,10 +298,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, long_tokens)
         )
 
-        with pytest.raises(
-            ValueError,
-            match="maximum context length is",
-        ):
+        with pytest.raises(ValueError, match="maximum context length is"):
             renderer.tokenize_prompts(
                 prompts,
                 TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=None),
@@ -337,10 +312,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
-            renderer.tokenize_prompts(
-                prompts,
-                TokenizeParams(max_total_tokens=100),
-            )
+            renderer.tokenize_prompts(prompts, TokenizeParams(max_total_tokens=100))
 
     def test_tokens_input_with_needs_detokenization(self):
         renderer = _build_renderer(MockModelConfig())
@@ -350,11 +322,7 @@ class TestRenderPrompt:
             _preprocess_prompt(renderer.model_config, tokens)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(
-                max_total_tokens=100,
-                needs_detokenization=True,
-            ),
+            prompts, TokenizeParams(max_total_tokens=100, needs_detokenization=True)
         )
 
         assert len(results) == 1
@@ -381,8 +349,7 @@ class TestRenderEmbedPrompt:
             _preprocess_prompt(renderer.model_config, embed_bytes)
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 1
@@ -405,8 +372,7 @@ class TestRenderEmbedPrompt:
             )
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 2
@@ -425,11 +391,7 @@ class TestRenderEmbedPrompt:
             )
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(
-                max_total_tokens=100,
-                truncate_prompt_tokens=10,
-            ),
+            prompts, TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=10)
         )
 
         assert len(results) == 1
@@ -454,8 +416,7 @@ class TestRenderEmbedPrompt:
                 )
             )
             results = renderer.tokenize_prompts(
-                prompts,
-                TokenizeParams(max_total_tokens=100),
+                prompts, TokenizeParams(max_total_tokens=100)
             )
 
             assert len(results) == 1
@@ -473,8 +434,7 @@ class TestRenderEmbedPrompt:
             )
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 1
@@ -495,8 +455,7 @@ class TestRenderEmbedPrompt:
             )
         )
         results = renderer.tokenize_prompts(
-            prompts,
-            TokenizeParams(max_total_tokens=100),
+            prompts, TokenizeParams(max_total_tokens=100)
         )
 
         assert len(results) == 2

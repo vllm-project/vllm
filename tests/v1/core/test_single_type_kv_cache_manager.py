@@ -251,11 +251,7 @@ def test_chunked_local_attention_remove_skipped_blocks():
 
 def test_sliding_window_remove_skipped_blocks():
     sliding_window_spec = SlidingWindowSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=4,
+        block_size=2, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=4
     )
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True, hash_block_size=2)

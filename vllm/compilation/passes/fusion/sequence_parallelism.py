@@ -53,9 +53,7 @@ SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
 
 
 def get_sequence_parallelism_threshold(
-    hidden_size: int,
-    tp_size: int,
-    element_size: int,
+    hidden_size: int, tp_size: int, element_size: int
 ) -> int | None:
     """
     Calculate the minimum token threshold for applying sequence parallelism.
@@ -114,12 +112,7 @@ def get_first_out_wrapper(
 class _SequenceParallelPatternHelper:
     """Helper for sequence parallelism patterns."""
 
-    def __init__(
-        self,
-        epsilon: float,
-        dtype: torch.dtype,
-        device: str | None,
-    ) -> None:
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         self.epsilon = epsilon
         self.dtype = dtype
         self.device = device
@@ -157,8 +150,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
             rmsnorm = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
@@ -166,8 +158,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             return rmsnorm, all_reduce
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
@@ -190,17 +181,11 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
-        return [
-            residual,
-            mm_1,
-            rms_norm_weights,
-        ]
+        return [residual, mm_1, rms_norm_weights]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
+            residual: torch.Tensor, mm_1: torch.Tensor, rms_norm_weights: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(mm_1)
             rmsnorm = vllm.ir.ops.fused_add_rms_norm(
@@ -209,9 +194,7 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             return rmsnorm[0], rmsnorm[1]
 
         def replacement(
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
+            residual: torch.Tensor, mm_1: torch.Tensor, rms_norm_weights: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # The pattern matcher replaces from the end of the graph
             # (last layer first). At the time each match is replaced,
@@ -257,12 +240,7 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
 
 class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
-    def __init__(
-        self,
-        epsilon: float,
-        dtype: torch.dtype,
-        device: str | None,
-    ) -> None:
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
@@ -272,9 +250,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            scale: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
@@ -282,9 +258,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             return quant, all_reduce
 
         def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            scale: torch.Tensor,
+            input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
@@ -408,11 +382,7 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             reduce_scatter = self._reduce_scatter(input)
             rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
-            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
-                rms,
-                input_global_scale,
-                True,
-            )
+            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(rms, input_global_scale, True)
             return (
                 self._all_gather(quant[0]),
                 reduce_scatter,
@@ -480,11 +450,7 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
                 reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
             rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
-            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
-                rms,
-                input_global_scale,
-                True,
-            )
+            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(rms, input_global_scale, True)
             return self._all_gather(quant[0]), residual_out, self._all_gather(quant[1])
 
         pm.register_replacement(

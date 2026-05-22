@@ -9,9 +9,7 @@ head_dim to a multiple of 16 for cuDNN compatibility.
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import round_up
@@ -109,11 +107,7 @@ def quantize_fp8_pad_head_dim_triton(
     S, H, D = tensor.shape
     padded_head_dim = round_up(D, 16)
     out_dtype = current_platform.fp8_dtype()
-    output = torch.empty(
-        (S, H, padded_head_dim),
-        device=tensor.device,
-        dtype=out_dtype,
-    )
+    output = torch.empty((S, H, padded_head_dim), device=tensor.device, dtype=out_dtype)
 
     scale_1d = scale.reshape(-1)
     n_rows = S * H
@@ -121,10 +115,7 @@ def quantize_fp8_pad_head_dim_triton(
     if block_m is None or block_n is None or num_warps is None:
         block_m, block_n, num_warps = _get_fp8_pad_quant_config(padded_head_dim)
 
-    grid = (
-        triton.cdiv(n_rows, block_m),
-        triton.cdiv(padded_head_dim, block_n),
-    )
+    grid = (triton.cdiv(n_rows, block_m), triton.cdiv(padded_head_dim, block_n))
 
     _quantize_pad_fp8_kernel[grid](
         tensor,

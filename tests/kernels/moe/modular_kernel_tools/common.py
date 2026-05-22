@@ -40,12 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.utils.import_utils import (
-    has_aiter,
-    has_deep_ep,
-    has_deep_gemm,
-    has_mori,
-)
+from vllm.utils.import_utils import has_aiter, has_deep_ep, has_deep_gemm, has_mori
 from vllm.utils.math_utils import next_power_of_2
 
 from .mk_objects import (
@@ -153,9 +148,7 @@ class Config:
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
 
-        env_dict = {
-            "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
-        }
+        env_dict = {"VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm()))}
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
@@ -421,9 +414,7 @@ class RankTensors:
         return s
 
     @staticmethod
-    def make_hidden_states(
-        config: Config,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def make_hidden_states(config: Config) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Return hidden_states
         """
@@ -601,9 +592,7 @@ def _make_gscale(num_experts: int) -> torch.Tensor:
 
 
 def make_modular_kernel(
-    config: Config,
-    vllm_config: VllmConfig,
-    quant_config: FusedMoEQuantConfig,
+    config: Config, vllm_config: VllmConfig, quant_config: FusedMoEQuantConfig
 ) -> mk.FusedMoEKernel:
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
@@ -630,9 +619,7 @@ def make_modular_kernel(
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe,
-        quant_config=quant_config,
-        allow_new_interface=True,
+        moe=moe, quant_config=quant_config, allow_new_interface=True
     )
     assert prepare_finalize is not None
 
@@ -645,9 +632,7 @@ def make_modular_kernel(
     )
 
     modular_kernel = mk.FusedMoEKernel(
-        prepare_finalize=prepare_finalize,
-        fused_experts=fused_experts,
-        inplace=False,
+        prepare_finalize=prepare_finalize, fused_experts=fused_experts, inplace=False
     )
 
     return modular_kernel

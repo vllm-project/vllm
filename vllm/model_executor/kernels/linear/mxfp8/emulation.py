@@ -37,10 +37,7 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         weight_scale = layer.weight_scale
         if weight_scale.dtype != MXFP8_SCALE_DTYPE:

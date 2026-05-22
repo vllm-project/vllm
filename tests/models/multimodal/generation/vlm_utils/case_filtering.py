@@ -63,9 +63,7 @@ def get_filtered_test_settings(
 
 
 def get_model_type_cases(
-    model_type: str,
-    test_info: VLMTestInfo,
-    test_type: VLMTestType,
+    model_type: str, test_info: VLMTestInfo, test_type: VLMTestType
 ):
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e,)
@@ -95,10 +93,7 @@ def get_model_type_cases(
         )
 
     # No sizes passed for custom inputs, since inputs are directly provided
-    if test_type not in (
-        VLMTestType.CUSTOM_INPUTS,
-        VLMTestType.AUDIO,
-    ):
+    if test_type not in (VLMTestType.CUSTOM_INPUTS, VLMTestType.AUDIO):
         wrapped_sizes = get_wrapped_test_sizes(test_info, test_type)
         if wrapped_sizes is None:
             raise ValueError(f"Sizes must be set for test type {test_type}")

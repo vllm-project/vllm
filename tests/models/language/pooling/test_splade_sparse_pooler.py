@@ -5,10 +5,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.models.bert import (
-    BertMLMHead,
-    SPLADESparsePooler,
-)
+from vllm.model_executor.models.bert import BertMLMHead, SPLADESparsePooler
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 

@@ -32,10 +32,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
@@ -100,10 +97,7 @@ class FunAudioChatAudioAttention(nn.Module):
         self.is_causal = False
 
         self.qkv_proj = QKVParallelLinear(
-            self.embed_dim,
-            self.head_dim,
-            self.total_num_heads,
-            bias=True,
+            self.embed_dim, self.head_dim, self.total_num_heads, bias=True
         )
         self.num_heads = self.qkv_proj.num_heads
         self.num_kv_heads = self.qkv_proj.num_kv_heads
@@ -117,11 +111,7 @@ class FunAudioChatAudioAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             prefix="funaudiochat_audio_tower.attn",
         )
-        self.out_proj = RowParallelLinear(
-            self.embed_dim,
-            self.embed_dim,
-            bias=True,
-        )
+        self.out_proj = RowParallelLinear(self.embed_dim, self.embed_dim, bias=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -385,9 +375,7 @@ class FunAudioChatAudioEncoder(nn.Module):
 
         for encoder_layer in self.layers:
             (hidden_states,) = encoder_layer(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                **kwargs,
+                hidden_states, cu_seqlens=cu_seqlens, **kwargs
             )
 
         hidden_states_list = hidden_states.split(valid_aftercnn_lens.tolist(), dim=0)
@@ -581,9 +569,7 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         return 1
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         # The discrete audio encoder downsamples 25Hz frames with group_size=5,
         # so for a 300s clip the max number of `<|AUDIO|>` placeholders is 1500.
@@ -623,17 +609,14 @@ class FunAudioChatDummyInputsBuilder(
         token_fps = int(getattr(self.info, "token_fps", 25))
         target_num_frames = max(1, max_audio_tokens) * max(1, group_size)
         audio_len = max(
-            1,
-            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
+            1, (target_num_frames * sampling_rate + token_fps - 1) // token_fps
         )
         num_audios = int(mm_counts.get("audio", 0))
 
         audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -718,9 +701,7 @@ class FunAudioChatMultiModalProcessor(
         return False
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
@@ -768,8 +749,7 @@ class FunAudioChatMultiModalProcessor(
 
             audio_tokens = [audio_token_id] * num_features
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
+                audio_tokens, embed_token_id=audio_token_id
             )
 
         return [
@@ -883,9 +863,7 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                         )
                     speech_ids_tensors.append(t)
                 speech_ids = nn.utils.rnn.pad_sequence(
-                    speech_ids_tensors,
-                    batch_first=True,
-                    padding_value=pad_id,
+                    speech_ids_tensors, batch_first=True, padding_value=pad_id
                 )
             else:
                 raise TypeError(
@@ -913,9 +891,7 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                         )
                     mask_tensors.append(t)
                 speech_attention_mask = nn.utils.rnn.pad_sequence(
-                    mask_tensors,
-                    batch_first=True,
-                    padding_value=0,
+                    mask_tensors, batch_first=True, padding_value=0
                 )
             else:
                 raise TypeError(
@@ -986,10 +962,7 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             inputs_embeds = None
 
         return self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:

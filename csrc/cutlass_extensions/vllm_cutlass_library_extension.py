@@ -23,10 +23,7 @@ class MixedInputKernelScheduleType(enum.Enum):
 
 VLLMDataTypeNames: dict[VLLMDataType | DataType, str] = {
     **DataTypeNames,  # type: ignore
-    **{
-        VLLMDataType.u4b8: "u4b8",
-        VLLMDataType.u8b128: "u8b128",
-    },
+    **{VLLMDataType.u4b8: "u4b8", VLLMDataType.u8b128: "u8b128"},
 }
 
 VLLMDataTypeTag: dict[VLLMDataType | DataType, str] = {
@@ -39,10 +36,7 @@ VLLMDataTypeTag: dict[VLLMDataType | DataType, str] = {
 
 VLLMDataTypeSize: dict[VLLMDataType | DataType, int] = {
     **DataTypeSize,  # type: ignore
-    **{
-        VLLMDataType.u4b8: 4,
-        VLLMDataType.u8b128: 8,
-    },
+    **{VLLMDataType.u4b8: 4, VLLMDataType.u8b128: 8},
 }
 
 VLLMDataTypeVLLMScalarTypeTag: dict[VLLMDataType | DataType, str] = {

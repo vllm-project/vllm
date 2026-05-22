@@ -29,10 +29,7 @@ def _make_tool_call(tc_id: str, name: str, args: str) -> dict:
 
 
 def _make_request(messages: list) -> ChatCompletionRequest:
-    return ChatCompletionRequest(
-        model="test-model",
-        messages=messages,
-    )
+    return ChatCompletionRequest(model="test-model", messages=messages)
 
 
 def test_tool_calls_list_preserved_after_model_dump():

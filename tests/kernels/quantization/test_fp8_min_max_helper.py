@@ -12,9 +12,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 
 
 class TestGetFp8MinMax:

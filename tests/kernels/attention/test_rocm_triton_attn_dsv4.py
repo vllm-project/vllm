@@ -76,9 +76,7 @@ def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
     num_tokens = kv.shape[0]
     num_blocks = (num_tokens + block_size - 1) // block_size
     cache = torch.zeros(
-        (num_blocks, block_size, 584),
-        dtype=torch.uint8,
-        device=kv.device,
+        (num_blocks, block_size, 584), dtype=torch.uint8, device=kv.device
     )
     cache_flat = cache.view(torch.uint8).flatten()
     kv_nope_fp8 = (
@@ -205,41 +203,22 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     device = torch.device("cuda")
     block_size = 4
     topk_indices = torch.tensor(
-        [
-            [0, 3, 4, -1],
-            [5, 8, -1, -1],
-            [2, 7, 9, -1],
-        ],
-        dtype=torch.int32,
-        device=device,
+        [[0, 3, 4, -1], [5, 8, -1, -1], [2, 7, 9, -1]], dtype=torch.int32, device=device
     )
     token_to_req_indices = torch.tensor([0, 1, 1], dtype=torch.int32, device=device)
     block_table = torch.tensor(
-        [
-            [10, 11, 12],
-            [20, 21, 22],
-        ],
-        dtype=torch.int32,
-        device=device,
+        [[10, 11, 12], [20, 21, 22]], dtype=torch.int32, device=device
     )
     is_valid_token = torch.tensor([True, False, True], dtype=torch.bool, device=device)
 
     actual_ragged, actual_indptr, actual_lens = (
         compute_global_topk_ragged_indices_and_indptr(
-            topk_indices,
-            token_to_req_indices,
-            block_table,
-            block_size,
-            is_valid_token,
+            topk_indices, token_to_req_indices, block_table, block_size, is_valid_token
         )
     )
     expected_values, expected_positions, expected_indptr, expected_lens = (
         _ref_global_topk_ragged(
-            topk_indices,
-            token_to_req_indices,
-            block_table,
-            block_size,
-            is_valid_token,
+            topk_indices, token_to_req_indices, block_table, block_size, is_valid_token
         )
     )
 
@@ -330,9 +309,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
 
 @torch.inference_mode()
 def test_combine_topk_swa_indices_ragged() -> None:
-    from vllm.models.deepseek_v4.amd.rocm import (
-        combine_topk_swa_indices_ragged,
-    )
+    from vllm.models.deepseek_v4.amd.rocm import combine_topk_swa_indices_ragged
 
     device = torch.device("cuda")
     topk_indices = torch.tensor(

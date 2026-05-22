@@ -29,9 +29,7 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
-from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
-    Qwen3VLMoeConfig,
-)
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -48,11 +46,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
-from .qwen3_moe import (
-    Qwen3MoeForCausalLM,
-    Qwen3MoeModel,
-    Qwen3MoeSparseMoeBlock,
-)
+from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel, Qwen3MoeSparseMoeBlock
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
@@ -108,11 +102,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
             if deepstack_input_embeds is not None and layer_idx in range(
                 0, len(deepstack_input_embeds)
             ):
@@ -346,9 +336,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
+        self, num_physical_experts: int, num_local_physical_experts: int
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
@@ -395,13 +383,7 @@ class Qwen3VLMoeForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()

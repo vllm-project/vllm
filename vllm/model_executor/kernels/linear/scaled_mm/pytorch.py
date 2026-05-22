@@ -8,10 +8,7 @@ import torch
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 def _get_num_tokens(output_shape: list) -> int:
@@ -154,12 +151,7 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
         # Fused GEMM_DQ Rowwise GEMM
         output = torch._scaled_mm(
-            A,
-            B,
-            out_dtype=out_dtype,
-            scale_a=As,
-            scale_b=scale_b,
-            bias=bias,
+            A, B, out_dtype=out_dtype, scale_a=As, scale_b=scale_b, bias=bias
         )
 
         num_tokens = _get_num_tokens(output_shape)
@@ -212,11 +204,7 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         # This computes C = (X * W).
         # Output in fp32 to allow subsequent ops to happen in-place
         output = torch._scaled_mm(
-            A,
-            B,
-            scale_a=dummy_tensor,
-            scale_b=dummy_tensor,
-            out_dtype=torch.float32,
+            A, B, scale_a=dummy_tensor, scale_b=dummy_tensor, out_dtype=torch.float32
         )
         # A fix for discrepancy in scaled_mm which returns tuple
         # for torch < 2.5 and a single value in torch >= 2.5

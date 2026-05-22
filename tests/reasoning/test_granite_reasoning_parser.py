@@ -47,75 +47,27 @@ MULTIPLE_LINES_WITH_THINK = {
 }
 
 TEST_CASES = [
+    pytest.param(False, SIMPLE_REASONING, id="simple_reasoning"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
+    pytest.param(False, NO_REASONING, id="no_reasoning"),
+    pytest.param(False, MULTIPLE_LINES, id="multiple_lines"),
+    pytest.param(False, REASONING_WITH_THINK, id="reasoning_with_think"),
     pytest.param(
-        False,
-        SIMPLE_REASONING,
-        id="simple_reasoning",
+        False, COMPLETE_REASONING_WITH_THINK, id="complete_reasoning_with_think"
     ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        False,
-        NO_REASONING,
-        id="no_reasoning",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
-    ),
-    pytest.param(
-        False,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING_WITH_THINK,
-        id="complete_reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think",
-    ),
-    pytest.param(
-        True,
-        SIMPLE_REASONING,
-        id="simple_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        NO_REASONING,
-        id="no_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
-    ),
-    pytest.param(
-        True,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think_streaming",
-    ),
+    pytest.param(False, MULTIPLE_LINES_WITH_THINK, id="multiple_lines_with_think"),
+    pytest.param(True, SIMPLE_REASONING, id="simple_reasoning_streaming"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_streaming"),
+    pytest.param(True, NO_REASONING, id="no_reasoning_streaming"),
+    pytest.param(True, MULTIPLE_LINES, id="multiple_lines_streaming"),
+    pytest.param(True, REASONING_WITH_THINK, id="reasoning_with_think_streaming"),
     pytest.param(
         True,
         COMPLETE_REASONING_WITH_THINK,
         id="complete_reasoning_with_think_streaming",
     ),
     pytest.param(
-        True,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think_streaming",
+        True, MULTIPLE_LINES_WITH_THINK, id="multiple_lines_with_think_streaming"
     ),
 ]
 
@@ -124,10 +76,7 @@ tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-):
+def test_reasoning(streaming: bool, param_dict: dict):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [
@@ -256,58 +205,19 @@ STREAMING_13 = {
 }
 
 STREAMING_SUBCASES = [
-    pytest.param(
-        STREAMING_1,
-        id="Starting reasoning special sequence",
-    ),
-    pytest.param(
-        STREAMING_2,
-        id="Unexpected start reasoning sequence",
-    ),
-    pytest.param(
-        STREAMING_3,
-        id="Continuing unexpected start reasoning sequence",
-    ),
-    pytest.param(
-        STREAMING_4,
-        id="Only start reasoning sequence and nothing else",
-    ),
-    pytest.param(
-        STREAMING_5,
-        id="Reasoning content has started",
-    ),
-    pytest.param(
-        STREAMING_6,
-        id="Response special sequence has started",
-    ),
-    pytest.param(
-        STREAMING_7,
-        id="Response special sequence reset",
-    ),
-    pytest.param(
-        STREAMING_8,
-        id="Response text has started",
-    ),
-    pytest.param(
-        STREAMING_9,
-        id="Delta contains everything",
-    ),
-    pytest.param(
-        STREAMING_10,
-        id="Delta contains some reasoning and response",
-    ),
-    pytest.param(
-        STREAMING_11,
-        id="Delta starts response sequence",
-    ),
-    pytest.param(
-        STREAMING_12,
-        id="Delta finishes response sequence",
-    ),
-    pytest.param(
-        STREAMING_13,
-        id="Delta breaks potential responise sequence",
-    ),
+    pytest.param(STREAMING_1, id="Starting reasoning special sequence"),
+    pytest.param(STREAMING_2, id="Unexpected start reasoning sequence"),
+    pytest.param(STREAMING_3, id="Continuing unexpected start reasoning sequence"),
+    pytest.param(STREAMING_4, id="Only start reasoning sequence and nothing else"),
+    pytest.param(STREAMING_5, id="Reasoning content has started"),
+    pytest.param(STREAMING_6, id="Response special sequence has started"),
+    pytest.param(STREAMING_7, id="Response special sequence reset"),
+    pytest.param(STREAMING_8, id="Response text has started"),
+    pytest.param(STREAMING_9, id="Delta contains everything"),
+    pytest.param(STREAMING_10, id="Delta contains some reasoning and response"),
+    pytest.param(STREAMING_11, id="Delta starts response sequence"),
+    pytest.param(STREAMING_12, id="Delta finishes response sequence"),
+    pytest.param(STREAMING_13, id="Delta breaks potential responise sequence"),
 ]
 
 

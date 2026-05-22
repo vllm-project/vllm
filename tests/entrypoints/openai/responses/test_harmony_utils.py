@@ -25,10 +25,7 @@ class TestResponsePreviousInputToHarmony:
 
     def test_message_with_empty_content(self):
         """Test parsing message with empty string content."""
-        chat_msg = {
-            "role": "user",
-            "content": "",
-        }
+        chat_msg = {"role": "user", "content": ""}
 
         messages = response_previous_input_to_harmony(chat_msg)
 
@@ -78,11 +75,7 @@ class TestResponsePreviousInputToHarmony:
 
     def test_tool_message_with_empty_content(self):
         """Test parsing tool message with None content."""
-        chat_msg = {
-            "role": "tool",
-            "name": "empty_tool",
-            "content": None,
-        }
+        chat_msg = {"role": "tool", "name": "empty_tool", "content": None}
 
         messages = response_previous_input_to_harmony(chat_msg)
 
@@ -278,8 +271,7 @@ class TestHarmonyToResponseOutput:
         are not included in final output to align with OpenAI behavior.
         """
         message = Message.from_author_and_content(
-            Author.new(Role.TOOL, "functions.get_weather"),
-            "The weather is sunny, 72°F",
+            Author.new(Role.TOOL, "functions.get_weather"), "The weather is sunny, 72°F"
         )
 
         output_items = harmony_to_response_output(message)

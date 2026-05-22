@@ -79,8 +79,7 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
 
 
 def _repeat_logprob_config(
-    test_prompts,
-    logprob_prompt_logprob_list: BatchLogprobsSpecType,
+    test_prompts, logprob_prompt_logprob_list: BatchLogprobsSpecType
 ) -> BatchLogprobsSpecType:
     """Ensure each test prompt has a logprob config.
 
@@ -334,14 +333,8 @@ def test_get_logprobs_and_prompt_logprobs(
     test_prompts = example_prompts
 
     max_tokens = 5
-    hf_outputs = hf_model.generate_greedy(
-        test_prompts,
-        max_tokens=max_tokens,
-    )
-    hf_logprobs = hf_model.generate_greedy_logprobs(
-        test_prompts,
-        max_tokens=max_tokens,
-    )
+    hf_outputs = hf_model.generate_greedy(test_prompts, max_tokens=max_tokens)
+    hf_logprobs = hf_model.generate_greedy_logprobs(test_prompts, max_tokens=max_tokens)
 
     # Batch has mixed sample params
     # (different logprobs/prompt logprobs combos)
@@ -407,14 +400,10 @@ def test_none_logprobs(vllm_model, example_prompts):
     max_tokens = 5
 
     sampling_params_logprobs_none = SamplingParams(
-        max_tokens=max_tokens,
-        logprobs=None,
-        prompt_logprobs=None,
-        temperature=0.0,
+        max_tokens=max_tokens, logprobs=None, prompt_logprobs=None, temperature=0.0
     )
     results_logprobs_none = vllm_model.llm.generate(
-        example_prompts,
-        sampling_params=sampling_params_logprobs_none,
+        example_prompts, sampling_params=sampling_params_logprobs_none
     )
 
     for i in range(len(results_logprobs_none)):
@@ -881,11 +870,7 @@ def test_verify_tokens_integration():
         # Based on user's example: "In this example,"
         test_prompts = ["In this example,"]
 
-        sampling_params = SamplingParams(
-            max_tokens=16,
-            temperature=0,
-            logprobs=0,
-        )
+        sampling_params = SamplingParams(max_tokens=16, temperature=0, logprobs=0)
 
         results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
@@ -930,11 +915,7 @@ def test_utf8_edge_cases_with_real_model():
             'Mixed: "quoted" — with symbols',  # Mixed
         ]
 
-        sampling_params = SamplingParams(
-            max_tokens=10,
-            temperature=0,
-            logprobs=1,
-        )
+        sampling_params = SamplingParams(max_tokens=10, temperature=0, logprobs=1)
 
         results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
@@ -970,11 +951,7 @@ def test_correct_decoded_token_preserves_valid_tokens():
         # Simple prompt with standard ASCII characters
         test_prompts = ["Hello world, this is a test."]
 
-        sampling_params = SamplingParams(
-            max_tokens=10,
-            temperature=0,
-            logprobs=2,
-        )
+        sampling_params = SamplingParams(max_tokens=10, temperature=0, logprobs=2)
 
         results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
@@ -1041,9 +1018,7 @@ def test_correct_decoded_token_preserves_valid_tokens():
     ],
 )
 def test_spec_decode_logprobs(
-    logprobs_mode: LogprobsMode,
-    model_setup: tuple[str, str, dict, int],
-    monkeypatch,
+    logprobs_mode: LogprobsMode, model_setup: tuple[str, str, dict, int], monkeypatch
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -1100,10 +1075,7 @@ def test_spec_decode_logprobs(
     )
 
     # Run base LLM.
-    ref_llm = LLM(
-        model=model_name,
-        **llm_kwargs,
-    )
+    ref_llm = LLM(model=model_name, **llm_kwargs)
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
@@ -1120,11 +1092,7 @@ def test_spec_decode_logprobs(
     # Run spec decode LLM.
     # Add max_model_len to spec_config if not present
     spec_config_with_len = {**spec_config, "max_model_len": max_model_len}
-    spec_llm = LLM(
-        model_name,
-        speculative_config=spec_config_with_len,
-        **llm_kwargs,
-    )
+    spec_llm = LLM(model_name, speculative_config=spec_config_with_len, **llm_kwargs)
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )

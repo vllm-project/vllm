@@ -37,10 +37,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    StreamOptions,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, StreamOptions
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 if TYPE_CHECKING:
@@ -175,10 +172,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_message_content(
-        cls,
-        msg,
-        openai_msg: dict[str, Any],
-        openai_messages: list[dict[str, Any]],
+        cls, msg, openai_msg: dict[str, Any], openai_messages: list[dict[str, Any]]
     ) -> None:
         """Convert complex message content blocks"""
         content_parts: list[dict[str, Any]] = []
@@ -431,9 +425,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req.tools = tools
 
     async def create_messages(
-        self,
-        request: AnthropicMessagesRequest,
-        raw_request: Request | None = None,
+        self, request: AnthropicMessagesRequest, raw_request: Request | None = None
     ) -> AsyncGenerator[str, None] | AnthropicMessagesResponse | ErrorResponse:
         """
         Messages API similar to Anthropic's API.
@@ -457,8 +449,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         return self.message_stream_converter(generator)
 
     def messages_full_converter(
-        self,
-        generator: ChatCompletionResponse,
+        self, generator: ChatCompletionResponse
     ) -> AnthropicMessagesResponse:
         result = AnthropicMessagesResponse(
             id=generator.id,
@@ -489,10 +480,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
         if choice.message.content:
             content.append(
-                AnthropicContentBlock(
-                    type="text",
-                    text=choice.message.content,
-                )
+                AnthropicContentBlock(type="text", text=choice.message.content)
             )
 
         for tool_call in choice.message.tool_calls:
@@ -509,8 +497,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         return result
 
     async def message_stream_converter(
-        self,
-        generator: AsyncGenerator[str, None],
+        self, generator: AsyncGenerator[str, None]
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -565,16 +552,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                         index=state.block_index,
                         type="content_block_delta",
                         delta=AnthropicDelta(
-                            type="signature_delta",
-                            signature=state.block_signature,
+                            type="signature_delta", signature=state.block_signature
                         ),
                     )
                     data = chunk.model_dump_json(exclude_unset=True)
                     events.append(wrap_data_with_event(data, "content_block_delta"))
                     state.signature_emitted = True
                 stop_chunk = AnthropicStreamEvent(
-                    index=state.block_index,
-                    type="content_block_stop",
+                    index=state.block_index, type="content_block_stop"
                 )
                 data = stop_chunk.model_dump_json(exclude_unset=True)
                 events.append(wrap_data_with_event(data, "content_block_stop"))
@@ -597,9 +582,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 if item.startswith("data:"):
                     data_str = item[5:].strip().rstrip("\n")
                     if data_str == "[DONE]":
-                        stop_message = AnthropicStreamEvent(
-                            type="message_stop",
-                        )
+                        stop_message = AnthropicStreamEvent(type="message_stop")
                         data = stop_message.model_dump_json(
                             exclude_unset=True, exclude_none=True
                         )
@@ -681,8 +664,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     ),
                                     type="content_block_delta",
                                     delta=AnthropicDelta(
-                                        type="thinking_delta",
-                                        thinking=reasoning_delta,
+                                        type="thinking_delta", thinking=reasoning_delta
                                     ),
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -811,9 +793,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             yield wrap_data_with_event(data, "error")
 
     async def count_tokens(
-        self,
-        request: AnthropicCountTokensRequest,
-        raw_request: Request | None = None,
+        self, request: AnthropicCountTokensRequest, raw_request: Request | None = None
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
         chat_req = self._convert_anthropic_to_openai_request(request)

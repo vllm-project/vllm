@@ -40,10 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
-NORM2FN = {
-    "rms_norm": RMSNorm,
-    "layer_norm": nn.LayerNorm,
-}
+NORM2FN = {"rms_norm": RMSNorm, "layer_norm": nn.LayerNorm}
 
 
 class InternVisionEmbeddings(nn.Module):
@@ -312,11 +309,7 @@ class InternVisionEncoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.mlp = InternMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = InternMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
 
@@ -338,10 +331,7 @@ class InternVisionEncoderLayer(nn.Module):
             prefix=prefix,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ):
+    def forward(self, hidden_states: torch.Tensor):
         hidden_states = hidden_states + self.attn(self.norm1(hidden_states)) * self.ls1
 
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
@@ -391,9 +381,7 @@ class InternVisionEncoder(nn.Module):
 
 
 class InternVisionModel(nn.Module):
-    packed_modules_mapping = {
-        "qkv": ["qkv"],
-    }
+    packed_modules_mapping = {"qkv": ["qkv"]}
 
     def __init__(
         self,

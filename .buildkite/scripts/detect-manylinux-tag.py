@@ -34,11 +34,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from auditwheel.error import (
-    AuditwheelError,
-    NonPlatformWheelError,
-    WheelToolsError,
-)
+from auditwheel.error import AuditwheelError, NonPlatformWheelError, WheelToolsError
 from auditwheel.wheel_abi import analyze_wheel_abi
 from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
 
@@ -101,9 +97,7 @@ def main() -> int:
         "auditwheel and rename the wheel in place."
     )
     parser.add_argument(
-        "wheel",
-        type=Path,
-        help="Path to the wheel to inspect and rename.",
+        "wheel", type=Path, help="Path to the wheel to inspect and rename."
     )
     args = parser.parse_args()
 

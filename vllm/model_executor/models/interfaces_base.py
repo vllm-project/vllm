@@ -64,10 +64,7 @@ def _check_vllm_model_init(model: type[object] | object) -> bool:
 def _check_vllm_model_embed_input_ids(model: type[object] | object) -> bool:
     model_embed_input_ids = getattr(model, "embed_input_ids", None)
     if not callable(model_embed_input_ids):
-        logger.warning(
-            "The model (%s) is missing the `embed_input_ids` method.",
-            model,
-        )
+        logger.warning("The model (%s) is missing the `embed_input_ids` method.", model)
         return False
 
     return True
@@ -114,10 +111,7 @@ def is_vllm_model(
 class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     """The interface required for all generative models in vLLM."""
 
-    def compute_logits(
-        self,
-        hidden_states: T,
-    ) -> T | None:
+    def compute_logits(self, hidden_states: T) -> T | None:
         """Return `None` if TP rank > 0."""
         ...
 
@@ -247,15 +241,11 @@ def default_pooling_type(
     return func
 
 
-def get_default_seq_pooling_type(
-    model: type[object] | object,
-) -> SequencePoolingType:
+def get_default_seq_pooling_type(model: type[object] | object) -> SequencePoolingType:
     return getattr(model, "default_seq_pooling_type", "LAST")
 
 
-def get_default_tok_pooling_type(
-    model: type[object] | object,
-) -> TokenPoolingType:
+def get_default_tok_pooling_type(model: type[object] | object) -> TokenPoolingType:
     return getattr(model, "default_tok_pooling_type", "ALL")
 
 

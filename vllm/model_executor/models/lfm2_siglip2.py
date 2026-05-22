@@ -26,10 +26,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .utils import maybe_prefix
-from .vision import (
-    is_vit_use_data_parallel,
-    resolve_visual_encoder_outputs,
-)
+from .vision import is_vit_use_data_parallel, resolve_visual_encoder_outputs
 
 
 class Siglip2VisionEmbeddings(nn.Module):
@@ -47,9 +44,7 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
     def forward(
-        self,
-        pixel_values_packed: torch.FloatTensor,
-        spatial_shapes: torch.LongTensor,
+        self, pixel_values_packed: torch.FloatTensor, spatial_shapes: torch.LongTensor
     ) -> torch.Tensor:
         """Embed patchified pixel values in packed (unpadded) form.
 
@@ -88,9 +83,7 @@ class Siglip2VisionEmbeddings(nn.Module):
             self.position_embedding_size, self.position_embedding_size, -1
         )
         packed_pos_embeds = self.resize_positional_embeddings_packed(
-            positional_embeddings,
-            spatial_shapes,
-            lengths_list=lengths_list,
+            positional_embeddings, spatial_shapes, lengths_list=lengths_list
         )
 
         embeddings = patch_embeds + packed_pos_embeds
@@ -286,16 +279,10 @@ class Siglip2EncoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = Siglip2Attention(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
-        self.mlp = Siglip2MLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
+        self.mlp = Siglip2MLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -313,9 +300,7 @@ class Siglip2EncoderLayer(nn.Module):
 
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            hidden_states=hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
         )
         hidden_states = residual + hidden_states
 
@@ -373,9 +358,7 @@ class Siglip2Encoder(nn.Module):
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(
-                hidden_states,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
+                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
             )
             if return_all_hidden_states:
                 hidden_states_pool.append(hidden_states)

@@ -7,10 +7,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
-from openai.types.responses import (
-    FunctionTool,
-    ToolChoiceFunction,
-)
+from openai.types.responses import FunctionTool, ToolChoiceFunction
 from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
@@ -144,9 +141,7 @@ def consume_space(i: int, s: str) -> int:
     return i
 
 
-def _extract_tool_info(
-    tool: Tool,
-) -> tuple[str, dict[str, Any] | None]:
+def _extract_tool_info(tool: Tool) -> tuple[str, dict[str, Any] | None]:
     if isinstance(tool, FunctionTool):
         return tool.name, tool.parameters
     elif isinstance(tool, ChatCompletionToolsParam):
@@ -155,10 +150,7 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def find_tool_properties(
-    tools: list[Tool] | None,
-    tool_name: str,
-) -> dict[str, Any]:
+def find_tool_properties(tools: list[Tool] | None, tool_name: str) -> dict[str, Any]:
     """Find a tool by name and return its properties dict, or {}."""
     if not tools:
         return {}
@@ -181,9 +173,7 @@ def _get_tool_schema_from_tool(tool: Tool) -> dict:
     }
 
 
-def _get_tool_schema_defs(
-    tools: list[Tool],
-) -> dict:
+def _get_tool_schema_defs(tools: list[Tool]) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
         _, params = _extract_tool_info(tool)
@@ -200,9 +190,7 @@ def _get_tool_schema_defs(
     return all_defs
 
 
-def _get_json_schema_from_tools(
-    tools: list[Tool],
-) -> dict:
+def _get_json_schema_from_tools(tools: list[Tool]) -> dict:
     json_schema = {
         "type": "array",
         "minItems": 1,
@@ -266,11 +254,7 @@ class UnexpectedAstError(Exception):
     pass
 
 
-_JSON_NAME_LITERALS = {
-    "null": None,
-    "true": True,
-    "false": False,
-}
+_JSON_NAME_LITERALS = {"null": None, "true": True, "false": False}
 
 
 def get_parameter_value(val: ast.expr) -> Any:
@@ -287,10 +271,7 @@ def get_parameter_value(val: ast.expr) -> Any:
         return val.value
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
-            logger.warning(
-                "Dict argument keys are not all literals: %s",
-                ast.dump(val),
-            )
+            logger.warning("Dict argument keys are not all literals: %s", ast.dump(val))
             raise UnexpectedAstError("Dict tool call arguments must have literal keys")
         return {
             k.value: get_parameter_value(v)  # type: ignore
@@ -302,8 +283,7 @@ def get_parameter_value(val: ast.expr) -> Any:
         return _JSON_NAME_LITERALS[val.id]
     else:
         logger.warning(
-            "Unsupported AST node type in tool call arguments: %s",
-            ast.dump(val),
+            "Unsupported AST node type in tool call arguments: %s", ast.dump(val)
         )
         raise UnexpectedAstError("Tool call arguments must be literals")
 
@@ -340,8 +320,7 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     """
     if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
-            "Tool call has non-simple function name: %s",
-            ast.dump(call.func),
+            "Tool call has non-simple function name: %s", ast.dump(call.func)
         )
         raise UnexpectedAstError("Invalid tool call name")
     function_name = _ast_callable_dotted_name(call.func)
@@ -351,8 +330,7 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     return ToolCall(
         type="function",
         function=FunctionCall(
-            name=function_name,
-            arguments=json.dumps(arguments, ensure_ascii=False),
+            name=function_name, arguments=json.dumps(arguments, ensure_ascii=False)
         ),
     )
 
@@ -594,10 +572,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
 
 
 def compute_tool_delta(
-    previously_sent_args: str,
-    new_call: ToolCall,
-    index: int,
-    withheld_suffix: str,
+    previously_sent_args: str, new_call: ToolCall, index: int, withheld_suffix: str
 ) -> DeltaToolCall | None:
     """Compute the incremental delta between previously streamed arguments
     and the current tool call state.
@@ -622,17 +597,14 @@ def compute_tool_delta(
             type="function",
             index=index,
             function=DeltaFunctionCall(
-                name=new_call.function.name,
-                arguments=new_call_args,
+                name=new_call.function.name, arguments=new_call_args
             ),
         )
 
     arg_diff = new_call_args[len(previously_sent_args) :]
     return (
         DeltaToolCall(
-            id=None,
-            index=index,
-            function=DeltaFunctionCall(arguments=arg_diff),
+            id=None, index=index, function=DeltaFunctionCall(arguments=arg_diff)
         )
         if arg_diff
         else None

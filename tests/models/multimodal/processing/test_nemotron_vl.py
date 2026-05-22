@@ -33,10 +33,7 @@ def _get_expected_num_patches(
     blocks, _, _ = calculate_nemotron_vl_targets(
         orig_width=width,
         orig_height=height,
-        target_ratios=get_nemotron_vl_target_ratios(
-            min_num,
-            max_num,
-        ),
+        target_ratios=get_nemotron_vl_target_ratios(min_num, max_num),
         image_size=config.force_image_size,
         use_thumbnail=False,
     )

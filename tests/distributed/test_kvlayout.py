@@ -26,8 +26,7 @@ def test_get_kv_connector_cache_layout_without_kv_connector():
 
 def test_get_kv_connector_cache_layout_with_lmcache_connector():
     kv_transfer_config = KVTransferConfig(
-        kv_connector="LMCacheConnectorV1",
-        kv_role="kv_both",
+        kv_connector="LMCacheConnectorV1", kv_role="kv_both"
     )
     vllm_config = VllmConfig(
         device_config=DeviceConfig("cpu"), kv_transfer_config=kv_transfer_config
@@ -40,8 +39,7 @@ def test_get_kv_connector_cache_layout_with_lmcache_connector():
 
 def test_get_kv_connector_cache_layout_with_nixl_connector():
     kv_transfer_config = KVTransferConfig(
-        kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_connector="NixlConnector", kv_role="kv_both"
     )
     model_config = ModelConfig()
     vllm_config = VllmConfig(

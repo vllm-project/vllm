@@ -25,11 +25,7 @@ def test_mq_bind_with_local_ip():
     when connect_ip is the local node's IP."""
     # n_reader=2, n_local_reader=1 means 1 remote reader,
     # which triggers the remote ZMQ socket bind.
-    mq = MessageQueue(
-        n_reader=2,
-        n_local_reader=1,
-        connect_ip=get_ip(),
-    )
+    mq = MessageQueue(n_reader=2, n_local_reader=1, connect_ip=get_ip())
     handle = mq.export_handle()
     assert handle.remote_subscribe_addr is not None
     # The bound address should contain our local IP
@@ -49,11 +45,7 @@ def test_mq_bind_with_non_local_ip_fails():
     # 198.51.100.1 is from TEST-NET-2 (RFC 5737), never locally assigned.
     non_local_ip = "198.51.100.1"
     with pytest.raises(zmq.error.ZMQError, match="Cannot assign requested address"):
-        MessageQueue(
-            n_reader=2,
-            n_local_reader=1,
-            connect_ip=non_local_ip,
-        )
+        MessageQueue(n_reader=2, n_local_reader=1, connect_ip=non_local_ip)
 
 
 def test_mq_bind_defaults_to_local_ip():

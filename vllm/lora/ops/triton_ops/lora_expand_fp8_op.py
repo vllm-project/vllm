@@ -10,10 +10,7 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.fp8_kernel_utils import do_expand_kernel_fp8
-from vllm.lora.ops.triton_ops.utils import (
-    _get_lora_b_ptr,
-    get_lora_op_configs,
-)
+from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -223,15 +220,9 @@ def _lora_expand_fp8(
         return
 
     if use_fp8_w8a8:
-        assert inputs.dtype in [
-            torch.float8_e4m3fn,
-            torch.float8_e5m2,
-        ]
+        assert inputs.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
         for weight in lora_b_weights:
-            assert weight.dtype in [
-                torch.float8_e5m2,
-                torch.float8_e4m3fn,
-            ]
+            assert weight.dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
     else:
         assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
         for weight in lora_b_weights:

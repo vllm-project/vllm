@@ -35,10 +35,7 @@ def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
     return level
 
 
-def filter_delta_text(
-    delta_text: str,
-    previous_text: str,
-) -> tuple[str, bool]:
+def filter_delta_text(delta_text: str, previous_text: str) -> tuple[str, bool]:
     """Trim trailing tool-list delimiters from required-tool streaming text."""
     bracket_level = _bracket_level(previous_text)
     updated_delta = ""
@@ -80,24 +77,16 @@ def extract_named_tool_call_streaming(
             tool_call_id = MistralToolCall.generate_random_id()
         else:
             tool_call_id = make_tool_call_id(
-                id_type=tool_call_id_type,
-                func_name=function_name,
-                idx=tool_call_idx,
+                id_type=tool_call_id_type, func_name=function_name, idx=tool_call_idx
             )
         delta_tool_call = DeltaToolCall(
             id=tool_call_id,
             type="function",
-            function=DeltaFunctionCall(
-                name=function_name,
-                arguments=delta_text,
-            ),
+            function=DeltaFunctionCall(name=function_name, arguments=delta_text),
             index=tool_call_array_index,
         )
         function_name_returned = True
-    return (
-        DeltaMessage(tool_calls=[delta_tool_call]),
-        function_name_returned,
-    )
+    return (DeltaMessage(tool_calls=[delta_tool_call]), function_name_returned)
 
 
 def extract_required_tool_call_streaming(
@@ -115,10 +104,7 @@ def extract_required_tool_call_streaming(
     try:
         flags = Allow.ALL
         obj, _ = partial_json_loads(current_text, flags)
-    except (
-        partial_json_parser.core.exceptions.MalformedJSON,
-        json.JSONDecodeError,
-    ):
+    except (partial_json_parser.core.exceptions.MalformedJSON, json.JSONDecodeError):
         obj = None
 
     # check if the current text is a valid array

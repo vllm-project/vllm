@@ -49,10 +49,7 @@ FULL_CUDA_GRAPH_MODELS = [
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
-FP32_STATE_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "Zyphra/Zamba2-1.2B-instruct",
-]
+FP32_STATE_MODELS = ["state-spaces/mamba-130m-hf", "Zyphra/Zamba2-1.2B-instruct"]
 
 # Avoid OOM
 MAX_NUM_SEQS = 4
@@ -100,10 +97,7 @@ def test_models(
         )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 
@@ -226,9 +220,7 @@ def test_mamba_cache_cg_padding(
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
-    vllm_runner,
-    example_prompts,
-    model: str,
+    vllm_runner, example_prompts, model: str
 ) -> None:
     """
     This test is for verifying that the hybrid inner state management doesn't
@@ -250,11 +242,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
-def test_state_cleanup(
-    vllm_runner,
-    example_prompts,
-    model: str,
-) -> None:
+def test_state_cleanup(vllm_runner, example_prompts, model: str) -> None:
     """
     This test is for verifying that the Hybrid state is cleaned up between
     steps.
@@ -277,11 +265,7 @@ def test_state_cleanup(
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_distributed_correctness(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-    num_logprobs: int,
+    vllm_runner, example_prompts, model: str, max_tokens: int, num_logprobs: int
 ) -> None:
     with vllm_runner(
         model, tensor_parallel_size=1, max_num_seqs=MAX_NUM_SEQS
@@ -337,10 +321,7 @@ def test_full_cuda_graph(
         )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 
@@ -380,18 +361,13 @@ def test_fp32_cache_state(
         )
 
     check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
     )
 
 
 # Helper functions for the APC tests
 def _get_vllm_runner_params(
-    model: str,
-    max_model_len: int,
-    tensor_parallel_size: int = 1,
+    model: str, max_model_len: int, tensor_parallel_size: int = 1
 ):
     return {
         "model_name": model,
@@ -807,10 +783,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
 @pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
-def test_same_mamba_output_apc_on_vs_off(
-    vllm_runner,
-    model: str,
-) -> None:
+def test_same_mamba_output_apc_on_vs_off(vllm_runner, model: str) -> None:
     num_logprobs = 5
     prompts = [
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
@@ -862,10 +835,7 @@ def test_same_mamba_output_apc_on_vs_off(
 # we have to use a real large model to get reasonable results
 # the model can't be a hybrid model as we need block_size 16
 @pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
-def test_apc_common_prefix_same_batch(
-    model: str,
-    monkeypatch,
-) -> None:
+def test_apc_common_prefix_same_batch(model: str, monkeypatch) -> None:
     # Required to put the two requests in the same batch
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     llm = LLM(

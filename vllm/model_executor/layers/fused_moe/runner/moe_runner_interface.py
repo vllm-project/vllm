@@ -8,9 +8,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
 class MoERunnerInterface(PluggableLayer, ABC):

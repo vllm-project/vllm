@@ -55,14 +55,12 @@ async def pause_generation(
             wait_for_inflight_requests=wait_for_inflight_requests,
         )
         return JSONResponse(
-            content={"status": "paused"},
-            status_code=HTTPStatus.OK.value,
+            content={"status": "paused"}, status_code=HTTPStatus.OK.value
         )
 
     except ValueError as err:
         return JSONResponse(
-            content={"error": str(err)},
-            status_code=HTTPStatus.BAD_REQUEST.value,
+            content={"error": str(err)}, status_code=HTTPStatus.BAD_REQUEST.value
         )
     except Exception as err:  # pragma: no cover - defensive
         logger.exception("Failed to pause generation")
@@ -81,8 +79,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
     try:
         await engine.resume_generation()
         return JSONResponse(
-            content={"status": "resumed"},
-            status_code=HTTPStatus.OK.value,
+            content={"status": "resumed"}, status_code=HTTPStatus.OK.value
         )
     except Exception as err:  # pragma: no cover - defensive
         logger.exception("Failed to resume generation")
@@ -166,10 +163,7 @@ async def finish_weight_update(raw_request: Request):
 
 
 @router.get("/get_world_size")
-async def get_world_size(
-    raw_request: Request,
-    include_dp: bool = Query(True),
-):
+async def get_world_size(raw_request: Request, include_dp: bool = Query(True)):
     """Get the world size from the parallel config.
 
     Args:

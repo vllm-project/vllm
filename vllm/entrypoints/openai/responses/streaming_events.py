@@ -116,8 +116,7 @@ class StreamingState:
 
 
 def is_mcp_tool_by_namespace(
-    recipient: str | None,
-    allowed_function_tool_names: frozenset[str] | None = None,
+    recipient: str | None, allowed_function_tool_names: frozenset[str] | None = None
 ) -> bool:
     """
     Determine if a tool call is an MCP tool based on recipient prefix.
@@ -136,8 +135,7 @@ def is_mcp_tool_by_namespace(
 
 
 def emit_text_delta_events(
-    delta: str,
-    state: StreamingState,
+    delta: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for text content delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -167,10 +165,7 @@ def emit_text_delta_events(
                 item_id=state.current_item_id,
                 content_index=state.current_content_index,
                 part=ResponseOutputText(
-                    type="output_text",
-                    text="",
-                    annotations=[],
-                    logprobs=[],
+                    type="output_text", text="", annotations=[], logprobs=[]
                 ),
             )
         )
@@ -190,8 +185,7 @@ def emit_text_delta_events(
 
 
 def emit_reasoning_delta_events(
-    delta: str,
-    state: StreamingState,
+    delta: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for reasoning text delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -219,10 +213,7 @@ def emit_reasoning_delta_events(
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
                 content_index=state.current_content_index,
-                part=ResponseReasoningTextContent(
-                    text="",
-                    type="reasoning_text",
-                ),
+                part=ResponseReasoningTextContent(text="", type="reasoning_text"),
             )
         )
     events.append(
@@ -239,9 +230,7 @@ def emit_reasoning_delta_events(
 
 
 def emit_function_call_delta_events(
-    delta: str,
-    function_name: str,
-    state: StreamingState,
+    delta: str, function_name: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for function call argument deltas."""
     events: list[StreamingResponsesResponse] = []
@@ -279,9 +268,7 @@ def emit_function_call_delta_events(
 
 
 def emit_mcp_delta_events(
-    delta: str,
-    state: StreamingState,
-    recipient: str,
+    delta: str, state: StreamingState, recipient: str
 ) -> list[StreamingResponsesResponse]:
     """Emit events for MCP tool delta streaming."""
     name, server_label = _resolve_mcp_name_label(recipient)
@@ -325,8 +312,7 @@ def emit_mcp_delta_events(
 
 
 def emit_code_interpreter_delta_events(
-    delta: str,
-    state: StreamingState,
+    delta: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for code interpreter delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -374,15 +360,10 @@ def emit_code_interpreter_delta_events(
 
 
 def emit_text_output_done_events(
-    text: str,
-    state: StreamingState,
+    text: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
-    text_content = ResponseOutputText(
-        type="output_text",
-        text=text,
-        annotations=[],
-    )
+    text_content = ResponseOutputText(type="output_text", text=text, annotations=[])
     events: list[StreamingResponsesResponse] = []
     events.append(
         ResponseTextDoneEvent(
@@ -423,14 +404,10 @@ def emit_text_output_done_events(
 
 
 def emit_reasoning_done_events(
-    text: str,
-    state: StreamingState,
+    text: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a reasoning (analysis) item completes."""
-    content = ResponseReasoningTextContent(
-        text=text,
-        type="reasoning_text",
-    )
+    content = ResponseReasoningTextContent(text=text, type="reasoning_text")
     reasoning_item = ResponseReasoningItem(
         type="reasoning",
         content=[content],
@@ -471,9 +448,7 @@ def emit_reasoning_done_events(
 
 
 def emit_function_call_done_events(
-    function_name: str,
-    arguments: str,
-    state: StreamingState,
+    function_name: str, arguments: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
     events: list[StreamingResponsesResponse] = []
@@ -509,9 +484,7 @@ def emit_function_call_done_events(
 
 
 def emit_mcp_completion_events(
-    recipient: str,
-    arguments: str,
-    state: StreamingState,
+    recipient: str, arguments: str, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events when an MCP tool call completes."""
     name, server_label = _resolve_mcp_name_label(recipient)
@@ -558,8 +531,7 @@ def emit_mcp_completion_events(
 
 
 def emit_content_delta_events(
-    ctx: StreamingHarmonyContext,
-    state: StreamingState,
+    ctx: StreamingHarmonyContext, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -633,8 +605,7 @@ def emit_previous_item_done_events(
 
 
 def emit_browser_tool_events(
-    previous_item: HarmonyMessage,
-    state: StreamingState,
+    previous_item: HarmonyMessage, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events for browser tool calls (web search)."""
     function_name = previous_item.recipient[len("browser.") :]
@@ -643,8 +614,7 @@ def emit_browser_tool_events(
 
     if function_name == "search":
         action = response_function_web_search.ActionSearch(
-            type="search",
-            query=parsed_args["query"],
+            type="search", query=parsed_args["query"]
         )
     elif function_name == "open":
         action = response_function_web_search.ActionOpenPage(
@@ -720,8 +690,7 @@ def emit_browser_tool_events(
 
 
 def emit_code_interpreter_completion_events(
-    previous_item: HarmonyMessage,
-    state: StreamingState,
+    previous_item: HarmonyMessage, state: StreamingState
 ) -> list[StreamingResponsesResponse]:
     """Emit events when code interpreter completes."""
     events: list[StreamingResponsesResponse] = []
@@ -769,9 +738,7 @@ def emit_code_interpreter_completion_events(
 
 
 def emit_tool_action_events(
-    ctx: StreamingHarmonyContext,
-    state: StreamingState,
-    tool_server: ToolServer | None,
+    ctx: StreamingHarmonyContext, state: StreamingState, tool_server: ToolServer | None
 ) -> list[StreamingResponsesResponse]:
     """Emit events for tool action turn."""
     if not ctx.is_assistant_action_turn() or len(ctx.parser.messages) == 0:
@@ -864,10 +831,7 @@ def emit_simple_content_open(
             item_id=state.current_item_id,
             content_index=state.content_index,
             part=ResponseOutputText(
-                type="output_text",
-                text="",
-                annotations=[],
-                logprobs=[],
+                type="output_text", text="", annotations=[], logprobs=[]
             ),
         ),
     ]
@@ -896,9 +860,7 @@ def emit_simple_content_done(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
     part = ResponseOutputText(
-        type="output_text",
-        text=state.accumulated_text,
-        annotations=[],
+        type="output_text", text=state.accumulated_text, annotations=[]
     )
     events: list[StreamingResponsesResponse] = [
         ResponseTextDoneEvent(
@@ -962,17 +924,13 @@ def emit_simple_reasoning_open(
             output_index=state.output_index,
             item_id=state.current_item_id,
             content_index=state.content_index,
-            part=ResponseReasoningTextContent(
-                text="",
-                type="reasoning_text",
-            ),
+            part=ResponseReasoningTextContent(text="", type="reasoning_text"),
         ),
     ]
 
 
 def emit_simple_reasoning_delta(
-    state: SimpleStreamingState,
-    delta: str,
+    state: SimpleStreamingState, delta: str
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
     return [
@@ -991,8 +949,7 @@ def emit_simple_reasoning_done(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
     part = ResponseReasoningTextContent(
-        text=state.accumulated_text,
-        type="reasoning_text",
+        text=state.accumulated_text, type="reasoning_text"
     )
     events: list[StreamingResponsesResponse] = [
         ResponseReasoningTextDoneEvent(
@@ -1030,9 +987,7 @@ def emit_simple_reasoning_done(
 
 
 def emit_simple_tool_call_open(
-    state: SimpleStreamingState,
-    name: str,
-    index: int | None,
+    state: SimpleStreamingState, name: str, index: int | None
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
@@ -1054,13 +1009,12 @@ def emit_simple_tool_call_open(
                 arguments="",
                 status="in_progress",
             ),
-        ),
+        )
     ]
 
 
 def emit_simple_tool_call_delta(
-    state: SimpleStreamingState,
-    delta: str,
+    state: SimpleStreamingState, delta: str
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
     state.has_emitted_tool_call_delta = True
@@ -1103,7 +1057,7 @@ def emit_simple_tool_call_done(
                 id=state.current_item_id,
                 call_id=state.tool_call_id,
             ),
-        ),
+        )
     )
     state.output_index += 1
     state.current_state = _StateType.NONE

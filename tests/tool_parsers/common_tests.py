@@ -195,9 +195,7 @@ class ToolParserTests:
         self.apply_xfail_mark(request, test_config, test_name, streaming)
 
         content, tool_calls = run_tool_extraction(
-            tool_parser,
-            test_config.parallel_tool_calls_output,
-            streaming=streaming,
+            tool_parser, test_config.parallel_tool_calls_output, streaming=streaming
         )
 
         assert len(tool_calls) == test_config.parallel_tool_calls_count, (
@@ -227,9 +225,7 @@ class ToolParserTests:
         self.apply_xfail_mark(request, test_config, test_name, streaming)
 
         content, tool_calls = run_tool_extraction(
-            tool_parser,
-            test_config.various_data_types_output,
-            streaming=streaming,
+            tool_parser, test_config.various_data_types_output, streaming=streaming
         )
         assert len(tool_calls) == 1, f"Expected 1 tool call, got {len(tool_calls)}"
 

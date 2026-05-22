@@ -62,12 +62,7 @@ def test_flashinfer_fp8_gemm(
 
     with flashinfer.autotune(autotune):
         out = flashinfer_scaled_fp8_mm(
-            a_fp8,
-            b_fp8.t(),
-            a_scale,
-            b_scale,
-            dtype,
-            bias=bias,
+            a_fp8, b_fp8.t(), a_scale, b_scale, dtype, bias=bias
         )
 
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)

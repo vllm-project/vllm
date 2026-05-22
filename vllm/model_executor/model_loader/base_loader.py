@@ -53,9 +53,7 @@ class BaseModelLoader(ABC):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(
-                    vllm_config=vllm_config,
-                    model_config=model_config,
-                    prefix=prefix,
+                    vllm_config=vllm_config, model_config=model_config, prefix=prefix
                 )
 
             log_model_inspection(model)

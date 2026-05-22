@@ -30,11 +30,7 @@ from .llava import (
 from .llava_next import LlavaNextProcessingInfo
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (
-    AutoWeightsLoader,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class MiniMaxVL01ImagePixelInputs(TensorSchema):
@@ -142,10 +138,7 @@ class MiniMaxVL01MultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
         pixel_values = processed_outputs.get("pixel_values")
@@ -162,9 +155,7 @@ class MiniMaxVL01MultiModalProcessor(
         return processed_outputs
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
@@ -300,15 +291,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         return new_image_features
 
     def _process_image_pixels(
-        self,
-        inputs: MiniMaxVL01ImagePixelInputs,
+        self, inputs: MiniMaxVL01ImagePixelInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         pixel_values = inputs["pixel_values"]
         return self._image_pixels_to_features(self.vision_tower, pixel_values)
 
     def _process_image_input(
-        self,
-        image_input: MiniMaxVL01ImageInputs,
+        self, image_input: MiniMaxVL01ImageInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -337,15 +326,12 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         if pixel_values is not None and image_sizes is not None:
             return MiniMaxVL01ImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_sizes=image_sizes,
+                type="pixel_values", pixel_values=pixel_values, image_sizes=image_sizes
             )
 
         if image_embeds is not None:
             return MiniMaxVL01ImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds,
+                type="image_embeds", data=image_embeds
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -374,10 +360,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

@@ -24,11 +24,7 @@ def poly_norm(
 
     out = torch.empty_like(x)
     ops.poly_norm(  # type: ignore[attr-defined]
-        out,
-        x,
-        weight,
-        bias,
-        variance_epsilon,
+        out, x, weight, bias, variance_epsilon
     )
     return out
 
@@ -80,9 +76,7 @@ class RMSNorm(CustomOp):
         self.pass_weight_add = self.has_weight or not native_add_rms_norm
 
     def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
@@ -102,9 +96,7 @@ class RMSNorm(CustomOp):
             )
 
     def forward_cuda(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
             envs.VLLM_BATCH_INVARIANT
@@ -116,9 +108,7 @@ class RMSNorm(CustomOp):
         return self.forward_native(x, residual)
 
     def forward_xpu(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_cuda(x, residual)
 
@@ -140,19 +130,13 @@ class GemmaRMSNorm(CustomOp):
 
     # --8<-- [end:gemma_rms_norm]
 
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-    ) -> None:
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
     def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -171,9 +155,7 @@ class GemmaRMSNorm(CustomOp):
         )
 
     def forward_cuda(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_native(x, residual)
 

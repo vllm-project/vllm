@@ -13,18 +13,13 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.mla.prefill.selector import (
-        MLAPrefillSelectorConfig,
-    )
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
 
 
 class MLAPrefillBackend(ABC):
     """Abstract base class for MLA prefill backends."""
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     requires_r1_mla_dimensions: ClassVar[bool] = False
 
     @staticmethod
@@ -91,8 +86,7 @@ class MLAPrefillBackend(ABC):
         self.vllm_config = vllm_config
 
     def prepare_metadata(  # noqa: B027
-        self,
-        prefill_metadata: "MLACommonPrefillMetadata",
+        self, prefill_metadata: "MLACommonPrefillMetadata"
     ) -> None:
         """Prepare backend-specific metadata before the forward pass.
 
@@ -112,10 +106,6 @@ class MLAPrefillBackend(ABC):
 
     @abstractmethod
     def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        self, chunk_idx: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

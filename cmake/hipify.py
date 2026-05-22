@@ -20,18 +20,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # Project directory where all the source + include files live.
-    parser.add_argument(
-        "-p",
-        "--project_dir",
-        help="The project directory.",
-    )
+    parser.add_argument("-p", "--project_dir", help="The project directory.")
 
     # Directory where hipified files are written.
-    parser.add_argument(
-        "-o",
-        "--output_dir",
-        help="The output directory.",
-    )
+    parser.add_argument("-o", "--output_dir", help="The output directory.")
 
     # Source files to convert.
     parser.add_argument(

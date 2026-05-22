@@ -285,8 +285,7 @@ class EplbState:
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
-        num_routed_experts: int,
-        num_redundant_experts: int,
+        num_routed_experts: int, num_redundant_experts: int
     ) -> Sequence[int]:
         """
         Build an initial expert arrangement using the following structure:
@@ -339,11 +338,7 @@ class EplbState:
                     )
                 )
 
-    def add_model(
-        self,
-        model: MixtureOfExperts,
-        model_config: ModelConfig,
-    ):
+    def add_model(self, model: MixtureOfExperts, model_config: ModelConfig):
         """
         Build the initial EPLB state.
         """
@@ -352,13 +347,11 @@ class EplbState:
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
-                model.num_routed_experts,
-                model.num_redundant_experts,
+                model.num_routed_experts, model.num_redundant_experts
             )
         )
         physical_to_logical_map = torch.tensor(
-            physical_to_logical_map_list,
-            device=self.device,
+            physical_to_logical_map_list, device=self.device
         )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
@@ -375,9 +368,7 @@ class EplbState:
             device=self.device,
         )
         logical_replica_count = torch.zeros(
-            (model.num_logical_experts,),
-            device=self.device,
-            dtype=torch.long,
+            (model.num_logical_experts,), device=self.device, dtype=torch.long
         )
 
         for i in range(model.num_physical_experts):
@@ -388,27 +379,17 @@ class EplbState:
         # Duplicate initial mapping for all layers
         physical_to_logical_map = (
             physical_to_logical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
+            .expand(model.num_moe_layers, -1)
             .contiguous()
         )
         logical_to_physical_map = (
             logical_to_physical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-                -1,
-            )
+            .expand(model.num_moe_layers, -1, -1)
             .contiguous()
         )
         logical_replica_count = (
             logical_replica_count.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
+            .expand(model.num_moe_layers, -1)
             .contiguous()
         )
 
@@ -440,9 +421,7 @@ class EplbState:
         logger.debug("Selected EPLB policy: %s", policy_type)
 
         model.set_eplb_state(
-            expert_load_pass,
-            logical_to_physical_map,
-            logical_replica_count,
+            expert_load_pass, logical_to_physical_map, logical_replica_count
         )
         self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
@@ -471,10 +450,7 @@ class EplbState:
         self.num_valid_physical_experts = model.num_physical_experts
 
     def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-        log_stats: bool = False,
+        self, is_dummy: bool = False, is_profile: bool = False, log_stats: bool = False
     ) -> None:
         """
         Step the EPLB state.
@@ -585,8 +561,7 @@ class EplbState:
                     eplb_model_state
                 ):
                     _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
+                        model_state=eplb_model_state, ep_rank=ep_group.rank()
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -655,9 +630,7 @@ class EplbState:
             ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
-        self,
-        is_profile: bool = False,
-        rank_mapping: dict[int, int] | None = None,
+        self, is_profile: bool = False, rank_mapping: dict[int, int] | None = None
     ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
@@ -807,17 +780,12 @@ class EplbState:
         return None
 
     def start_async_loop(
-        self,
-        rank_mapping: dict[int, int] | None = None,
-        is_profile: bool = False,
+        self, rank_mapping: dict[int, int] | None = None, is_profile: bool = False
     ):
         if not self.is_async:
             return
         if self.async_worker is None:
-            self.async_worker = start_async_worker(
-                self,
-                is_profile=is_profile,
-            )
+            self.async_worker = start_async_worker(self, is_profile=is_profile)
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
@@ -887,14 +855,8 @@ class EplbState:
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
     ) -> "EplbState":
-        eplb_state = cls(
-            parallel_config=parallel_config,
-            device=device,
-        )
-        eplb_state.add_model(
-            model=model,
-            model_config=model_config,
-        )
+        eplb_state = cls(parallel_config=parallel_config, device=device)
+        eplb_state.add_model(model=model, model_config=model_config)
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
@@ -906,12 +868,7 @@ class EplbState:
         max_num_replicas = eplb_model_state.logical_to_physical_map.shape[-1]
         num_replicas = logical_to_physical_map_cpu.shape[-1]
         logical_to_physical_map = torch.nn.functional.pad(
-            logical_to_physical_map_cpu,
-            (
-                0,
-                max_num_replicas - num_replicas,
-            ),
-            value=-1,
+            logical_to_physical_map_cpu, (0, max_num_replicas - num_replicas), value=-1
         ).to(device)
         logical_replica_count = logical_replica_count_cpu.to(device)
 
@@ -953,8 +910,7 @@ class EplbLayerState:
 
 
 def _node_count_with_rank_mapping(
-    pg: ProcessGroup | StatelessProcessGroup,
-    rank_mapping: dict[int, int],
+    pg: ProcessGroup | StatelessProcessGroup, rank_mapping: dict[int, int]
 ) -> int:
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)
@@ -990,8 +946,7 @@ def _node_count_with_rank_mapping(
 
 
 def compute_logical_maps(
-    physical_to_logical_map: torch.Tensor,
-    num_logical_experts: int,
+    physical_to_logical_map: torch.Tensor, num_logical_experts: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Derive logical_to_physical_map and logical_replica_count from
@@ -1023,23 +978,15 @@ def compute_logical_maps(
 
     valid_mask = physical_to_logical_map_view >= 0
     logical_replica_count = torch.zeros(
-        num_layers,
-        num_logical_experts,
-        dtype=dtype,
-        device=device,
+        num_layers, num_logical_experts, dtype=dtype, device=device
     )
     logical_replica_count.scatter_add_(
-        1,
-        physical_to_logical_map_view.clamp(min=0),
-        valid_mask.to(dtype),
+        1, physical_to_logical_map_view.clamp(min=0), valid_mask.to(dtype)
     )
 
     max_replicas = int(logical_replica_count.max().item())
     logical_to_physical_map_out = torch.full(
-        (num_layers, num_logical_experts, max_replicas),
-        -1,
-        dtype=dtype,
-        device=device,
+        (num_layers, num_logical_experts, max_replicas), -1, dtype=dtype, device=device
     )
 
     running_count = torch.zeros_like(logical_replica_count)
@@ -1076,9 +1023,7 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
 
 
 def _commit_eplb_maps_for_layer(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-    layer: int,
+    model_state: EplbModelState, new_physical_to_logical_map: torch.Tensor, layer: int
 ) -> None:
     """
     Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
@@ -1100,10 +1045,7 @@ def _commit_eplb_maps_for_layer(
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map[layer],
-    )
+    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
 
     # Commit logical_replica_count
     src = new_replica_count
@@ -1113,8 +1055,7 @@ def _commit_eplb_maps_for_layer(
 
 
 def _commit_eplb_maps(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
+    model_state: EplbModelState, new_physical_to_logical_map: torch.Tensor
 ) -> None:
     """
     Copies all of the new_* maps into model_state. After this function completes,
@@ -1138,10 +1079,7 @@ def _commit_eplb_maps(
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map,
-    )
+    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map)
 
     # Commit logical_replica_count
     src = new_replica_count
@@ -1149,10 +1087,7 @@ def _commit_eplb_maps(
     dst.copy_(src, non_blocking=True)
 
 
-def _move_to_workspace(
-    model_state: EplbModelState,
-    ep_rank: int,
-) -> None:
+def _move_to_workspace(model_state: EplbModelState, ep_rank: int) -> None:
     result = model_state.pending_result
     assert result is not None
     move_from_buffer(

@@ -38,12 +38,7 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         self.vision_config = hf_config.vision_config
 
     @abstractmethod
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
+    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
         raise NotImplementedError
 
     @abstractmethod
@@ -90,16 +85,11 @@ def _get_vit_attn_backend(
     Get the available attention backend for Vision Transformer.
     """
     return current_platform.get_vit_attn_backend(
-        head_size,
-        dtype,
-        backend=attn_backend_override,
+        head_size, dtype, backend=attn_backend_override
     )
 
 
-def get_vit_attn_backend(
-    head_size: int,
-    dtype: torch.dtype,
-) -> AttentionBackendEnum:
+def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> AttentionBackendEnum:
     """
     Get the attention backend for Vision Transformer.
     """
@@ -108,9 +98,7 @@ def get_vit_attn_backend(
         mm_cfg.mm_encoder_attn_backend if mm_cfg is not None else None
     )
     return _get_vit_attn_backend(
-        head_size,
-        dtype,
-        attn_backend_override=attn_backend_override,
+        head_size, dtype, attn_backend_override=attn_backend_override
     )
 
 
@@ -175,8 +163,7 @@ def _get_vision_feature_selector(
 
 
 def get_num_selected_vision_tokens(
-    num_vision_tokens: int,
-    strategy: VisionFeatureSelectStrategy | str,
+    num_vision_tokens: int, strategy: VisionFeatureSelectStrategy | str
 ) -> int:
     if callable(strategy):
         dummy_features = torch.empty(1, num_vision_tokens, 64)  # [B, L, D]
@@ -312,8 +299,7 @@ def run_dp_sharded_vision_model(
 
 
 def get_load_balance_assignment(
-    sizes: list[int],
-    num_gpus: int = 2,
+    sizes: list[int], num_gpus: int = 2
 ) -> tuple[list[int], list[int], list[int]]:
     """
     Generate load balancing assignment and metadata

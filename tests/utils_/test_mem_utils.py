@@ -82,14 +82,9 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
     ):
-        mock_platform.mem_get_info.return_value = (
-            mock_cuda_free,
-            mock_cuda_total,
-        )
+        mock_platform.mem_get_info.return_value = (mock_cuda_free, mock_cuda_total)
         mock_platform.is_integrated_gpu.return_value = True
-        mock_platform.memory_stats.return_value = {
-            "allocated_bytes.all.peak": 0,
-        }
+        mock_platform.memory_stats.return_value = {"allocated_bytes.all.peak": 0}
         mock_platform.memory_reserved.return_value = 0
         mock_platform.current_device = lambda: "cuda:0"
 
@@ -113,14 +108,9 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
     ):
-        mock_platform.mem_get_info.return_value = (
-            mock_cuda_free,
-            mock_cuda_total,
-        )
+        mock_platform.mem_get_info.return_value = (mock_cuda_free, mock_cuda_total)
         mock_platform.is_integrated_gpu.return_value = False
-        mock_platform.memory_stats.return_value = {
-            "allocated_bytes.all.peak": 0,
-        }
+        mock_platform.memory_stats.return_value = {"allocated_bytes.all.peak": 0}
         mock_platform.memory_reserved.return_value = 0
         mock_platform.current_device = lambda: "cuda:0"
 

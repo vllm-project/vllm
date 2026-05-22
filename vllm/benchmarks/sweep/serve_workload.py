@@ -13,12 +13,7 @@ from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
-from .serve import (
-    SweepServeArgs,
-    _get_comb_base_path,
-    run_comb,
-    server_ctx,
-)
+from .serve import SweepServeArgs, _get_comb_base_path, run_comb, server_ctx
 from .server import ServerProcess
 
 try:
@@ -31,8 +26,7 @@ WorkloadVariable = Literal["request_rate", "max_concurrency"]
 
 
 def _estimate_workload_value(
-    run_data: dict[str, object],
-    workload_var: WorkloadVariable,
+    run_data: dict[str, object], workload_var: WorkloadVariable
 ):
     request_throughput = float(run_data["request_throughput"])  # type: ignore
     if workload_var == "request_rate":
@@ -45,8 +39,7 @@ def _estimate_workload_value(
 
 
 def _estimate_workload_avg(
-    runs: list[dict[str, object]],
-    workload_var: WorkloadVariable,
+    runs: list[dict[str, object]], workload_var: WorkloadVariable
 ):
     total = sum(_estimate_workload_value(run, workload_var) for run in runs)
     return total / len(runs)

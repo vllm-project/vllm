@@ -290,11 +290,7 @@ def qwen_prompt_path_encoder(
     for asset in assets:
         image_tmp_path = tmp_path / f"{asset.name}.jpg"
         asset.pil_image.save(image_tmp_path)
-        prompt = prompt.replace(
-            "<img></img>",
-            f"<img>{image_tmp_path}</img>",
-            1,
-        )
+        prompt = prompt.replace("<img></img>", f"<img>{image_tmp_path}</img>", 1)
     return prompt
 
 
@@ -307,12 +303,7 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if isinstance(images, Image):
             images = [images]
         # inputs is a custom class instead of dict or BatchFeature
-        inputs = hf_processor(
-            *args,
-            prompt=text,
-            images=images,
-            **kwargs,
-        )
+        inputs = hf_processor(*args, prompt=text, images=images, **kwargs)
         inputs = {
             k: inputs[k]
             for k in inputs.keys()  # noqa
@@ -927,10 +918,7 @@ def _internvl_generate(
 
     input_embeds = input_embeds.reshape(B, N, C)
 
-    forward_kwargs = dict(
-        inputs_embeds=input_embeds,
-        attention_mask=attention_mask,
-    )
+    forward_kwargs = dict(inputs_embeds=input_embeds, attention_mask=attention_mask)
     if getattr(self, "use_visual_token_mask", False):
         visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
         forward_kwargs["visual_token_mask"] = visual_token_mask
@@ -939,10 +927,7 @@ def _internvl_generate(
     if not isinstance(self.language_model, GenerationMixin):
         pytest.skip("HF impl is not compatible with current transformers")
 
-    outputs = self.language_model.generate(
-        **forward_kwargs,
-        **generate_kwargs,
-    )
+    outputs = self.language_model.generate(**forward_kwargs, **generate_kwargs)
 
     return outputs
 
@@ -1296,10 +1281,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
                     else:
                         arr, sr = item, 16_000
                     content.append(
-                        {
-                            "type": "audio",
-                            "base64": _audio_to_base64(arr, sr),
-                        }
+                        {"type": "audio", "base64": _audio_to_base64(arr, sr)}
                     )
 
             content.append({"type": "text", "text": prompt})
@@ -1403,10 +1385,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             tiling = _normalize_tiling(tilings)
             local = features[1:].view(-1, grid_size, grid_size, config.vision.enc_dim)
             reconstructed = reconstruct_from_crops(
-                local,
-                tiling,
-                config.vision.overlap_margin,
-                patch_size=1,
+                local, tiling, config.vision.overlap_margin, patch_size=1
             )
         else:
             reconstructed = global_feat.view(
@@ -1439,8 +1418,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             sequences = input_ids
             if return_dict:
                 return types.SimpleNamespace(
-                    sequences=sequences,
-                    hidden_states=() if output_hs else None,
+                    sequences=sequences, hidden_states=() if output_hs else None
                 )
             return sequences
 
@@ -1485,8 +1463,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 sequences = input_ids
                 if return_dict:
                     return types.SimpleNamespace(
-                        sequences=sequences,
-                        hidden_states=() if output_hs else None,
+                        sequences=sequences, hidden_states=() if output_hs else None
                     )
                 return sequences
 
@@ -1496,8 +1473,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 sequences = input_ids
                 if return_dict:
                     return types.SimpleNamespace(
-                        sequences=sequences,
-                        hidden_states=() if output_hs else None,
+                        sequences=sequences, hidden_states=() if output_hs else None
                     )
                 return sequences
 
@@ -1507,10 +1483,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
             mask = native_model.attn_mask[:, :, prefix_len : prefix_len + prompt_len, :]
             pos_ids = torch.arange(
-                prefix_len,
-                prefix_len + prompt_len,
-                dtype=torch.long,
-                device=device,
+                prefix_len, prefix_len + prompt_len, dtype=torch.long, device=device
             )
             hidden = native_model._prefill(prompt_emb, mask, pos_ids, None)
             pos = prefix_len + prompt_len
@@ -1531,8 +1504,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     all_hidden_states.append((prev_hs,))
 
                 next_emb = F.embedding(
-                    torch.tensor([[next_token]], device=device),
-                    native_model.text.wte,
+                    torch.tensor([[next_token]], device=device), native_model.text.wte
                 )
                 mask = native_model.attn_mask[:, :, pos : pos + 1, :]
                 pos_ids_step = torch.tensor([pos], dtype=torch.long, device=device)

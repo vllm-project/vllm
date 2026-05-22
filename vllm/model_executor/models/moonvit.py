@@ -253,11 +253,7 @@ class Rope2DPosEmb(nn.Module):
         shapes = grid_hws.tolist()
         assert all(
             1 <= h <= self.max_height and 1 <= w <= self.max_width for h, w in shapes
-        ), (
-            shapes,
-            self.max_height,
-            self.max_width,
-        )
+        ), (shapes, self.max_height, self.max_width)
         freqs_cis = torch.cat(
             [
                 self.precomputed_freqs_cis[:h, :w].reshape(-1, self.dim // 2)
@@ -303,11 +299,7 @@ class MLP2(nn.Module):
     """
 
     def __init__(
-        self,
-        dims: list[int],
-        activation,
-        bias: bool = True,
-        prefix: str = "",
+        self, dims: list[int], activation, bias: bool = True, prefix: str = ""
     ):
         super().__init__()
         assert len(dims) == 3
@@ -360,9 +352,7 @@ class MoonVitEncoderLayer(nn.Module):
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP2(
-            [hidden_dim, mlp_dim, hidden_dim],
-            activation,
-            prefix=f"{prefix}.mlp",
+            [hidden_dim, mlp_dim, hidden_dim], activation, prefix=f"{prefix}.mlp"
         )
         self.wqkv = QKVParallelLinear(
             hidden_size=hidden_dim,
@@ -456,11 +446,7 @@ class MoonVitEncoderLayer(nn.Module):
 
 class MoonVitEncoder(nn.Module):
     def __init__(
-        self,
-        hidden_dim: int,
-        num_layers: int,
-        block_cfg: dict,
-        prefix: str = "",
+        self, hidden_dim: int, num_layers: int, block_cfg: dict, prefix: str = ""
     ) -> None:
         super().__init__()
 
@@ -469,10 +455,7 @@ class MoonVitEncoder(nn.Module):
         )
         self.blocks = nn.ModuleList(
             [
-                MoonVitEncoderLayer(
-                    prefix=f"{prefix}.blocks.{layer_idx}",
-                    **block_cfg,
-                )
+                MoonVitEncoderLayer(prefix=f"{prefix}.blocks.{layer_idx}", **block_cfg)
                 for layer_idx in range(num_layers)
             ]
         )
@@ -502,9 +485,7 @@ class MoonVitEncoder(nn.Module):
 
 
 def patch_merger(
-    x: torch.Tensor,
-    grid_hw: torch.Tensor,
-    merge_kernel_size: list[int, int] = (2, 2),
+    x: torch.Tensor, grid_hw: torch.Tensor, merge_kernel_size: list[int, int] = (2, 2)
 ) -> list[torch.Tensor]:
     d_model = x.size(-1)
 
@@ -537,13 +518,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
     _supports_sdpa = True
 
-    def __init__(
-        self,
-        config: MoonViTConfig,
-        prefix: str = "",
-        *inputs,
-        **kwargs,
-    ):
+    def __init__(self, config: MoonViTConfig, prefix: str = "", *inputs, **kwargs):
         super().__init__(config, *inputs, **kwargs)
         config = deepcopy(config)
         self.merge_kernel_size = config.merge_kernel_size

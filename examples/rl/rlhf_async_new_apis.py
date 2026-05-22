@@ -128,9 +128,7 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
-        from vllm.model_executor.layers.batch_invariant import (
-            init_batch_invariance,
-        )
+        from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
         # need to init all env vars for batch invariance which affect nccl ops
         init_batch_invariance()
@@ -162,18 +160,16 @@ class TrainModel:
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
-            ),
+            )
         )
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
         trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
+            group=self.model_update_group, packed=packed
         )
         NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
+            iterator=self.model.named_parameters(), trainer_args=trainer_args
         )
 
     @torch.inference_mode()
@@ -181,9 +177,7 @@ class TrainModel:
         """Greedy-decode max_new_tokens from the given context."""
         input_ids = torch.tensor([token_ids], device="cuda:0")
         output = self.model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
+            input_ids, max_new_tokens=max_new_tokens, do_sample=False
         )
         new_token_ids = output[0, len(token_ids) :].tolist()
         return new_token_ids
@@ -192,7 +186,7 @@ class TrainModel:
 # Build platform-specific env vars for Ray
 ray_env_vars = {
     # Prevent Ray from setting CUDA_VISIBLE_DEVICES
-    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
+    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1"
 }
 
 if current_platform.is_rocm():
@@ -235,10 +229,7 @@ llm_kwargs.update(rocm_determinism_kwargs)
 # its own placement groups internally for each DP rank, so we must NOT
 # create an outer placement group (it would reserve GPUs and hide them
 # from the internal DP resource check).
-llm = ray.remote(
-    num_cpus=0,
-    num_gpus=0,
-)(MyLLM).remote(**llm_kwargs)
+llm = ray.remote(num_cpus=0, num_gpus=0)(MyLLM).remote(**llm_kwargs)
 
 PROMPTS = [
     "The president of the United States is",
@@ -313,10 +304,7 @@ inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
         update_info=asdict(
             NCCLWeightTransferUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=True,
+                names=names, dtype_names=dtype_names, shapes=shapes, packed=True
             )
         )
     )
@@ -371,10 +359,7 @@ llm_v2_kwargs = dict(
 )
 llm_v2_kwargs.update(rocm_determinism_kwargs)
 
-llm_v2 = ray.remote(
-    num_cpus=0,
-    num_gpus=0,
-)(MyLLM).remote(**llm_v2_kwargs)
+llm_v2 = ray.remote(num_cpus=0, num_gpus=0)(MyLLM).remote(**llm_v2_kwargs)
 
 val_futures = [
     llm_v2.do_generate.remote(

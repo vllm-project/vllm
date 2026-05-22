@@ -89,11 +89,7 @@ def test_models(example_prompts, model_name) -> None:
 
 EAGER = [True, False]
 
-SM_100_NVFP4_BACKENDS = [
-    "flashinfer_cudnn",
-    "flashinfer_trtllm",
-    "flashinfer_cutlass",
-]
+SM_100_NVFP4_BACKENDS = ["flashinfer_cudnn", "flashinfer_trtllm", "flashinfer_cutlass"]
 
 
 @pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
@@ -122,11 +118,7 @@ def test_nvfp4(vllm_runner, model, eager, backend):
 
 
 @pytest.mark.parametrize(
-    "model",
-    [
-        "nvidia/Qwen3-30B-A3B-NVFP4",
-        "RedHatAI/Qwen3-30B-A3B-NVFP4",
-    ],
+    "model", ["nvidia/Qwen3-30B-A3B-NVFP4", "RedHatAI/Qwen3-30B-A3B-NVFP4"]
 )
 @pytest.mark.parametrize("backend", ["emulation"])
 @pytest.mark.skipif(

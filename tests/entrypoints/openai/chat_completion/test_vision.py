@@ -129,8 +129,7 @@ def url_encoded_image(local_asset_server) -> dict[str, str]:
 
 
 def dummy_messages_from_image_url(
-    image_urls: str | list[str],
-    content_text: str = "What's in this image?",
+    image_urls: str | list[str], content_text: str = "What's in this image?"
 ):
     if isinstance(image_urls, str):
         image_urls = [image_urls]
@@ -155,10 +154,7 @@ def describe_image_messages(
     """Build the system + user messages used by the completions-with-image
     family of tests. *extra_image_fields* is merged into the top-level
     image content block (for uuid / bad-key tests)."""
-    image_block: dict = {
-        "type": "image_url",
-        "image_url": {"url": image_url},
-    }
+    image_block: dict = {"type": "image_url", "image_url": {"url": image_url}}
     if extra_image_fields:
         image_block.update(extra_image_fields)
 
@@ -166,10 +162,7 @@ def describe_image_messages(
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": "Describe this image."},
-                image_block,
-            ],
+            "content": [{"type": "text", "text": "Describe this image."}, image_block],
         },
     ]
 
@@ -200,12 +193,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
     )
 
     placeholder = "<|image_1|>\n"
-    messages = [
-        {
-            "role": "user",
-            "content": f"{placeholder}{content}",
-        }
-    ]
+    messages = [{"role": "user", "content": f"{placeholder}{content}"}]
     image = fetch_image(image_url)
     # Unwrap MediaWithBytes if present
     if isinstance(image, MediaWithBytes):
@@ -350,8 +338,7 @@ async def test_single_chat_session_image_base64encoded(
 ):
     content_text = "What's in this image?"
     messages = dummy_messages_from_image_url(
-        url_encoded_image[raw_image_url],
-        content_text,
+        url_encoded_image[raw_image_url], content_text
     )
 
     max_completion_tokens = 10
@@ -478,10 +465,7 @@ async def test_chat_streaming_image(
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=10, temperature=0.0
     )
     output = chat_completion.choices[0].message.content
     stop_reason = chat_completion.choices[0].finish_reason
@@ -547,10 +531,7 @@ async def test_multi_image_input(
 
         # the server should still work afterwards
         completion = await client.completions.create(
-            model=model_name,
-            prompt=[0, 0, 0, 0, 0],
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
         )
         assert completion.choices[0].text is not None, (
             "Server failed to produce output after rejecting over-limit "
@@ -575,9 +556,7 @@ async def test_multi_image_input(
     indirect=True,
 )
 async def test_completions_with_image(
-    client: openai.AsyncOpenAI,
-    model_name: str,
-    image_urls: list[str],
+    client: openai.AsyncOpenAI, model_name: str, image_urls: list[str]
 ):
     for image_url in image_urls:
         messages = describe_image_messages(image_url)
@@ -597,20 +576,14 @@ async def test_completions_with_image(
     indirect=True,
 )
 async def test_completions_with_image_with_uuid(
-    client: openai.AsyncOpenAI,
-    model_name: str,
-    image_urls: list[str],
+    client: openai.AsyncOpenAI, model_name: str, image_urls: list[str]
 ):
     for image_url in image_urls:
         messages = describe_image_messages(
-            image_url,
-            extra_image_fields={"uuid": image_url},
+            image_url, extra_image_fields={"uuid": image_url}
         )
         await complete_and_check(
-            client,
-            model_name,
-            messages,
-            context=f"uuid first request url={image_url}",
+            client, model_name, messages, context=f"uuid first request url={image_url}"
         )
 
         cached_messages: list[dict] = [
@@ -634,8 +607,7 @@ async def test_completions_with_image_with_uuid(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_empty_image_with_uuid_without_cache_hit(
-    client: openai.AsyncOpenAI,
-    model_name: str,
+    client: openai.AsyncOpenAI, model_name: str
 ):
     with pytest.raises(openai.BadRequestError):
         await client.chat.completions.create(
@@ -665,16 +637,11 @@ async def test_completions_with_empty_image_with_uuid_without_cache_hit(
     indirect=True,
 )
 async def test_completions_with_image_with_incorrect_uuid_format(
-    client: openai.AsyncOpenAI,
-    model_name: str,
-    image_urls: list[str],
+    client: openai.AsyncOpenAI, model_name: str, image_urls: list[str]
 ):
     for image_url in image_urls:
         messages = describe_image_messages(
-            image_url,
-            extra_image_fields={
-                "also_incorrect_uuid_key": image_url,
-            },
+            image_url, extra_image_fields={"also_incorrect_uuid_key": image_url}
         )
         # Inject the bad key inside image_url dict too
         messages[1]["content"][1]["image_url"]["incorrect_uuid_key"] = image_url

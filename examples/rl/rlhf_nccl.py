@@ -58,9 +58,7 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-        ).to("cuda:0")
+        self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda:0")
 
         self.port = get_open_port()
         self.master_address = get_ip()
@@ -86,18 +84,16 @@ class TrainModel:
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
-            ),
+            )
         )
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
         trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
+            group=self.model_update_group, packed=packed
         )
         NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
+            iterator=self.model.named_parameters(), trainer_args=trainer_args
         )
 
 
@@ -124,11 +120,9 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 # start-up latency.
 # Note: Weight transfer APIs (init_weight_transfer_engine, update_weights)
 # are now native to vLLM workers.
-llm = ray.remote(
-    num_cpus=0,
-    num_gpus=0,
-    scheduling_strategy=scheduling_inference,
-)(MyLLM).remote(
+llm = ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=scheduling_inference)(
+    MyLLM
+).remote(
     model=MODEL_NAME,
     enforce_eager=True,
     tensor_parallel_size=2,
@@ -194,10 +188,7 @@ ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
 inference_handle = llm.update_weights.remote(
     dict(
         update_info=dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=True,
+            names=names, dtype_names=dtype_names, shapes=shapes, packed=True
         )
     )
 )

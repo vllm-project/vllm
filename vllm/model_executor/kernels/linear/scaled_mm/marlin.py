@@ -20,10 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -89,11 +86,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 layer.output_size_per_partition,
             ):
                 # transpose the weights to (K,N)
-                replace_parameter(
-                    layer,
-                    "weight",
-                    w_q.t(),
-                )
+                replace_parameter(layer, "weight", w_q.t())
 
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
@@ -102,10 +95,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         del layer.input_scale
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.block_quant:
             weight_scale = layer.weight_scale_inv

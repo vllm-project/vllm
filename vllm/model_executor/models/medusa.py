@@ -8,9 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .utils import maybe_prefix
@@ -105,10 +103,7 @@ class Medusa(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> list[torch.Tensor]:
         return [block(hidden_states) for block in self.blocks]
 
-    def compute_logits(
-        self,
-        hidden_states: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
+    def compute_logits(self, hidden_states: list[torch.Tensor]) -> list[torch.Tensor]:
         logits_lst: list[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):

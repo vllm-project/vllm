@@ -7,9 +7,7 @@ from collections.abc import Sequence
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -21,10 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    Tool,
-    ToolParser,
-)
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -67,9 +62,7 @@ class Hermes2ProToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
+        self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_call_start_token not in model_output:
@@ -261,10 +254,7 @@ class Hermes2ProToolParser(ToolParser):
                     )
 
             if content or tool_call_deltas:
-                return DeltaMessage(
-                    content=content,
-                    tool_calls=tool_call_deltas,
-                )
+                return DeltaMessage(content=content, tool_calls=tool_call_deltas)
 
             return None
 

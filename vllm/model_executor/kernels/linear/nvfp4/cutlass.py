@@ -3,10 +3,7 @@
 
 import torch
 
-from vllm._custom_ops import (
-    cutlass_scaled_fp4_mm,
-    scaled_fp4_quant,
-)
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
     pad_nvfp4_weight_for_cutlass,
@@ -43,10 +40,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype

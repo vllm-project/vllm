@@ -176,8 +176,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             # as threshold. This ensures that each captured graph covers the
             # correct execution path.
             self.seq_threshold_3D = min(
-                capture_sizes,
-                key=lambda x: abs(x - self.seq_threshold_3D),
+                capture_sizes, key=lambda x: abs(x - self.seq_threshold_3D)
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
@@ -323,10 +322,7 @@ class TritonAttentionBackend(AttentionBackend):
             # Pad head_size by sizeof(float32)/sizeof(cache_dtype) so
             # the per-head scale fits inline.  The backend extracts
             # data[:head_size] and scale[head_size:] via typed views.
-            from vllm.utils.torch_utils import (
-                STR_DTYPE_TO_TORCH_DTYPE,
-                get_dtype_size,
-            )
+            from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)

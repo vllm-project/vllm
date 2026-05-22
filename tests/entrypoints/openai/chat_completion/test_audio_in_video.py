@@ -25,10 +25,7 @@ def server():
         *ROCM_EXTRA_ARGS,
     ]
 
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -70,11 +67,7 @@ async def test_online_audio_in_video(
             messages=messages,
             max_tokens=8,
             temperature=0.0,
-            extra_body={
-                "mm_processor_kwargs": {
-                    "use_audio_in_video": True,
-                }
-            },
+            extra_body={"mm_processor_kwargs": {"use_audio_in_video": True}},
         )
 
         assert len(chat_completion.choices) == 1
@@ -124,11 +117,7 @@ async def test_online_audio_in_video_multi_videos(
             messages=messages,
             max_tokens=8,
             temperature=0.0,
-            extra_body={
-                "mm_processor_kwargs": {
-                    "use_audio_in_video": True,
-                }
-            },
+            extra_body={"mm_processor_kwargs": {"use_audio_in_video": True}},
         )
 
         assert len(chat_completion.choices) == 1
@@ -182,9 +171,5 @@ async def test_online_audio_in_video_interleaved(
             model=MODEL_NAME,
             messages=messages,
             max_tokens=16,
-            extra_body={
-                "mm_processor_kwargs": {
-                    "use_audio_in_video": True,
-                }
-            },
+            extra_body={"mm_processor_kwargs": {"use_audio_in_video": True}},
         )

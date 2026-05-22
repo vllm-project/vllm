@@ -110,10 +110,7 @@ def extract_harmony_streaming_delta(
                     DeltaToolCall(
                         id=make_tool_call_id(),
                         type="function",
-                        function=DeltaFunctionCall(
-                            name=tool_name,
-                            arguments="",
-                        ),
+                        function=DeltaFunctionCall(name=tool_name, arguments=""),
                         index=next_tool_index,
                     )
                 )

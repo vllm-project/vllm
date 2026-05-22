@@ -41,9 +41,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
 )
-from vllm.model_executor.model_loader.ep_weight_filter import (
-    should_skip_weight,
-)
+from vllm.model_executor.model_loader.ep_weight_filter import should_skip_weight
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
@@ -220,10 +218,7 @@ def _shared_pointers(tensors):
     return failing
 
 
-def convert_bin_to_safetensor_file(
-    pt_filename: str,
-    sf_filename: str,
-) -> None:
+def convert_bin_to_safetensor_file(pt_filename: str, sf_filename: str) -> None:
     loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
     if "state_dict" in loaded:
         loaded = loaded["state_dict"]
@@ -799,8 +794,7 @@ def _get_fs_type(files: list[str]) -> str:
 
 
 def _prefetch_checkpoint(
-    file_path: str,
-    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    file_path: str, block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE
 ) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
@@ -841,8 +835,7 @@ def _prefetch_all_checkpoints(
         next_log_pct = 10
 
         async def prefetch_one(
-            path: str,
-            executor: concurrent.futures.ThreadPoolExecutor,
+            path: str, executor: concurrent.futures.ThreadPoolExecutor
         ) -> None:
             nonlocal completed, next_log_pct
             try:
@@ -877,8 +870,7 @@ def _prefetch_all_checkpoints(
         asyncio.run(_prefetch_all())
         elapsed = time.perf_counter() - start
         logger.info(
-            "Prefetching checkpoint files into page cache finished in %.2fs",
-            elapsed,
+            "Prefetching checkpoint files into page cache finished in %.2fs", elapsed
         )
 
     logger.info(
@@ -1028,9 +1020,7 @@ def safetensors_weights_iterator(
 
 
 def multi_thread_safetensors_weights_iterator(
-    hf_weights_files: list[str],
-    use_tqdm_on_load: bool,
-    max_workers: int = 4,
+    hf_weights_files: list[str], use_tqdm_on_load: bool, max_workers: int = 4
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
@@ -1058,9 +1048,7 @@ def multi_thread_safetensors_weights_iterator(
 
 
 def runai_safetensors_weights_iterator(
-    hf_weights_files: list[str],
-    use_tqdm_on_load: bool,
-    is_distributed: bool = False,
+    hf_weights_files: list[str], use_tqdm_on_load: bool, is_distributed: bool = False
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
@@ -1072,9 +1060,7 @@ def runai_safetensors_weights_iterator(
         )
 
         streamer.stream_files(
-            hf_weights_files,
-            device=device,
-            is_distributed=is_distributed,
+            hf_weights_files, device=device, is_distributed=is_distributed
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1107,8 +1093,7 @@ def _init_fastsafetensors_loader(
 
 
 def fastsafetensors_weights_iterator(
-    hf_weights_files: list[str],
-    use_tqdm_on_load: bool,
+    hf_weights_files: list[str], use_tqdm_on_load: bool
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library."""
@@ -1164,8 +1149,7 @@ def fastsafetensors_weights_iterator(
 
 
 def instanttensor_weights_iterator(
-    hf_weights_files: list[str],
-    use_tqdm_on_load: bool,
+    hf_weights_files: list[str], use_tqdm_on_load: bool
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using instanttensor library."""
@@ -1472,10 +1456,7 @@ def initialize_dummy_weights(
 
 @torch.no_grad()
 def initialize_single_dummy_weight(
-    param: torch.Tensor,
-    low: float = -1e-3,
-    high: float = 1e-3,
-    seed: int = 1234,
+    param: torch.Tensor, low: float = -1e-3, high: float = 1e-3, seed: int = 1234
 ) -> None:
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)

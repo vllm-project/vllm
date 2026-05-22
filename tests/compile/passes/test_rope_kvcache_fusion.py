@@ -29,10 +29,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
@@ -229,17 +226,11 @@ def test_rope_kvcache_fusion(
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
-        cache_config=CacheConfig(
-            block_size=block_size,
-            cache_dtype=kv_cache_dtype,
-        ),
+        cache_config=CacheConfig(block_size=block_size, cache_dtype=kv_cache_dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
-            pass_config=PassConfig(
-                fuse_rope_kvcache=True,
-                eliminate_noops=True,
-            ),
+            pass_config=PassConfig(fuse_rope_kvcache=True, eliminate_noops=True),
         ),
     )
 

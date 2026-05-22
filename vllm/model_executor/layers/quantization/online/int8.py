@@ -7,9 +7,7 @@ import torch
 from torch.nn import Module
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEQuantConfig,
-    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
@@ -17,9 +15,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.moe_base import (
-    OnlineMoEMethodBase,
-)
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -32,11 +28,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     Loads fp16/bf16 weights and quantizes them per-row to int8 during loading.
     """
 
-    def __init__(
-        self,
-        *,
-        layer: torch.nn.Module,
-    ):
+    def __init__(self, *, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
@@ -106,8 +98,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
         quant_config = make_int8_moe_quant_config(
-            w1_scale=layer.w13_scale,
-            w2_scale=layer.w2_scale,
+            w1_scale=layer.w13_scale, w2_scale=layer.w2_scale
         )
         self._maybe_inject_biases(quant_config, layer)
         return quant_config

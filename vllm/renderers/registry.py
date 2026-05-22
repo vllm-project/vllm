@@ -60,10 +60,7 @@ class RendererRegistry:
         return resolve_obj_by_qualname(f"{module}.{class_name}")
 
     def load_renderer(
-        self,
-        renderer_mode: str,
-        config: "VllmConfig",
-        tokenizer: TokenizerLike | None,
+        self, renderer_mode: str, config: "VllmConfig", tokenizer: TokenizerLike | None
     ) -> BaseRenderer:
         renderer_cls = self.load_renderer_cls(renderer_mode)
         return renderer_cls(config, tokenizer)

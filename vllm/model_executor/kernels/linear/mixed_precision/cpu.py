@@ -120,10 +120,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             raise NotImplementedError("AWQ is not supported in CPUWNA16LinearKernel")
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
         x = ops.cpu_gemm_wna16(

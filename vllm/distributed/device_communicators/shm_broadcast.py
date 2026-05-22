@@ -316,10 +316,7 @@ class ShmRingBuffer:
         )
 
     def __reduce__(self):
-        return (
-            self.__class__,
-            self.handle(),
-        )
+        return (self.__class__, self.handle())
 
     def __del__(self):
         if hasattr(self, "shared_memory"):
@@ -655,11 +652,7 @@ class MessageQueue:
             return False
 
     @contextmanager
-    def acquire_read(
-        self,
-        timeout: float | None = None,
-        indefinite: bool = False,
-    ):
+    def acquire_read(self, timeout: float | None = None, indefinite: bool = False):
         assert self._is_local_reader, "Only readers can acquire read"
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
@@ -762,11 +755,7 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
-    def dequeue(
-        self,
-        timeout: float | None = None,
-        indefinite: bool = False,
-    ):
+    def dequeue(self, timeout: float | None = None, indefinite: bool = False):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
             with self.acquire_read(timeout, indefinite) as buf:

@@ -13,10 +13,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 
-def safe_load_prompt_embeds(
-    model_config: "ModelConfig",
-    embed: bytes,
-) -> torch.Tensor:
+def safe_load_prompt_embeds(model_config: "ModelConfig", embed: bytes) -> torch.Tensor:
     if not model_config.enable_prompt_embeds:
         raise VLLMValidationError(
             "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",

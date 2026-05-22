@@ -10,9 +10,7 @@ from transformers.activations import ACT2FN
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention import (
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import EncoderOnlyAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
@@ -50,9 +48,7 @@ class ModernBertEmbeddings(nn.Module):
         return self.tok_embeddings(input_ids)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
+        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor | None = None
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.tok_embeddings(input_ids)
@@ -126,9 +122,7 @@ class ModernBertAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
@@ -180,9 +174,7 @@ class ModernBertLayer(nn.Module):
         self.mlp = ModernBertMLP(config, prefix=f"{prefix}.mlp")
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         attn_outputs = self.attn(
             hidden_states=self.attn_norm(hidden_states), position_ids=position_ids
@@ -209,9 +201,7 @@ class ModernBertEncoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> torch.Tensor:
         for i, layer in enumerate(self.layers):
             hidden_states = layer(hidden_states, position_ids)
@@ -225,11 +215,7 @@ class ModernBertModel(nn.Module):
         orig_to_new_prefix={"layers.": "encoder_layer.layers."}
     )
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
@@ -272,8 +258,7 @@ class ModernBertModel(nn.Module):
             )
 
         outputs = self.encoder_layer(
-            hidden_states=hidden_states,
-            position_ids=positions,
+            hidden_states=hidden_states, position_ids=positions
         )
         norm_outputs = self.final_norm(outputs)
         return norm_outputs
@@ -344,9 +329,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.pooling = ModernBertPooler(vllm_config.model_config)
 
         self.pooler = DispatchPooler.for_seq_cls(
-            pooler_config,
-            pooling=self.pooling,
-            classifier=self.classifier,
+            pooler_config, pooling=self.pooling, classifier=self.classifier
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -384,9 +367,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            positions=positions,
+            input_ids=input_ids, inputs_embeds=inputs_embeds, positions=positions
         )
 
 

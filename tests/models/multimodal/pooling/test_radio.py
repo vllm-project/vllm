@@ -22,12 +22,7 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @torch.inference_mode()
-def run_radio_test(
-    image_assets: ImageTestAssets,
-    model_id: str,
-    *,
-    dtype: str,
-):
+def run_radio_test(image_assets: ImageTestAssets, model_id: str, *, dtype: str):
     model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -50,10 +45,7 @@ def run_radio_test(
     hf_config.args["dtype"] = torch_dtype
 
     hf_model = AutoModel.from_pretrained(
-        model_id,
-        config=hf_config,
-        dtype=torch_dtype,
-        trust_remote_code=True,
+        model_id, config=hf_config, dtype=torch_dtype, trust_remote_code=True
     ).to(DEVICE_TYPE)
     hf_model.eval()
 
@@ -68,10 +60,7 @@ def run_radio_test(
         hf_model(pixel_value.to(DEVICE_TYPE)) for pixel_value in pixel_values
     ]
 
-    vllm_config = RadioConfig(
-        model_name=hf_config.args["model"],
-        **hf_config.args,
-    )
+    vllm_config = RadioConfig(model_name=hf_config.args["model"], **hf_config.args)
     vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())
     vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
@@ -89,18 +78,9 @@ def run_radio_test(
         assert cos_similar(vllm_output[1], hf_output[1]).mean() > 0.99
 
 
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "nvidia/C-RADIOv2-H",
-    ],
-)
+@pytest.mark.parametrize("model_id", ["nvidia/C-RADIOv2-H"])
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 def test_radio(
     default_vllm_config, dist_init, image_assets, model_id, dtype: str
 ) -> None:
-    run_radio_test(
-        image_assets,
-        model_id,
-        dtype=dtype,
-    )
+    run_radio_test(image_assets, model_id, dtype=dtype)

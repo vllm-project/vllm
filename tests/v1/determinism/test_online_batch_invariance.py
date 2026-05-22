@@ -135,9 +135,7 @@ def _compare_bs1_vs_bsn_single_process(
 
 @skip_unsupported
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
-    backend: str,
-) -> None:
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend: str) -> None:
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 

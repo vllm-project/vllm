@@ -10,9 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
-)
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -130,9 +128,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
         )
 
         self.req_id_per_token_buffer = torch.empty(
-            (max_num_batched_tokens,),
-            dtype=torch.int32,
-            device=device,
+            (max_num_batched_tokens,), dtype=torch.int32, device=device
         )
 
     def build(
@@ -213,10 +209,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
         topk_indices = topk_indices.view(num_tokens, 1, -1)
 
         output, _, _ = triton_bf16_mla_sparse_interface(
-            q,
-            kv_c_and_k_pe_cache,
-            topk_indices,
-            sm_scale=self.softmax_scale,
+            q, kv_c_and_k_pe_cache, topk_indices, sm_scale=self.softmax_scale
         )
 
         return output[:, : self.num_heads, :]

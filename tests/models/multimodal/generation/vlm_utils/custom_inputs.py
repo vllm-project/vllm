@@ -37,10 +37,7 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     aspect_ratio_images = [
         [stop_sign, cherry_blossom],
         # Images with different sizes and aspect-ratios
-        [
-            rescale_image_size(stop_sign, 0.1),
-            stop_sign,
-        ],
+        [rescale_image_size(stop_sign, 0.1), stop_sign],
         [
             stop_sign,
             rescale_image_size(stop_sign, 0.25),
@@ -52,8 +49,7 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
 
     return [
         PromptWithMultiModalInput(
-            prompts=formatted_prompts,
-            image_data=aspect_ratio_images,
+            prompts=formatted_prompts, image_data=aspect_ratio_images
         )
     ]
 
@@ -78,10 +74,7 @@ def multi_video_multi_aspect_ratio_inputs(
     aspect_ratio_videos = [
         [video, video],
         # Videos with different sizes and aspect-ratios
-        [
-            rescale_video_size(video, 0.1),
-            video,
-        ],
+        [rescale_video_size(video, 0.1), video],
         [
             video,
             rescale_video_size(video, 0.25),
@@ -93,8 +86,7 @@ def multi_video_multi_aspect_ratio_inputs(
 
     return [
         PromptWithMultiModalInput(
-            prompts=formatted_prompts,
-            video_data=aspect_ratio_videos,
+            prompts=formatted_prompts, video_data=aspect_ratio_videos
         )
     ]
 
@@ -109,7 +101,7 @@ def different_patch_input_cases_internvl():
         "<image>\nWhat is the season?",
     ]
     multi_img_prompts = [
-        "Image-1: <image>\nImage-2: <image>\nDescribe the two images in detail.\n",  # noqa: E501
+        "Image-1: <image>\nImage-2: <image>\nDescribe the two images in detail.\n"  # noqa: E501
     ]
     formatted_sprompts = [formatter(prompt) for prompt in single_img_prompts]
     formatted_mprompts = [formatter(prompt) for prompt in multi_img_prompts]
@@ -148,9 +140,4 @@ def video_with_metadata_glm4_1v():
     ]
     prompts = [formatted_prompt] * len(video_input)
 
-    return [
-        PromptWithMultiModalInput(
-            prompts=prompts,
-            video_data=video_input,
-        )
-    ]
+    return [PromptWithMultiModalInput(prompts=prompts, video_data=video_input)]

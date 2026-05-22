@@ -46,8 +46,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_user_message_string_content(self):
         msg = response_input_to_harmony(
-            {"type": "message", "role": "user", "content": "Hello"},
-            prev_responses=[],
+            {"type": "message", "role": "user", "content": "Hello"}, prev_responses=[]
         )
 
         assert msg.author.role == Role.USER
@@ -57,8 +56,7 @@ class TestResponseInputToHarmonyMessage:
     def test_no_type_key_defaults_to_message_branch(self):
         """Omitting 'type' should fall through to the message branch."""
         msg = response_input_to_harmony(
-            {"role": "user", "content": "Hello"},
-            prev_responses=[],
+            {"role": "user", "content": "Hello"}, prev_responses=[]
         )
 
         assert msg.author.role == Role.USER
@@ -229,16 +227,10 @@ class TestResponseInputToHarmonyMessage:
 
         assert msg.author.name == "functions.get_weather"
 
-    def test_function_call_output_skips_non_function_call_items_in_prev_responses(
-        self,
-    ):
+    def test_function_call_output_skips_non_function_call_items_in_prev_responses(self):
         """ResponseReasoningItem entries in prev_responses should be ignored."""
         msg = response_input_to_harmony(
-            {
-                "type": "function_call_output",
-                "call_id": "call_test",
-                "output": "18°C",
-            },
+            {"type": "function_call_output", "call_id": "call_test", "output": "18°C"},
             prev_responses=[_REASONING_ITEM, _PREV_CALL],
         )
 

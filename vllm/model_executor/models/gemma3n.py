@@ -114,10 +114,7 @@ class Gemma3nAltUp(nn.Module):
             prefix=f"{prefix}.modality_router",
             return_bias=False,
         )
-        self.router_norm = RMSNorm(
-            hidden_size=hidden_size,
-            eps=rms_norm_eps,
-        )
+        self.router_norm = RMSNorm(hidden_size=hidden_size, eps=rms_norm_eps)
         self.router_input_scale = torch.tensor(
             hidden_size**-1.0, dtype=self.modality_router.weight.dtype
         )
@@ -147,9 +144,7 @@ class Gemma3nAltUp(nn.Module):
         # Reshape and transpose the 2D matrix for the matmul.
         # all_coefs_T:  [num_tokens, num_altup_inputs, num_altup_inputs]
         all_coefs_T = all_coefs.reshape(
-            -1,
-            self.altup_num_inputs,
-            self.altup_num_inputs,
+            -1, self.altup_num_inputs, self.altup_num_inputs
         ).permute(0, 2, 1)
 
         # hidden_states to [num_tokens, hidden_size, altup_num_inputs]
@@ -216,10 +211,7 @@ class Gemma3nLaurelBlock(nn.Module):
             prefix=f"{prefix}.linear_right",
             return_bias=False,
         )
-        self.post_laurel_norm = RMSNorm(
-            hidden_size=hidden_size,
-            eps=rms_norm_eps,
-        )
+        self.post_laurel_norm = RMSNorm(hidden_size=hidden_size, eps=rms_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         laurel_x = self.linear_left(x)
@@ -402,10 +394,7 @@ class Gemma3nAttention(nn.Module):
         )
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -500,25 +489,18 @@ class Gemma3nDecoderLayer(nn.Module):
         )
 
         # LayerNorms.
-        self.input_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.pre_feedforward_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.post_feedforward_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.post_per_layer_input_norm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
+            config.hidden_size, eps=config.rms_norm_eps
         )
 
         self.act_fn = _ACTIVATION_REGISTRY[config.hidden_activation]
@@ -538,9 +520,7 @@ class Gemma3nDecoderLayer(nn.Module):
 
         # Attention.
         attn = self.self_attn(
-            positions=positions,
-            hidden_states=active_prediction_normed,
-            **kwargs,
+            positions=positions, hidden_states=active_prediction_normed, **kwargs
         )
         attn = self.post_attention_layernorm(attn)
         attn_gated = attn + active_prediction
@@ -602,8 +582,7 @@ class Gemma3nSelfDecoder(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
         self.embed_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+            config.hidden_size**0.5, dtype=self.embed_tokens.weight.dtype
         )
         # Additional per-layer embeddings (PLE)
         self.embed_tokens_per_layer = VocabParallelEmbedding(
@@ -626,15 +605,13 @@ class Gemma3nSelfDecoder(nn.Module):
             prefix=f"{prefix}.per_layer_model_projection",
         )
         self.per_layer_projection_norm = RMSNorm(
-            hidden_size=config.hidden_size_per_layer_input,
-            eps=config.rms_norm_eps,
+            hidden_size=config.hidden_size_per_layer_input, eps=config.rms_norm_eps
         )
         self.per_layer_input_scale = torch.rsqrt(torch.tensor(2.0)).to(
             self.embed_tokens.weight.dtype
         )
         self.per_layer_projection_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+            config.hidden_size**0.5, dtype=self.embed_tokens.weight.dtype
         )
         self.altup_projections = nn.ModuleList(
             [
@@ -667,9 +644,7 @@ class Gemma3nSelfDecoder(nn.Module):
         )
 
     def get_per_layer_inputs(
-        self,
-        hidden_states_0: torch.Tensor,
-        per_layer_inputs: torch.Tensor | None,
+        self, hidden_states_0: torch.Tensor, per_layer_inputs: torch.Tensor | None
     ) -> torch.Tensor:
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
@@ -845,10 +820,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 layer_idx_start=first_kv_shared_layer_idx,
             )
 
-        self.norm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
 
@@ -920,9 +892,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
         if logits_indices_padded is None:
             logits_indices_padded = torch.arange(
-                positions.size(0),
-                dtype=positions.dtype,
-                device=positions.device,
+                positions.size(0), dtype=positions.dtype, device=positions.device
             )
 
         # NOTE(sarckk): There is currently a bug caused by
@@ -985,10 +955,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         )
         return hidden_states
 
-    def altup_unembed(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def altup_unembed(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Altup unembed.
         target_magnitude = (
             torch.mean(hidden_states[..., 0] ** 2, dim=-1, keepdim=True) ** 0.5
@@ -1018,19 +985,11 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
     ) -> torch.Tensor | IntermediateTensors:
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
-                input_ids,
-                positions,
-                inputs_embeds,
-                per_layer_inputs,
-                **kwargs,
+                input_ids, positions, inputs_embeds, per_layer_inputs, **kwargs
             )
         else:
             hidden_states = self.normal_forward(
-                input_ids,
-                positions,
-                inputs_embeds,
-                per_layer_inputs,
-                **kwargs,
+                input_ids, positions, inputs_embeds, per_layer_inputs, **kwargs
             )
         hidden_states = self.altup_unembed(hidden_states)
         return self.norm(hidden_states)
@@ -1102,15 +1061,8 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
 class Gemma3nForCausalLM(nn.Module):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1149,10 +1101,7 @@ class Gemma3nForCausalLM(nn.Module):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 

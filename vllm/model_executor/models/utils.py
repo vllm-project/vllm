@@ -19,9 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -30,10 +28,7 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import (
-    async_tensor_h2d,
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -157,8 +152,7 @@ class AutoWeightsLoader:
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
     def _groupby_prefix(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
+        self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, Iterable[tuple[str, torch.Tensor]]]]:
         weights_by_parts = (
             (weight_name.split(".", 1), weight_data)
@@ -277,8 +271,7 @@ class AutoWeightsLoader:
                     )
                 else:
                     yield from map(
-                        lambda x: self._get_qualname(base_prefix, x),
-                        loaded_params,
+                        lambda x: self._get_qualname(base_prefix, x), loaded_params
                     )
 
         child_modules = dict(module.named_children())
@@ -387,24 +380,18 @@ def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 @overload
 def flatten_bn(
-    x: list[torch.Tensor] | torch.Tensor,
-    *,
-    concat: Literal[True],
+    x: list[torch.Tensor] | torch.Tensor, *, concat: Literal[True]
 ) -> torch.Tensor: ...
 
 
 @overload
 def flatten_bn(
-    x: list[torch.Tensor] | torch.Tensor,
-    *,
-    concat: bool = False,
+    x: list[torch.Tensor] | torch.Tensor, *, concat: bool = False
 ) -> list[torch.Tensor] | torch.Tensor: ...
 
 
 def flatten_bn(
-    x: list[torch.Tensor] | torch.Tensor,
-    *,
-    concat: bool = False,
+    x: list[torch.Tensor] | torch.Tensor, *, concat: bool = False
 ) -> list[torch.Tensor] | torch.Tensor:
     """
     Flatten the `B` and `N` dimensions of batched multimodal inputs.
@@ -492,10 +479,7 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
-def isin_list(
-    elements: torch.Tensor,
-    test_elements_list: list[int],
-) -> torch.Tensor:
+def isin_list(elements: torch.Tensor, test_elements_list: list[int]) -> torch.Tensor:
     test_elements = async_tensor_h2d(
         test_elements_list, dtype=torch.int64, device=elements.device
     )
@@ -615,9 +599,7 @@ class PPMissingLayer(torch.nn.Identity):
 
 
 def make_layers(
-    num_hidden_layers: int,
-    layer_fn: LayerFn,
-    prefix: str,
+    num_hidden_layers: int, layer_fn: LayerFn, prefix: str
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
@@ -684,9 +666,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
     def make_empty_intermediate_tensors(
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
+        batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
         return IntermediateTensors(
             {
@@ -711,9 +691,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(
-    vllm_config: VllmConfig,
-) -> QuantizationConfig | None:
+def get_draft_quant_config(vllm_config: VllmConfig) -> QuantizationConfig | None:
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
@@ -843,10 +821,7 @@ direct_register_custom_op(
 )
 
 
-def process_eagle_weight(
-    model: nn.Module,
-    name: str,
-) -> None:
+def process_eagle_weight(model: nn.Module, name: str) -> None:
     """
     Update EAGLE model flags based on loaded weight name.
     This should be called during weight loading to detect if a model

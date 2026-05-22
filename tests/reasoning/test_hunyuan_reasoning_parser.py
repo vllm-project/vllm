@@ -61,82 +61,32 @@ MULTIPLE_LINES_WITH_THINK = {
 }
 
 TEST_CASES = [
+    pytest.param(False, SIMPLE_REASONING, id="simple_reasoning"),
+    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
     pytest.param(
-        False,
-        SIMPLE_REASONING,
-        id="simple_reasoning",
+        False, COMPLETE_REASONING_WITH_SYMBOL, id="complete_reasoning_with_symbol"
     ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING_WITH_SYMBOL,
-        id="complete_reasoning_with_symbol",
-    ),
-    pytest.param(
-        False,
-        NO_REASONING,
-        id="no_reasoning",
-    ),
+    pytest.param(False, NO_REASONING, id="no_reasoning"),
     pytest.param(False, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick"),
+    pytest.param(False, MULTIPLE_LINES, id="multiple_lines"),
+    pytest.param(False, REASONING_WITH_THINK, id="reasoning_with_think"),
     pytest.param(
-        False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
+        False, COMPLETE_REASONING_WITH_THINK, id="complete_reasoning_with_think"
     ),
-    pytest.param(
-        False,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING_WITH_THINK,
-        id="complete_reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think",
-    ),
-    pytest.param(
-        True,
-        SIMPLE_REASONING,
-        id="simple_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        NO_REASONING,
-        id="no_reasoning_streaming",
-    ),
+    pytest.param(False, MULTIPLE_LINES_WITH_THINK, id="multiple_lines_with_think"),
+    pytest.param(True, SIMPLE_REASONING, id="simple_reasoning_streaming"),
+    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_streaming"),
+    pytest.param(True, NO_REASONING, id="no_reasoning_streaming"),
     pytest.param(True, NO_REASONING_QUICK_THOUGHT, id="no_reasoning_quick_stream"),
-    pytest.param(
-        True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
-    ),
-    pytest.param(
-        True,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think_streaming",
-    ),
+    pytest.param(True, MULTIPLE_LINES, id="multiple_lines_streaming"),
+    pytest.param(True, REASONING_WITH_THINK, id="reasoning_with_think_streaming"),
     pytest.param(
         True,
         COMPLETE_REASONING_WITH_THINK,
         id="complete_reasoning_with_think_streaming",
     ),
     pytest.param(
-        True,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think_streaming",
+        True, MULTIPLE_LINES_WITH_THINK, id="multiple_lines_with_think_streaming"
     ),
 ]
 
@@ -147,10 +97,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-):
+def test_reasoning(streaming: bool, param_dict: dict):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [

@@ -25,18 +25,12 @@ PROMPT_TEMPLATE = """<|im_start|>user
 
 # Visual captioning prompts: each image will be paired with one LoRA in the
 # mixed-batch case so we can check per-prompt routing.
-VL_TEST_IMAGES = [
-    ImageAsset("stop_sign"),
-    ImageAsset("cherry_blossom"),
-]
+VL_TEST_IMAGES = [ImageAsset("stop_sign"), ImageAsset("cherry_blossom")]
 
 
 def _build_prompts() -> list[dict]:
     return [
-        {
-            "prompt": PROMPT_TEMPLATE,
-            "multi_modal_data": {"image": asset.pil_image},
-        }
+        {"prompt": PROMPT_TEMPLATE, "multi_modal_data": {"image": asset.pil_image}}
         for asset in VL_TEST_IMAGES
     ]
 
@@ -73,22 +67,12 @@ def _run_mixed_2d_3d_lora_test(
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
         compilation_config=vllm.config.CompilationConfig(
-            cudagraph_specialize_lora=False,
+            cudagraph_specialize_lora=False
         ),
     )
 
-    lora_2d = LoRARequest(
-        "lora_2d",
-        LORA_2D_ID,
-        lora_2d_files,
-        is_3d_lora_weight=False,
-    )
-    lora_3d = LoRARequest(
-        "lora_3d",
-        LORA_3D_ID,
-        lora_3d_files,
-        is_3d_lora_weight=True,
-    )
+    lora_2d = LoRARequest("lora_2d", LORA_2D_ID, lora_2d_files, is_3d_lora_weight=False)
+    lora_3d = LoRARequest("lora_3d", LORA_3D_ID, lora_3d_files, is_3d_lora_weight=True)
 
     # Reference: each adapter alone over both prompts.
     outputs_2d_alone = _generate(llm, lora_2d)
@@ -128,9 +112,7 @@ def _run_mixed_2d_3d_lora_test(
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
 def test_qwen36_moe_mixed_2d_3d_lora_tp2(
-    qwen36_moe_2d_lora_files,
-    qwen36_moe_3d_lora_files,
-    fully_sharded_loras,
+    qwen36_moe_2d_lora_files, qwen36_moe_3d_lora_files, fully_sharded_loras
 ):
     _run_mixed_2d_3d_lora_test(
         lora_2d_files=qwen36_moe_2d_lora_files,
@@ -144,9 +126,7 @@ def test_qwen36_moe_mixed_2d_3d_lora_tp2(
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=4)
 def test_qwen36_moe_mixed_2d_3d_lora_tp4(
-    qwen36_moe_2d_lora_files,
-    qwen36_moe_3d_lora_files,
-    fully_sharded_loras,
+    qwen36_moe_2d_lora_files, qwen36_moe_3d_lora_files, fully_sharded_loras
 ):
     _run_mixed_2d_3d_lora_test(
         lora_2d_files=qwen36_moe_2d_lora_files,

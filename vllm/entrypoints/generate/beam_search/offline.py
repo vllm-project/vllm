@@ -93,11 +93,7 @@ class BeamSearchOfflineMixin(ABC):
                 )
 
             instances.append(
-                BeamSearchInstance(
-                    prompt,
-                    lora_request=lora_req,
-                    logprobs=None,
-                ),
+                BeamSearchInstance(prompt, lora_request=lora_req, logprobs=None)
             )
 
         for prompt_start in range(0, len(instances), concurrency_limit):
@@ -206,9 +202,7 @@ class BeamSearchOfflineMixin(ABC):
 
     @abstractmethod
     def _params_to_seq(
-        self,
-        params: SamplingParams,
-        num_requests: int,
+        self, params: SamplingParams, num_requests: int
     ) -> Sequence[SamplingParams]:
         raise NotImplementedError
 

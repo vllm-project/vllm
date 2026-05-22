@@ -158,8 +158,7 @@ class AsyncOperationManager:
 
         # I/O thread pool
         self._io_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self._numjobs,
-            thread_name_prefix=f"HF3FS-Rank{self._rank}",
+            max_workers=self._numjobs, thread_name_prefix=f"HF3FS-Rank{self._rank}"
         )
 
         # Background worker threads
@@ -423,12 +422,7 @@ class AsyncOperationManager:
         self, operation: str, error_msg: str, request_id: str, future: Future
     ) -> None:
         """Helper to fail task with error logging."""
-        logger.error(
-            "%s for %s request %s",
-            error_msg,
-            operation,
-            request_id,
-        )
+        logger.error("%s for %s request %s", error_msg, operation, request_id)
         self.hf3fs_stats.record_failed_task_count(operation)
         future.set_result(False)
 
@@ -443,11 +437,7 @@ class AsyncOperationManager:
         """Helper to succeed task with logging."""
         duration = time.perf_counter() - start_time
         logger.info(
-            "%s %s: %d blocks in %.2fs",
-            operation,
-            request_id,
-            block_count,
-            duration,
+            "%s %s: %d blocks in %.2fs", operation, request_id, block_count, duration
         )
         self.hf3fs_stats.record_success_task_duration(operation, duration)
         future.set_result(True)
@@ -556,11 +546,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         if self._use_mla:
             layer_block_size = block_size * head_size * element_size
             self._bytes_per_page = layer_block_size * len(self._kv_caches)
-            self._shape_per_page = [
-                len(self._kv_caches),
-                block_size,
-                head_size,
-            ]
+            self._shape_per_page = [len(self._kv_caches), block_size, head_size]
         else:
             layer_block_size = 2 * block_size * num_heads * head_size * element_size
             self._bytes_per_page = layer_block_size * len(self._kv_caches)
@@ -686,9 +672,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ############################################################
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         return True, None
 
@@ -1171,25 +1155,13 @@ class HF3FSPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
-            [
-                self.hf3fs_save_duration,
-                self.hf3fs_load_duration,
-            ],
-            [
-                "save_duration",
-                "load_duration",
-            ],
+            [self.hf3fs_save_duration, self.hf3fs_load_duration],
+            ["save_duration", "load_duration"],
         ):
             for list_item in transfer_stats_data[list_item_key]:
                 prom_obj[engine_idx].observe(list_item)
         for counter_obj, counter_item_key in zip(
-            [
-                self.hf3fs_num_failed_save,
-                self.hf3fs_num_failed_load,
-            ],
-            [
-                "num_failed_save",
-                "num_failed_load",
-            ],
+            [self.hf3fs_num_failed_save, self.hf3fs_num_failed_load],
+            ["num_failed_save", "num_failed_load"],
         ):
             counter_obj[engine_idx].inc(transfer_stats_data[counter_item_key])

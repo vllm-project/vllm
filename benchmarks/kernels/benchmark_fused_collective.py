@@ -27,9 +27,7 @@ import torch.distributed as dist  # type: ignore
 
 from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
-from vllm.distributed import (
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
@@ -55,9 +53,7 @@ logger = init_logger(__name__)
 TorchDistBackend = None
 try:
     import flashinfer.comm as flashinfer_comm  # type: ignore
-    from flashinfer.comm.mnnvl import (  # type: ignore
-        TorchDistBackend,
-    )
+    from flashinfer.comm.mnnvl import TorchDistBackend  # type: ignore
 
     if not (
         hasattr(flashinfer_comm, "allreduce_fusion")
@@ -141,9 +137,7 @@ def cleanup_flashinfer_workspaces():
             workspace.destroy()
         except Exception as e:
             logger.error(
-                "Failed to cleanup FlashInfer workspace (backend=%s): %s",
-                backend,
-                e,
+                "Failed to cleanup FlashInfer workspace (backend=%s): %s", backend, e
             )
     _FI_WORKSPACES.clear()
 
@@ -151,19 +145,13 @@ def cleanup_flashinfer_workspaces():
 class FlashInferFusedAllReduceParams:
     """Parameters for FlashInfer fused allreduce operations."""
 
-    def __init__(
-        self,
-        max_token_num: int = 1024,
-    ):
+    def __init__(self, max_token_num: int = 1024):
         self.launch_with_pdl = True
         self.fp32_acc = True
         self.max_token_num = max_token_num
 
     def get_flashinfer_fused_allreduce_kwargs(self):
-        return {
-            "launch_with_pdl": self.launch_with_pdl,
-            "fp32_acc": self.fp32_acc,
-        }
+        return {"launch_with_pdl": self.launch_with_pdl, "fp32_acc": self.fp32_acc}
 
 
 def flashinfer_fused_allreduce_rmsnorm(
@@ -299,10 +287,7 @@ class VllmFusedAllreduce:
     def __init__(self, hidden_dim, dtype):
         self.rms_eps = 1e-6
         self.rms_norm = RMSNorm(hidden_dim, eps=self.rms_eps, dtype=dtype)
-        self.fp8_quant = QuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-        )
+        self.fp8_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     def allreduce_rmsnorm(
         self, input_tensor: torch.Tensor, residual: torch.Tensor | None
@@ -526,9 +511,7 @@ def run_benchmarks(
                     results[key] = time_ms
                 except Exception as e:
                     logger.error(
-                        "FlashInfer (%s) Fused AllReduce+RMSNorm failed: %s",
-                        backend,
-                        e,
+                        "FlashInfer (%s) Fused AllReduce+RMSNorm failed: %s", backend, e
                     )
                     results[key] = float("inf")
 
@@ -619,8 +602,7 @@ def run_benchmarks(
                     results[key] = time_ms
                 except Exception as e:
                     logger.error(
-                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP8 failed: %s",
-                        e,
+                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP8 failed: %s", e
                     )
                     results[key] = float("inf")
 
@@ -706,8 +688,7 @@ def run_benchmarks(
                     results[key] = time_ms
                 except Exception as e:
                     logger.error(
-                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP4 failed: %s",
-                        e,
+                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP4 failed: %s", e
                     )
                     results[key] = float("inf")
 
@@ -947,9 +928,7 @@ def main():
         help="Data types to test",
     )
     parser.add_argument(
-        "--no-residual",
-        action="store_true",
-        help="Skip residual connection tests",
+        "--no-residual", action="store_true", help="Skip residual connection tests"
     )
 
     parser.add_argument(
@@ -977,9 +956,7 @@ def main():
     )
 
     parser.add_argument(
-        "--no-oneshot",
-        action="store_true",
-        help="Skip oneshot benchmarks",
+        "--no-oneshot", action="store_true", help="Skip oneshot benchmarks"
     )
 
     args = parser.parse_args()
@@ -1026,9 +1003,7 @@ def main():
         logger.info("Running benchmark with world_size=%s, rank=%s", world_size, rank)
         logger.info("Quantization modes: %s", ",".join(sorted(list(quant_modes))))
         if flashinfer_comm is not None:
-            logger.info(
-                "FlashInfer available - will benchmark fused operations",
-            )
+            logger.info("FlashInfer available - will benchmark fused operations")
         else:
             logger.info(
                 "FlashInfer not available - only benchmarking standard operations"
@@ -1074,7 +1049,7 @@ def main():
 
         if _FI_WORKSPACES:
             allreduce_params = FlashInferFusedAllReduceParams(
-                max_token_num=max_num_token,
+                max_token_num=max_num_token
             )
 
     # Collect all results for markdown export

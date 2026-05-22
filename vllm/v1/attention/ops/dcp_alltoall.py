@@ -71,11 +71,7 @@ def _lse_weighted_combine(
 
     # Compute max LSE for numerical stability
     lse_max, _ = lses.max(dim=0)  # [B, H]
-    lse_max = torch.where(
-        lse_max == float("-inf"),
-        torch.zeros_like(lse_max),
-        lse_max,
-    )
+    lse_max = torch.where(lse_max == float("-inf"), torch.zeros_like(lse_max), lse_max)
 
     # Compute weights: softmax over the N dimension
     if is_lse_base_on_e:
@@ -113,14 +109,11 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
 
 
 def _dcp_a2a_send_recv_buffers(
-    shape: tuple[int, ...],
-    device: torch.device,
-    dtype: torch.dtype,
+    shape: tuple[int, ...], device: torch.device, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if is_workspace_manager_initialized():
         send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
-            (shape, dtype),
-            (shape, dtype),
+            (shape, dtype), (shape, dtype)
         )
         return send_buffer, recv_buffer
 
@@ -235,9 +228,7 @@ def _dcp_a2a_unpack_combine_kernel(
             hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
             lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
+            (lse_val != lse_val) | (lse_val == float("inf")), -float("inf"), lse_val
         )
         lse_max = tl.maximum(lse_max, lse_val)
 
@@ -261,9 +252,7 @@ def _dcp_a2a_unpack_combine_kernel(
             hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
             lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
+            (lse_val != lse_val) | (lse_val == float("inf")), -float("inf"), lse_val
         )
         if IS_BASE_E:
             lse_sum += tl.exp(lse_val - lse_max)
@@ -293,9 +282,7 @@ def _dcp_a2a_unpack_combine_kernel(
             hi = hi_raw.to(tl.uint16, bitcast=True).to(tl.uint32)
             lse_val = (lo | (hi << 16)).to(tl.float32, bitcast=True)
         lse_val = tl.where(
-            (lse_val != lse_val) | (lse_val == float("inf")),
-            -float("inf"),
-            lse_val,
+            (lse_val != lse_val) | (lse_val == float("inf")), -float("inf"), lse_val
         )
         if IS_BASE_E:
             weight = tl.exp(lse_val - global_lse)
@@ -436,13 +423,7 @@ def dcp_a2a_lse_reduce(
     )
 
     _dcp_a2a_pack_send(
-        cp_attn_out,
-        cp_attn_lse,
-        send_buffer,
-        world_size,
-        H_per_rank,
-        D,
-        lse_pack_dim,
+        cp_attn_out, cp_attn_lse, send_buffer, world_size, H_per_rank, D, lse_pack_dim
     )
 
     work = dist.all_to_all_single(

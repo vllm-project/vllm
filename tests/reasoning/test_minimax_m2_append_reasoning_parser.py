@@ -94,85 +94,25 @@ CODE_OUTPUT = {
 }
 
 TEST_CASES = [
-    pytest.param(
-        False,
-        SIMPLE_OUTPUT,
-        id="simple_output",
-    ),
-    pytest.param(
-        True,
-        SIMPLE_OUTPUT,
-        id="simple_output_streaming",
-    ),
-    pytest.param(
-        False,
-        NO_END_TOKEN,
-        id="no_end_token",
-    ),
-    pytest.param(
-        True,
-        NO_END_TOKEN,
-        id="no_end_token_streaming",
-    ),
-    pytest.param(
-        False,
-        ONLY_END_TOKEN,
-        id="only_end_token",
-    ),
-    pytest.param(
-        True,
-        ONLY_END_TOKEN,
-        id="only_end_token_streaming",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
-    ),
-    pytest.param(
-        True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
-    ),
-    pytest.param(
-        False,
-        EMPTY,
-        id="empty",
-    ),
-    pytest.param(
-        True,
-        EMPTY_STREAMING,
-        id="empty_streaming",
-    ),
-    pytest.param(
-        False,
-        SPECIAL_CHARS,
-        id="special_chars",
-    ),
-    pytest.param(
-        True,
-        SPECIAL_CHARS,
-        id="special_chars_streaming",
-    ),
-    pytest.param(
-        False,
-        CODE_OUTPUT,
-        id="code_output",
-    ),
-    pytest.param(
-        True,
-        CODE_OUTPUT,
-        id="code_output_streaming",
-    ),
+    pytest.param(False, SIMPLE_OUTPUT, id="simple_output"),
+    pytest.param(True, SIMPLE_OUTPUT, id="simple_output_streaming"),
+    pytest.param(False, NO_END_TOKEN, id="no_end_token"),
+    pytest.param(True, NO_END_TOKEN, id="no_end_token_streaming"),
+    pytest.param(False, ONLY_END_TOKEN, id="only_end_token"),
+    pytest.param(True, ONLY_END_TOKEN, id="only_end_token_streaming"),
+    pytest.param(False, MULTIPLE_LINES, id="multiple_lines"),
+    pytest.param(True, MULTIPLE_LINES, id="multiple_lines_streaming"),
+    pytest.param(False, EMPTY, id="empty"),
+    pytest.param(True, EMPTY_STREAMING, id="empty_streaming"),
+    pytest.param(False, SPECIAL_CHARS, id="special_chars"),
+    pytest.param(True, SPECIAL_CHARS, id="special_chars_streaming"),
+    pytest.param(False, CODE_OUTPUT, id="code_output"),
+    pytest.param(True, CODE_OUTPUT, id="code_output_streaming"),
 ]
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    minimax_m2_tokenizer,
-):
+def test_reasoning(streaming: bool, param_dict: dict, minimax_m2_tokenizer):
     output = minimax_m2_tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [

@@ -26,9 +26,7 @@ class Conv2dSubsampling(nn.Module):
         )
         subsample_idim = ((idim - 1) // 2 - 1) // 2
         self.out = ReplicatedLinear(
-            input_size=out_channels * subsample_idim,
-            output_size=d_model,
-            bias=True,
+            input_size=out_channels * subsample_idim, output_size=d_model, bias=True
         )
 
         self.subsampling = 4
@@ -83,15 +81,11 @@ class ConformerFeedForward(nn.Module):
         super().__init__()
         self.pre_layer_norm = nn.LayerNorm(d_model)
         self.linear_expand = ReplicatedLinear(
-            input_size=d_model,
-            output_size=d_model * 4,
-            bias=True,
+            input_size=d_model, output_size=d_model * 4, bias=True
         )
         self.nonlinear = Swish()
         self.linear_project = ReplicatedLinear(
-            input_size=d_model * 4,
-            output_size=d_model,
-            bias=True,
+            input_size=d_model * 4, output_size=d_model, bias=True
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -140,21 +134,14 @@ class EncoderMultiHeadAttention(nn.Module):
         return q, k, v
 
     def forward_output(
-        self,
-        output: torch.Tensor,
-        residual: torch.Tensor,
-        sz_b: int,
-        len_q: int,
+        self, output: torch.Tensor, residual: torch.Tensor, sz_b: int, len_q: int
     ) -> torch.Tensor:
         output = output.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
         fc_out, _ = self.fc(output)
         return fc_out + residual
 
     def forward_attention(
-        self,
-        attn: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.Tensor | None = None,
+        self, attn: torch.Tensor, v: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if mask is not None:
             mask = mask.unsqueeze(1)
@@ -312,10 +299,7 @@ class ConformerEncoder(nn.Module):
             self.layer_stack.append(block)
 
     def forward(
-        self,
-        padded_input: torch.Tensor,
-        input_lengths: torch.Tensor,
-        pad: bool = True,
+        self, padded_input: torch.Tensor, input_lengths: torch.Tensor, pad: bool = True
     ):
         if pad:
             padded_input = F.pad(

@@ -17,11 +17,7 @@ def sync_openai(audio_path: str, client: OpenAI, model: str):
             response_format="json",
             temperature=0.0,
             # Additional params not provided by OpenAI API.
-            extra_body=dict(
-                language="it",
-                seed=4419,
-                repetition_penalty=1.3,
-            ),
+            extra_body=dict(language="it", seed=4419, repetition_penalty=1.3),
         )
         print("translation result:", translation.text)
 
@@ -29,11 +25,7 @@ def sync_openai(audio_path: str, client: OpenAI, model: str):
 async def stream_openai_response(
     audio_path: str, base_url: str, api_key: str, model: str
 ):
-    data = {
-        "language": "it",
-        "stream": True,
-        "model": model,
-    }
+    data = {"language": "it", "stream": True, "model": model}
     url = base_url + "/audio/translations"
     headers = {"Authorization": f"Bearer {api_key}"}
     print("translation result:", end=" ")
@@ -64,10 +56,7 @@ def main():
     # Modify OpenAI's API key and API base to use vLLM's API server.
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
+    client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     model = client.models.list().data[0].id
     print(f"Using model: {model}")

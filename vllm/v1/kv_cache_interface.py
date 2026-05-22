@@ -45,10 +45,7 @@ class KVQuantMode(IntEnum):
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
-        return self in (
-            KVQuantMode.INT8_PER_TOKEN_HEAD,
-            KVQuantMode.FP8_PER_TOKEN_HEAD,
-        )
+        return self in (KVQuantMode.INT8_PER_TOKEN_HEAD, KVQuantMode.FP8_PER_TOKEN_HEAD)
 
     @property
     def is_nvfp4(self) -> bool:

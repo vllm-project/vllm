@@ -23,8 +23,4 @@ else:
     from .amd.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .amd.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
-__all__ = [
-    "DeepSeekV4MTP",
-    "DeepseekV4FP8Config",
-    "DeepseekV4ForCausalLM",
-]
+__all__ = ["DeepSeekV4MTP", "DeepseekV4FP8Config", "DeepseekV4ForCausalLM"]

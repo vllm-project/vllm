@@ -110,10 +110,7 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def override_quantization_method(
-        cls,
-        hf_quant_cfg: dict[str, Any],
-        user_quant: str | None,
-        hf_config: Any = None,
+        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None, hf_config: Any = None
     ) -> QuantizationMethods | None:
         """
         Detects if this quantization method can support a given checkpoint

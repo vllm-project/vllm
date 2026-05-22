@@ -41,11 +41,7 @@ def run_clip(seed: int):
     print("Image embedding output:")
     prompt = ""  # For image input, make sure that the prompt text is empty
     outputs = llm.embed(
-        {
-            "prompt": prompt,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
@@ -71,11 +67,7 @@ def run_e5_v(seed: int):
     print("Image embedding output:")
     prompt_image = llama3_template.format("<image>\nSummary above image in one word: ")
     outputs = llm.embed(
-        {
-            "prompt": prompt_image,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt_image, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
@@ -96,11 +88,7 @@ def run_qwen3_vl(seed: int):
 
         def post_process_image(image: Image) -> Image:
             width, height = image.size
-            resized_height, resized_width = smart_resize(
-                height,
-                width,
-                factor=32,
-            )
+            resized_height, resized_width = smart_resize(height, width, factor=32)
             return image.resize((resized_width, resized_height))
 
         multi_modal_data["image"] = post_process_image(multi_modal_data["image"])
@@ -126,20 +114,13 @@ def run_qwen3_vl(seed: int):
 
     print("Image embedding output:")
     outputs = llm.embed(
-        {
-            "prompt": prompt_image,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt_image, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
     print("Image+Text embedding output:")
     outputs = llm.embed(
-        {
-            "prompt": prompt_image_text,
-            "multi_modal_data": multi_modal_data,
-        },
+        {"prompt": prompt_image_text, "multi_modal_data": multi_modal_data},
         use_tqdm=False,
     )
     print_embeddings(outputs[0].outputs.embedding)
@@ -160,11 +141,7 @@ def run_siglip(seed: int):
     print("Image embedding output:")
     prompt = ""  # For image input, make sure that the prompt text is empty
     outputs = llm.embed(
-        {
-            "prompt": prompt,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
@@ -189,11 +166,7 @@ def run_vlm2vec_phi3v(seed: int):
     print("Image embedding output:")
     prompt_image = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501
     outputs = llm.embed(
-        {
-            "prompt": prompt_image,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt_image, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
@@ -202,10 +175,7 @@ def run_vlm2vec_phi3v(seed: int):
         f"{image_token} Represent the given image with the following question: {text}"  # noqa: E501
     )
     outputs = llm.embed(
-        {
-            "prompt": prompt_image_text,
-            "multi_modal_data": multi_modal_data,
-        },
+        {"prompt": prompt_image_text, "multi_modal_data": multi_modal_data},
         use_tqdm=False,
     )
     print_embeddings(outputs[0].outputs.embedding)
@@ -224,9 +194,7 @@ def run_vlm2vec_qwen2vl(seed: int):
 
     base_model = AutoModelForImageTextToText.from_pretrained(model_id)
     lora_model = PeftModel.from_pretrained(
-        base_model,
-        model_id,
-        config=PeftConfig.from_pretrained(model_id),
+        base_model, model_id, config=PeftConfig.from_pretrained(model_id)
     )
     model = lora_model.merge_and_unload().to(dtype=base_model.dtype)
     model._hf_peft_config_loaded = False  # Needed to save the merged model
@@ -239,7 +207,7 @@ def run_vlm2vec_qwen2vl(seed: int):
     )
     processor.chat_template = load_chat_template(
         # The original chat template is not correct
-        EMBED_TEMPLATE_DIR / "vlm2vec_qwen2vl.jinja",
+        EMBED_TEMPLATE_DIR / "vlm2vec_qwen2vl.jinja"
     )
 
     merged_path = str(
@@ -258,10 +226,7 @@ def run_vlm2vec_qwen2vl(seed: int):
         model=merged_path,
         runner="pooling",
         max_model_len=4096,
-        mm_processor_kwargs={
-            "min_pixels": 3136,
-            "max_pixels": 12845056,
-        },
+        mm_processor_kwargs={"min_pixels": 3136, "max_pixels": 12845056},
         limit_mm_per_prompt={"image": 1},
         seed=seed,
     )
@@ -275,11 +240,7 @@ def run_vlm2vec_qwen2vl(seed: int):
     print("Image embedding output:")
     prompt_image = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501
     outputs = llm.embed(
-        {
-            "prompt": prompt_image,
-            "multi_modal_data": multi_modal_data,
-        },
-        use_tqdm=False,
+        {"prompt": prompt_image, "multi_modal_data": multi_modal_data}, use_tqdm=False
     )
     print_embeddings(outputs[0].outputs.embedding)
 
@@ -288,10 +249,7 @@ def run_vlm2vec_qwen2vl(seed: int):
         f"{image_token} Represent the given image with the following question: {text}"  # noqa: E501
     )
     outputs = llm.embed(
-        {
-            "prompt": prompt_image_text,
-            "multi_modal_data": multi_modal_data,
-        },
+        {"prompt": prompt_image_text, "multi_modal_data": multi_modal_data},
         use_tqdm=False,
     )
     print_embeddings(outputs[0].outputs.embedding)
@@ -320,10 +278,7 @@ def parse_args():
         help="The name of the embedding model.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Set the seed when initializing `vllm.LLM`.",
+        "--seed", type=int, default=0, help="Set the seed when initializing `vllm.LLM`."
     )
     return parser.parse_args()
 

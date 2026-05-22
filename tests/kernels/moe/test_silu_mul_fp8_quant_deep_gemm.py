@@ -10,9 +10,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
@@ -217,11 +215,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
     set_random_seed(42)
 
     tokens_per_expert = torch.randint(
-        low=0,
-        high=T,
-        size=(E,),
-        dtype=torch.int32,
-        device="cuda",
+        low=0, high=T, size=(E,), dtype=torch.int32, device="cuda"
     )
 
     # Input tensor of shape (E, T, 2*H)
@@ -243,10 +237,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
     # Run the SiLU V2 kernel
     for scale_fmt in scale_fmts:
         y_q, y_s = persistent_masked_m_silu_mul_quant(
-            y,
-            tokens_per_expert,
-            group_size=group_size,
-            quant_scale_fmt=scale_fmt,
+            y, tokens_per_expert, group_size=group_size, quant_scale_fmt=scale_fmt
         )
 
         ref_y_q, ref_y_s = ref_with_scale_fmt(
@@ -302,8 +293,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
                 )
             else:
                 torch.testing.assert_close(
-                    y_q[e, :nt].to(torch.float32),
-                    ref_y_q[e, :nt].to(torch.float32),
+                    y_q[e, :nt].to(torch.float32), ref_y_q[e, :nt].to(torch.float32)
                 )
 
             if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
@@ -315,7 +305,4 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
                     dg_sliced = as_uint8(dg_scales[e])
                     torch.testing.assert_close(y_s_sliced[:nt, :G], dg_sliced[:nt, :G])
             else:
-                torch.testing.assert_close(
-                    y_s[e, :nt],
-                    ref_y_s[e, :nt],
-                )
+                torch.testing.assert_close(y_s[e, :nt], ref_y_s[e, :nt])

@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NIXL KV-cache transfer connector (disaggregated prefill / decode)."""
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
-    NixlConnector,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import NixlConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
@@ -13,12 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
-    NixlKVConnectorStats,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-    NixlConnectorWorker,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import NixlKVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import NixlConnectorWorker
 
 __all__ = [
     "NixlAgentMetadata",

@@ -10,17 +10,9 @@ from transformers import SiglipModel
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_embeddings_close
 
-HF_TEXT_PROMPTS = [
-    "a photo of a stop sign",
-    "a photo of a cherry blossom",
-]
+HF_TEXT_PROMPTS = ["a photo of a stop sign", "a photo of a cherry blossom"]
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
-    {
-        "stop_sign": "",
-        "cherry_blossom": "",
-    }
-)
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({"stop_sign": "", "cherry_blossom": ""})
 
 MODELS = [
     "google/siglip-base-patch16-224",
@@ -68,11 +60,11 @@ def _run_test(
 
             if "pixel_values" in inputs:
                 pooled_output = hf_model.model.get_image_features(
-                    pixel_values=inputs.pixel_values,
+                    pixel_values=inputs.pixel_values
                 )
             else:
                 pooled_output = hf_model.model.get_text_features(
-                    input_ids=inputs.input_ids,
+                    input_ids=inputs.input_ids
                 )
 
             if not isinstance(pooled_output, torch.Tensor):
@@ -149,11 +141,7 @@ def test_models_image(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 def test_models_text_image_no_crash(
-    vllm_runner,
-    image_assets,
-    siglip_attention_config,
-    model: str,
-    dtype: str,
+    vllm_runner, image_assets, siglip_attention_config, model: str, dtype: str
 ) -> None:
     texts = [HF_TEXT_PROMPTS[0]]
     images = [image_assets[0].pil_image]

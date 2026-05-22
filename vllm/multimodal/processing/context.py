@@ -111,16 +111,10 @@ class InputProcessingContext:
     def get_hf_config(self, /) -> PretrainedConfig: ...
 
     @overload
-    def get_hf_config(
-        self,
-        typ: type[_C] | tuple[type[_C], ...],
-        /,
-    ) -> _C: ...
+    def get_hf_config(self, typ: type[_C] | tuple[type[_C], ...], /) -> _C: ...
 
     def get_hf_config(
-        self,
-        typ: type[Any] | tuple[type[Any], ...] | None = None,
-        /,
+        self, typ: type[Any] | tuple[type[Any], ...] | None = None, /
     ) -> Any:
         """
         Get the HuggingFace configuration
@@ -169,17 +163,11 @@ class InputProcessingContext:
 
     @overload
     def get_hf_processor(
-        self,
-        typ: type[_P] | tuple[type[_P], ...],
-        /,
-        **kwargs: object,
+        self, typ: type[_P] | tuple[type[_P], ...], /, **kwargs: object
     ) -> _P: ...
 
     def get_hf_processor(
-        self,
-        typ: type[Any] | tuple[type[Any], ...] | None = None,
-        /,
-        **kwargs: object,
+        self, typ: type[Any] | tuple[type[Any], ...] | None = None, /, **kwargs: object
     ) -> Any:
         """
         Get the HuggingFace processor
@@ -202,18 +190,10 @@ class InputProcessingContext:
         merged_kwargs.pop("tokenizer", None)
 
         return cached_processor_from_config(
-            self.model_config,
-            processor_cls=typ,
-            tokenizer=tokenizer,
-            **merged_kwargs,
+            self.model_config, processor_cls=typ, tokenizer=tokenizer, **merged_kwargs
         )
 
-    def init_processor(
-        self,
-        typ: type[_T],
-        /,
-        **kwargs: object,
-    ) -> _T:
+    def init_processor(self, typ: type[_T], /, **kwargs: object) -> _T:
         """
         Initialize a HuggingFace-like processor class, merging the
         keyword arguments with those in the model's configuration.
@@ -222,10 +202,7 @@ class InputProcessingContext:
 
         return typ(**merged_kwargs)
 
-    def _postprocess_output(
-        self,
-        output: JSONTree,
-    ) -> JSONTree:
+    def _postprocess_output(self, output: JSONTree) -> JSONTree:
         def _postprocess_one(x: object):
             if isinstance(x, torch.Tensor):  # noqa: SIM102
                 # This mimics the behavior of transformers.BatchFeature
@@ -258,10 +235,7 @@ class InputProcessingContext:
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
-            hf_processor,
-            merged_kwargs,
-            requires_kw_only=False,
-            allow_var_kwargs=True,
+            hf_processor, merged_kwargs, requires_kw_only=False, allow_var_kwargs=True
         )
         allowed_kwargs.setdefault("return_tensors", "pt")
 
@@ -360,7 +334,7 @@ class BaseProcessingInfo:
         that has additional subparsers.
         """
         return MultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
+            expected_hidden_size=self._get_expected_hidden_size()
         )
 
     @cached_property
@@ -427,10 +401,7 @@ class BaseProcessingInfo:
             raise ValueError(msg)
 
     def parse_mm_data(
-        self,
-        mm_data: MultiModalDataDict,
-        *,
-        validate: bool = True,
+        self, mm_data: MultiModalDataDict, *, validate: bool = True
     ) -> MultiModalDataItems:
         """
         Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
@@ -462,9 +433,7 @@ class BaseProcessingInfo:
         return mm_items
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         """
         Return the maximum number of tokens per item of for each modality.

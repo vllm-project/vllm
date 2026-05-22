@@ -76,14 +76,10 @@ class Qwen2AudioFeatureInputs(TensorSchema):
 
     type: Literal["audio_features"]
     input_features: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("na", "nmb", 3000),
+        torch.Tensor | list[torch.Tensor], TensorShape("na", "nmb", 3000)
     ]
 
-    feature_attention_mask: Annotated[
-        torch.Tensor,
-        TensorShape("na", 3000),
-    ]
+    feature_attention_mask: Annotated[torch.Tensor, TensorShape("na", 3000)]
 
 
 class Qwen2AudioEmbeddingInputs(TensorSchema):
@@ -98,8 +94,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
     type: Literal["audio_embeds"] = "audio_embeds"
 
     audio_embeds: Annotated[
-        list[torch.Tensor],
-        TensorShape("bn", "naf", "hs", dynamic_dims={"naf"}),
+        list[torch.Tensor], TensorShape("bn", "naf", "hs", dynamic_dims={"naf"})
     ]
 
 
@@ -135,8 +130,7 @@ def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
     def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
+        self, data: dict[str, torch.Tensor] | ModalityData[AudioItem]
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
@@ -179,9 +173,7 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         return {"audio": None}
 
     def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int] | None = None,
+        self, seq_len: int, mm_counts: Mapping[str, int] | None = None
     ) -> Mapping[str, int]:
         mm_counts = mm_counts or {}
         if mm_counts.get("audio", 0) <= 0:
@@ -226,9 +218,7 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
 
@@ -255,22 +245,14 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
-        )
+        mm_kwargs = dict(**mm_kwargs, sampling_rate=feature_extractor.sampling_rate)
 
         return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            prompt=prompt, mm_data=mm_data, mm_kwargs=mm_kwargs, tok_kwargs=tok_kwargs
         )
 
     def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _qwen2audio_field_config(hf_inputs)
 
@@ -474,10 +456,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

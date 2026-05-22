@@ -7,9 +7,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.kernels.linear import (
-    init_wfp8_a16_linear_kernel,
-)
+from vllm.model_executor.kernels.linear import init_wfp8_a16_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -141,9 +139,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         self.linear_kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.linear_kernel.apply_weights(layer, x, bias)

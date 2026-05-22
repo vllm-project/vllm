@@ -10,8 +10,7 @@ _FAKE_HASH: bytes = b"\xab" * 32
 
 
 def _make_block_stored(
-    group_idx: int | None = None,
-    kv_cache_spec_sliding_window: int | None = None,
+    group_idx: int | None = None, kv_cache_spec_sliding_window: int | None = None
 ) -> BlockStored:
     return BlockStored(
         block_hashes=[_FAKE_HASH],
@@ -26,14 +25,8 @@ def _make_block_stored(
     )
 
 
-def _make_block_removed(
-    group_idx: int | None = None,
-) -> BlockRemoved:
-    return BlockRemoved(
-        block_hashes=[_FAKE_HASH],
-        medium="GPU",
-        group_idx=group_idx,
-    )
+def _make_block_removed(group_idx: int | None = None) -> BlockRemoved:
+    return BlockRemoved(block_hashes=[_FAKE_HASH], medium="GPU", group_idx=group_idx)
 
 
 def test_block_stored_default_group_idx_is_none():

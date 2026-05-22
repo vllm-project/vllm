@@ -20,15 +20,9 @@ MAX_PIXELS = 1792 * 1792
 
 class Ovis2_5ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
     _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "images_kwargs": {
-            "do_convert_rgb": True,
-        },
-        "videos_kwargs": {
-            "do_convert_rgb": True,
-        },
+        "text_kwargs": {"padding": False},
+        "images_kwargs": {"do_convert_rgb": True},
+        "videos_kwargs": {"do_convert_rgb": True},
     }
 
 
@@ -186,8 +180,7 @@ class Ovis2_5Processor(ProcessorMixin):
             # Process each image
             for image in images if isinstance(images, list) else [images]:
                 pixel_values, image_placeholders, grid = self.preprocess_multidata(
-                    images=image,
-                    **output_kwargs["images_kwargs"],
+                    images=image, **output_kwargs["images_kwargs"]
                 )
                 processed_images.append(pixel_values)
                 image_placeholders_list.append(image_placeholders)
@@ -206,8 +199,7 @@ class Ovis2_5Processor(ProcessorMixin):
             # Process each video
             for video in videos if isinstance(videos, list) else [videos]:
                 pixel_values, video_placeholders, grid = self.preprocess_multidata(
-                    video=video,
-                    **output_kwargs["videos_kwargs"],
+                    video=video, **output_kwargs["videos_kwargs"]
                 )
                 processed_videos.append(pixel_values)
                 videos_placeholders_list.append(video_placeholders)

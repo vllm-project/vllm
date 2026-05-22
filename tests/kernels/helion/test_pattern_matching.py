@@ -21,10 +21,7 @@ import helion.language as hl
 from helion._compat import requires_torch_version
 
 if not requires_torch_version("2.11"):
-    pytest.skip(
-        "HigherOrderOp requires PyTorch >= 2.11",
-        allow_module_level=True,
-    )
+    pytest.skip("HigherOrderOp requires PyTorch >= 2.11", allow_module_level=True)
 
 from helion._compiler._dynamo.higher_order_ops import (
     helion_kernel_side_table,
@@ -44,9 +41,7 @@ from vllm.kernels.helion.register import HelionKernelWrapper
 
 @contextlib.contextmanager
 def _helion_mock_context():
-    configs = {
-        "default": helion.Config(block_sizes=[64], num_warps=2, num_stages=2),
-    }
+    configs = {"default": helion.Config(block_sizes=[64], num_warps=2, num_stages=2)}
     mock_config_manager = Mock(spec=ConfigManager)
     mock_config_manager.get_platform_configs = Mock(return_value=configs)
 

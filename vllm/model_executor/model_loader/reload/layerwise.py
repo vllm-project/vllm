@@ -60,8 +60,7 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     """
     if layer not in LAYERWISE_INFO:
         LAYERWISE_INFO[layer] = LayerReloadingInfo(
-            restore_metadata=({}, {}),
-            restore_device=torch.get_default_device(),
+            restore_metadata=({}, {}), restore_device=torch.get_default_device()
         )
 
     return LAYERWISE_INFO[layer]

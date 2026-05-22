@@ -46,10 +46,7 @@ except ImportError:
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
 ):
-    pytest.skip(
-        "Supported for sm >= 90",
-        allow_module_level=True,
-    )
+    pytest.skip("Supported for sm >= 90", allow_module_level=True)
 
 NUM_EXPERTS = [16]
 TOP_KS = [1]
@@ -195,13 +192,7 @@ class TestData:
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 def test_flashinfer_per_tensor_moe_fp8_no_graph(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-    activation: MoEActivation,
-    monkeypatch,
+    m: int, n: int, k: int, e: int, topk: int, activation: MoEActivation, monkeypatch
 ):
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
@@ -249,8 +240,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                 use_monolithic=True,
             ),
             TrtLlmFp8ExpertsMonolithic(
-                moe_config=td.layer.moe,
-                quant_config=quant_config,
+                moe_config=td.layer.moe, quant_config=quant_config
             ),
         )
 
@@ -360,10 +350,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            FlashInferExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
+            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
             inplace=False,
         )
 
@@ -389,11 +376,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 
 
 @pytest.mark.parametrize(
-    "num_experts,intermediate,hidden",
-    [
-        (8, 2048, 1536),
-        (64, 4096, 4096),
-    ],
+    "num_experts,intermediate,hidden", [(8, 2048, 1536), (64, 4096, 4096)]
 )
 def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     num_experts, intermediate, hidden

@@ -3,9 +3,7 @@
 
 import pytest
 
-from vllm.model_executor.layers.fused_moe.expert_map_manager import (
-    determine_expert_map,
-)
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):

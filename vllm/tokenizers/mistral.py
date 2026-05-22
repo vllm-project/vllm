@@ -10,9 +10,7 @@ from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
-from mistral_common.protocol.instruct.request import (
-    ReasoningEffort,
-)
+from mistral_common.protocol.instruct.request import ReasoningEffort
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
@@ -26,9 +24,7 @@ from mistral_common.tokens.tokenizers.instruct import (
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as MistralCommonTokenizer,
 )
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer,
-)
+from mistral_common.tokens.tokenizers.sentencepiece import SentencePieceTokenizer
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
 
@@ -502,15 +498,13 @@ class MistralTokenizer(TokenizerLike):
         return decoded
 
     def convert_ids_to_tokens(
-        self,
-        ids: Sequence[int],
-        skip_special_tokens: bool = False,
+        self, ids: Sequence[int], skip_special_tokens: bool = False
     ) -> list[str]:
         if not skip_special_tokens:
             return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
         non_skip_special_tokens_ids = {
-            self.tokenizer.get_special_token(SpecialTokens.tool_calls),
+            self.tokenizer.get_special_token(SpecialTokens.tool_calls)
         }
         if isinstance(self.instruct, InstructTokenizerV13):
             if self.instruct.BEGIN_THINK:

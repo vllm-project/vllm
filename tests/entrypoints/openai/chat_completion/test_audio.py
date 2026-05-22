@@ -12,10 +12,7 @@ from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, encode_audio_url, fetch_audio
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
-TEST_AUDIO_URLS = [
-    AudioAsset("winning_call").url,
-    AudioAsset("mary_had_lamb").url,
-]
+TEST_AUDIO_URLS = [AudioAsset("winning_call").url, AudioAsset("mary_had_lamb").url]
 MAXIMUM_AUDIOS = 2
 
 
@@ -61,8 +58,7 @@ def url_encoded_audio() -> dict[str, str]:
 
 
 def dummy_messages_from_audio_url(
-    audio_urls: str | list[str],
-    content_text: str = "What's happening in this audio?",
+    audio_urls: str | list[str], content_text: str = "What's happening in this audio?"
 ):
     if isinstance(audio_urls, str):
         audio_urls = [audio_urls]
@@ -115,9 +111,7 @@ async def test_single_chat_session_audio(
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
+        model=model_name, messages=messages, max_completion_tokens=10
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -186,10 +180,7 @@ async def test_single_chat_session_audio_base64encoded(
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=10, temperature=0.0
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -245,9 +236,7 @@ async def test_single_chat_session_input_audio(
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
+        model=model_name, messages=messages, max_completion_tokens=10
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -265,10 +254,7 @@ async def test_chat_streaming_audio(
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=8,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=8, temperature=0.0
     )
     output = chat_completion.choices[0].message.content
     stop_reason = chat_completion.choices[0].finish_reason
@@ -325,10 +311,7 @@ async def test_chat_streaming_input_audio(
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=8,
-        temperature=0.0,
+        model=model_name, messages=messages, max_completion_tokens=8, temperature=0.0
     )
     output = chat_completion.choices[0].message.content
     stop_reason = chat_completion.choices[0].finish_reason
@@ -379,10 +362,7 @@ async def test_multi_audio_input(
 
         # the server should still work afterwards
         completion = await client.completions.create(
-            model=model_name,
-            prompt=[0, 0, 0, 0, 0],
-            max_tokens=5,
-            temperature=0.0,
+            model=model_name, prompt=[0, 0, 0, 0, 0], max_tokens=5, temperature=0.0
         )
         completion = completion.choices[0].text
         assert completion is not None and len(completion) >= 0

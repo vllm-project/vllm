@@ -332,11 +332,7 @@ def _verify_bundles(
 
 
 def build_actor_name(
-    instance_id: str,
-    rank: int,
-    tp_size: int,
-    pp_size: int,
-    pcp_size: int,
+    instance_id: str, rank: int, tp_size: int, pp_size: int, pcp_size: int
 ) -> str:
     """Build a descriptive Ray actor name for dashboard visibility."""
     name = f"vllm_Worker_{instance_id}"
@@ -350,9 +346,7 @@ def build_actor_name(
 
 
 def get_bundles_for_indices(
-    placement_group: "PlacementGroup",
-    bundle_indices: list[int],
-    world_size: int,
+    placement_group: "PlacementGroup", bundle_indices: list[int], world_size: int
 ) -> list[tuple[int, str, str]]:
     """
     Return GPU bundle indices paired with node IDs and node IPs for

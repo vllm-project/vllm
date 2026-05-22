@@ -34,7 +34,7 @@ def test_pre_quantized_model(vllm_runner):
 @pytest.mark.parametrize(
     "pt_load_map_location",
     [
-        f"{DEVICE_TYPE}:0",
+        f"{DEVICE_TYPE}:0"
         # {"": "cuda"},
     ],
 )

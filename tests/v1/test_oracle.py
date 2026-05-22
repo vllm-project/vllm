@@ -10,8 +10,5 @@ MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 def test_unsupported_configs():
     with pytest.raises(ValueError):
         AsyncEngineArgs(
-            model=MODEL,
-            speculative_config={
-                "model": MODEL,
-            },
+            model=MODEL, speculative_config={"model": MODEL}
         ).create_engine_config()

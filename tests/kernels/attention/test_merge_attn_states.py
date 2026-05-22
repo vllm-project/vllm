@@ -4,12 +4,8 @@
 import pytest
 import torch
 
-from vllm._custom_ops import (
-    merge_attn_states as merge_attn_states_cuda,
-)
-from vllm._custom_ops import (
-    scaled_fp8_quant,
-)
+from vllm._custom_ops import merge_attn_states as merge_attn_states_cuda
+from vllm._custom_ops import scaled_fp8_quant
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
@@ -339,10 +335,7 @@ def test_merge_attn_states(
     output_ref = output_ref_triton
     output_lse_ref = output_lse_ref_triton
     torch.testing.assert_close(
-        output_cuda.float() * scale,
-        output_ref.float() * scale,
-        atol=atol,
-        rtol=rtol,
+        output_cuda.float() * scale, output_ref.float() * scale, atol=atol, rtol=rtol
     )
     print(
         "Output all match, max abs diff (dequantized):"

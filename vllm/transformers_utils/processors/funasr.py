@@ -7,10 +7,7 @@ import torch
 import torch.nn as nn
 import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
-from transformers import (
-    AutoFeatureExtractor,
-    BatchFeature,
-)
+from transformers import AutoFeatureExtractor, BatchFeature
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 from transformers.utils import TensorType
@@ -126,10 +123,7 @@ class WavFrontend(nn.Module):
         return self.n_mels * self.lfr_m
 
     def forward(
-        self,
-        input: torch.Tensor,
-        input_lengths,
-        **kwargs,
+        self, input: torch.Tensor, input_lengths, **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = input.size(0)
         feats = []
@@ -390,12 +384,7 @@ class FunASRProcessor(ProcessorMixin):
     feature_extractor_class = "FunASRFeatureExtractor"
     tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
 
-    def __init__(
-        self,
-        feature_extractor,
-        tokenizer,
-        audio_token="<|AUDIO|>",
-    ):
+    def __init__(self, feature_extractor, tokenizer, audio_token="<|AUDIO|>"):
         super().__init__(feature_extractor, tokenizer)
         self.current_processor = self.feature_extractor
         self._in_target_context_manager = False

@@ -29,13 +29,11 @@ PROMPT_TEMPLATE = (
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
 )
 
-IMAGE_ASSETS = [
-    ImageAsset("stop_sign"),
-]
+IMAGE_ASSETS = [ImageAsset("stop_sign")]
 
 # After fine-tuning with LoRA, all generated content should start begin `A`.
 EXPECTED_OUTPUT = [
-    "A red and white stop sign with a Chinese archway in the background featuring red lanterns and gold accents.",  # noqa: E501
+    "A red and white stop sign with a Chinese archway in the background featuring red lanterns and gold accents."  # noqa: E501
 ]
 
 
@@ -47,10 +45,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     )
 
     inputs = [
-        {
-            "prompt": PROMPT_TEMPLATE,
-            "multi_modal_data": {"image": asset.pil_image},
-        }
+        {"prompt": PROMPT_TEMPLATE, "multi_modal_data": {"image": asset.pil_image}}
         for asset in IMAGE_ASSETS
     ]
 

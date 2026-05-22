@@ -9,10 +9,7 @@ from tests.models.language.pooling_mteb_test.mteb_embed_utils import (
 from tests.models.language.pooling_mteb_test.mteb_score_utils import (
     mteb_test_rerank_models,
 )
-from tests.models.utils import (
-    EmbedModelInfo,
-    RerankModelInfo,
-)
+from tests.models.utils import EmbedModelInfo, RerankModelInfo
 
 EMBEDDING_MODELS = [
     EmbedModelInfo(
@@ -36,7 +33,7 @@ RERANK_MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-    ),
+    )
 ]
 
 

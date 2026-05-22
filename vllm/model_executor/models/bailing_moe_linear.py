@@ -142,10 +142,7 @@ class BailingMoeV25MLAAttention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
 
         # KV projections
-        self.kv_a_layernorm = RMSNorm(
-            self.kv_lora_rank,
-            eps=config.rms_norm_eps,
-        )
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -173,10 +170,7 @@ class BailingMoeV25MLAAttention(nn.Module):
                 prefix=f"{prefix}.fused_qkv_a_proj",
                 disable_tp=True,
             )
-            self.q_a_layernorm = RMSNorm(
-                self.q_lora_rank,
-                eps=config.rms_norm_eps,
-            )
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
@@ -253,9 +247,7 @@ class BailingMoeV25MLAAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
         """Forward pass for MLA attention."""
         return self.mla_attn(positions, hidden_states)
@@ -274,13 +266,12 @@ class BailingMoEGate(nn.Module):
         self.params_dtype = params_dtype
         self.weight = nn.Parameter(
             torch.empty(
-                (config.num_experts, config.hidden_size),
-                dtype=self.params_dtype,
-            ),
+                (config.num_experts, config.hidden_size), dtype=self.params_dtype
+            )
         )
         if getattr(config, "moe_router_enable_expert_bias", False):
             self.expert_bias = nn.Parameter(
-                torch.empty((config.num_experts,), dtype=torch.float32),
+                torch.empty((config.num_experts,), dtype=torch.float32)
             )
         else:
             self.expert_bias = None
@@ -329,9 +320,7 @@ class BailingMoeV25(nn.Module):
 
         # Gate for routing
         self.gate = BailingMoEGate(
-            config=config,
-            params_dtype=self.router_dtype,
-            prefix=f"{prefix}.gate",
+            config=config, params_dtype=self.router_dtype, prefix=f"{prefix}.gate"
         )
         correction_bias = (
             self.gate.expert_bias if self.gate.expert_bias is not None else None
@@ -454,9 +443,7 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
         Must match the calculation in get_mamba_state_shape_from_config.
         """
         return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=self.total_num_heads,
-            tp_size=self.tp_size,
-            head_dim=self.head_dim,
+            num_heads=self.total_num_heads, tp_size=self.tp_size, head_dim=self.head_dim
         )
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
@@ -465,8 +452,7 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
         Must match the calculation in get_mamba_state_dtype_from_config.
         """
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
+            self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
 
     def __init__(
@@ -624,24 +610,13 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
             param.data.copy_(loaded_weight)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        positions: torch.Tensor,
+        self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
         """Forward method called by torch.ops.vllm.linear_attention"""
-        torch.ops.vllm.linear_attention(
-            hidden_states,
-            output,
-            positions,
-            self.prefix,
-        )
+        torch.ops.vllm.linear_attention(hidden_states, output, positions, self.prefix)
 
     def _forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        positions: torch.Tensor,
+        self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
         """Actual forward implementation."""
         forward_context = get_forward_context()
@@ -888,12 +863,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
 class BailingMoeV25Model(nn.Module):
     """Bailing MoE v2.5 Model with hybrid attention support."""
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
@@ -917,9 +887,7 @@ class BailingMoeV25Model(nn.Module):
         # Embeddings
         if get_pp_group().is_first_rank:
             self.word_embeddings = VocabParallelEmbedding(
-                self.vocab_size,
-                self.embed_dim,
-                org_num_embeddings=self.vocab_size,
+                self.vocab_size, self.embed_dim, org_num_embeddings=self.vocab_size
             )
         else:
             from vllm.model_executor.models.utils import PPMissingLayer
@@ -1130,16 +1098,9 @@ class BailingMoeV25Model(nn.Module):
 class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     """Bailing MoE v2.5 For CausalLM."""
 
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -1148,8 +1109,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         self.quant_config = quant_config
 
         self.model = BailingMoeV25Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
         if get_pp_group().is_last_rank:
@@ -1181,10 +1141,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         )
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states)
 
     def make_empty_intermediate_tensors(
@@ -1203,8 +1160,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
 
     @classmethod
     def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: VllmConfig,
+        cls, vllm_config: VllmConfig
     ) -> tuple[tuple[int, ...], ...]:
         """Calculate shape for linear attention cache."""
         config = vllm_config.model_config.hf_config
@@ -1216,19 +1172,15 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
 
         # Return base state shape from linear attention (no padding)
         return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=config.num_attention_heads,
-            tp_size=tp_size,
-            head_dim=head_dim,
+            num_heads=config.num_attention_heads, tp_size=tp_size, head_dim=head_dim
         )
 
     @classmethod
     def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: VllmConfig,
+        cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
 
     @classmethod

@@ -112,10 +112,7 @@ def main() -> None:
     book_schema = {
         "type": "object",
         "properties": {
-            "author": {
-                "type": "string",
-                "description": "Full name of the author",
-            },
+            "author": {"type": "string", "description": "Full name of the author"},
             "num_pages": {
                 "type": "integer",
                 "description": "Number of pages in the book",

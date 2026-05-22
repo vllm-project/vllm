@@ -107,10 +107,7 @@ class TestGemma3nAudioTensorLogic:
             # This should fail with negative size error
             padding_embs.expand(batch_size, extra_padding_tokens, embed_dim)
 
-    @pytest.mark.parametrize(
-        "seq_len",
-        [50, 100, 150, 187, 188, 189, 192, 200, 300],
-    )
+    @pytest.mark.parametrize("seq_len", [50, 100, 150, 187, 188, 189, 192, 200, 300])
     def test_various_audio_lengths(self, seq_len: int):
         """Test padding/truncation with various audio lengths."""
         batch_size, embed_dim = 1, 256
@@ -152,9 +149,7 @@ class TestGemma3nAudioTensorLogic:
 @pytest.mark.parametrize("model_id", [GEMMA3_MODEL_ID])
 @pytest.mark.parametrize("mm_processor_kwargs", [{}])
 def test_get_image_size_with_most_features(
-    image_assets: ImageTestAssets,
-    model_id: str,
-    mm_processor_kwargs: dict[str, object],
+    image_assets: ImageTestAssets, model_id: str, mm_processor_kwargs: dict[str, object]
 ):
     ctx = build_model_context(
         model_id,

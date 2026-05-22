@@ -7,17 +7,10 @@ from transformers import AutoModelForSequenceClassification
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["jason9693/Qwen2.5-1.5B-apeach"],
-)
+@pytest.mark.parametrize("model", ["jason9693/Qwen2.5-1.5B-apeach"])
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
+    hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
     # example_prompts is too short for testing prefix_caching
     example_prompts = [s * 10 for s in example_prompts]
@@ -54,26 +47,14 @@ def test_classify_models(
         )
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["Qwen/Qwen3-Embedding-0.6B"],
-)
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-Embedding-0.6B"])
 @pytest.mark.parametrize("dtype", ["half"])
-def test_embed_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-):
+def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype: str):
     # example_prompts is too short for testing prefix_caching
     example_prompts = [str(s).strip() * 10 for s in example_prompts]
 
     with vllm_runner(
-        model,
-        runner="pooling",
-        max_model_len=None,
-        enable_prefix_caching=True,
+        model, runner="pooling", max_model_len=None, enable_prefix_caching=True
     ) as vllm_model:
         vllm_config = vllm_model.llm.llm_engine.vllm_config
         cache_config = vllm_config.cache_config
@@ -88,10 +69,7 @@ def test_embed_models(
             assert output.num_cached_tokens > 0
         vllm_outputs = [req_output.outputs.data for req_output in pooling_outputs]
 
-    with hf_runner(
-        model,
-        is_sentence_transformer=True,
-    ) as hf_model:
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
         run_embedding_correctness_test(hf_model, example_prompts, vllm_outputs)
 
 

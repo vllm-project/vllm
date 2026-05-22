@@ -50,11 +50,7 @@ def single_prompt_inference(
     chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
     prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
 
-    outputs = llm.generate(
-        {
-            "prompt_embeds": prompt_embeds,
-        }
-    )
+    outputs = llm.generate({"prompt_embeds": prompt_embeds})
 
     print("\n[Single Inference Output]")
     print("-" * 30)

@@ -13,11 +13,7 @@ from vllm.outputs import ClassificationOutput
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
-from .protocol import (
-    ClassificationData,
-    ClassificationRequest,
-    ClassificationResponse,
-)
+from .protocol import ClassificationData, ClassificationRequest, ClassificationResponse
 
 logger = init_logger(__name__)
 
@@ -31,10 +27,7 @@ class ServingClassification(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> ClassifyIOProcessor:
         return ClassifyIOProcessor(*args, **kwargs)
 
-    def _build_response(
-        self,
-        ctx: ClassificationServeContext,
-    ) -> JSONResponse:
+    def _build_response(self, ctx: ClassificationServeContext) -> JSONResponse:
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
@@ -46,10 +39,7 @@ class ServingClassification(PoolingServing):
             label = id2label.get(predicted_index)
 
             item = ClassificationData(
-                index=idx,
-                label=label,
-                probs=probs,
-                num_classes=len(probs),
+                index=idx, label=label, probs=probs, num_classes=len(probs)
             )
 
             items.append(item)
@@ -57,8 +47,7 @@ class ServingClassification(PoolingServing):
             num_prompt_tokens += len(prompt_token_ids)
 
         usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
+            prompt_tokens=num_prompt_tokens, total_tokens=num_prompt_tokens
         )
 
         response = ClassificationResponse(

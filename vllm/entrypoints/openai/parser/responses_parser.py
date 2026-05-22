@@ -80,12 +80,7 @@ class ResponsesParser:
                     type="reasoning",
                     id=f"rs_{random_uuid()}",
                     summary=[],
-                    content=[
-                        Content(
-                            type="reasoning_text",
-                            text=reasoning,
-                        )
-                    ],
+                    content=[Content(type="reasoning_text", text=reasoning)],
                 )
             )
 

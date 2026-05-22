@@ -10,9 +10,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.modelexpress_loader import (
-    ModelExpressModelLoader,
-)
+from vllm.model_executor.model_loader.modelexpress_loader import ModelExpressModelLoader
 
 
 class FakeModelexpressLoader:
@@ -37,11 +35,7 @@ def _install_fake_modelexpress(monkeypatch):
     FakeModelexpressLoader.calls = []
     FakeModelexpressLoader.loaded_model = nn.Module()
 
-    for name in [
-        "modelexpress",
-        "modelexpress.engines",
-        "modelexpress.engines.vllm",
-    ]:
+    for name in ["modelexpress", "modelexpress.engines", "modelexpress.engines.vllm"]:
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
 
     module = ModuleType("modelexpress.engines.vllm.loader")
@@ -68,9 +62,7 @@ def test_modelexpress_loader_delegates_to_modelexpress(monkeypatch):
     loader.load_weights(model, model_config)
     FakeModelexpressLoader.loaded_model.train()
     result = loader.load_model(
-        vllm_config=vllm_config,
-        model_config=model_config,
-        prefix="model",
+        vllm_config=vllm_config, model_config=model_config, prefix="model"
     )
 
     assert result is FakeModelexpressLoader.loaded_model

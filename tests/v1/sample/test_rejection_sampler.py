@@ -321,10 +321,7 @@ def test_deterministic_when_seeded(
 ):
     num_tokens = batch_size * k
     draft_probs = torch.rand(
-        num_tokens,
-        vocab_size,
-        dtype=torch.float32,
-        device=DEVICE_TYPE,
+        num_tokens, vocab_size, dtype=torch.float32, device=DEVICE_TYPE
     )
     draft_probs = F.softmax(draft_probs, dim=-1)
     target_logits = torch.rand_like(draft_probs)
@@ -410,8 +407,7 @@ def test_rejection_sampling_approximates_target_distribution():
     target_logits = torch.rand(vocab_size, dtype=torch.float32)
     target_probs = F.softmax(target_logits, dim=-1)
     reference_probs = F.softmax(
-        torch.rand(num_reference_probs, vocab_size, dtype=torch.float32),
-        dim=-1,
+        torch.rand(num_reference_probs, vocab_size, dtype=torch.float32), dim=-1
     )
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
@@ -548,11 +544,7 @@ def native_sample_recovered_tokens(
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
 
-    q = torch.empty(
-        (batch_size, vocab_size),
-        dtype=torch.float32,
-        device=device,
-    )
+    q = torch.empty((batch_size, vocab_size), dtype=torch.float32, device=device)
     q.exponential_()
 
     states = {
@@ -624,9 +616,7 @@ def _test_masked_logits(
 
     # Bonus tokens not used but required
     bonus_token_ids = torch.zeros(
-        (batch_size, 1),
-        dtype=torch.int64,
-        device=DEVICE_TYPE,
+        (batch_size, 1), dtype=torch.int64, device=DEVICE_TYPE
     )
 
     # Create spec decode metadata
@@ -725,9 +715,7 @@ def test_top_p(rejection_sampler, top_p):
         all_greedy=False,
         temperature=temperature,
         top_p=torch.tensor(
-            [top_p] * batch_size,
-            device=DEVICE_TYPE,
-            dtype=torch.float32,
+            [top_p] * batch_size, device=DEVICE_TYPE, dtype=torch.float32
         ),
     )
 
@@ -755,8 +743,7 @@ def test_frequency_penalties(rejection_sampler):
         output_token_ids=[[2], [3], [4]],
         spec_token_ids=spec_tokens,
         prompt_token_ids=torch.tensor(
-            [[5, 6, 7], [6, 7, 8], [7, 8, 9]],
-            device=DEVICE_TYPE,
+            [[5, 6, 7], [6, 7, 8], [7, 8, 9]], device=DEVICE_TYPE
         ),
         frequency_penalties=[1.5, 1.5, 0.7],
         presence_penalties=[0.0] * num_requests,
@@ -884,10 +871,7 @@ def test_sample_recovered_tokens(
 
     # Create random draft probabilities.
     draft_probs = torch.rand(
-        num_tokens,
-        vocab_size,
-        dtype=torch.float32,
-        device=DEVICE_TYPE,
+        num_tokens, vocab_size, dtype=torch.float32, device=DEVICE_TYPE
     )
     draft_probs = F.softmax(draft_probs, dim=-1)
 
@@ -967,9 +951,7 @@ def test_synthetic_all_accepted(all_greedy: bool):
     mock_sampler_output(sampler, bonus)
     output = sampler(spec_decode_metadata, None, logits, metadata)
     expected = torch.tensor(
-        [[1, 2, 50], [3, 40, PLACEHOLDER_TOKEN_ID]],
-        dtype=torch.int,
-        device=DEVICE_TYPE,
+        [[1, 2, 50], [3, 40, PLACEHOLDER_TOKEN_ID]], dtype=torch.int, device=DEVICE_TYPE
     )
     assert torch.equal(output.sampled_token_ids, expected)
 

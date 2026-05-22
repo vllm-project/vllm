@@ -65,10 +65,7 @@ def init_pooling_io_processors(
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
-    if has_io_processor(
-        vllm_config,
-        model_config.io_processor_plugin,
-    ):
+    if has_io_processor(vllm_config, model_config.io_processor_plugin):
         from .pooling.io_processor import PluginWithIOProcessorPlugins
 
         processors["plugin"] = PluginWithIOProcessorPlugins
@@ -117,9 +114,7 @@ def register_pooling_api_routers(
         app.include_router(pooling_router)
 
     if "classify" in supported_tasks:
-        from .classify.api_router import (
-            router as classify_router,
-        )
+        from .classify.api_router import router as classify_router
 
         app.include_router(classify_router)
 
@@ -227,39 +222,29 @@ def get_pooling_invocation_types(
         from .embed.api_router import create_embedding, embedding
         from .embed.protocol import EmbeddingRequest
 
-        invocation_types += [
-            (EmbeddingRequest, (embedding, create_embedding)),
-        ]
+        invocation_types += [(EmbeddingRequest, (embedding, create_embedding))]
 
     if pooling_task == "classify":
         from .classify.api_router import classify, create_classify
         from .classify.protocol import ClassificationRequest
 
-        invocation_types += [
-            (ClassificationRequest, (classify, create_classify)),
-        ]
+        invocation_types += [(ClassificationRequest, (classify, create_classify))]
 
     if enable_scoring_api(supported_tasks, model_config):
         from .scoring.api_router import do_rerank, rerank
         from .scoring.protocol import RerankRequest
 
-        invocation_types += [
-            (RerankRequest, (rerank, do_rerank)),
-        ]
+        invocation_types += [(RerankRequest, (rerank, do_rerank))]
 
         from .scoring.api_router import create_score, score
         from .scoring.protocol import ScoreRequest
 
-        invocation_types += [
-            (ScoreRequest, (score, create_score)),
-        ]
+        invocation_types += [(ScoreRequest, (score, create_score))]
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from .pooling.api_router import create_pooling, pooling
         from .pooling.protocol import PoolingRequest
 
-        invocation_types += [
-            (PoolingRequest, (pooling, create_pooling)),
-        ]
+        invocation_types += [(PoolingRequest, (pooling, create_pooling))]
 
     return invocation_types

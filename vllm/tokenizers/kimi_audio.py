@@ -118,11 +118,7 @@ class KimiAudioTokenizer(TokenizerLike):
         )
 
     def __init__(
-        self,
-        *,
-        vocab_file: Path,
-        name_or_path: str,
-        truncation_side: str,
+        self, *, vocab_file: Path, name_or_path: str, truncation_side: str
     ) -> None:
         super().__init__()
         self.name_or_path = name_or_path
@@ -401,10 +397,7 @@ class KimiAudioTokenizer(TokenizerLike):
         # Use render_jinja_template instead of apply_chat_template
         # Note: render_jinja_template returns ([prompts], [generation_indices])
         rendered, _ = hf_chat_utils.render_jinja_template(
-            conversation,
-            chat_template=template,
-            tools=tools,
-            **kwargs,
+            conversation, chat_template=template, tools=tools, **kwargs
         )
         # Extract the first (and usually only) prompt
         prompt = rendered[0] if rendered else ""

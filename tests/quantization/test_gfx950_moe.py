@@ -18,9 +18,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     select_mxfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
 
 ROCM_AVAILABLE = current_platform.is_rocm()

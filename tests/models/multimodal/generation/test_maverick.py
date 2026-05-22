@@ -554,10 +554,7 @@ def save_weights_to_safetensors(
 
 
 def check_attention_spec_interleaved_rope(
-    llm: LLM,
-    num_attention_layers: int,
-    num_ranks: int,
-    rope_layers: list[int],
+    llm: LLM, num_attention_layers: int, num_ranks: int, rope_layers: list[int]
 ):
     """Check that the attention spec is correct."""
     assert isinstance(llm.llm_engine.model_executor, Executor)
@@ -640,12 +637,7 @@ def test_dummy_maverick(
         enable_expert_parallel=ep,
     )
 
-    check_attention_spec_interleaved_rope(
-        llm,
-        text_layers,
-        tp,
-        rope_layers,
-    )
+    check_attention_spec_interleaved_rope(llm, text_layers, tp, rope_layers)
 
     print(f"\nTesting reduced model at {model_path}...")
     run_reduced_model(llm=llm, should_profile=profile)
@@ -665,10 +657,7 @@ def main():
         help="Output directory for the reduced model",
     )
     parser.add_argument(
-        "--text-layers",
-        type=int,
-        default=4,
-        help="Number of text transformer layers",
+        "--text-layers", type=int, default=4, help="Number of text transformer layers"
     )
     parser.add_argument("--num-experts", type=int, default=4, help="Number of experts")
     parser.add_argument(
@@ -689,9 +678,7 @@ def main():
         "--profile", action="store_true", help="Profile the created model with vLLM"
     )
     parser.add_argument(
-        "--test-original",
-        action="store_true",
-        help="Test the original model with vLLM",
+        "--test-original", action="store_true", help="Test the original model with vLLM"
     )
     parser.add_argument(
         "--original-model",

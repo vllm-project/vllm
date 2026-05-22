@@ -64,9 +64,7 @@ class MoEActivation(Enum):
 
 
 # Module-level lookup tables used by MoEActivation functions.
-_STR_ALIASES: dict[str, str] = {
-    "gelu_pytorch_tanh": "gelu_tanh",
-}
+_STR_ALIASES: dict[str, str] = {"gelu_pytorch_tanh": "gelu_tanh"}
 
 _CUSTOM_OP_NAMES: dict[MoEActivation, str] = {
     MoEActivation.SILU: "silu_and_mul",
@@ -102,9 +100,7 @@ def activation_without_mul(activation: str) -> str:
 
 
 def apply_moe_activation(
-    activation: MoEActivation,
-    output: torch.Tensor,
-    input: torch.Tensor,
+    activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
 ) -> torch.Tensor:
     """Apply MoE activation function."""
     assert input.dim() == 2, "Input must be 2D"

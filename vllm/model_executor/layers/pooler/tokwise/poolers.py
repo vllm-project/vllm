@@ -34,8 +34,7 @@ from .methods import (
 )
 
 TokenPoolingFn: TypeAlias = Callable[
-    [torch.Tensor, PoolingMetadata],
-    list[TokenPoolingMethodOutputItem],
+    [torch.Tensor, PoolingMetadata], list[TokenPoolingMethodOutputItem]
 ]
 TokenPoolingHeadFn: TypeAlias = Callable[
     [list[TokenPoolingMethodOutputItem], PoolingMetadata],
@@ -84,9 +83,7 @@ class TokenPooler(Pooler):
         return updates
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         if self.head is not None:

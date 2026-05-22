@@ -42,8 +42,7 @@ class AsyncMicrobatchTokenizer:
 
         self._loop = asyncio.get_running_loop()
         self._queues: dict[
-            tuple,
-            asyncio.Queue[tuple[str, dict, Future] | tuple[list[int], Future]],
+            tuple, asyncio.Queue[tuple[str, dict, Future] | tuple[list[int], Future]]
         ] = {}
         self._batcher_tasks: list[Task] = []
 
@@ -229,8 +228,7 @@ def cancel_task_threadsafe(task: Task):
 
 
 def make_async(
-    func: Callable[P, T],
-    executor: Executor | None = None,
+    func: Callable[P, T], executor: Executor | None = None
 ) -> Callable[P, Awaitable[T]]:
     """
     Take a blocking function, and run it on in an executor thread.

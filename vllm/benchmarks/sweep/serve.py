@@ -99,10 +99,7 @@ def run_benchmark(
         with output_path.open("rb") as f:
             run_data = json.load(f)
             return _update_run_data(
-                run_data,
-                serve_overrides,
-                bench_overrides,
-                run_number,
+                run_data, serve_overrides, bench_overrides, run_number
             )
 
     if server is None:
@@ -120,12 +117,7 @@ def run_benchmark(
     with output_path.open("rb") as f:
         run_data = json.load(f)
 
-    run_data = _update_run_data(
-        run_data,
-        serve_overrides,
-        bench_overrides,
-        run_number,
-    )
+    run_data = _update_run_data(run_data, serve_overrides, bench_overrides, run_number)
 
     with output_path.open("w") as f:
         json.dump(run_data, f, indent=4)
@@ -161,9 +153,7 @@ def _get_comb_run_path(base_path: Path, run_number: int | None):
 
 
 def _comb_needs_server(
-    serve_comb: ParameterSweepItem,
-    bench_combs: ParameterSweep,
-    experiment_dir: Path,
+    serve_comb: ParameterSweepItem, bench_combs: ParameterSweep, experiment_dir: Path
 ):
     for bench_comb in bench_combs:
         base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)

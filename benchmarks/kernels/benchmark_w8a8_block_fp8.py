@@ -232,14 +232,7 @@ def tune(M, N, K, block_size, out_dtype, search_space, input_type):
     for config in tqdm(search_space):
         try:
             kernel_time = benchmark_config(
-                A,
-                B,
-                As,
-                Bs,
-                block_size,
-                config,
-                out_dtype,
-                num_iters=10,
+                A, B, As, Bs, block_size, config, out_dtype, num_iters=10
             )
         except triton.runtime.autotuner.OutOfResources:
             # Some configurations may be invalid and fail to compile.
@@ -254,15 +247,7 @@ def tune(M, N, K, block_size, out_dtype, search_space, input_type):
     return best_config
 
 
-def save_configs(
-    N,
-    K,
-    block_n,
-    block_k,
-    configs,
-    save_path,
-    input_type="fp8",
-) -> None:
+def save_configs(N, K, block_n, block_k, configs, save_path, input_type="fp8") -> None:
     os.makedirs(save_path, exist_ok=True)
     device_name = current_platform.get_device_name().replace(" ", "_")
     json_file_name = (

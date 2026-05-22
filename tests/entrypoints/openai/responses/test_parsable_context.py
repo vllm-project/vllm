@@ -67,9 +67,7 @@ async def client(server):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
-        model=model_name,
-        input="What is 123 * 456?",
-        temperature=0.0,
+        model=model_name, input="What is 123 * 456?", temperature=0.0
     )
     assert response is not None
     print("response: ", response)
@@ -88,10 +86,7 @@ async def test_reasoning_and_function_items(client: OpenAI, model_name: str):
                 "type": "reasoning",
                 "id": "lol",
                 "content": [
-                    {
-                        "type": "reasoning_text",
-                        "text": "We need to respond: greeting.",
-                    }
+                    {"type": "reasoning_text", "text": "We need to respond: greeting."}
                 ],
                 "summary": [],
             },
@@ -147,9 +142,7 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
             "description": "Get today's horoscope for an astrological sign.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "sign": {"type": "string"},
-                },
+                "properties": {"sign": {"type": "string"}},
                 "required": ["sign"],
                 "additionalProperties": False,
             },

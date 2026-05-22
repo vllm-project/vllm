@@ -111,15 +111,11 @@ def test_mrope(
     )
 
     query_native, key_native = mrope_helper_class.forward_native(
-        positions,
-        query.clone(),
-        key.clone(),
+        positions, query.clone(), key.clone()
     )
 
     query_cuda, key_cuda = mrope_helper_class.forward_cuda(
-        positions,
-        query.clone(),
-        key.clone(),
+        positions, query.clone(), key.clone()
     )
 
     torch.testing.assert_close(query_native, query_cuda, atol=atol, rtol=rtol)
@@ -194,9 +190,7 @@ def test_mrope_torch_compile_tracing(
 
     # Get reference results
     query_native, key_native = mrope_helper_class.forward_native(
-        positions,
-        query.clone(),
-        key.clone(),
+        positions, query.clone(), key.clone()
     )
 
     try:
@@ -210,9 +204,7 @@ def test_mrope_torch_compile_tracing(
 
         # Run compiled version
         query_compiled_cuda, key_compiled_cuda = compiled_forward_cuda(
-            positions,
-            query,
-            key,
+            positions, query, key
         )
 
         # Run original version for comparison
