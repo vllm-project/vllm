@@ -44,11 +44,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 try:
     from mori.io import (
+        BackendType,
         EngineDesc,
         IOEngine,
         MemoryDesc,
         PollCqMode,
         RdmaBackendConfig,
+        XgmiBackendConfig,
     )
 
     logger.info("MoRIIO is available")
@@ -376,17 +378,24 @@ class MoRIIOWrapper:
 
     def set_backend_type(self, backend_type):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
-        post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
-        num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
-        poll_mode = PollCqMode.POLLING
-        rdma_cfg = RdmaBackendConfig(
-            qp_per_transfer,
-            post_batch_size,
-            num_worker_threads,
-            poll_mode,
-        )
-        self.moriio_engine.create_backend(backend_type, rdma_cfg)
+        if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
+            self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        else:
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                envs.VLLM_MORIIO_QP_PER_TRANSFER,
+                envs.VLLM_MORIIO_POST_BATCH_SIZE,
+                envs.VLLM_MORIIO_NUM_WORKERS,
+            )
+            rdma_cfg = RdmaBackendConfig(
+                envs.VLLM_MORIIO_QP_PER_TRANSFER,
+                envs.VLLM_MORIIO_POST_BATCH_SIZE,
+                envs.VLLM_MORIIO_NUM_WORKERS,
+                PollCqMode.POLLING,
+            )
+            self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
     def get_agent_metadata(self):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
