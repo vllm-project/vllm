@@ -9,18 +9,19 @@ use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use rmpv::Value;
 use serde::Serialize;
-use tokio::task::JoinSet;
-use tokio::task::yield_now;
+use tokio::task::{JoinSet, yield_now};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vllm_engine_core_client::EngineId;
 use vllm_engine_core_client::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, MockEngineSockets, connect_to_frontend,
 };
+use vllm_engine_core_client::protocol::utility::{
+    EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
+};
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
     EngineCoreRequestType, decode_msgpack, encode_msgpack,
-    utility::{EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope},
 };
 use zeromq::ZmqMessage;
 use zeromq::prelude::{SocketRecv, SocketSend};
