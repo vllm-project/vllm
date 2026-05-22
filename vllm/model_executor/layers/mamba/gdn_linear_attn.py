@@ -49,6 +49,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -365,6 +368,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
         )
+        self.disable_tp_for_ba_proj = self.maybe_disable_tp(quant_config)
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -479,7 +483,36 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
+            disable_tp=self.maybe_disable_tp(quant_config),
         )
+
+    def maybe_disable_tp(self, quant_config: QuantizationConfig | None) -> bool:
+        """Whether to replicate ba_proj instead of TP-sharding it.
+
+        Marlin requires output_size_per_partition >= MIN_THREAD_N=64, which
+        the Qwen3.5 non-interleaved [num_v_heads]*2 layout violates at TP>=2
+        (e.g. num_v_heads=64, TP=4 -> 16). Replicating the projection keeps
+        each rank above the Marlin threshold; forward() then slices b/a to
+        the local TP partition. Qwen3-Next's interleaved [num_v_heads*2]
+        layout is unaffected and stays TP-sharded.
+
+        See https://github.com/vllm-project/vllm/issues/35924
+        """
+        return (
+            current_platform.is_cuda()
+            and not self.gqa_interleaved_layout
+            and isinstance(quant_config, (AWQMarlinConfig, AutoGPTQConfig, INCConfig))
+        )
+
+    def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        b, a = ba.chunk(2, dim=-1)
+        if self.disable_tp_for_ba_proj and self.tp_size > 1:
+            # ba_proj is replicated for Marlin; slice b/a to local TP rank.
+            ba_chunk = self.num_v_heads // self.tp_size
+            ba_start = self.tp_rank * ba_chunk
+            b = b[:, ba_start : ba_start + ba_chunk]
+            a = a[:, ba_start : ba_start + ba_chunk]
+        return b, a
 
     def fix_query_key_value_ordering(
         self,
@@ -778,7 +811,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             z_size = self.value_dim // self.tp_size
             mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = ba.chunk(2, dim=-1)
+            b, a = self.split_ba(ba)
             b = b.contiguous()
             a = a.contiguous()
 
@@ -1061,7 +1094,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             )
 
         core_attn_out.zero_()
-        z_out.zero_()
         num_tokens_all = qkvz.shape[0]
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
