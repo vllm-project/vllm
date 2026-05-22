@@ -17,6 +17,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+from vllm.v1.metrics.stats import RequestSpecDecodeStats
 
 ####### Tokens IN <> Tokens OUT #######
 
@@ -190,6 +191,7 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    request_spec_decode_stats: RequestSpecDecodeStats | None = Field(default=None)
 
 
 class GenerateResponse(BaseModel):
@@ -209,3 +211,4 @@ class GenerateResponse(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    request_spec_decode_stats: RequestSpecDecodeStats | None = Field(default=None)

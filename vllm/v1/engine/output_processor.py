@@ -322,6 +322,15 @@ class RequestState:
             outputs = [output]
         else:
             outputs, finished = self.parent_req.get_outputs(self.request_id, output)
+            # Surface the parent-aggregated totals so RequestOutput.metrics
+            # carries request-level (not per-child) spec stats.
+            if self.stats is not None and self.stats.request_spec_decode_stats:
+                self.stats.request_spec_decode_stats = (
+                    self.parent_req.observe_request_spec_decode_stats(
+                        self.request_id,
+                        self.stats.request_spec_decode_stats,
+                    )
+                )
             if not outputs:
                 return None
             external_req_id = self.parent_req.external_req_id
@@ -620,6 +629,13 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
+            if (
+                engine_core_output.request_spec_decode_stats is not None
+                and req_state.stats is not None
+            ):
+                req_state.stats.request_spec_decode_stats = (
+                    engine_core_output.request_spec_decode_stats
+                )
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts

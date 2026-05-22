@@ -92,6 +92,7 @@ class EngineCoreOutput(
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    request_spec_decode_stats: object | None = None
 
 
 class EngineCoreOutputs(

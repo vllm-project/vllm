@@ -13,7 +13,7 @@ use thiserror_ext::AsReport;
 use crate::error::{Error, Result};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::MmFeatures;
-use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::stats::{PrefillStats, RequestSpecDecodeStats, SchedulerStats};
 use crate::protocol::utility::UtilityOutput;
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
@@ -412,6 +412,8 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    #[serde(default)]
+    pub request_spec_decode_stats: Option<RequestSpecDecodeStats>,
 }
 
 impl EngineCoreOutput {
@@ -540,6 +542,7 @@ mod tests {
                 prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
+                request_spec_decode_stats: None,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()

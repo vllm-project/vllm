@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
+from dataclasses import replace
 from typing import cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, RequestSpecDecodeStats
 
 
 class ParentRequest:
@@ -29,6 +30,8 @@ class ParentRequest:
 
     # To find the max number of generated tokens across all children
     max_num_generation_tokens: int
+    request_spec_decode_stats: RequestSpecDecodeStats
+    request_spec_decode_stats_by_child: dict[str, RequestSpecDecodeStats]
 
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
@@ -47,6 +50,8 @@ class ParentRequest:
             else []
         )
         self.max_num_generation_tokens = 0
+        self.request_spec_decode_stats = RequestSpecDecodeStats()
+        self.request_spec_decode_stats_by_child = {}
         self.cached_child_sampling_params = None
 
     def _get_child_sampling_params(
@@ -124,6 +129,33 @@ class ParentRequest:
 
         finished = not self.child_requests
         return outputs, finished
+
+    def observe_request_spec_decode_stats(
+        self,
+        child_request_id: str,
+        request_spec_decode_stats: RequestSpecDecodeStats,
+    ) -> RequestSpecDecodeStats:
+        # Sum of the latest per-child totals: subtract the previous snapshot
+        # for this child, add the current one.
+        old_stats = self.request_spec_decode_stats_by_child.get(
+            child_request_id, RequestSpecDecodeStats()
+        )
+        self.request_spec_decode_stats.num_draft_tokens += (
+            request_spec_decode_stats.num_draft_tokens - old_stats.num_draft_tokens
+        )
+        self.request_spec_decode_stats.num_accepted_tokens += (
+            request_spec_decode_stats.num_accepted_tokens
+            - old_stats.num_accepted_tokens
+        )
+        self.request_spec_decode_stats.num_verify_steps += (
+            request_spec_decode_stats.num_verify_steps - old_stats.num_verify_steps
+        )
+        # Inproc engine shares the live stats object with the scheduler;
+        # snapshot so the next call sees stable old values.
+        self.request_spec_decode_stats_by_child[child_request_id] = replace(
+            request_spec_decode_stats
+        )
+        return self.request_spec_decode_stats
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(

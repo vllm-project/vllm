@@ -20,7 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -165,6 +165,8 @@ class Request:
 
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
+
+        self.request_spec_decode_stats: RequestSpecDecodeStats | None = None
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 

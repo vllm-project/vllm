@@ -51,7 +51,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PrefixCacheStats,
+    RequestSpecDecodeStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -1390,6 +1394,13 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                self.update_request_spec_decode_stats(
+                    request,
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted,
+                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                    request_id=req_id,
+                )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1519,6 +1530,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        request_spec_decode_stats=request.request_spec_decode_stats,
                     )
                 )
             else:
@@ -1775,6 +1787,10 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+                # Pre-allocate so consumers can distinguish "spec decode
+                # enabled, no verify step yet" from "spec decode disabled".
+                if self.num_spec_tokens > 0:
+                    request.request_spec_decode_stats = RequestSpecDecodeStats()
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -2021,6 +2037,24 @@ class Scheduler(SchedulerInterface):
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
         return spec_decoding_stats
+
+    def update_request_spec_decode_stats(
+        self,
+        request: Request,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_invalid_spec_tokens: dict[str, int] | None,
+        request_id: str,
+    ) -> None:
+        if not self.log_stats:
+            return
+        if request.request_spec_decode_stats is None:
+            request.request_spec_decode_stats = RequestSpecDecodeStats()
+        if num_invalid_spec_tokens:
+            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
+        request.request_spec_decode_stats.num_draft_tokens += num_draft_tokens
+        request.request_spec_decode_stats.num_accepted_tokens += num_accepted_tokens
+        request.request_spec_decode_stats.num_verify_steps += 1
 
     def shutdown(self) -> None:
         if self.kv_event_publisher:
