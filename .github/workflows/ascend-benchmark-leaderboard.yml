@@ -117,6 +117,9 @@ jobs:
       HARDWARE_CHIP_MODEL: 910B3
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
+      SAME_SPEC_BENCHMARK_ENABLED: ${{ vars.VLLM_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1' }}
+      SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || '' }}
+      SAME_SPEC_CONSTRAINTS_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_CONSTRAINTS_FILE || '' }}
       ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_HUST_BENCHMARK_USE_SUDO || '1' }}
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
@@ -624,11 +627,19 @@ jobs:
 
           result_root.mkdir(parents=True, exist_ok=True)
 
+          artifact = None
+          if leaderboard_entry.is_file():
+            artifact = json.loads(leaderboard_entry.read_text(encoding='utf-8'))
+
+          display_model_name = model_name
+          if isinstance(artifact, dict):
+            display_model_name = artifact.get('model_name') or model_name
+
           lines = [
             '## Ascend Benchmark Summary',
             f'- Run ID: `{run_id}`',
             f'- Scenario: `{bench_scenario}`',
-            f'- Model: `{model_name}`',
+            f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
@@ -636,7 +647,7 @@ jobs:
             '<!-- ascend-benchmark-leaderboard-comment -->',
             '## Ascend Benchmark Result',
             f'- Scenario: `{bench_scenario}`',
-            f'- Model: `{model_name}`',
+            f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
@@ -661,9 +672,17 @@ jobs:
             lines.append('- Raw benchmark result: `missing`')
             comment_lines.append('- Raw benchmark result: `missing`')
           if leaderboard_entry.is_file():
-            artifact = json.loads(leaderboard_entry.read_text(encoding='utf-8'))
             lines.append(f"- Leaderboard engine version: `{artifact.get('engine_version')}`")
             comment_lines.append(f"- Leaderboard engine version: `{artifact.get('engine_version')}`")
+            same_spec = artifact.get('same_spec') if isinstance(artifact, dict) else None
+            if isinstance(same_spec, dict):
+              spec_id = same_spec.get('spec_id') or 'unknown'
+              spec_hash = str(same_spec.get('resolved_spec_hash') or '')
+              spec_note = f'- Same-spec goal artifact: `{spec_id}`'
+              if spec_hash:
+                spec_note += f' (`{spec_hash[:8]}`)'
+              lines.append(spec_note)
+              comment_lines.append(spec_note)
           else:
             lines.append('- Leaderboard entry: `missing`')
             comment_lines.append('- Leaderboard entry: `missing`')
@@ -675,7 +694,7 @@ jobs:
             lines.append(f'- Constraints file: `{constraints_path}`')
             comment_lines.append(f'- Dataset path: `{dataset_path}`')
             comment_lines.append(f'- Constraints file: `{constraints_path}`')
-          elif publish_mode == 'artifact-preview':
+          elif publish_mode == 'artifact-preview' and not (artifact and isinstance(artifact.get('same_spec'), dict)):
             note = '- Note: random-online runs stay as preview artifacts unless random preview publish is explicitly enabled.'
             lines.append(note)
             comment_lines.append(note)

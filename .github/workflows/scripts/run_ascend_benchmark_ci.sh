@@ -20,6 +20,9 @@ NODE_ENV_FAILURE_FILE=${NODE_ENV_FAILURE_FILE:-$RESULT_ROOT/node_env_failure.txt
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
+SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
+SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0110-random-online-qwen25-14b-910b3.json}
+SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
 MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -72,6 +75,7 @@ marker_pgid_file=""
 selected_device=""
 
 NODE_ENV_RETRY_EXIT_CODE=86
+INVALID_BENCHMARK_RESULT_EXIT_CODE=${INVALID_BENCHMARK_RESULT_EXIT_CODE:-77}
 
 is_node_env_failure_text() {
   local text=${1:-}
@@ -84,6 +88,7 @@ runtime_ready_log_indicates_sudo_auth_failure() {
 
 SUDO_PRESERVE_ENV_VARS=(
   ASCEND_AICPU_PATH
+  ASCEND_BENCHMARK_USE_SUDO
   ASCEND_HOME_PATH
   ASCEND_OPP_PATH
   ASCEND_RT_VISIBLE_DEVICES
@@ -91,7 +96,39 @@ SUDO_PRESERVE_ENV_VARS=(
   ASCEND_TOOLKIT_LATEST_HOME
   ASCEND_VISIBLE_DEVICES
   ATB_HOME_PATH
+  BENCH_CONSTRAINTS_FILE
+  BENCH_DATASET_PATH
+  BENCH_INPUT_LEN
+  BENCH_MAX_CONCURRENCY
+  BENCH_NUM_PROMPTS
+  BENCH_OUTPUT_LEN
+  BENCH_RANDOM_BATCH_SIZE
+  BENCH_RANDOM_INPUT_LEN
+  BENCH_RANDOM_OUTPUT_LEN
+  BENCH_REQUEST_RATE
+  BENCH_SCENARIO
+  CHIP_COUNT
+  CONSTRAINTS_FILE
+  CURRENT_CLIENT_PORT
+  CURRENT_DATA_SOURCE
+  CURRENT_ENGINE_VERSION
+  CURRENT_GIT_COMMIT
+  CURRENT_GITHUB_REF
+  CURRENT_GITHUB_REPOSITORY
+  CURRENT_PLUGIN_ENGINE
+  CURRENT_PLUGIN_GIT_COMMIT
+  CURRENT_PLUGIN_GITHUB_REF
+  CURRENT_PLUGIN_GITHUB_REPOSITORY
+  CURRENT_RUNTIME_CWD
+  CURRENT_RUNTIME_PYTHON
+  CURRENT_SERVER_PORT
+  CURRENT_SUBMITTER
+  CURRENT_VLLM_ASCEND_HUST_REPO
+  CURRENT_VLLM_CACHE_ROOT
+  CURRENT_VLLM_HUST_REPO
   DTYPE
+  GITHUB_ACTOR
+  GITHUB_EVENT_NAME
   HCCL_CONNECT_TIMEOUT
   HCCL_EXEC_TIMEOUT
   HF_ENDPOINT
@@ -105,14 +142,28 @@ SUDO_PRESERVE_ENV_VARS=(
   MAX_MODEL_LEN
   MAX_NUM_SEQS
   MODEL_NAME
+  MODEL_PARAMETERS
+  MODEL_PRECISION
+  NODE_COUNT
   PATH
   PIP_CACHE_DIR
   PORT
   PYTHON_BIN
   PYTHONPATH
+  RESULT_DIR
+  RESULT_ROOT
+  RUN_ID
+  SAME_SPEC_BENCHMARK_ENABLED
+  SAME_SPEC_CONSTRAINTS_FILE
+  SAME_SPEC_SPEC_FILE
+  TMPDIR
   TRANSFORMERS_CACHE
   VLLM_CACHE_ROOT
+  VLLM_HUST_BENCHMARK_REPO
   VLLM_CONFIG_ROOT
+  VLLM_ASCEND_HUST_REPO
+  VLLM_HUST_REPO
+  VLLM_HUST_WORKSPACE_ROOT
   WORKSPACE_ROOT
   XDG_CACHE_HOME
   XDG_CONFIG_HOME
@@ -519,6 +570,144 @@ ensure_runner_npu_ready() {
   return 1
 }
 
+validate_benchmark_result_file() {
+  local result_file=${1:-}
+
+  if [[ -z "$result_file" ]]; then
+    echo "validate_benchmark_result_file requires a result file path" >&2
+    return 2
+  fi
+  if [[ ! -f "$result_file" ]]; then
+    echo "benchmark result file not found: $result_file" >&2
+    return 2
+  fi
+
+  RESULT_FILE="$result_file" INVALID_EXIT_CODE="$INVALID_BENCHMARK_RESULT_EXIT_CODE" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
+result_file = os.environ["RESULT_FILE"]
+invalid_exit_code = int(os.environ["INVALID_EXIT_CODE"])
+
+with open(result_file, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+completed = int(payload.get("completed", 0) or 0)
+failed = int(payload.get("failed", 0) or 0)
+total = int(payload.get("total_input", completed + failed) or (completed + failed))
+
+if completed == 0 and failed > 0:
+    print(
+        f"invalid-all-failed completed={completed} failed={failed} total_input={total}",
+        file=sys.stderr,
+    )
+    sys.exit(invalid_exit_code)
+
+print(f"validated benchmark result: completed={completed}, failed={failed}, total_input={total}")
+PY
+}
+
+run_same_spec_current_benchmark() {
+  local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
+  local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
+  local same_spec_submission_dir=$RESULT_ROOT/submission
+  local current_vllm_hust_commit
+  local current_vllm_hust_ref
+  local current_plugin_commit
+  local current_plugin_ref
+  local display_version
+
+  if [[ ! -f "$same_spec_runner" ]]; then
+    echo "same-spec benchmark runner not found: $same_spec_runner" >&2
+    return 2
+  fi
+  if [[ ! -f "$SAME_SPEC_SPEC_FILE" ]]; then
+    echo "same-spec benchmark spec file not found: $SAME_SPEC_SPEC_FILE" >&2
+    return 2
+  fi
+  if [[ ! -f "$SAME_SPEC_CONSTRAINTS_FILE" ]]; then
+    echo "same-spec benchmark constraints file not found: $SAME_SPEC_CONSTRAINTS_FILE" >&2
+    return 2
+  fi
+
+  current_vllm_hust_commit=$(git -C "$VLLM_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
+  current_vllm_hust_ref=${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-$(git -C "$VLLM_HUST_REPO" branch --show-current 2>/dev/null || echo main)}}
+  current_plugin_commit=$(git -C "$VLLM_ASCEND_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
+  current_plugin_ref=$(git -C "$VLLM_ASCEND_HUST_REPO" branch --show-current 2>/dev/null || echo main)
+  display_version=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
+
+  rm -f "$same_spec_raw_result" "$RAW_RESULT_FILE"
+  rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
+
+  if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
+    VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+      CURRENT_RUNTIME_CWD=/tmp \
+      CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
+      CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
+      CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+      CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
+      CURRENT_ENGINE_VERSION="$display_version" \
+      CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+      CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
+      CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
+      CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
+      CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
+      CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
+      CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
+      CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
+      CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
+      RESULT_DIR="$RESULT_ROOT" \
+      RESULT_ROOT="$RESULT_ROOT" \
+      RUN_ID="$RUN_ID" \
+      CURRENT_SERVER_PORT="$PORT" \
+      CURRENT_CLIENT_PORT="$PORT" \
+      CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
+      run_ascend_root_helper same-spec "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+  else
+    env \
+      VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+      CURRENT_RUNTIME_CWD=/tmp \
+      CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
+      CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
+      CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+      CURRENT_VLLM_CACHE_ROOT="$runtime_root/current-ascend-same-spec-cache" \
+      CURRENT_ENGINE_VERSION="$display_version" \
+      CURRENT_GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-vLLM-HUST/vllm-hust}" \
+      CURRENT_GITHUB_REF="$current_vllm_hust_ref" \
+      CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
+      CURRENT_PLUGIN_ENGINE="vllm-ascend-hust" \
+      CURRENT_PLUGIN_GITHUB_REPOSITORY="vLLM-HUST/vllm-ascend-hust" \
+      CURRENT_PLUGIN_GITHUB_REF="$current_plugin_ref" \
+      CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
+      CURRENT_SUBMITTER="${GITHUB_ACTOR:-ci}" \
+      CURRENT_DATA_SOURCE="vllm-hust-ci-same-spec" \
+      RESULT_DIR="$RESULT_ROOT" \
+      RESULT_ROOT="$RESULT_ROOT" \
+      RUN_ID="$RUN_ID" \
+      CURRENT_SERVER_PORT="$PORT" \
+      CURRENT_CLIENT_PORT="$PORT" \
+      CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
+      bash "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+  fi
+
+  if [[ ! -f "$same_spec_raw_result" ]]; then
+    echo "same-spec benchmark did not produce raw result: $same_spec_raw_result" >&2
+    return 2
+  fi
+  if [[ ! -f "$same_spec_submission_dir/leaderboard_manifest.json" || ! -f "$same_spec_submission_dir/run_leaderboard.json" ]]; then
+    echo "same-spec benchmark did not produce submission artifacts under: $same_spec_submission_dir" >&2
+    return 2
+  fi
+
+  validate_benchmark_result_file "$same_spec_raw_result"
+
+  mkdir -p "$SUBMISSION_DIR"
+  cp "$same_spec_raw_result" "$RAW_RESULT_FILE"
+  cp "$same_spec_submission_dir/leaderboard_manifest.json" "$SUBMISSION_DIR/leaderboard_manifest.json"
+  cp "$same_spec_submission_dir/run_leaderboard.json" "$SUBMISSION_DIR/run_leaderboard.json"
+}
+
 start_server() {
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
@@ -603,6 +792,7 @@ echo "result root: $RESULT_ROOT"
 echo "benchmark port: $PORT"
 echo "benchmark scenario: $BENCH_SCENARIO"
 echo "publish to hf: $PUBLISH_TO_HF"
+echo "same-spec benchmark enabled: $SAME_SPEC_BENCHMARK_ENABLED"
 echo "ascend benchmark use sudo: $ASCEND_BENCHMARK_USE_SUDO"
 echo "vllm-ascend-hust repo: $VLLM_ASCEND_HUST_REPO"
 if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
@@ -616,7 +806,11 @@ case "$BENCH_SCENARIO" in
     EFFECTIVE_DATASET_PATH=""
     EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-$BENCH_RANDOM_INPUT_LEN}
     EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-$BENCH_RANDOM_OUTPUT_LEN}
-    EFFECTIVE_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-$VLLM_HUST_REPO/.github/workflows/data/random-online-ci-constraints.json}
+    if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+      EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE
+    else
+      EFFECTIVE_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-$VLLM_HUST_REPO/.github/workflows/data/random-online-ci-constraints.json}
+    fi
     bench_args=(
       --backend vllm
       --endpoint /v1/completions
@@ -659,7 +853,7 @@ case "$BENCH_SCENARIO" in
     ;;
 esac
 
-if [[ "$PUBLISH_TO_HF" == "1" && "$BENCH_SCENARIO" == "random-online" && "$ALLOW_RANDOM_HF_PUBLISH" != "1" ]]; then
+if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && "$PUBLISH_TO_HF" == "1" && "$BENCH_SCENARIO" == "random-online" && "$ALLOW_RANDOM_HF_PUBLISH" != "1" ]]; then
   echo "Refusing to publish random-online CI preview to HF without ALLOW_RANDOM_HF_PUBLISH=1" >&2
   exit 2
 fi
@@ -698,84 +892,90 @@ else
   fi
 fi
 
-start_server
+if [[ "$BENCH_SCENARIO" == "random-online" && "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+  run_same_spec_current_benchmark
+else
+  start_server
 
-for attempt in $(seq 1 120); do
-  if "$CURL_BIN" -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
-    break
-  fi
+  for attempt in $(seq 1 120); do
+    if "$CURL_BIN" -fsS "http://$HOST:$PORT/health" >/dev/null 2>&1; then
+      break
+    fi
 
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "vLLM server exited before becoming ready"
-    cat "$SERVER_LOG"
-    collect_ascend_diagnostics "server-exit-before-ready"
-    if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
-      mark_node_env_failure "vllm server exited with Ascend node-level runtime error before ready"
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "vLLM server exited before becoming ready"
+      cat "$SERVER_LOG"
+      collect_ascend_diagnostics "server-exit-before-ready"
+      if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+        mark_node_env_failure "vllm server exited with Ascend node-level runtime error before ready"
+        exit "$NODE_ENV_RETRY_EXIT_CODE"
+      fi
+      exit 1
+    fi
+
+    if [[ "$attempt" -eq 120 ]]; then
+      echo "Timed out waiting for vLLM server to become ready"
+      cat "$SERVER_LOG"
+      collect_ascend_diagnostics "server-ready-timeout"
+      if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+        mark_node_env_failure "vllm server readiness timeout with Ascend node-level runtime errors"
+        exit "$NODE_ENV_RETRY_EXIT_CODE"
+      fi
+      exit 1
+    fi
+
+    sleep 2
+  done
+
+  "${VLLM_CLI[@]}" bench serve \
+    --model "$MODEL_NAME" \
+    --host "$HOST" \
+    --port "$PORT" \
+    "${bench_args[@]}" \
+    --save-result \
+    --result-dir "$RESULT_ROOT" \
+    --result-filename "$(basename "$RAW_RESULT_FILE")"
+
+  if [[ ! -f "$RAW_RESULT_FILE" ]]; then
+    collect_ascend_diagnostics "benchmark-result-missing"
+    if [[ -f "$SERVER_LOG" ]] && is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
+      mark_node_env_failure "benchmark failed due to Ascend node-level runtime errors"
       exit "$NODE_ENV_RETRY_EXIT_CODE"
     fi
-    exit 1
   fi
 
-  if [[ "$attempt" -eq 120 ]]; then
-    echo "Timed out waiting for vLLM server to become ready"
-    cat "$SERVER_LOG"
-    collect_ascend_diagnostics "server-ready-timeout"
-    if is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
-      mark_node_env_failure "vllm server readiness timeout with Ascend node-level runtime errors"
-      exit "$NODE_ENV_RETRY_EXIT_CODE"
-    fi
-    exit 1
-  fi
+  validate_benchmark_result_file "$RAW_RESULT_FILE"
 
-  sleep 2
-done
-
-"${VLLM_CLI[@]}" bench serve \
-  --model "$MODEL_NAME" \
-  --host "$HOST" \
-  --port "$PORT" \
-  "${bench_args[@]}" \
-  --save-result \
-  --result-dir "$RESULT_ROOT" \
-  --result-filename "$(basename "$RAW_RESULT_FILE")"
-
-if [[ ! -f "$RAW_RESULT_FILE" ]]; then
-  collect_ascend_diagnostics "benchmark-result-missing"
-  if [[ -f "$SERVER_LOG" ]] && is_node_env_failure_text "$(cat "$SERVER_LOG" 2>/dev/null || true)"; then
-    mark_node_env_failure "benchmark failed due to Ascend node-level runtime errors"
-    exit "$NODE_ENV_RETRY_EXIT_CODE"
-  fi
-fi
-
-CORE_VERSION=$("$PYTHON_BIN" - <<'PY'
+  CORE_VERSION=$("$PYTHON_BIN" - <<'PY'
 import vllm
 print(vllm.__version__)
 PY
-)
+  )
 
-DISPLAY_VERSION=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
+  DISPLAY_VERSION=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
 
-"$PYTHON_BIN" -m vllm_hust_benchmark.cli submit \
-  "$BENCH_SCENARIO" \
-  --benchmark-result-file "$RAW_RESULT_FILE" \
-  --constraints-file "$EFFECTIVE_CONSTRAINTS_FILE" \
-  --run-id "$RUN_ID" \
-  --engine vllm-hust \
-  --engine-version "$DISPLAY_VERSION" \
-  --model-name "$MODEL_NAME" \
-  --model-parameters "$MODEL_PARAMETERS" \
-  --model-precision "$MODEL_PRECISION" \
-  --hardware-vendor "$HARDWARE_VENDOR" \
-  --hardware-chip-model "$HARDWARE_CHIP_MODEL" \
-  --chip-count "$CHIP_COUNT" \
-  --node-count "$NODE_COUNT" \
-  --submitter "${GITHUB_ACTOR:-ci}" \
-  --data-source "vllm-hust-ci-$BENCH_SCENARIO" \
-  --input-length "$EFFECTIVE_INPUT_LEN" \
-  --output-length "$EFFECTIVE_OUTPUT_LEN" \
-  --concurrent-requests "$BENCH_MAX_CONCURRENCY" \
-  --core-version "$CORE_VERSION" \
-  --submissions-dir "$SUBMISSIONS_ROOT"
+  "$PYTHON_BIN" -m vllm_hust_benchmark.cli submit \
+    "$BENCH_SCENARIO" \
+    --benchmark-result-file "$RAW_RESULT_FILE" \
+    --constraints-file "$EFFECTIVE_CONSTRAINTS_FILE" \
+    --run-id "$RUN_ID" \
+    --engine vllm-hust \
+    --engine-version "$DISPLAY_VERSION" \
+    --model-name "$MODEL_NAME" \
+    --model-parameters "$MODEL_PARAMETERS" \
+    --model-precision "$MODEL_PRECISION" \
+    --hardware-vendor "$HARDWARE_VENDOR" \
+    --hardware-chip-model "$HARDWARE_CHIP_MODEL" \
+    --chip-count "$CHIP_COUNT" \
+    --node-count "$NODE_COUNT" \
+    --submitter "${GITHUB_ACTOR:-ci}" \
+    --data-source "vllm-hust-ci-$BENCH_SCENARIO" \
+    --input-length "$EFFECTIVE_INPUT_LEN" \
+    --output-length "$EFFECTIVE_OUTPUT_LEN" \
+    --concurrent-requests "$BENCH_MAX_CONCURRENCY" \
+    --core-version "$CORE_VERSION" \
+    --submissions-dir "$SUBMISSIONS_ROOT"
+fi
 
 if [[ "$PUBLISH_TO_HF" == "1" ]]; then
   if [[ -z "$HF_REPO_ID" ]]; then
@@ -803,5 +1003,4 @@ echo "SUBMISSION_DIR=$SUBMISSION_DIR"
 echo "AGGREGATE_OUTPUT_DIR=$AGGREGATE_OUTPUT_DIR"
 echo "SERVER_LOG=$SERVER_LOG"
 echo "BENCH_SCENARIO=$BENCH_SCENARIO"
-echo "EFFECTIVE_CONSTRAINTS_FILE=$EFFECTIVE_CONSTRAINTS_FILE"
 echo "EFFECTIVE_CONSTRAINTS_FILE=$EFFECTIVE_CONSTRAINTS_FILE"
