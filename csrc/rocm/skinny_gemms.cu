@@ -1491,6 +1491,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           unsigned int kOff = k + (thrd * A_CHUNK);
           unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
+  #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
                 (int*)(&A[min__(Kap * actlN - A_CHUNK,
                                 kOffcp + Kap * (n / CHUNKK +
@@ -1500,6 +1501,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                 (int*)(&s[(k +
                            kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
                 16, 0, 0);
+  #else
+            *((bigType*)(&s[k + kFitPdd *
+                                    ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
+                *((bigType*)(&A[min__(
+                    Kap * actlN - A_CHUNK,
+                    kOffcp +
+                        Kap * (n / CHUNKK +
+                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                               (threadIdx.y % sprdN)))]));
+  #endif
           }
 
           // Stage loaded B[] to LDS for MFMA swizzling...
@@ -1653,11 +1664,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             int g_nindx =
                 (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
             int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+  #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
                 (float4*)(&glbl[g_adr + M * N * ks]),
                 &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
                                nt * THRDS * 4 * k_rnd]),
                 16, 0, 0);
+  #else
+            ((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                         nt * THRDS * 4 * k_rnd] =
+                *((const float4*)(&glbl[g_adr + M * N * ks]));
+  #endif
           }
         }
         if (BIAS)
@@ -1731,7 +1748,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             int* cntr, scalar_t* C,
                             const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__gfx950__) TODO: extend to __HIP__GFX9__ and __HIP__GFX1X__
+#endif  // defined(__HIP__GFX9__) TODO: Add __HIP__GFX1X__ (RDNA) support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
