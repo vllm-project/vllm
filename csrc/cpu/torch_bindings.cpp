@@ -4,8 +4,8 @@
 
 #include <torch/library.h>
 
-// Force all ISA-specific libs (_C_AVX512, _C_AVX2) to register under _C so
-// vllm/_custom_ops.py can use torch.ops._C.* uniformly (cpu.py:390).
+// ISA-specific libs (_C_AVX512, _C_AVX2) must register under the same _C
+// namespace so torch.ops._C.* dispatch works uniformly from Python.
 #undef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME _C
 
