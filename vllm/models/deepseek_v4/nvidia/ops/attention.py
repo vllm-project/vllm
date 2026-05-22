@@ -69,7 +69,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.attention.impl.flashmla import (
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
         DeepseekV4SparseMLAAttentionImpl,
     )
 
@@ -79,12 +79,12 @@ logger = init_logger(__name__)
 def _select_v4_sparse_impl() -> "type[DeepseekV4SparseMLAAttentionImpl]":
     """Pick the platform-specific V4 sparse MLA impl class. Sole platform check."""
     if current_platform.is_rocm():
-        from vllm.models.deepseek_v4.attention.impl.rocm import (
+        from vllm.models.deepseek_v4.amd.rocm import (
             DeepseekV4ROCMAiterMLASparseImpl,
         )
 
         return DeepseekV4ROCMAiterMLASparseImpl
-    from vllm.models.deepseek_v4.attention.impl.flashmla import (
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
         DeepseekV4FlashMLASparseImpl,
     )
 

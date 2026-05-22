@@ -117,7 +117,10 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # V3.2 layout: 512 NoPE + 64 RoPE. DeepseekV4 overrides this with 512.
+        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
+        # DeepSeek V4 uses 448 NoPE + 64 RoPE = 512 and overrides this in
+        # vllm/models/deepseek_v4/nvidia/flashmla.py:
+        # DeepseekV4FlashMLASparseBackend.get_supported_head_sizes.
         return [576]
 
     @classmethod

@@ -28,7 +28,9 @@ from vllm.v1.attention.ops.flashmla import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.attention import DeepseekV4MLAAttention
+    from vllm.models.deepseek_v4.nvidia.ops.attention import (
+        DeepseekV4MLAAttention,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
@@ -77,7 +79,8 @@ class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # DeepseekV4 layout: 448 NoPE + 64 RoPE.
+        # DeepSeek V4 layout: 448 NoPE + 64 RoPE = 512 (overrides the
+        # V3.2 default of 576 from FlashMLASparseBackend).
         return [512]
 
     @staticmethod

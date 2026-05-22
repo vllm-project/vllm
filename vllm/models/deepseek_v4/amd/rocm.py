@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.attention.impl.flashmla import (
+from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.nvidia.flashmla import (
     DeepseekV4FlashMLASparseBackend,
     DeepseekV4SparseMLAAttentionImpl,
 )
-from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -32,7 +32,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.attention import DeepseekV4MLAAttention
+    from vllm.models.deepseek_v4.nvidia.ops.attention import (
+        DeepseekV4MLAAttention,
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
