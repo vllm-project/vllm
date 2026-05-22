@@ -87,8 +87,11 @@ constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
 constexpr float kFp8Max = 448.0f;
 
-// When num_tokens is less than this threshold, run the reduced grid variant
+#ifndef USE_ROCM
+// When num_tokens is less than this threshold,
+// run the reduced grid variant on cuda
 constexpr float NUM_TOKEN_CUTOFF = 1024;
+#endif
 
 // Per-warp layout:  32 lanes × 16 elems/lane = 512 elems = HEAD_DIM.
 constexpr int kNumLanes = 32;
