@@ -499,7 +499,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
-    "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
+    "Qwen3ForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        extras={"fp8_block": "RedHatAI/Qwen3-32B-FP8-block"},
+    ),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
     "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
