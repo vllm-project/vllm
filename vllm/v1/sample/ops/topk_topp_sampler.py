@@ -95,7 +95,7 @@ class TopKTopPSampler(nn.Module):
                 import aiter.ops.sampling  # noqa: F401
 
                 self.aiter_ops = torch.ops.aiter
-                logger.warning_once(
+                logger.info_once(
                     "Using aiter sampler on ROCm (requires the accuracy fix "
                     "from ROCm/aiter#2035, Feb 2026+)."
                 )
