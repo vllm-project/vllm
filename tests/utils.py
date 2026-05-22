@@ -33,6 +33,8 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -44,6 +46,7 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
@@ -61,7 +64,28 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
+logger = init_logger(__name__)
+
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
+    """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
+    trust_remote_code modules would otherwise fetch from third-party CDNs
+    (often unreachable from US-based CI)."""
+    if HF_HUB_OFFLINE:
+        return
+    for repo_id, filename in assets:
+        try:
+            hf_hub_download(repo_id=repo_id, filename=filename)
+        except Exception as e:
+            logger.warning(
+                "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
+                repo_id,
+                filename,
+                e,
+            )
+
 
 if current_platform.is_rocm():
     from amdsmi import (
