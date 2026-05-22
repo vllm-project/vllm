@@ -1453,10 +1453,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--self-timed",
-        action="store_true",
-        default=True,
-        help="Use timing information from the traces instead of the configuration."
-        "This is useful when replaying traces faithfully based on their timestamps.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use timing information from the traces instead of the configuration. "
+        "This is useful when replaying traces faithfully based on their timestamps. "
+        "When unset, defaults to False, except for --dataset-name=timed_trace where "
+        "it defaults to True. Use --no-self-timed to force off. When off, user "
+        "defined generation rates are used and in trace timing info is ignored.",
     )
     parser.add_argument(
         "--percentile-metrics",
@@ -1788,6 +1791,24 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         and args.backend in OPENAI_COMPATIBLE_BACKENDS
     ):
         args.ignore_eos = True
+
+    if args.dataset_name == "timed_trace":
+        # timed_trace carries per-request timestamps;
+        # ignore EOS so generation runs to the trace's specified output length,
+        # and default to using those timestamps for scheduling unless the user
+        # opted out.
+        args.ignore_eos = True
+        if args.self_timed is None:
+            args.self_timed = True
+    else:
+        # if this is set for anything else, it is an error
+        if args.self_timed is not None:
+            raise ValueError(
+                "--self-timed/--no-self-timed is only supported with "
+                "--dataset-name=timed_trace"
+            )
+        # for any non self-timed trace, this is False
+        args.self_timed = False
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
