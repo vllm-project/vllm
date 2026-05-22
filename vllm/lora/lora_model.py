@@ -134,9 +134,13 @@ class LoRAModel:
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
                 continue
-            module_name, is_lora_a = parse_fine_tuned_lora_name(
-                tensor_name, weights_mapper
-            )
+            try:
+                module_name, is_lora_a = parse_fine_tuned_lora_name(
+                    tensor_name, weights_mapper
+                )
+            except ValueError:
+                # Skip non-LoRA / modules_to_save weights
+                continue
             if module_name not in loras:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper
@@ -222,7 +226,11 @@ class LoRAModel:
                     lora_module, skip_prefixes
                 ):
                     continue
-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                try:
+                    module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                except ValueError:
+                    # Skip non-LoRA / modules_to_save weights
+                    continue
                 # Case for expert lora weights
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")

@@ -22,7 +22,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.lora.utils import is_moe_model
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -566,6 +565,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.is_pool_model = is_pooling_model(model)
         self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
 
+        # Local import to prevent circular dependency crashes on TPU startup
+        from vllm.lora.utils import is_moe_model
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
             if not self.expert_params_mapping:

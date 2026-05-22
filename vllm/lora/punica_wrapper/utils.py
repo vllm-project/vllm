@@ -112,9 +112,9 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
+    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device, pin_memory=False)
     prompt_mapping_tensor = async_tensor_h2d(
-        prompt_mapping, dtype=torch.long, device=device
+        prompt_mapping, dtype=torch.long, device=device, pin_memory=False
     )
     embeddings_indices = torch.stack(
         [
@@ -122,14 +122,17 @@ def convert_mapping(
             indices[2] * (vocab_size + extra_vocab_size),
         ]
     )
+    # Pre-create a native torchax Tensor for max_loras - 1 to prevent raw tensor wrapping
+    max_loras_tensor = torch.tensor(max_loras - 1, device=device, dtype=torch.long)
+
     embeddings_indices = torch.where(
-        embeddings_indices == -1, max_loras - 1, embeddings_indices
+        embeddings_indices == -1, max_loras_tensor, embeddings_indices
     )
     base_indices = indices[1]
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded = torch.where(
-        sampler_indices_padded == -1, max_loras - 1, sampler_indices_padded
+        sampler_indices_padded == -1, max_loras_tensor, sampler_indices_padded
     )
     sampler_indices_padded = torch.arange(
         0, len(sampler_indices_padded), device=device, dtype=torch.long

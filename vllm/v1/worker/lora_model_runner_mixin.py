@@ -94,7 +94,7 @@ class LoRAModelRunnerMixin:
     def maybe_setup_dummy_loras(
         self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
-        if lora_config is None:
+        if lora_config is None or self.lora_manager is None:
             yield
         else:
             # __enter__ code
@@ -117,7 +117,14 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, num_loras + 1)
             }
 
-            with self.lora_manager.dummy_lora_cache():
+            try:
+                import torchax
+                torchax_ctx = torchax.default_env()
+            except ImportError:
+                from contextlib import nullcontext
+                torchax_ctx = nullcontext()
+
+            with torchax_ctx, self.lora_manager.dummy_lora_cache():
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to
                 # load from disk.
                 for lr in lora_requests:
@@ -127,7 +134,8 @@ class LoRAModelRunnerMixin:
 
             # __exit__ code
             if remove_lora:
-                self.lora_manager.remove_all_adapters()
+                with torchax_ctx:
+                    self.lora_manager.remove_all_adapters()
 
     @contextmanager
     def maybe_select_dummy_loras(
@@ -152,8 +160,8 @@ class LoRAModelRunnerMixin:
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
-        # Skip LoRA setup entirely only if no LoRA config
-        if lora_config is None:
+        # Skip LoRA setup entirely only if no LoRA config or if no LoRA manager
+        if lora_config is None or self.lora_manager is None:
             yield
         else:
             # __enter__ code
@@ -224,14 +232,22 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, effective_num_loras + 1)
             }
 
-            self._set_active_loras(
-                tuple(sample_lora_mapping),
-                tuple(token_lora_mapping),
-                lora_requests,
-                mapping_type,
-            )
+            try:
+                import torchax
+                torchax_ctx = torchax.default_env()
+            except ImportError:
+                from contextlib import nullcontext
+                torchax_ctx = nullcontext()
 
-            yield
+            with torchax_ctx:
+                self._set_active_loras(
+                    tuple(sample_lora_mapping),
+                    tuple(token_lora_mapping),
+                    lora_requests,
+                    mapping_type,
+                )
+
+                yield
 
     @contextmanager
     def maybe_dummy_run_with_lora(
