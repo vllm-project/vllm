@@ -198,7 +198,6 @@ def _compare_tp(
             tp_env,
             method=method,
             max_wait_seconds=360,
-            force_v1_runner=True,
         )
     except Exception:
         raise

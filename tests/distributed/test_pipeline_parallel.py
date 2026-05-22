@@ -349,15 +349,7 @@ def _compare_tp(
         "mp",
     ]
 
-    compare_two_settings(
-        model_id,
-        pp_args,
-        tp_args,
-        pp_env,
-        tp_env,
-        method=method,
-        force_v1_runner=True,
-    )
+    compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
 
 
 @pytest.mark.parametrize(
