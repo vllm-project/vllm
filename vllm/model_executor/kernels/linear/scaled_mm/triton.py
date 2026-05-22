@@ -161,6 +161,14 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_cuda_alike():
             return False, "only cuda like devices are supported."
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc[0] * 10 + _cc[1]
+        if compute_capability is not None and compute_capability < 89:
+            return False, (
+                f"Triton block FP8 needs SM>=89 (fp8e4nv), got SM {compute_capability}."
+            )
         return True, None
 
     def apply_block_scaled_mm(
