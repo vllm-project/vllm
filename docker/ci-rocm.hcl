@@ -7,7 +7,9 @@
 # Registry cache: Docker Hub (rocm/vllm-ci-cache) is used exclusively.
 # AMD build agents already have Docker Hub credentials (they push the test
 # image to rocm/vllm-ci), so no additional credential setup is required.
-# ROCm CI does not use a separate remote compiler cache.
+# ROCm CI uses Docker Hub for BuildKit layer cache by default. A separate
+# compiler cache can be enabled with USE_SCCACHE=1 when AMD provides a shared
+# S3-compatible cache endpoint.
 
 # CI metadata
 

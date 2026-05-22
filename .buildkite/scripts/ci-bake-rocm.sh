@@ -602,6 +602,9 @@ print_header() {
     else
         echo "Build mode: generic"
     fi
+    if [[ "${USE_SCCACHE:-0}" == "1" ]]; then
+        echo "Compiler cache: sccache enabled"
+    fi
 }
 
 validate_inputs() {

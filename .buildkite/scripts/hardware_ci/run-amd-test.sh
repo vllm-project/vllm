@@ -81,7 +81,9 @@ prepare_artifact_image() {
   local archive=""
   local metadata_file=""
   local base_image="${VLLM_CI_BASE_IMAGE:-rocm/vllm-dev:ci_base}"
-  local artifact_image="rocm/vllm-ci-artifact:${BUILDKITE_COMMIT:-local}"
+  local artifact_image=""
+  local artifact_key=""
+  local base_digest=""
   local wheel_dir=""
   local context_dir=""
   local workspace_dir=""
@@ -112,6 +114,29 @@ prepare_artifact_image() {
     base_image=$(tr -d '[:space:]' < "${metadata_file}")
   fi
 
+  echo "--- Preparing local ROCm test image"
+  echo "Base image: ${base_image}"
+  docker pull "${base_image}" || return 1
+  base_digest=$(
+    docker image inspect \
+      --format='{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' \
+      "${base_image}" 2>/dev/null || printf '%s' "${base_image}"
+  )
+
+  artifact_key=$(
+    {
+      printf 'base-image:%s\n' "${base_digest}"
+      sha256sum "${archive}"
+    } | sha256sum | cut -c1-24
+  )
+  artifact_image="rocm/vllm-ci-artifact:${artifact_key}"
+
+  if docker image inspect "${artifact_image}" >/dev/null 2>&1; then
+    echo "Using existing local ROCm artifact image: ${artifact_image}"
+    image_name="${artifact_image}"
+    return 0
+  fi
+
   tar -xzf "${archive}" -C "${wheel_dir}" || return 1
   if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
     echo "ROCm wheel artifact did not contain a wheel"
@@ -136,8 +161,6 @@ WORKDIR /vllm-workspace
 EOF
 
   echo "--- Building local ROCm test image"
-  echo "Base image: ${base_image}"
-  docker pull "${base_image}" || return 1
   docker build \
     --pull=false \
     --build-arg "BASE_IMAGE=${base_image}" \
@@ -343,8 +366,15 @@ artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || true
-  docker image rm -f "${image_name}" || true
+  if docker container inspect "${container_name}" >/dev/null 2>&1; then
+    docker rm -f "${container_name}" || true
+  fi
+  if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" ]]; then
+    docker image rm -f "${image_name}" || true
+  else
+    # Keep images by default so later jobs on the same AMD node can reuse layers.
+    echo "Keeping ROCm test image locally: ${image_name}"
+  fi
   if [[ -n "${artifact_work_dir}" ]]; then
     rm -rf "${artifact_work_dir}"
   fi
