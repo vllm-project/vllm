@@ -174,12 +174,12 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
-            if scales is not None:
+            if scales is not None and not skip_gather_scales:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
                 )
             else:
-                a1q_scale = None
+                a1q_scale = scales
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
