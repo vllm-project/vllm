@@ -749,9 +749,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 )
                 if oversized_key is not None:
                     oversized_key_index = key_list_c.index(oversized_key)
-                    self._add_load_error_block_ids(
-                        [block_id_list_c[oversized_key_index]]
-                    )
+                    # Mark every block: we skip the whole request, and the
+                    # tp_rank rotation means oversized_key isn't necessarily
+                    # the first block in the request's original order.
+                    self._add_load_error_block_ids(block_id_list_c)
                     oversized_key_bytes = _estimate_disk_offload_staging_bytes(
                         size_list_c[oversized_key_index]
                     )

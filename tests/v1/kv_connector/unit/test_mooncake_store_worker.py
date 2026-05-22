@@ -730,22 +730,26 @@ def test_recv_thread_skips_split_when_budget_holds_all_keys():
 
 
 def test_recv_thread_reports_unsplittable_key_larger_than_budget():
+    # Non-zero tp_rank exercises the rotation: the oversized key may not sit
+    # at the original request's first block. Every block must still be marked
+    # invalid, since none are loaded.
     store = MagicMock()
     thread = _make_store_recving_thread(
         store,
+        tp_rank=2,
         disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_TOO_SMALL,
     )
 
     req = _make_load_req(
         "req-a",
-        [b"a0"],
-        token_len=16,
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
     )
 
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 0
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
