@@ -282,9 +282,7 @@ def test_from_request_tracker_load_overrides_caller_skip_save():
         allocated_block_ids=([0, 1, 2],),
         num_saved_tokens=0,
     )
-    load_spec = LoadSpec(
-        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=True
-    )
+    load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=True)
 
     req_meta = ReqMeta.from_request_tracker(
         tracker,
@@ -309,9 +307,7 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
         allocated_block_ids=([0, 1, 2],),
         num_saved_tokens=0,
     )
-    load_spec = LoadSpec(
-        vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=False
-    )
+    load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=48, can_load=False)
 
     req_meta = ReqMeta.from_request_tracker(
         tracker,
