@@ -214,9 +214,7 @@ class WorkerLoRAManager:
     def add_adapter(self, adapter_request: Any) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
-        # One-time per adapter: load may sync (tensorizer) and
-        # `activate_adapter` eventually calls `set_lora` / `reset_lora`
-        # which write per-adapter scalars to GPU buffers.
+        # One-time per adapter
         with gpu_sync_allowed():
             loaded_adapter = self._load_adapter(adapter_request)
             loaded = self._adapter_manager.add_adapter(loaded_adapter)
@@ -224,9 +222,7 @@ class WorkerLoRAManager:
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        # Adapter removal calls `reset_lora` which does small per-adapter
-        # scalar-index writes on GPU buffers (e.g. `adapter_enabled[i] = 0`);
-        # one-time per adapter.
+        # One-time per adapter.
         with gpu_sync_allowed():
             return self._adapter_manager.remove_adapter(adapter_id)
 
@@ -285,19 +281,15 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if (
-            lora_request.lora_int_id not in self.list_adapters()
-            or lora_request.load_inplace
-        ):
-            # Load the new adapter first to ensure it is actually valid, before
-            # evicting any existing adapters.
-            # This may cause the # of loaded lora adapters to very temporarily
-            # exceed `--max-cpu-loras`.
-            # Adapter loading may sync (e.g. tensorizer's H2D weight copy) and
-            # the subsequent `reset_lora` / `set_lora` bookkeeping does small
-            # per-adapter scalar writes to GPU buffers. These are one-time
-            # per adapter lifecycle event, so allow syncs for the whole block.
-            with gpu_sync_allowed():
+        with gpu_sync_allowed():
+            if (
+                lora_request.lora_int_id not in self.list_adapters()
+                or lora_request.load_inplace
+            ):
+                # Load the new adapter first to ensure it is actually valid, before
+                # evicting any existing adapters.
+                # This may cause the # of loaded lora adapters to very temporarily
+                # exceed `--max-cpu-loras`.
                 lora = self._load_adapter(lora_request)
 
                 # Remove the existing adapter if it exists
@@ -311,14 +303,12 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                     self._adapter_manager.remove_oldest_adapter()
                 # Then add the new adapter to the cache
                 loaded = self._adapter_manager.add_adapter(lora)
-        else:
-            # If the lora is already loaded, just touch it to
-            # update its position in the caches
-            loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
-            )
-        # `activate_adapter` eventually calls `set_lora` / `reset_lora` which
-        # write per-adapter scalars to GPU buffers; allow the one-time sync.
-        with gpu_sync_allowed():
+            else:
+                # If the lora is already loaded, just touch it to
+                # update its position in the caches
+                loaded = (
+                    self._adapter_manager.get_adapter(lora_request.lora_int_id)
+                    is not None
+                )
             self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded

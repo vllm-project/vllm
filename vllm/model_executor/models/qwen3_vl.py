@@ -2220,21 +2220,13 @@ class Qwen3VLForConditionalGeneration(
                     spatial_merge_size=self.visual.spatial_merge_size,
                     q=self.video_pruning_rate,
                 )
-                # Boolean-mask indexing has a data-dependent output shape and
-                # always syncs on CUDA. The `.tolist()` below is also a sync
-                # but is required because `num_tokens_per_frame` is consumed
-                # downstream as Python ints. Runs once per video in the EVS
-                # path.
+
                 with gpu_sync_allowed():
                     # Apply retention mask.
                     emb = emb[retention_mask]
 
                     # Calculate the actual number of retained tokens per frame.
-                    num_frames, rows, cols = (
-                        t,
-                        h // merge_size,
-                        w // merge_size,
-                    )
+                    num_frames, rows, cols = t, h // merge_size, w // merge_size
                     retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
                     num_tokens_per_frame = (
                         retention_mask_thw.sum(dim=(1, 2)).long().tolist()
@@ -2406,8 +2398,7 @@ class Qwen3VLForConditionalGeneration(
             .permute(1, 0)
         )
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
-        # Boolean-mask indexing has data-dependent output shapes and always
-        # syncs on CUDA; runs once per video in the EVS path.
+
         with gpu_sync_allowed():
             expanded_positions[is_video_embed, :3] = original_mrope[
                 full_is_video_embed

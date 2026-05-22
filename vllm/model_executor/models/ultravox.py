@@ -693,11 +693,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             embeddings.shape[0], -1
         )
         mask = indices < audio_token_len[:, None]
-        # The boolean-mask gather, the `.item()` on per-group lengths, and the
-        # `.tolist()` feeding `torch.split` all force GPU->CPU syncs (output
-        # sizes are data-dependent). Suppress the sync check here; avoiding
-        # these syncs would require restructuring the downstream contract
-        # for per-audio flattened embeddings.
+
         with gpu_sync_allowed():
             # Apply mask and flatten
             flattened_embeddings = embeddings[mask]

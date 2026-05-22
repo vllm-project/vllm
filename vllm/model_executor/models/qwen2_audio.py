@@ -445,10 +445,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             )
             < audio_output_lengths
         )
-        # The boolean-mask gather below and the `.tolist()` that feeds
-        # `torch.split` both force GPU->CPU syncs (output sizes are
-        # data-dependent). Suppress the sync check here; restructuring the
-        # downstream contract to avoid these syncs would be a broader refactor.
         with gpu_sync_allowed():
             masked_audio_features = audio_features[audio_features_mask].view(
                 -1, embed_dim

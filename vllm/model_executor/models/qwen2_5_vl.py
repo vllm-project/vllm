@@ -1451,8 +1451,6 @@ class Qwen2_5_VLForConditionalGeneration(
                 video_second_per_grid=video_second_per_grid_t.item(),
             ).to(emb.device, non_blocking=True)
 
-            # Boolean-mask indexing has a data-dependent output shape and
-            # always syncs on CUDA; runs once per video in the EVS path.
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
                 positions = positions[retention_mask]

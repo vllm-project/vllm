@@ -291,9 +291,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         # only load the bitsandbytes module when needed
         from bitsandbytes import MatmulLtState, matmul
 
-        # BnB's `int8_vectorwise_quant` branches on `outliers.any()` which
-        # forces a D2H sync; this is third-party code we can't refactor,
-        # and it's a per-layer fixed cost in int8 quant mode.
         original_type = x.dtype
         original_shape = x.shape
         reshape_after_matmul = False

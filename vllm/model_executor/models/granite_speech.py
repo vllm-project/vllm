@@ -778,9 +778,7 @@ class GraniteSpeechForConditionalGeneration(
         encoder_embeds = self.encoder(audio_input["input_features"])
         # [bsz, <max feature size>, 4096]
         projected_embeds = self.projector(encoder_embeds)
-        # Apply mask on variable length audio features. Boolean-mask indexing
-        # has a data-dependent output shape and always syncs on CUDA; this
-        # runs once per MM encoder call.
+        # Apply mask on variable length audio features.
         with gpu_sync_allowed():
             masked_embeds = projected_embeds[audio_input["input_features_mask"]]
         # Split variable length features into a tuple

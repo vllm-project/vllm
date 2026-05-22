@@ -883,12 +883,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # then chunk_stride = 2
                 chunk_stride = mamba_block_size // chunk_size
 
-                # The per-sequence loop below uses these as Python scalars
-                # (slice bounds, `if == 0` tests, `%`, etc). Pull them to
-                # CPU once so each iteration doesn't force a D2H sync.
-                # These are small (per-request) and are known-unavoidable
-                # D2H reads; allow the one-shot sync instead of paying a
-                # per-iteration D2H cost.
+                # The per-sequence loop below uses these as Python scalars.
+                # TODO avoid sync here?
                 with gpu_sync_allowed():
                     block_idx_first_cpu = block_idx_first_scheduled_token_p.tolist()
                     block_idx_last_cpu = block_idx_last_scheduled_token_p.tolist()

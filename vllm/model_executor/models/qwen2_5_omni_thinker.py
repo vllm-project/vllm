@@ -961,10 +961,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
         )
 
-        # Upstream transformers `qwen2_5_omni` audio tower does
-        # `torch.full((chunk_num.sum(),), ...)` which syncs on a GPU scalar
-        # reduction. Third-party; suppress at the integration boundary. The
-        # subsequent `.tolist()` on GPU output lengths is also unavoidable.
         with gpu_sync_allowed():
             audio_outputs = self.audio_tower(
                 input_features.to(self.audio_tower.dtype),
@@ -1457,10 +1453,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        # Branch on a Python scalar below; the `input_ids.cpu()` and
-        # `.item()` reductions are unavoidable without refactoring the
-        # interleave-merge to be fully GPU-resident. Run under an
-        # allowed-sync block since this happens once per MM embed call.
         with gpu_sync_allowed():
             input_ids_cpu = input_ids.cpu()
             is_video = is_multimodal & (input_ids_cpu == video_token_id)

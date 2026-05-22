@@ -429,15 +429,12 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # Compute chunk information. `feature_lens` is small (per-audio) so
-        # pull to CPU once to compute total chunk count and split sizes
-        # without per-iteration D2H syncs.
+        # Compute chunk information.
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         with gpu_sync_allowed():
             total_chunks = int(chunk_num.sum())
-        # `torch.tensor([...], device=cuda)` forces a blocking H2D; use
-        # pinned CPU + non-blocking upload instead.
+
         chunk_lengths = async_tensor_h2d(
             [self.n_window * 2] * total_chunks,
             dtype=torch.long,
@@ -457,9 +454,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Compute feature lengths after CNN
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
-        # Vectorized mask creation: avoid creating many small tensors. The
-        # `.item()` below is unavoidable — `torch.arange` needs a Python int
-        # for the output size. Runs once per audio forward.
+        # Vectorized mask creation: avoid creating many small tensors.
         with gpu_sync_allowed():
             max_len_after_cnn = feature_lens_after_cnn.max().item()
         indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
@@ -500,11 +495,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         )
         padded_embed = padded_embed + positional_embedding
 
-        # Boolean-mask indexing has a data-dependent output shape; syncs on
-        # CUDA. Runs once per audio forward.
         with gpu_sync_allowed():
             hidden_states = padded_embed[padded_mask_after_cnn]
-            # `aftercnn_lens.tolist()` is an unavoidable D2H below.
+            # Use tolist() for efficient batch conversion from tensor to Python
             aftercnn_lens_list = aftercnn_lens.tolist()
 
         # Compute cumulative sequence lengths for chunked attention

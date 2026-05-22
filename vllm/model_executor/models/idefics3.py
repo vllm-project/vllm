@@ -502,6 +502,7 @@ class Idefics3Model(nn.Module):
         ) != nb_values_per_image
         with gpu_sync_allowed():
             pixel_values = pixel_values[real_images_inds].contiguous()
+
             # Handle the vision attention mask
             # Remove padding images from the mask
             pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()

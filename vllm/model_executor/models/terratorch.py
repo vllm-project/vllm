@@ -278,10 +278,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        # terratorch's forward has internal GPU syncs we can't fix from
-        # here (e.g. prithvi_mae._get_1d_sincos_embed_from_grid_torch
-        # does `torch.arange(...).to(pos.device)` every call). Suppress
-        # sync checking at this integration boundary.
+        # terratorch's forward has internal GPU syncs.
         with gpu_sync_allowed():
             model_output = self.inference_runner.forward(**kwargs)
         return model_output.output

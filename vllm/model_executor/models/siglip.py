@@ -1113,11 +1113,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if len(features) == 1:
             return features
 
-        # Detect sequence boundaries where position_ids decrease.
-        # `torch.where(boundary_mask)` and `repeat_interleave(lengths)` both
-        # have data-dependent output shapes that always sync on CUDA. This
-        # runs once per pooling call. Compute boundaries on CPU (single D2H
-        # for `boundary_mask`) then upload the final flip-index tensor.
+        # Detect sequence boundaries where position_ids decrease
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 

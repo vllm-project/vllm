@@ -375,8 +375,6 @@ class Qwen3ASRForConditionalGeneration(
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        # `.tolist()` on GPU output lengths forces a D2H sync; split sizes are
-        # data-dependent so this is unavoidable.
         with gpu_sync_allowed():
             split_sizes = audio_output_lengths.tolist()
         return audio_features.split(split_sizes)

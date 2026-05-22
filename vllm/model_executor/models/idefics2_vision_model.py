@@ -96,10 +96,6 @@ class Idefics2VisionEmbeddings(nn.Module):
             size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
         )
 
-        # This loop runs CPU-side (position_ids/boundaries are on CPU).
-        # Bring the per-image inputs to CPU once up front so the loop doesn't
-        # pay a per-iteration D2H sync for `nb_patches_*` (via `.sum()` on a
-        # GPU `p_attn_mask`) or for the boolean indexing into `position_ids`.
         with gpu_sync_allowed():
             patch_attention_mask_cpu = patch_attention_mask.cpu()
             tgt_sizes_cpu = tgt_sizes.cpu() if tgt_sizes is not None else None
@@ -123,8 +119,6 @@ class Idefics2VisionEmbeddings(nn.Module):
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
-        # `position_ids` is a CPU tensor built above; pin+non_blocking upload
-        # to avoid a synchronous H2D copy.
         position_ids = position_ids.to(
             self.position_embedding.weight.device, non_blocking=True
         )

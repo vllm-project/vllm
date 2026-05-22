@@ -84,14 +84,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        # This method has two unavoidable GPU->CPU syncs given the current
-        # design: (1) the `torch.all(... == -1)` no-lora check below, and
-        # (2) `torch.unique(...)` + reading `lora_ids.size(0)` as a Python
-        # int further down. Both ultimately stem from needing facts about
-        # `token_lora_mapping`'s contents on the host (is everything -1?
-        # how many distinct loras?). TODO: compute these on CPU upstream
-        # in `convert_mapping` where the mapping is still a Python list,
-        # then pass the results in.
+        # TODO avoid gpu<->cpu sync here
         with gpu_sync_allowed():
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
