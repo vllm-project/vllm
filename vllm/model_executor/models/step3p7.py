@@ -20,8 +20,12 @@ logger = init_logger(__name__)
 class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "model.vision_model.": "vision_model.",
+            "model.vit_large_projector.": "vit_large_projector.",
+            "model.vit_large_projector": "vit_large_projector",
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
+            "lm_head": "language_model.lm_head",
         },
         orig_to_new_substr={
             ".attn.in_proj_weight": ".attn.qkv_proj.weight",
@@ -79,8 +83,6 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
             return run_dp_sharded_vision_model(input_tensor, self.vision_model)
         return self.vision_model(input_tensor)
 
-    def _process_image_features(
-        self, image_features: torch.Tensor
-    ) -> torch.Tensor:
+    def _process_image_features(self, image_features: torch.Tensor) -> torch.Tensor:
         image_features, _ = self.vit_large_projector(image_features)
         return image_features

@@ -190,6 +190,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -215,11 +216,16 @@ class EagleSpeculator:
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
+            model_kwargs: dict[str, Any] = {}
+            if self.method == "mtp":
+                model_kwargs["spec_step_idx"] = spec_step_idx
+
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
@@ -276,7 +282,10 @@ class EagleSpeculator:
             mm_inputs=mm_inputs,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        if self.method == "mtp":
+            logits = self.model.compute_logits(sample_hidden_states, spec_step_idx=0)
+        else:
+            logits = self.model.compute_logits(sample_hidden_states)
 
         self.draft_tokens[:num_reqs, 0] = self._sample_draft(
             logits,
@@ -337,6 +346,7 @@ class EagleSpeculator:
                     slot_mappings_by_layer,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=batch_desc.cg_mode,
+                    spec_step_idx=step,
                 )
 
     def generate_draft(
@@ -347,6 +357,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        spec_step_idx: int = 0,
     ) -> None:
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
@@ -357,11 +368,17 @@ class EagleSpeculator:
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            spec_step_idx=spec_step_idx,
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 
         # Sample the draft tokens.
-        logits = self.model.compute_logits(last_hidden_states)
+        if self.method == "mtp":
+            logits = self.model.compute_logits(
+                last_hidden_states, spec_step_idx=spec_step_idx
+            )
+        else:
+            logits = self.model.compute_logits(last_hidden_states)
         draft_tokens = self._sample_draft(
             logits,
             idx_mapping,

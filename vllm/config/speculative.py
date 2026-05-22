@@ -485,7 +485,43 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
 
-        if hf_config.model_type == "step3p5":
+        if (
+            hf_config.model_type == "step3p7"
+            or hf_config.architectures[0] == "Step3p7ForConditionalGeneration"
+        ):
+            outer_hf_config = hf_config
+            hf_config = get_hf_text_config(hf_config)
+            raw_config_path = getattr(outer_hf_config, "_name_or_path", None)
+            if raw_config_path:
+                import json
+                from pathlib import Path
+
+                config_path = Path(raw_config_path) / "config.json"
+                if config_path.is_file():
+                    raw_text_config = json.loads(config_path.read_text()).get(
+                        "text_config", {}
+                    )
+                    for attr in (
+                        "layer_types",
+                        "partial_rotary_factors",
+                        "rope_theta",
+                        "swiglu_limits_shared",
+                        "swiglu_limits",
+                        "use_rope_layers",
+                    ):
+                        raw_value = raw_text_config.get(attr)
+                        if isinstance(raw_value, list):
+                            setattr(hf_config, attr, raw_value)
+            if (
+                hasattr(outer_hf_config, "quantization_config")
+                and not hasattr(hf_config, "quantization_config")
+            ):
+                hf_config.quantization_config = outer_hf_config.quantization_config
+
+        if (
+            hf_config.model_type == "step3p5"
+            or hf_config.architectures[0] == "Step3p5ForCausalLM"
+        ):
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
@@ -705,7 +741,11 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
+                    if (
+                        self.num_speculative_tokens > 1
+                        and self.draft_model_config.hf_config.model_type
+                        != "step3p5_mtp"
+                    ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
@@ -1054,6 +1094,14 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
+        )
+
+    def use_step3p5_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "step3p5_mtp"
         )
 
     def use_eagle(self) -> bool:
