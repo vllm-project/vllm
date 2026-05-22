@@ -35,6 +35,7 @@ class UnquantizedMoeBackend(Enum):
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
+    SONIC_MOE = "Sonic MoE"
     CPU = "CPU"
     XPU = "XPU"
     TPU = "TPU"
@@ -119,6 +120,13 @@ def backend_to_kernel_cls(
 
         return BatchedTritonExperts
 
+    elif backend == UnquantizedMoeBackend.SONIC_MOE:
+        from vllm.model_executor.layers.fused_moe.experts.sonic_moe import (
+            SonicMoEExperts,
+        )
+
+        return SonicMoEExperts
+
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
@@ -135,6 +143,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
+        "sonic_moe": UnquantizedMoeBackend.SONIC_MOE,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -316,6 +325,30 @@ def convert_to_unquantized_kernel_format(
             w13_weight,
             w2_weight,
         )
+
+    elif unquantized_backend == UnquantizedMoeBackend.SONIC_MOE:
+        # quack's grouped GEMM wants `mB: (E, K, N)` with the gate/up split
+        # INTERLEAVED on the N axis ([g0, u0, g1, u1, ...]). vLLM stores w13
+        # as (E, 2*I, H) with [gate | up] BLOCK-concatenated on dim 1:
+        #   w13: (E, 2*I, H)  ->  permute to (E, H, 2*I)  ->  interleave the
+        #        last dim so even cols are gate and odd cols are up
+        #   w2:  (E, H, I)   ->  (E, I, H)  (no interleave needed)
+        # NOTE: quack's `concat_layout=("B",)` is silently a no-op on the
+        # varlen_m (grouped) path, so the interleave must be materialized.
+        E_local = w13_weight.shape[0]
+        intermediate = w13_weight.shape[1] // 2
+        H_dim = w13_weight.shape[2]
+        gate = w13_weight[:, :intermediate, :]
+        up = w13_weight[:, intermediate:, :]
+        # Stack (gate, up) along a new axis and flatten to interleave:
+        #   (E, I, H) + (E, I, H) -> (E, I, 2, H) -> (E, 2I, H)
+        # then permute to (E, H, 2I).
+        w13_weight = (
+            torch.stack([gate, up], dim=2)  # (E, I, 2, H)
+            .reshape(E_local, 2 * intermediate, H_dim)  # (E, 2I, H) interleaved
+            .permute(0, 2, 1)  # (E, H, 2I)
+        )
+        w2_weight = w2_weight.permute(0, 2, 1)
 
     return w13_weight.contiguous(), w2_weight.contiguous()
 
