@@ -734,6 +734,17 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
+        # Check if KV connector requires chunked prefill to be disabled.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
+            and self.scheduler_config.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
+            )
+
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
