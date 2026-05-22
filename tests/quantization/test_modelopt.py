@@ -77,6 +77,12 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             kv_cache_quant_algo=None,
             exclude_modules=[],
         ),
+        w4a16_nvfp4_config=ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
     )
 
 
