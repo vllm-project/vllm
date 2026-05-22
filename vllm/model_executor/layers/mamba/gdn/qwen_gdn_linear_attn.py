@@ -5,7 +5,6 @@
 import torch
 from einops import rearrange
 from torch import nn
-from transformers.activations import ACT2FN
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -15,8 +14,6 @@ from vllm.config import (
 )
 from vllm.distributed import (
     divide,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -37,10 +34,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
@@ -55,7 +51,6 @@ from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -67,7 +62,6 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Optional ROCm AITER Triton kernels for the GDN decode fast-path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -263,20 +257,11 @@ class ChunkGatedDeltaRule(CustomOp):
         )
 
 
-@PluggableLayer.register("gated_delta_net_attention")
-class GatedDeltaNetAttention(PluggableLayer, MambaBase):
-    @property
-    def mamba_type(self) -> MambaAttentionBackendEnum:
-        return MambaAttentionBackendEnum.GDN_ATTN
-
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
-            self.cache_config.mamba_ssm_cache_dtype,
-        )
-
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+@PluggableLayer.register("qwen_gated_delta_net_attention")
+class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
@@ -294,33 +279,15 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         prefix: str = "",
         gqa_interleaved_layout=False,
     ) -> None:
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.hidden_size = config.hidden_size
-        self.num_v_heads = config.linear_num_value_heads
+        super().__init__(config, vllm_config, prefix)
+
         self.num_k_heads = config.linear_num_key_heads
+        self.num_v_heads = config.linear_num_value_heads
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
+        self.conv_kernel_size = config.linear_conv_kernel_dim
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
-
-        self.conv_kernel_size = config.linear_conv_kernel_dim
-        self.layer_idx = extract_layer_index(prefix)
-        self.activation = config.hidden_act
-        self.act = ACT2FN[config.hidden_act]
-        self.layer_norm_epsilon = config.rms_norm_eps
-        self.prefix = prefix
-        self.config = config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        self.speculative_config = vllm_config.speculative_config
-        self.num_spec = (
-            self.speculative_config.num_speculative_tokens
-            if self.speculative_config
-            else 0
-        )
         self.gqa_interleaved_layout = gqa_interleaved_layout
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
@@ -355,7 +322,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             hidden_size=self.hidden_size,
             key_dim=self.key_dim,
             value_dim=self.value_dim,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvz",
         )
 
@@ -365,10 +332,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.in_proj_ba = self.create_ba_proj(
             hidden_size=self.hidden_size,
             num_v_heads=self.num_v_heads,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_ba",
         )
-        self.disable_tp_for_ba_proj = self.maybe_disable_tp(quant_config)
+        self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -421,7 +388,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
 
@@ -765,7 +732,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 device=projected_states_qkvz.device,
             )
 
-            torch.ops.vllm.gdn_attention_core(
+            torch.ops.vllm.qwen_gdn_attention_core(
                 projected_states_qkvz,
                 projected_states_ba,
                 z,
@@ -826,7 +793,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.gdn_attention_core(
+        torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
             b,
             a,
@@ -1492,7 +1459,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         return
 
 
-def gdn_attention_core(
+def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
@@ -1545,8 +1512,8 @@ def gdn_attention_core_fake(
 
 
 direct_register_custom_op(
-    op_name="gdn_attention_core",
-    op_func=gdn_attention_core,
+    op_name="qwen_gdn_attention_core",
+    op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
     fake_impl=gdn_attention_core_fake,
 )
