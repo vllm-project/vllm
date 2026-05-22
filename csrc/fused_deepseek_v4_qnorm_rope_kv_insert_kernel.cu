@@ -610,7 +610,7 @@ static void launchFusedDeepseekV4Templated(
 }
 
 // Runtime dispatch into one of the precompiled `kNumHeadsQPadded`
-// instantiations.  Only FlashMLA's production set is supported (64, 128).
+// instantiations.  Supported padded head counts: 8, 16, 32, 64, 128.
 template <typename scalar_t_in>
 void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
     scalar_t_in const* q_in, scalar_t_in* q_out, scalar_t_in const* kv_in,
@@ -629,6 +629,9 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
     return;
 
   switch (num_heads_q_padded) {
+    DISPATCH(8)
+    DISPATCH(16)
+    DISPATCH(32)
     DISPATCH(64)
     DISPATCH(128)
     default:
@@ -636,7 +639,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
                   "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert: "
                   "unsupported num_heads_q_padded=",
                   num_heads_q_padded,
-                  " (compiled instantiations: 64, 128).");
+                  " (compiled instantiations: 8, 16, 32, 64, 128).");
   }
 #undef DISPATCH
 }
