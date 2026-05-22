@@ -464,6 +464,9 @@ def _run_eagle_correctness(
             enable_chunked_prefill=enable_chunked_prefill,
             model_impl=model_impl,
             attention_config=attention_config,
+            # Leave headroom for the eagle draft model's CUDA graphs and
+            # warmup-time allocations on smaller MIG slices (~33 GiB).
+            gpu_memory_utilization=0.7,
         )
         # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
