@@ -330,6 +330,125 @@ direct_register_custom_op(
 )
 
 
+def _xpu_fp8_mm_out(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> None:
+    torch.ops._xpu_C.fp8_gemm_out(out, A, B, None, scale_a, scale_b, bias)
+
+
+def fused_xpu_fp8_matmul_reduce_scatter_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    result_shape = list(output_shape)
+    result_shape[orig_scatter_dim] //= world_size
+    return torch.empty(result_shape, dtype=out_dtype or torch.bfloat16, device=x.device)
+
+
+def fused_xpu_fp8_matmul_reduce_scatter(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    reduce_op: str,
+    orig_scatter_dim: int,
+    scatter_dim_after_maybe_reshape: int,
+    group_name: str,
+    output_shape: list[int],
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    return torch.distributed._symmetric_memory._fused_scaled_matmul_reduce_scatter_impl(
+        mm_out_op=_xpu_fp8_mm_out,
+        A=x,
+        B=weight,
+        A_scale=input_scale,
+        kwargs={
+            "scale_b": weight_scale,
+            "bias": None,
+        },
+        out_dtype=out_dtype,
+        reduce_op=reduce_op,
+        orig_scatter_dim=orig_scatter_dim,
+        scatter_dim_after_maybe_reshape=scatter_dim_after_maybe_reshape,
+        group_name=group_name,
+        output_shape=output_shape,
+    )
+
+
+def fused_all_gather_xpu_fp8_matmul_fake(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    world_size = c10d._resolve_process_group(group_name).size()
+    output_shape = list(A_shard.shape)
+    output_shape[gather_dim] *= world_size
+    output_shape[-1] = B.shape[1]
+    return torch.empty(
+        output_shape, dtype=out_dtype or torch.bfloat16, device=A_shard.device
+    )
+
+
+def fused_all_gather_xpu_fp8_matmul(
+    A_shard: torch.Tensor,
+    B: torch.Tensor,
+    A_scale: torch.Tensor,
+    B_scale: torch.Tensor,
+    gather_dim: int,
+    group_name: str,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    _, outputs = torch.distributed._symmetric_memory._fused_all_gather_matmul_impl(
+        mm_out_op=_xpu_fp8_mm_out,
+        A_shard=A_shard,
+        Bs=[B],
+        A_scale=A_scale,
+        kwargs_list=[
+            {
+                "scale_b": B_scale,
+                "bias": None,
+            }
+        ],
+        out_dtypes=[out_dtype],
+        gather_dim=gather_dim,
+        group_name=group_name,
+        return_A=False,
+    )
+    return outputs[0]
+
+
+direct_register_custom_op(
+    op_name="fused_xpu_fp8_matmul_reduce_scatter",
+    op_func=fused_xpu_fp8_matmul_reduce_scatter,
+    fake_impl=fused_xpu_fp8_matmul_reduce_scatter_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_all_gather_xpu_fp8_matmul",
+    op_func=fused_all_gather_xpu_fp8_matmul,
+    fake_impl=fused_all_gather_xpu_fp8_matmul_fake,
+)
+
+
 class BasePattern:
     def __init__(self, dtype: torch.dtype, device: str | None) -> None:
         self.dtype = dtype
@@ -677,6 +796,112 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
         )
 
 
+class XPUFp8GEMMReduceScatterPattern(BasePattern):
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        mm_weight = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        scale_a = torch.empty([16, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+        return [input, mm_weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            input_scale: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            fp8_gemm = torch.ops._xpu_C.fp8_gemm.default(
+                A=x,
+                B=weight,
+                out_dtype=self.dtype,
+                A_scale_=input_scale,
+                B_scale_=weight_scale,
+                bias_=None,
+            )
+            return torch.ops.vllm.reduce_scatter.default(
+                fp8_gemm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+
+        def replacement(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
+            return torch.ops.vllm.fused_xpu_fp8_matmul_reduce_scatter.default(  # noqa
+                input,
+                mat2,
+                scale_a,
+                scale_b,
+                "sum",
+                scatter_dim,
+                scatter_dim,
+                self.tp.device_group.group_name,
+                output_shape,
+                self.dtype,
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class AllGatherXPUFp8GEMMPattern(BasePattern):
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        # XPU weights are row_major (contiguous), unlike CUDA col_major.
+        weight = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        scale_a = torch.empty([8, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+        return [x, weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
+            )
+            fp8_gemm = torch.ops._xpu_C.fp8_gemm.default(
+                A=all_gather,
+                B=weight,
+                out_dtype=self.dtype,
+                A_scale_=scale_a,
+                B_scale_=scale_b,
+                bias_=None,
+            )
+            return fp8_gemm
+
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_all_gather_xpu_fp8_matmul.default(  # noqa
+                x,
+                weight,
+                scale_a,
+                scale_b,
+                0,
+                self.tp.device_group.group_name,
+                self.dtype,
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class FlashInferBMMFP8ReduceScatterPattern(
     BasePattern, VllmPatternReplacement[..., torch.Tensor]
 ):
@@ -971,6 +1196,14 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                 # path; reduce-scatter needs a dedicated FP4 producer rather
                 # than the existing FP8-style helper.
 
+            if current_platform.is_xpu():
+                XPUFp8GEMMReduceScatterPattern(self.model_dtype, self.device).register(
+                    self.pm_pass
+                )
+                AllGatherXPUFp8GEMMPattern(self.model_dtype, self.device).register(
+                    self.pm_pass
+                )
+
         self.dump_patterns(config, self.pm_pass)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
@@ -986,4 +1219,4 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.pm_pass.apply(graph)
         VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.info("Replaced %s patterns", self.matched_count)
