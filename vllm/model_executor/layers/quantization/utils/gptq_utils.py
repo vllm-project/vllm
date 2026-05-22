@@ -74,7 +74,7 @@ def flatten_list(lst: list[Any]) -> list[Any]:
 
     def _flatten(lst: list[Any]):
         for i in lst:
-            if isinstance(type(i), list):
+            if isinstance(i, list):
                 _flatten(i)
             else:
                 output.append(i)
