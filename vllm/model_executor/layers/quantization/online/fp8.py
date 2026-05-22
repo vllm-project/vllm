@@ -108,7 +108,7 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
 
         self.weight_quant_key = kFp8StaticTensorSym
         # Use per-token quantization for better perf if dynamic and cutlass
-        if cutlass_fp8_supported():
+        if cutlass_fp8_supported() or current_platform.is_xpu():
             self.activation_quant_key = kFp8DynamicTokenSym
         else:
             self.activation_quant_key = kFp8DynamicTensorSym

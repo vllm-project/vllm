@@ -656,8 +656,13 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                # XPU does not expose a CUDA-style capability, but has its own
+                # W8A8 FP8 kernel path.
+                is_fp8_w8a8_supported = (
+                    self._check_scheme_supported(
+                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                    )
+                    or current_platform.is_xpu()
                 )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
