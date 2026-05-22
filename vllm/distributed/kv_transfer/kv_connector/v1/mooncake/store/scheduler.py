@@ -358,16 +358,11 @@ class MooncakeStoreScheduler:
                     num_saved_tokens=0,
                 )
                 self._request_trackers[request_id] = request_tracker
-                # skip_save=True: co-queuing a save with a load makes the
-                # worker produce both finished_recving and finished_sending
-                # for the same req_id, which double-frees in
-                # _update_from_kv_xfer_finished. Saves resume normally on
-                # later cached_reqs steps as new tokens are computed.
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     load_spec=load_spec,
-                    skip_save=True,
+                    skip_save=True, # Do not save when we have to load (load_spec is not None)
                     block_hashes=unfinished_req.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
