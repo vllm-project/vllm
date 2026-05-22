@@ -99,6 +99,7 @@ SUDO_PRESERVE_ENV_VARS=(
   HF_TOKEN
   HOME
   HOST
+  HUST_ATB_SET_ENV
   HUGGINGFACE_HUB_CACHE
   LD_LIBRARY_PATH
   MAX_MODEL_LEN
@@ -144,6 +145,24 @@ export_sudo_preserved_env_vars() {
       export "$var_name"
     fi
   done
+}
+
+build_root_helper_shell_wrapper() {
+  cat <<'EOF'
+set -euo pipefail
+
+if [[ -n "${HUST_ATB_SET_ENV:-}" && -f "${HUST_ATB_SET_ENV}" ]]; then
+  set +u
+  source "${HUST_ATB_SET_ENV}" --cxx_abi=1
+  set -u
+elif [[ -f /usr/local/Ascend/nnal/atb/set_env.sh ]]; then
+  set +u
+  source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
+  set -u
+fi
+
+exec "$@"
+EOF
 }
 
 benchmark_root_helper_fix_command() {
@@ -196,6 +215,7 @@ verify_root_helper_ready() {
 
 run_ascend_root_helper() {
   local preserve_list
+  local shell_wrapper
 
   if [[ "$ASCEND_BENCHMARK_USE_SUDO" != "1" ]]; then
     echo "run_ascend_root_helper requires ASCEND_BENCHMARK_USE_SUDO=1" >&2
@@ -204,11 +224,12 @@ run_ascend_root_helper() {
 
   export_sudo_preserved_env_vars
   preserve_list=$(build_sudo_env_preserve_list)
+  shell_wrapper=$(build_root_helper_shell_wrapper)
 
   if [[ -n "$preserve_list" ]]; then
-    sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
+    sudo --preserve-env="$preserve_list" -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
   else
-    sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
+    sudo -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" "$@"
   fi
 }
 
@@ -492,12 +513,14 @@ start_server() {
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       local preserve_list
+      local shell_wrapper
       export_sudo_preserved_env_vars
       preserve_list=$(build_sudo_env_preserve_list)
+      shell_wrapper=$(build_root_helper_shell_wrapper)
       if [[ -n "$preserve_list" ]]; then
-        setsid sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+        setsid sudo --preserve-env="$preserve_list" -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       else
-        setsid sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+        setsid sudo -E -n bash -lc "$shell_wrapper" bash "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       fi
     else
       setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
