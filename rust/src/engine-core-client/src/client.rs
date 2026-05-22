@@ -10,9 +10,8 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
-use crate::protocol::{
-    EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest, ModelDtype,
-};
+use crate::protocol::utility::EngineCoreUtilityRequest;
+use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
