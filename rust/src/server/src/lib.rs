@@ -102,12 +102,14 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
+    let model = state.primary_model_name().to_owned();
+    let app = build_router(state.clone());
+
+    info!(model, "starting vLLM server");
+
     let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
-    let bind_address = listener.local_addr()?;
-    let model = state.primary_model_name().to_owned();
-    let app = build_router(state.clone());
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
@@ -123,25 +125,11 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
             .await
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
-        let addr = grpc_listener.local_addr()?;
         let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
-        info!(%addr, "starting gRPC server");
         Some((grpc_listener, svc))
     } else {
         None
     };
-
-    info!(%bind_address, %model, "starting OpenAI server");
-
-    // Set TCP_NODELAY on accepted connections to reduce latency.
-    // By `tap_io` we will do this on every accepted connection.
-    let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
-        }
-    });
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
     // token. Caller cancellation propagates into both protocols; if either
@@ -176,9 +164,22 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
+
         async move {
+            let addr = listener.local_addr().ok();
+
+            // Set TCP_NODELAY on accepted connections to reduce latency.
+            // By `tap_io` we will do this on every accepted connection.
+            let listener = listener.tap_io(|io| {
+                if let Either::Left(tcp_stream) = io
+                    && let Err(err) = tcp_stream.set_nodelay(true)
+                {
+                    trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+                }
+            });
             let server =
                 axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+            info!(addr, "OpenAI server is ready to accept requests");
 
             let result = tokio::select! {
                 result = server => {
@@ -199,6 +200,7 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
+
         async move {
             let Some((grpc_listener, svc)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
@@ -206,10 +208,13 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
                 shutdown.cancelled().await;
                 return Ok(());
             };
+
+            let addr = grpc_listener.local_addr().ok().map(|addr| addr.to_string());
             let server = TonicServer::builder().add_service(svc).serve_with_incoming_shutdown(
                 TcpListenerStream::new(grpc_listener),
                 shutdown.cancelled_owned(),
             );
+            info!(addr, "gRPC server is ready to accept requests");
 
             let result = tokio::select! {
                 result = server => {

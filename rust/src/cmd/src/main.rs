@@ -1,8 +1,8 @@
 mod cli;
 mod logging;
 
-use std::process::ExitStatus;
-use std::{env, process::ExitCode};
+use std::env;
+use std::process::{ExitCode, ExitStatus};
 
 use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
