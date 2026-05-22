@@ -22,9 +22,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
-from vllm.model_executor.layers.fused_moe.router.norm_gate_linear import (
-    NormGateLinear,
-)
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -655,23 +653,23 @@ class DeepseekV4MoE(nn.Module):
                 "deep_gemm_mega_moe for this checkpoint."
             )
 
-        # Fused RMSNorm + gate: owns both ffn_norm and the gate matmul.
-        self.norm_gate = NormGateLinear(
-            hidden_size=config.hidden_size,
-            num_experts=config.n_routed_experts,
-            rms_eps=config.rms_norm_eps,
-            prefix=f"{prefix}.norm_gate",
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=config.n_routed_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
-        # Routing-side tensors live on ``norm_gate`` directly (not on the
-        # inner gate); they are initialized to None in NormGatedLinear and
-        # populated below depending on the MoE variant.
+
+        self.gate.e_score_correction_bias = None
+        self.gate.tid2eid = None
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
             # Use randint instead of empty to avoid garbage values causing
             # invalid memory access in dummy mode (--load-format="dummy")
-            self.norm_gate.tid2eid = nn.Parameter(
+            self.gate.tid2eid = nn.Parameter(
                 torch.randint(
                     0,
                     config.n_routed_experts,
@@ -681,7 +679,7 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         elif getattr(config, "topk_method", None) == "noaux_tc":
-            self.norm_gate.e_score_correction_bias = nn.Parameter(
+            self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
             )
@@ -756,8 +754,8 @@ class DeepseekV4MoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.norm_gate.e_score_correction_bias,
-            hash_indices_table=self.norm_gate.tid2eid,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
@@ -765,40 +763,40 @@ class DeepseekV4MoE(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.norm_gate.tid2eid is not None and input_ids is None:
+        if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
         org_shape = hidden_states.shape
-        normed_x, router_logits = self.norm_gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=normed_x,
+            hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.norm_gate.e_score_correction_bias.data
-            if self.norm_gate.e_score_correction_bias is not None
+            e_score_correction_bias=self.gate.e_score_correction_bias.data
+            if self.gate.e_score_correction_bias is not None
             else None,
             topk=self.n_activated_experts,
             renormalize=self.renormalize,
             indices_type=self.hash_indices_dtype,
             input_tokens=input_ids,
-            hash_indices_table=self.norm_gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
             routed_scaling_factor=self.routed_scaling_factor,
         )
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
         final_hidden_states = self.experts(
-            normed_x,
+            hidden_states,
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
         )
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(normed_x)
+            shared_output = self.shared_experts(hidden_states)
             final_hidden_states += shared_output
 
         return final_hidden_states.view(org_shape)
@@ -808,9 +806,9 @@ class DeepseekV4MoE(nn.Module):
     ) -> torch.Tensor:
         assert not self.experts.is_internal_router
         org_shape = hidden_states.shape
-        normed_x, router_logits = self.norm_gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
-            hidden_states=normed_x,
+            hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=input_ids,
         )
@@ -1017,8 +1015,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
-        # ``ffn_norm`` is owned by ``self.ffn.norm_gate`` (fused with the
-        # router gate matmul); see ``NormGatedLinear``.
+        self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
@@ -1077,6 +1074,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ):
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -1088,6 +1087,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.hc_post_alpha,
             sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return layer_input, post_mix, res_mix
 
@@ -1109,11 +1110,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_norm_weight = self.attn_norm.weight.data
+        attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
             x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
         else:
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
@@ -1129,11 +1137,17 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
 
-        x = self.attn_norm(x)
+        # attn_norm is fused into hc_pre / mhc_fused_post_pre above.
         x = self.attn(positions, x, None)
 
+        ffn_norm_weight = self.ffn_norm.weight.data
+        ffn_norm_eps = self.ffn_norm.variance_epsilon
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -1147,9 +1161,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=ffn_norm_weight,
+            norm_eps=ffn_norm_eps,
         )
-        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
-        # the pre-norm activation directly.
+        # ffn_norm is fused into mhc_fused_post_pre above; ffn() takes the
+        # already-normed activation directly.
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
@@ -1176,8 +1194,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
-        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
-        # the pre-norm activation directly.
+        x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
         return x, None, None, None
@@ -1527,13 +1544,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         orig_to_new_suffix={
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
-            # Pre-MoE norm + gate are now owned by ``DeepseekV4MoE.norm_gate``
-            # (see NormGatedLinear).
-            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
-            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
-            ".ffn.gate.bias": ".ffn.norm_gate.e_score_correction_bias",
-            # Hash MoE table also moved off the inner gate.
-            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
         },
         orig_to_new_substr={
             ".attn.compressor.": ".attn.mla_attn.compressor.",
