@@ -1,22 +1,21 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use asynk_strim_attr::{Yielder, stream};
 use clap::Parser;
-use futures::{StreamExt as _, pin_mut};
+use futures::future::select_all;
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use rmpv::Value;
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
+use tokio::task::yield_now;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vllm_engine_core_client::EngineId;
 use vllm_engine_core_client::mock_engine::{
-    MockEngineConfig, MockEngineSockets, connect_to_frontend,
+    MockEngineConfig, MockEngineDataSockets, MockEngineSockets, connect_to_frontend,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
@@ -58,15 +57,15 @@ pub struct Opt {
     pub log_requests: bool,
 }
 
-/// Per-request decode settings captured before spawning a decode task.
+/// Per-request decode state owned by one mock engine.
 #[derive(Debug)]
-struct DecodeRequest {
-    /// Engine-core ADD request received from the frontend.
-    request: EngineCoreRequest,
-    /// Python-compatible engine index included in output envelopes.
-    engine_index: u32,
-    /// Shared CLI options for token generation and logging.
-    opt: Opt,
+struct ActiveRequest {
+    request_id: String,
+    client_index: u32,
+    prompt_len: usize,
+    max_tokens: usize,
+    generated: usize,
+    rng: StdRng,
 }
 
 /// Derive a stable per-request seed from the CLI seed, engine, and request id.
@@ -156,17 +155,17 @@ fn utility_response(
     })
 }
 
-/// Simulate decode by emitting random token IDs until max_tokens is reached.
-#[stream]
-async fn decode_stream(
-    request: DecodeRequest,
-    mut abort_rx: oneshot::Receiver<()>,
-    mut y: Yielder<EngineCoreOutputs>,
-) {
-    let request_id = request.request.request_id;
-    let prompt_len = request.request.prompt_token_ids.as_ref().map(Vec::len).unwrap_or_default();
+/// Convert one ADD request into active decode state.
+fn active_request_from_add(
+    engine_index: u32,
+    request: EngineCoreRequest,
+    opt: &Opt,
+) -> std::result::Result<ActiveRequest, EngineCoreOutputs> {
+    let request_id = request.request_id;
+    let client_index = request.client_index;
+    let prompt_len = request.prompt_token_ids.as_ref().map(Vec::len).unwrap_or_default();
 
-    let Some(sampling_params) = request.request.sampling_params else {
+    let Some(sampling_params) = request.sampling_params else {
         warn!(
             request_id,
             "request has no sampling params; returning engine error"
@@ -176,17 +175,16 @@ async fn decode_stream(
             Vec::new(),
             Some(EngineCoreFinishReason::Error),
         );
-        y.yield_item(outputs_for_request(request.engine_index, output, true)).await;
-        return;
+        return Err(outputs_for_request(engine_index, output, true));
     };
-
     let max_tokens = sampling_params.max_tokens as usize;
-    if request.opt.log_requests {
+
+    if opt.log_requests {
         info!(
             request_id,
             prompt_len,
             max_tokens,
-            chunk_size = request.opt.output_token_chunk_size,
+            chunk_size = opt.output_token_chunk_size,
             "mock request started"
         );
     }
@@ -197,81 +195,152 @@ async fn decode_stream(
             Vec::new(),
             Some(EngineCoreFinishReason::Length),
         );
-        y.yield_item(outputs_for_request(request.engine_index, output, true)).await;
-        return;
+        return Err(outputs_for_request(engine_index, output, true));
     }
 
-    let mut rng = StdRng::seed_from_u64(request_seed(
-        request.opt.seed,
-        request.engine_index,
-        &request_id,
-    ));
-    let mut generated = 0usize;
-    while generated < max_tokens {
-        if abort_rx.try_recv().is_ok() {
-            return;
-        }
+    Ok(ActiveRequest {
+        rng: StdRng::seed_from_u64(request_seed(opt.seed, engine_index, &request_id)),
+        request_id,
+        client_index,
+        prompt_len,
+        max_tokens,
+        generated: 0,
+    })
+}
 
-        let remaining = max_tokens - generated;
-        let chunk_len = remaining.min(request.opt.output_token_chunk_size);
+impl ActiveRequest {
+    /// Advance this request by one mock engine step.
+    fn step(&mut self, opt: &Opt) -> EngineCoreOutput {
+        let remaining = self.max_tokens - self.generated;
+        let chunk_len = remaining.min(opt.output_token_chunk_size);
         let mut new_token_ids = Vec::with_capacity(chunk_len);
         for _ in 0..chunk_len {
-            new_token_ids.push(rng.random_range(0..request.opt.vocab_size));
+            new_token_ids.push(self.rng.random_range(0..opt.vocab_size));
         }
-        generated += chunk_len;
+        self.generated += chunk_len;
 
-        let finished = generated >= max_tokens;
-        let finish_reason = finished.then_some(EngineCoreFinishReason::Length);
-        let output = request_output(request_id.clone(), new_token_ids, finish_reason);
-        y.yield_item(outputs_for_request(request.engine_index, output, finished)).await;
+        let finished = self.generated >= self.max_tokens;
+        request_output(
+            self.request_id.clone(),
+            new_token_ids,
+            finished.then_some(EngineCoreFinishReason::Length),
+        )
+    }
+}
 
-        if finished {
-            if request.opt.log_requests {
+/// Advance active requests once and return one batched engine output.
+fn step_active_requests(
+    engine_index: u32,
+    opt: &Opt,
+    active_requests: &mut BTreeMap<String, ActiveRequest>,
+) -> Vec<(u32, EngineCoreOutputs)> {
+    if active_requests.is_empty() {
+        return Vec::new();
+    }
+
+    let request_ids = active_requests.keys().cloned().collect::<Vec<_>>();
+    let mut outputs_by_client = BTreeMap::<u32, (Vec<EngineCoreOutput>, BTreeSet<String>)>::new();
+    let mut all_finished_requests = BTreeSet::new();
+
+    for request_id in request_ids {
+        let Some(request) = active_requests.get_mut(&request_id) else {
+            continue;
+        };
+        let client_index = request.client_index;
+        let output = request.step(opt);
+        let finished = output.finished();
+        if output.finished() {
+            all_finished_requests.insert(request_id.clone());
+            if opt.log_requests {
                 info!(
                     request_id,
-                    prompt_len,
-                    output_tokens = generated,
+                    prompt_len = request.prompt_len,
+                    output_tokens = request.generated,
                     finish_reason = "length",
                     "mock request finished"
                 );
             }
-            return;
         }
-
-        tokio::select! {
-            _ = &mut abort_rx => return,
-            _ = tokio::task::yield_now() => {}
+        let (outputs, finished_requests) = outputs_by_client
+            .entry(client_index)
+            .or_insert_with(|| (Vec::new(), BTreeSet::new()));
+        if finished {
+            finished_requests.insert(request_id.clone());
         }
-    }
-}
-
-/// Forward one decode stream into the shared output channel.
-async fn run_decode_request(
-    request: DecodeRequest,
-    abort_rx: oneshot::Receiver<()>,
-    output_tx: mpsc::UnboundedSender<EngineCoreOutputs>,
-) -> Result<String> {
-    let request_id = request.request.request_id.clone();
-    let stream = decode_stream(request, abort_rx);
-    pin_mut!(stream);
-
-    while let Some(outputs) = stream.next().await {
-        if output_tx.send(outputs).is_err() {
-            break;
-        }
+        outputs.push(output);
     }
 
-    Ok(request_id)
+    for request_id in &all_finished_requests {
+        active_requests.remove(request_id);
+    }
+
+    outputs_by_client
+        .into_iter()
+        .filter_map(|(client_index, (outputs, finished_requests))| {
+            (!outputs.is_empty()).then(|| {
+                (
+                    client_index,
+                    EngineCoreOutputs {
+                        engine_index,
+                        outputs,
+                        timestamp: now_secs(),
+                        finished_requests: (!finished_requests.is_empty())
+                            .then_some(finished_requests),
+                        ..Default::default()
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
-/// Handle one frontend request message received on the input DEALER socket.
-fn handle_engine_message<F>(
+async fn send_engine_outputs(
+    push: &mut zeromq::PushSocket,
+    outputs: EngineCoreOutputs,
+) -> Result<()> {
+    push.send(ZmqMessage::from(encode_msgpack(&outputs)?)).await?;
+    Ok(())
+}
+
+async fn send_engine_outputs_to_client(
+    data_sockets: &mut [MockEngineDataSockets],
+    client_index: u32,
+    outputs: EngineCoreOutputs,
+) -> Result<()> {
+    let socket_index = client_index as usize;
+    let socket_index = if socket_index < data_sockets.len() {
+        socket_index
+    } else {
+        warn!(
+            client_index,
+            socket_count = data_sockets.len(),
+            "client index exceeds connected frontend sockets; using socket 0"
+        );
+        0
+    };
+    send_engine_outputs(&mut data_sockets[socket_index].push, outputs).await
+}
+
+async fn recv_from_any_client(
+    data_sockets: &mut [MockEngineDataSockets],
+) -> Result<(usize, Vec<Vec<u8>>)> {
+    let recv_futures = data_sockets
+        .iter_mut()
+        .enumerate()
+        .map(|(index, sockets)| Box::pin(async move { (index, sockets.dealer.recv().await) }))
+        .collect::<Vec<_>>();
+    let ((index, message), _, _) = select_all(recv_futures).await;
+    let frames = message?.into_vec().into_iter().map(|frame| frame.as_ref().to_vec()).collect();
+    Ok((index, frames))
+}
+
+/// Drain one frontend request message received on the input DEALER socket.
+async fn handle_engine_message<F>(
     engine_index: u32,
     frames: Vec<F>,
     opt: &Opt,
-    active_requests: &mut HashMap<String, oneshot::Sender<()>>,
-    decode_tasks: &mut JoinSet<Result<String>>,
-    output_tx: &mpsc::UnboundedSender<EngineCoreOutputs>,
+    active_requests: &mut BTreeMap<String, ActiveRequest>,
+    data_sockets: &mut [MockEngineDataSockets],
 ) -> Result<()>
 where
     F: AsRef<[u8]>,
@@ -309,35 +378,59 @@ where
                 warn!(engine_index, request_id, "duplicate mock request id");
                 let output =
                     request_output(request_id, Vec::new(), Some(EngineCoreFinishReason::Error));
-                output_tx.send(outputs_for_request(engine_index, output, true)).ok();
+                send_engine_outputs_to_client(
+                    data_sockets,
+                    request.client_index,
+                    outputs_for_request(engine_index, output, true),
+                )
+                .await?;
                 return Ok(());
             }
 
-            let (abort_tx, abort_rx) = oneshot::channel();
-            active_requests.insert(request_id, abort_tx);
-            let decode = DecodeRequest {
-                request,
-                engine_index,
-                opt: opt.clone(),
-            };
-            let output_tx = output_tx.clone();
-            decode_tasks.spawn(run_decode_request(decode, abort_rx, output_tx));
+            let client_index = request.client_index;
+            match active_request_from_add(engine_index, request, opt) {
+                Ok(request) => {
+                    active_requests.insert(request_id, request);
+                }
+                Err(outputs) => {
+                    send_engine_outputs_to_client(data_sockets, client_index, outputs).await?
+                }
+            }
         }
         EngineCoreRequestType::Abort => {
             let request_ids: Vec<String> = decode_msgpack(frames[1].as_ref())?;
+            let mut outputs_by_client =
+                BTreeMap::<u32, (Vec<EngineCoreOutput>, BTreeSet<String>)>::new();
             for request_id in request_ids {
-                if let Some(abort_tx) = active_requests.remove(&request_id) {
-                    let _ = abort_tx.send(());
+                if let Some(request) = active_requests.remove(&request_id) {
                     let output = request_output(
                         request_id.clone(),
                         Vec::new(),
                         Some(EngineCoreFinishReason::Abort),
                     );
-                    output_tx.send(outputs_for_request(engine_index, output, true)).ok();
+                    let (outputs, finished_requests) = outputs_by_client
+                        .entry(request.client_index)
+                        .or_insert_with(|| (Vec::new(), BTreeSet::new()));
+                    outputs.push(output);
+                    finished_requests.insert(request_id.clone());
                     if opt.log_requests {
                         info!(request_id, finish_reason = "abort", "mock request aborted");
                     }
                 }
+            }
+            for (client_index, (outputs, finished_requests)) in outputs_by_client {
+                send_engine_outputs_to_client(
+                    data_sockets,
+                    client_index,
+                    EngineCoreOutputs {
+                        engine_index,
+                        outputs,
+                        timestamp: now_secs(),
+                        finished_requests: Some(finished_requests),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             }
         }
         EngineCoreRequestType::Utility => {
@@ -348,7 +441,13 @@ where
                 method = request.method_name,
                 "mock utility request"
             );
-            output_tx.send(utility_response(engine_index, request)?).ok();
+            let client_index = request.client_index;
+            send_engine_outputs_to_client(
+                data_sockets,
+                client_index,
+                utility_response(engine_index, request)?,
+            )
+            .await?;
         }
         EngineCoreRequestType::StartDpWave => {
             debug!(engine_index, "ignoring START_DP_WAVE in mock engine");
@@ -364,8 +463,10 @@ async fn run_engine(engine_id: EngineId, opt: Opt, shutdown: CancellationToken) 
         .engine_index()
         .context("mock engine id must encode a two-byte engine index")?;
     let MockEngineSockets {
-        mut dealer,
-        mut push,
+        dealer,
+        push,
+        additional_data_sockets,
+        coordinator: _coordinator,
         ..
     } = connect_to_frontend(
         &opt.handshake_address,
@@ -377,49 +478,58 @@ async fn run_engine(engine_id: EngineId, opt: Opt, shutdown: CancellationToken) 
 
     info!(engine_index, "mock engine connected");
 
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<EngineCoreOutputs>();
-    let writer = tokio::spawn(async move {
-        while let Some(outputs) = output_rx.recv().await {
-            push.send(ZmqMessage::from(encode_msgpack(&outputs)?)).await?;
-        }
-        Ok::<(), anyhow::Error>(())
-    });
+    let mut data_sockets = Vec::with_capacity(additional_data_sockets.len() + 1);
+    data_sockets.push(MockEngineDataSockets { dealer, push });
+    data_sockets.extend(additional_data_sockets);
 
-    let mut active_requests = HashMap::<String, oneshot::Sender<()>>::new();
-    let mut decode_tasks = JoinSet::new();
+    let mut active_requests = BTreeMap::<String, ActiveRequest>::new();
 
     loop {
+        if active_requests.is_empty() {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                received = recv_from_any_client(&mut data_sockets) => {
+                    let (_, frames) = received?;
+                    handle_engine_message(
+                        engine_index,
+                        frames,
+                        &opt,
+                        &mut active_requests,
+                        &mut data_sockets,
+                    ).await?;
+                }
+            }
+            continue;
+        }
+
+        // Prefer control/admission messages that are already available before
+        // advancing decode. When none are ready, yield once and emit a single
+        // engine-step batch covering every active request.
         tokio::select! {
-            _ = shutdown.cancelled() => {
-                break;
-            }
-
-            Some(joined) = decode_tasks.join_next() => {
-                let request_id = joined.context("decode task join failed")??;
-                active_requests.remove(&request_id);
-            }
-
-            message = dealer.recv() => {
-                let frames = message?.into_vec();
+            biased;
+            _ = shutdown.cancelled() => break,
+            received = recv_from_any_client(&mut data_sockets) => {
+                let (_, frames) = received?;
                 handle_engine_message(
                     engine_index,
                     frames,
                     &opt,
                     &mut active_requests,
-                    &mut decode_tasks,
-                    &output_tx,
-                )?;
+                    &mut data_sockets,
+                ).await?;
+                continue;
             }
+            _ = yield_now() => {}
+        }
+
+        for (client_index, outputs) in
+            step_active_requests(engine_index, &opt, &mut active_requests)
+        {
+            send_engine_outputs_to_client(&mut data_sockets, client_index, outputs).await?;
         }
     }
 
-    for (_, abort_tx) in active_requests {
-        let _ = abort_tx.send(());
-    }
-    decode_tasks.abort_all();
-    while decode_tasks.join_next().await.is_some() {}
-    drop(output_tx);
-    writer.await.context("output writer join failed")??;
+    active_requests.clear();
     info!(engine_index, "mock engine shut down");
     Ok(())
 }

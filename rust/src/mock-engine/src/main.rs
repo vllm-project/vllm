@@ -31,9 +31,13 @@ fn main() -> Result<()> {
     init_tracing();
     let opt = Opt::parse();
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("failed to build Tokio runtime")?
-        .block_on(vllm_mock_engine::run(opt, shutdown_signal()))
+        .context("failed to build Tokio runtime")?;
+
+    runtime.block_on(async move {
+        let shutdown = shutdown_signal();
+        vllm_mock_engine::run(opt, shutdown).await
+    })
 }

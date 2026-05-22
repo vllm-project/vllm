@@ -62,6 +62,18 @@ pub struct MockCoordinatorSockets {
     pub output_push: PushSocket,
 }
 
+/// One mock engine's connection to one frontend client.
+///
+/// vLLM launches one engine-client pair per API server process. A remote
+/// engine connects to every advertised input/output pair and uses the request's
+/// `client_index` to route outputs back to the originating API server.
+pub struct MockEngineDataSockets {
+    /// Socket used to receive frontend requests.
+    pub dealer: DealerSocket,
+    /// Socket used to publish normal request outputs back to the frontend.
+    pub push: PushSocket,
+}
+
 /// Frontend-facing sockets owned by one mock engine.
 pub struct MockEngineSockets {
     /// Decoded INIT message sent by the frontend during handshake.
@@ -70,6 +82,8 @@ pub struct MockEngineSockets {
     pub dealer: DealerSocket,
     /// Socket used to publish normal request outputs back to the frontend.
     pub push: PushSocket,
+    /// Additional frontend clients for multi-API-server launches.
+    pub additional_data_sockets: Vec<MockEngineDataSockets>,
     /// Optional coordinator sockets when the client enabled the in-process
     /// coordinator.
     pub coordinator: Option<MockCoordinatorSockets>,
@@ -148,29 +162,41 @@ pub async fn connect_to_frontend(
     }
     let init: HandshakeInitMessage = decode_msgpack(init_frames[0].as_ref())?;
 
-    let input_address =
-        init.addresses.inputs.first().ok_or_else(|| Error::UnexpectedHandshakeMessage {
+    if init.addresses.inputs.is_empty() {
+        return Err(Error::UnexpectedHandshakeMessage {
             message: "frontend INIT did not include an input address".to_string(),
-        })?;
-    let output_address =
-        init.addresses
-            .outputs
-            .first()
-            .ok_or_else(|| Error::UnexpectedHandshakeMessage {
-                message: "frontend INIT did not include an output address".to_string(),
-            })?;
+        });
+    }
+    if init.addresses.inputs.len() != init.addresses.outputs.len() {
+        return Err(Error::UnexpectedHandshakeMessage {
+            message: format!(
+                "frontend INIT input/output address count mismatch: {} inputs, {} outputs",
+                init.addresses.inputs.len(),
+                init.addresses.outputs.len()
+            ),
+        });
+    }
 
-    wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
-    wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
+    let mut data_sockets = Vec::with_capacity(init.addresses.inputs.len());
+    for (input_address, output_address) in
+        init.addresses.inputs.iter().zip(init.addresses.outputs.iter())
+    {
+        wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
+        wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
 
-    let mut input_options = SocketOptions::default();
-    input_options.peer_identity(peer_identity);
-    let mut dealer = DealerSocket::with_options(input_options);
-    dealer.connect(input_address).await?;
-    dealer.send(ZmqMessage::from(ready_response_payload(&config)?)).await?;
+        let mut input_options = SocketOptions::default();
+        input_options.peer_identity(peer_identity.clone());
+        let mut dealer = DealerSocket::with_options(input_options);
+        dealer.connect(input_address).await?;
+        dealer.send(ZmqMessage::from(ready_response_payload(&config)?)).await?;
 
-    let mut push = PushSocket::new();
-    push.connect(output_address).await?;
+        let mut push = PushSocket::new();
+        push.connect(output_address).await?;
+
+        data_sockets.push(MockEngineDataSockets { dealer, push });
+    }
+
+    let first_data_socket = data_sockets.remove(0);
 
     let coordinator = match (
         init.addresses.coordinator_input.as_deref(),
@@ -211,8 +237,9 @@ pub async fn connect_to_frontend(
 
     Ok(MockEngineSockets {
         init,
-        dealer,
-        push,
+        dealer: first_data_socket.dealer,
+        push: first_data_socket.push,
+        additional_data_sockets: data_sockets,
         coordinator,
     })
 }
