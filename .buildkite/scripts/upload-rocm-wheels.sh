@@ -20,10 +20,6 @@ BUCKET="${S3_BUCKET:-vllm-wheels}"
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
 S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
-PYTHON="${PYTHON_PROG:-python3}"
-
-# ROCm uses manylinux_2_35 (Ubuntu 22.04 based)
-MANYLINUX_VERSION="manylinux_2_35"
 
 echo "========================================"
 echo "ROCm Wheel Upload Configuration"
@@ -34,19 +30,21 @@ echo "Commit: $BUILDKITE_COMMIT"
 echo "Branch: $BUILDKITE_BRANCH"
 echo "========================================"
 
-# ======== Part 0: Setup Python ========
+# ======== Part 0: Setup Python and helpers ========
 
-# Detect if python3.12+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)" 2>/dev/null || echo 0)
-if [[ "$has_new_python" -eq 0 ]]; then
-    # Use new python from docker
-    # Use --user to ensure files are created with correct ownership (not root)
-    docker pull python:3-slim
-    PYTHON="docker run --rm --user $(id -u):$(id -g) -v $(pwd):/app -w /app python:3-slim python3"
-fi
+# Pick a Python interpreter for index generation -- local if recent
+# enough, else a one-shot docker fallback.
+# shellcheck source=lib/select-python.sh
+source .buildkite/scripts/lib/select-python.sh
+select_python
 
-echo "Using python interpreter: $PYTHON"
-echo "Python version: $($PYTHON --version)"
+# Set up auditwheel-in-a-container for the manylinux retagging step.
+# Distinct from select_python: ``manylinux.sh`` deliberately pins both
+# the Python and auditwheel versions (the script reads auditwheel
+# internals) and so always runs in a known-good container regardless
+# of what's on the agent.
+# shellcheck source=lib/manylinux.sh
+source .buildkite/scripts/lib/manylinux.sh
 
 # ======== Part 1: Collect and prepare wheels ========
 
@@ -63,11 +61,18 @@ if [ "$WHEEL_COUNT" -eq 0 ]; then
     exit 1
 fi
 
-# Rename linux to manylinux in wheel filenames
+# Detect the appropriate manylinux platform tag for any wheel that still
+# carries the generic ``linux_<arch>`` tag, and rename it in place. We use
+# auditwheel via ``apply_manylinux_tag`` (see lib/manylinux.sh) rather than
+# a hard-coded ``manylinux_2_35`` string so that the label tracks the actual
+# glibc symbol versions used by the binaries (and stays correct if the
+# rocm_base image is rebased).
+#
+# The ``linux``/``manylinux`` filter below skips both pre-tagged wheels
+# (e.g. upstream torch) and pure-Python ``-any.whl`` wheels.
 for wheel in all-rocm-wheels/*.whl; do
     if [[ "$wheel" == *"linux"* ]] && [[ "$wheel" != *"manylinux"* ]]; then
-        new_wheel="${wheel/linux/$MANYLINUX_VERSION}"
-        mv -- "$wheel" "$new_wheel"
+        new_wheel="$(apply_manylinux_tag "$wheel")"
         echo "Renamed: $(basename "$wheel") -> $(basename "$new_wheel")"
     fi
 done

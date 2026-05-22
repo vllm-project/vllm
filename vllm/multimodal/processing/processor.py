@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -17,23 +17,26 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
+from vllm.inputs import (
+    MultiModalEncDecInput,
+    MultiModalHashes,
+    MultiModalInput,
+    mm_enc_dec_input,
+    mm_input,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.processor import call_hf_processor_mm_only
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
-    MultiModalEncDecInputs,
     MultiModalFieldConfig,
-    MultiModalHashes,
-    MultiModalInputs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
-    mm_enc_dec_inputs,
-    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
@@ -986,25 +989,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
-        # TODO: Remove in v0.18
-        if hasattr(self, "_get_data_parser"):
-            raise ValueError(
-                "BaseMultiModalProcessor._get_data_parser has been "
-                "moved to `BaseProcessingInfo.build_data_parser` in v0.16. "
-                "You should override `BaseProcessingInfo.build_data_parser` instead."
-            )
-
         self.data_parser = self.info.get_data_parser()
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
-    def supported_mm_limits(self):
-        return self.info.supported_mm_limits
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
-    def allowed_mm_limits(self):
-        return self.info.allowed_mm_limits
 
     def __call__(
         self,
@@ -1012,7 +997,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         mm_uuid_items: MultiModalUUIDItems | None = None,
         hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         processor_inputs = ProcessorInputs(
             prompt,
             mm_items,
@@ -1083,21 +1068,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             unbound_prompt_updates,
             mm_items.get_all_counts(),
         )
-
-        for modality, prompt_updates in mm_prompt_updates.items():
-            for item_idx, item_prompt_updates in enumerate(prompt_updates):
-                if len(item_prompt_updates) > 1:
-                    logger.warning_once(
-                        "Detected %d prompt updates for `mm_items[%r][%s]`. "
-                        "Multiple prompt updates per item is now "
-                        "deprecated and may be removed in v0.13. "
-                        "Instead, please specify dynamic update targets "
-                        "in the same prompt update definition by passing "
-                        "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
-                        modality,
-                        item_idx,
-                    )
 
         return mm_prompt_updates
 
@@ -1188,7 +1158,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processed_data.update(passthrough_data)
 
-        (prompt_ids,) = processed_data.pop("input_ids").tolist()
+        input_ids = processed_data.pop("input_ids")
+        if not isinstance(input_ids, list):
+            input_ids = input_ids.tolist()
+
+        (prompt_ids,) = input_ids
 
         is_update_applied = self._hf_processor_applies_updates(
             prompt_text=prompt_text,
@@ -1251,16 +1225,35 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         [`DummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
         to go along with the multi-modal data.
         """
-        mm_counts = mm_items.get_all_counts()
+        # Custom logic based on text inputs
+        if type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor:
+            mm_counts = mm_items.get_all_counts()
 
-        _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
+            _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
+                prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            return mm_processed_data
+
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        return mm_processed_data
+        processed_data = self.info.ctx.call_hf_processor(
+            partial(
+                call_hf_processor_mm_only,
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            ),
+            processor_data,
+            dict(**hf_processor_mm_kwargs, **tokenization_kwargs),
+        )
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _apply_hf_processor_main(
         self,
@@ -1671,7 +1664,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -1706,7 +1699,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1715,6 +1708,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    skip_decoder_start_token: bool = False
+
     @abstractmethod
     def create_encoder_prompt(
         self,
@@ -1739,7 +1734,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-        encoder_inputs: MultiModalInputs,
+        encoder_inputs: MultiModalInput,
     ):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_items)
@@ -1752,7 +1747,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
-        return mm_enc_dec_inputs(
+        return mm_enc_dec_input(
             encoder_inputs,
             decoder_prompt_ids,
             decoder_prompt=decoder_prompt_text,
@@ -1762,7 +1757,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalEncDecInputs:
+    ) -> MultiModalEncDecInput:
         """
         Process multi-modal inputs to be used in vLLM.
         The main processing steps are modified to fit encoder-decoder model:

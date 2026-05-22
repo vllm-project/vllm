@@ -30,15 +30,22 @@ NKM_FACTORS_LLMM1 = [
 
 NKM_FACTORS_WVSPLITK = [
     # Different batch sizes with key dimensions
-    (1, 16, 16),
+    (1, 32, 16),
     (1, 64, 64),
     (2, 256, 256),
     (3, 1024, 1024),
     (4, 4096, 4096),
+    (4, 4096, 4096 + 1),
+    (4, 4096 + 16, 4096),
+    (4, 4096 + 16, 4096 + 1),
     # Extended K values
     (1, 9216, 512),
     (2, 10240, 1024),
     (4, 16384, 8192),
+    (4, 16384 * 2, 8192),
+    (4, 16384 * 2, 8192 + 1),
+    (4, 16384 * 2 + 16, 8192),
+    (4, 16384 * 2 + 16, 8192 + 1),
     # Minimum M constraint validation (m >= 8)
     (1, 64, 8),
     (2, 128, 8),
@@ -63,7 +70,6 @@ N_FACTORS_WVSPLITKRC = [
     117,
     128,
 ]
-
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
@@ -116,10 +122,11 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
+def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
@@ -134,7 +141,8 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = CuNeeded <= cu_count
+    fits_wvsplitkrc = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
+    fits_wvsplitkrc &= CuNeeded <= cu_count
 
     if not fits_wvsplitkrc:
         pytest.skip("Too large for wvSplitKrc")
@@ -144,15 +152,19 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
     )  # normalize to avoid large output-bias deltas
     A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
     B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    if padded_a:
+        A = pad_fp8(A)
 
     BIAS = None
     if bias_mode == 1:
         BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
     elif bias_mode == 2:
         BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 3:
+        BIAS = torch.rand(1, m, dtype=dtype, device="cuda") * 2 - 1
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
-    out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
+    out = ops.wvSplitKrc(A, B, cu_count, BIAS)
 
     if xnorm:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-8)
@@ -180,59 +192,43 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
 
 
+@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
+@pytest.mark.parametrize("padded_a", [False, True])
+@pytest.mark.parametrize("padded_b", [False, True])
+def test_rocm_wvsplitk_kernel(
+    xnorm, n, k, m, dtype, seed, bias_mode, padded_a, padded_b
+):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
-    A = torch.rand(n, k, dtype=dtype, device="cuda") - 0.5
-    B = torch.rand(m, k, dtype=dtype, device="cuda") - 0.5
+    xavier = (
+        math.sqrt(2 / k) if xnorm else 1
+    )  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
 
-    ref_out = torch.nn.functional.linear(A, B)
-    out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
-
-
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_bias1D_kernel(n, k, m, dtype, seed):
-    torch.manual_seed(seed)
-    cu_count = num_compute_units()
-
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
+    if padded_a:
+        A = pad_fp8(A)
+    if padded_b:
+        B = pad_fp8(B)
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
-
-
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
-    torch.manual_seed(seed)
-    cu_count = num_compute_units()
-
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - 0.5
-
-    ref_out = torch.nn.functional.linear(A, B, BIAS)
-    out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
-
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    # Accumulation error in fp16 GEMM scales with sqrt(K)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])

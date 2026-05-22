@@ -1,22 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import json
 from json import JSONDecodeError, JSONDecoder
-from typing import Any
+from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
     ToolChoiceFunction,
 )
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaToolCall,
+    FunctionCall,
+    ToolCall,
+)
+from vllm.logger import init_logger
+
+Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+
+logger = init_logger(__name__)
+
+
+def partial_tag_overlap(text: str, tag: str) -> int:
+    """Length of the longest prefix of *tag* that matches a suffix of *text*.
+
+    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    Returns 0 when there is no overlap.
+    """
+    max_check = min(len(tag) - 1, len(text))
+    for k in range(max_check, 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -93,21 +118,6 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
-def find_all_indices(string: str, substring: str) -> list[int]:
-    """
-    Find all (starting) indices of a substring in a given string. Useful for
-    tool call extraction
-    """
-    indices = []
-    index = -1
-    while True:
-        index = string.find(substring, index + 1)
-        if index == -1:
-            break
-        indices.append(index)
-    return indices
-
-
 # partial_json_parser doesn't support extra data and
 # JSONDecoder.raw_decode doesn't support partial JSON
 def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
@@ -135,7 +145,7 @@ def consume_space(i: int, s: str) -> int:
 
 
 def _extract_tool_info(
-    tool: Tool | ChatCompletionToolsParam,
+    tool: Tool,
 ) -> tuple[str, dict[str, Any] | None]:
     if isinstance(tool, FunctionTool):
         return tool.name, tool.parameters
@@ -145,7 +155,21 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
-def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+def find_tool_properties(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Find a tool by name and return its properties dict, or {}."""
+    if not tools:
+        return {}
+    for tool in tools:
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            return (params or {}).get("properties", {})
+    return {}
+
+
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}
     return {
@@ -158,7 +182,7 @@ def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
 
 
 def _get_tool_schema_defs(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
@@ -177,7 +201,7 @@ def _get_tool_schema_defs(
 
 
 def _get_json_schema_from_tools(
-    tools: list[Tool | ChatCompletionToolsParam],
+    tools: list[Tool],
 ) -> dict:
     json_schema = {
         "type": "array",
@@ -195,7 +219,7 @@ def _get_json_schema_from_tools(
 
 def get_json_schema_from_tools(
     tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
-    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
+    tools: list[Tool] | None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
@@ -227,3 +251,389 @@ def get_json_schema_from_tools(
         return _get_json_schema_from_tools(tools)
     # tool_choice: "auto"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities for pythonic-style tool call parsers
+# (PythonicToolParser, Llama4PythonicToolParser, Olmo3PythonicToolParser)
+# ---------------------------------------------------------------------------
+
+
+class UnexpectedAstError(Exception):
+    """Raised when the AST structure does not match the expected
+    pythonic tool call format."""
+
+    pass
+
+
+_JSON_NAME_LITERALS = {
+    "null": None,
+    "true": True,
+    "false": False,
+}
+
+
+def get_parameter_value(val: ast.expr) -> Any:
+    """Extract a Python literal value from an AST expression node.
+
+    Handles constants, dicts, lists, and JSON-style name literals
+    (null, true, false) that some models produce instead of Python
+    literals (None, True, False).
+
+    Raises:
+        UnexpectedAstError: If the AST node is not a supported literal type.
+    """
+    if isinstance(val, ast.Constant):
+        return val.value
+    elif isinstance(val, ast.Dict):
+        if not all(isinstance(k, ast.Constant) for k in val.keys):
+            logger.warning(
+                "Dict argument keys are not all literals: %s",
+                ast.dump(val),
+            )
+            raise UnexpectedAstError("Dict tool call arguments must have literal keys")
+        return {
+            k.value: get_parameter_value(v)  # type: ignore
+            for k, v in zip(val.keys, val.values)
+        }
+    elif isinstance(val, ast.List):
+        return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
+        return _JSON_NAME_LITERALS[val.id]
+    else:
+        logger.warning(
+            "Unsupported AST node type in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be literals")
+
+
+def _ast_callable_dotted_name(node: ast.expr) -> str:
+    """Return the dotted name for a call target, walking ``ast.Attribute``
+    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+
+    Raises:
+        UnexpectedAstError: If the chain does not bottom out in an
+            ``ast.Name`` (e.g. subscript or call expression as receiver).
+    """
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        raise UnexpectedAstError("Invalid tool call name")
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
+def handle_single_tool(call: ast.Call) -> ToolCall:
+    """Convert a single AST function call node into a ToolCall object.
+
+    Accepts both bare names (``foo(...)``) and dotted attribute chains
+    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    dotted form.
+
+    Raises:
+        UnexpectedAstError: If the call target is neither a simple name
+            nor a chain of attribute accesses bottoming out in a name.
+    """
+    if not isinstance(call.func, (ast.Name, ast.Attribute)):
+        logger.warning(
+            "Tool call has non-simple function name: %s",
+            ast.dump(call.func),
+        )
+        raise UnexpectedAstError("Invalid tool call name")
+    function_name = _ast_callable_dotted_name(call.func)
+    arguments = {}
+    for keyword in call.keywords:
+        arguments[keyword.arg] = get_parameter_value(keyword.value)
+    return ToolCall(
+        type="function",
+        function=FunctionCall(
+            name=function_name,
+            arguments=json.dumps(arguments, ensure_ascii=False),
+        ),
+    )
+
+
+def make_valid_python(text: str) -> tuple[str, str] | None:
+    """Attempt to close all open brackets/quotes to make partial Python valid.
+
+    Used during streaming to parse incomplete tool call expressions by
+    appending the necessary closing characters.
+
+    Returns:
+        A tuple of (completed_text, added_suffix) if the text can be
+        made valid, or None if the text is too incomplete to complete
+        meaningfully (e.g. mid-parameter-name or mid-dict-key).
+
+    Raises:
+        UnexpectedAstError: If mismatched brackets or parentheses
+            are detected.
+    """
+    bracket_stack: list[str] = []
+    for index, char in enumerate(text):
+        if char in {"[", "(", "{"}:
+            bracket_stack.append(char)
+        elif char == "]":
+            if not bracket_stack or bracket_stack.pop() != "[":
+                raise UnexpectedAstError("Mismatched square brackets")
+        elif char == ")":
+            if not bracket_stack or bracket_stack.pop() != "(":
+                raise UnexpectedAstError("Mismatched parentheses")
+        elif char == "}":
+            if not bracket_stack or bracket_stack.pop() != "{":
+                raise UnexpectedAstError("Mismatched curly braces")
+        elif char in {"'", '"'}:
+            if bracket_stack and bracket_stack[-1] == char:
+                if index > 0 and text[index - 1] == "\\":
+                    pass
+                else:
+                    bracket_stack.pop()
+            elif bracket_stack and bracket_stack[-1] in {"'", '"'}:
+                pass
+            else:
+                bracket_stack.append(char)
+
+    text = text.rstrip()
+    if text.endswith("=") or text.endswith(":"):
+        return None
+    if bracket_stack and bracket_stack[-1] == "{":
+        trailing_dict_text = text[: text.rfind("{")]
+        num_keys = trailing_dict_text.count(":")
+        num_values = trailing_dict_text.count(",")
+        if num_keys <= num_values:
+            return None
+    if bracket_stack and bracket_stack[-1] == "(":
+        trailing_params_text = text[: text.rfind("(")]
+        num_full_param_names = trailing_params_text.count("=")
+        num_full_param_values = trailing_params_text.count(",")
+        if num_full_param_names <= num_full_param_values:
+            return None
+    if text.endswith(","):
+        text = text[:-1]
+    if (
+        bracket_stack
+        and bracket_stack[-1] == "["
+        and not text.endswith("[")
+        and not text.endswith(")")
+    ):
+        return None
+
+    _CLOSING = {"[": "]", "(": ")", "{": "}", "'": "'", '"': '"'}
+    added_text = ""
+    for char in reversed(bracket_stack):
+        added_text += _CLOSING[char]
+
+    candidate = text + added_text
+
+    # Streaming partial text can land in shapes the bracket-counting
+    # heuristics above don't catch. Two failure modes:
+    #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
+    #      syntactically invalid mixed dict/set.
+    #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
+    #      Python but a *set* literal, which downstream tool-call AST
+    #      handling rejects.
+    # Validate the candidate parses, has a body, and contains no Set
+    # nodes (pythonic tool calls always use dicts for `{...}`).
+    try:
+        module = ast.parse(candidate)
+    except SyntaxError:
+        return None
+    if not module.body:
+        return None
+    for node in ast.walk(module):
+        if isinstance(node, ast.Set):
+            return None
+
+    return candidate, added_text
+
+
+def extract_types_from_schema(schema: Any) -> list[str]:
+    """Extract all possible type strings from a JSON Schema definition.
+
+    Handles ``type`` (string or list), ``enum`` value inference, and
+    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    when no type information can be determined.
+    """
+    if schema is None or not isinstance(schema, dict):
+        return ["string"]
+
+    types: set[str] = set()
+
+    if "type" in schema:
+        type_value = schema["type"]
+        if isinstance(type_value, str):
+            types.add(type_value)
+        elif isinstance(type_value, list):
+            for t in type_value:
+                if isinstance(t, str):
+                    types.add(t)
+
+    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        for value in schema["enum"]:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+
+    for choice_field in ("anyOf", "oneOf", "allOf"):
+        if choice_field in schema and isinstance(schema[choice_field], list):
+            for choice in schema[choice_field]:
+                types.update(extract_types_from_schema(choice))
+
+    return list(types) if types else ["string"]
+
+
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
+
+
+def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
+    """Best-effort coercion of a raw string value to a JSON Schema type.
+
+    Tries each type in priority order (null > integer > number > boolean >
+    object > array > string) and returns the first successful coercion.
+    Falls back to the original string when no coercion succeeds.
+
+    Args:
+        value: The raw string value from the model output.
+        schema_type: One or more JSON Schema type strings
+            (e.g. ``"string"`` or ``["string", "null"]``).
+    """
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+
+    normalized_types = {
+        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
+    }
+
+    # Priority: null > integer > number > boolean > object > array > string
+    type_priority = [
+        "null",
+        "integer",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "string",
+    ]
+
+    for candidate_type in type_priority:
+        if candidate_type not in normalized_types:
+            continue
+
+        if candidate_type == "null":
+            if value.lower() == "null":
+                return None
+            continue
+        if candidate_type == "string":
+            return value
+        if candidate_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "number":
+            try:
+                val = float(value)
+                return val if val != int(val) else int(val)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "boolean":
+            lower_val = value.lower().strip()
+            if lower_val in ("true", "1"):
+                return True
+            if lower_val in ("false", "0"):
+                return False
+            continue
+        if candidate_type in ("object", "array"):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
+def compute_tool_delta(
+    previously_sent_args: str,
+    new_call: ToolCall,
+    index: int,
+    withheld_suffix: str,
+) -> DeltaToolCall | None:
+    """Compute the incremental delta between previously streamed arguments
+    and the current tool call state.
+
+    Returns:
+        A DeltaToolCall with only the new argument characters, or None
+        if there is no difference from what was previously sent.
+    """
+    new_call_args = new_call.function.arguments
+    if withheld_suffix:
+        if not new_call_args.endswith(withheld_suffix):
+            msg = (
+                f"Tool call arguments '{new_call_args}' do not end with "
+                f"expected withheld suffix '{withheld_suffix}'"
+            )
+            logger.error(msg)
+            raise ValueError(msg)
+        new_call_args = new_call_args[: -len(withheld_suffix)]
+    if not previously_sent_args:
+        return DeltaToolCall(
+            id=new_call.id,
+            type="function",
+            index=index,
+            function=DeltaFunctionCall(
+                name=new_call.function.name,
+                arguments=new_call_args,
+            ),
+        )
+
+    arg_diff = new_call_args[len(previously_sent_args) :]
+    return (
+        DeltaToolCall(
+            id=None,
+            index=index,
+            function=DeltaFunctionCall(arguments=arg_diff),
+        )
+        if arg_diff
+        else None
+    )

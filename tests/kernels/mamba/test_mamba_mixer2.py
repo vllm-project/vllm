@@ -6,7 +6,7 @@ import unittest
 import pytest
 import torch
 
-from tests.utils import multi_gpu_test
+from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -71,7 +71,7 @@ def mixer2_gated_norm_tensor_parallel(
     set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -87,7 +87,8 @@ def mixer2_gated_norm_tensor_parallel(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # create random weights an inputs
     weight = torch.rand((hidden_size,), dtype=dtype, device=device)

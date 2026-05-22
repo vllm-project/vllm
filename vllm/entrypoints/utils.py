@@ -6,9 +6,10 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from http import HTTPStatus
 from logging import Logger
 from string import Template
-from typing import TYPE_CHECKING
+from typing import Any
 
 import regex as re
 from fastapi import Request
@@ -17,17 +18,16 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    GenerationError,
+    StreamOptions,
+)
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.engine.protocol import StreamOptions
-    from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-else:
-    StreamOptions = object
-    LoRAModulePath = object
-
 
 logger = init_logger(__name__)
 
@@ -178,7 +178,19 @@ def get_max_tokens(
     input_length: int,
     default_sampling_params: dict,
     override_max_tokens: int | None = None,
+    truncate_prompt_tokens: int | None = None,
 ) -> int:
+    if truncate_prompt_tokens is not None:
+        limit = truncate_prompt_tokens
+        input_length = min(
+            input_length,
+            max_model_len if limit == -1 else limit,
+        )
+    if max_model_len < input_length:
+        raise ValueError(
+            f"Input length ({input_length}) exceeds model's maximum "
+            f"context length ({max_model_len})."
+        )
     model_max_tokens = max_model_len - input_length
     platform_max_tokens = current_platform.get_max_output_tokens(input_length)
     fallback_max_tokens = (
@@ -199,7 +211,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Namespace | EngineArgs):
+def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
     from vllm.entrypoints.openai.cli_args import make_arg_parser
 
     non_default_args = {}
@@ -226,19 +238,58 @@ def log_non_default_args(args: Namespace | EngineArgs):
             "Unsupported argument type. Must be Namespace or EngineArgs instance."
         )
 
+    return non_default_args
+
+
+def _jsonify_arg_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            key: _jsonify_arg_value(val)
+            for key, val in dataclasses.asdict(value).items()
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonify_arg_value(val) for key, val in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonify_arg_value(item) for item in value]
+    if (model_dump := getattr(value, "model_dump", None)) is not None:
+        return _jsonify_arg_value(model_dump(mode="json"))
+    if (to_dict := getattr(value, "dict", None)) is not None:
+        return _jsonify_arg_value(to_dict())
+    return repr(value)
+
+
+def jsonify_non_default_args(
+    args: Namespace | EngineArgs,
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
+    non_default_args = get_non_default_args(args)
+    if exclude is not None:
+        for key in exclude:
+            non_default_args.pop(key, None)
+
+    return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
+
+
+def log_non_default_args(args: Namespace | EngineArgs):
+    non_default_args = get_non_default_args(args)
     logger.info("non-default args: %s", non_default_args)
 
 
 def should_include_usage(
     stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
+    if enable_force_include_usage:
+        return True, True
     if stream_options:
-        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_usage = bool(stream_options.include_usage)
         include_continuous_usage = include_usage and bool(
             stream_options.continuous_usage_stats
         )
     else:
-        include_usage, include_continuous_usage = enable_force_include_usage, False
+        include_usage, include_continuous_usage = False, False
     return include_usage, include_continuous_usage
 
 
@@ -291,3 +342,62 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
         message = logo_template.substitute(colors)
 
     lgr.info(message, version, model_name)
+
+
+def create_error_response(
+    message: str | Exception,
+    err_type: str = "BadRequestError",
+    status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    param: str | None = None,
+) -> ErrorResponse:
+    exc: Exception | None = None
+
+    if isinstance(message, Exception):
+        exc = message
+        logger.debug(
+            "create_error_response called with %s: %s", type(exc).__name__, exc
+        )
+
+        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
+
+        if isinstance(exc, VLLMValidationError):
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = exc.parameter
+        elif isinstance(exc, VLLMNotFoundError):
+            err_type = "NotFoundError"
+            status_code = HTTPStatus.NOT_FOUND
+            param = None
+        elif isinstance(exc, (ValueError, TypeError, OverflowError)):
+            # Common validation errors from user input
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = None
+        elif isinstance(exc, NotImplementedError):
+            err_type = "NotImplementedError"
+            status_code = HTTPStatus.NOT_IMPLEMENTED
+            param = None
+        elif isinstance(exc, GenerationError):
+            err_type = "InternalServerError"
+            status_code = exc.status_code
+            param = None
+        elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
+            # jinja2.TemplateError and its subclasses (avoid importing jinja2)
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = None
+        else:
+            err_type = "InternalServerError"
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            param = None
+
+        message = str(exc)
+
+    return ErrorResponse(
+        error=ErrorInfo(
+            message=sanitize_message(message),
+            type=err_type,
+            code=status_code.value,
+            param=param,
+        )
+    )

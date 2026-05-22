@@ -585,10 +585,11 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         enc_streaming_mask = self._streaming_mask(
             seq_len, batch_size, self.chunk_size, self.left_chunk
         )
-
-        if xs_pad.is_cuda:
-            enc_streaming_mask = enc_streaming_mask.cuda()
-            xs_pad = xs_pad.cuda()
+        device = xs_pad.device
+        enc_streaming_mask = enc_streaming_mask.contiguous().to(
+            device, non_blocking=True
+        )
+        xs_pad = xs_pad.to(device)
 
         input_tensor = xs_pad
         input_tensor, masks = self._forward_embeddings_core(input_tensor, masks)
@@ -605,8 +606,10 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             enc_streaming_mask_nc = self._streaming_mask(
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc
             )
-            if xs_pad.is_cuda:
-                enc_streaming_mask_nc = enc_streaming_mask_nc.cuda()
+            if device.type != "cpu":
+                enc_streaming_mask_nc = enc_streaming_mask_nc.contiguous().to(
+                    device, non_blocking=True
+                )
             if masks is not None:
                 hs_mask_nc = masks & enc_streaming_mask_nc
             else:
@@ -690,19 +693,19 @@ class ConformerEncoder(TransformerEncoderBase):
             default False.
         ext_pw_out_channel: int, optional
             the number of channel for CNN
-            before depthwise_seperable_CNN.
+            before depthwise_separable_CNN.
             If 0 then use linear. default 0.
         ext_pw_kernel_size: int, optional
-            kernel size of N before depthwise_seperable_CNN.
+            kernel size of N before depthwise_separable_CNN.
             only work for ext_pw_out_channel > 0.
             default 1
         depthwise_seperable_out_channel: int, optional
             the number of channel for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 256.
         depthwise_multiplier: int, optional
             the number of multiplier for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 1.
         chunk_se: int, optional
             0 for offline SE.
@@ -712,7 +715,7 @@ class ConformerEncoder(TransformerEncoderBase):
              by only the current chunk.
             default 0.
         kernel_size: int, optional
-            the number of kernels for depthwise_seperable_CNN.
+            the number of kernels for depthwise_separable_CNN.
             default 3.
         activation: str, optional
             FeedForward block activation.
@@ -722,7 +725,7 @@ class ConformerEncoder(TransformerEncoderBase):
             activation function used in ConvModule part
             of the conformer, default "relu".
         conv_glu_type: str, optional
-            activation used use glu in depthwise_seperable_CNN,
+            activation used use glu in depthwise_separable_CNN,
             default "sigmoid"
         bias_in_glu: bool, optional
             if set to True, use additive bias in the weight module
@@ -918,7 +921,9 @@ class ConformerEncoder(TransformerEncoderBase):
         enc_streaming_mask = self._streaming_mask(
             max_audio_length, batch_size, self.chunk_size, self.left_chunk
         )
-        enc_streaming_mask = enc_streaming_mask.to(device)
+        enc_streaming_mask = enc_streaming_mask.contiguous().to(
+            device, non_blocking=True
+        )
         if mask is None:
             return enc_streaming_mask
 

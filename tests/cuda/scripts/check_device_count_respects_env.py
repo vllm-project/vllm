@@ -14,7 +14,7 @@ import torch  # noqa: E402
 from vllm.platforms import current_platform  # noqa: F401, E402
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-count = torch.cuda.device_count()
+count = torch.accelerator.device_count()
 
 if count == 0:
     sys.exit(0)  # Skip: no GPUs available

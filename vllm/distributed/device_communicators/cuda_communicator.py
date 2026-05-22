@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
+    NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_allreduce,
 )
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -16,6 +17,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from ..utils import StatelessProcessGroup
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -28,8 +30,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
+        tcp_store_group: StatelessProcessGroup | None = None,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            global_ranks,
+            global_world_size,
+        )
         if "tp" not in unique_name:
             # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
@@ -62,7 +74,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
-                group=self.cpu_group,
+                group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
             )
             if is_symmetric_memory_enabled():
@@ -103,31 +115,57 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
-        if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
+        if self.world_size > 1:
+            self._log_all_reduce_backend_selection()
 
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "allgather_reducescatter":
+        if self.use_all2all:
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
-                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                self.all2all_manager = AgRsAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
-                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+                self.all2all_manager = DeepEPHTAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
 
-                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+                self.all2all_manager = DeepEPLLAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "mori":
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "flashinfer_all2allv":
-                from .all2all import FlashInferAllToAllManager
+            elif self.all2all_backend == "nixl_ep":
+                from .all2all import NixlEPAll2AllManager
 
-                self.all2all_manager = FlashInferAllToAllManager(self.cpu_group)
+                self.all2all_manager = NixlEPAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
+            elif (
+                self.all2all_backend == "flashinfer_all2allv"
+                or self.all2all_backend == "flashinfer_nvlink_two_sided"
+            ):
+                if self.all2all_backend == "flashinfer_all2allv":
+                    logger.warning_once(
+                        "'flashinfer_all2allv' is deprecated and has been renamed to"
+                        "'flashinfer_nvlink_two_sided'. It will be removed in a future"
+                        "release."
+                    )
+                from .all2all import FlashInferNVLinkTwoSidedManager
+
+                self.all2all_manager = FlashInferNVLinkTwoSidedManager(
+                    self.cpu_group, tcp_store_group
+                )
+            elif self.all2all_backend == "flashinfer_nvlink_one_sided":
+                from .all2all import FlashInferNVLinkOneSidedManager
+
+                self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
@@ -136,6 +174,69 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager.__class__.__name__,
                 scope="global",
             )
+
+    def _log_all_reduce_backend_selection(self) -> None:
+        """Log the all-reduce backends that are active for this group.
+
+        The dispatch chain in ``all_reduce`` tries backends in this order and
+        falls through to the next one if the current backend rejects the
+        input (size/dtype gates) or is disabled. The list of "enabled"
+        backends below is the subset of potential backends that may be
+        chosen at dispatch time for this group; the actual per-call choice
+        depends on the input tensor.
+        """
+        all_potential_ar_backends = [
+            "NCCL_SYMM_MEM",
+            "QUICK_REDUCE",
+            "FLASHINFER",
+            "CUSTOM",
+            "SYMM_MEM",
+            "PYNCCL",
+        ]
+        enabled_ar_backends: list[str] = []
+        # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
+        # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
+        # min_world_size, and world_size either has a tuned entry in
+        # `custom_ar_preferred_ranges` or is greater than
+        # `always_use_above_world_size`. World sizes that fail the latter (e.g.
+        # 5/6/7 with the default config) never dispatch NCCL symm mem
+        # regardless of input. The per-tensor-size check inside the function
+        # stays as a runtime decision.
+        nccl_symm_ws_ok = self.world_size >= NCCL_SYMM_MEM_ALL_REDUCE_CONFIG[
+            "min_world_size"
+        ] and (
+            self.world_size
+            in NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["custom_ar_preferred_ranges"]
+            or self.world_size
+            > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+        )
+        if (
+            self.pynccl_comm is not None
+            and not self.pynccl_comm.disabled
+            and is_symmetric_memory_enabled()
+            and not envs.VLLM_BATCH_INVARIANT
+            and nccl_symm_ws_ok
+        ):
+            enabled_ar_backends.append("NCCL_SYMM_MEM")
+        if self.qr_comm is not None and not self.qr_comm.disabled:
+            enabled_ar_backends.append("QUICK_REDUCE")
+        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
+            enabled_ar_backends.append("FLASHINFER")
+        if self.ca_comm is not None and not self.ca_comm.disabled:
+            enabled_ar_backends.append("CUSTOM")
+        if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
+            enabled_ar_backends.append("SYMM_MEM")
+        if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
+            enabled_ar_backends.append("PYNCCL")
+
+        logger.info_once(
+            "Using %s all-reduce backends (in dispatch order) for group "
+            "'%s' out of potential backends: %s.",
+            "[" + ", ".join(f"'{b}'" for b in enabled_ar_backends) + "]",
+            self.unique_name or "<unnamed>",
+            "[" + ", ".join(f"'{b}'" for b in all_potential_ar_backends) + "]",
+            scope="global",
+        )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
@@ -236,7 +337,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         input_tensor = input_.movedim(0, dim).contiguous()
 
         if sizes is not None:
-            assert len(sizes) == world_size
+            assert len(sizes) == world_size, f"{len(sizes)} == {world_size}"
             assert input_tensor.shape[0] == sum(sizes)
             chunk_size = sizes[self.rank_in_group]
         else:
@@ -284,8 +385,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+        """Broadcast a tensor from source rank to all ranks."""
+        if self.world_size == 1:
+            return tensor
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.broadcast(tensor, src)
+            return tensor
+        else:
+            raise ValueError("No PyNCCL communicator found")
+
     def destroy(self):
         if self.pynccl_comm is not None:
+            self.pynccl_comm.destroy()
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
@@ -403,3 +517,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             hidden_states,
             is_sequence_parallel,
         )
+
+    def batch_isend_irecv(self, p2p_ops: list):
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.batch_isend_irecv(p2p_ops)
+        else:
+            raise ValueError("No PyNCCL communicator found")

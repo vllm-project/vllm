@@ -8,6 +8,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -134,7 +135,7 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if find_spec("flash_attn") is not None:
+        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
             self.apply_rotary_emb_flash_attn = apply_rotary
@@ -237,7 +238,7 @@ class ApplyRotaryEmb(CustomOp):
         Arguments of apply_rotary_emb() in vllm_flash_attn:
             x: [batch_size, seq_len, nheads, headdim]
             cos, sin: [seqlen_rotary, rotary_dim / 2]
-            interleaved: defalut as False (Neox-style).
+            interleaved: default as False (Neox-style).
             ...
         """
         interleaved = not self.is_neox_style
@@ -259,7 +260,7 @@ class ApplyRotaryEmb(CustomOp):
             Arguments of apply_rotary() in flash_attn:
                 x: [batch_size, seq_len, nheads, headdim]
                 cos, sin: [seqlen_rotary, rotary_dim / 2]
-                interleaved: defalut as False (Neox-style).
+                interleaved: default as False (Neox-style).
                 ...
             """
             interleaved = not self.is_neox_style

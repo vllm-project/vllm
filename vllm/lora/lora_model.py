@@ -11,7 +11,7 @@ from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
-    is_base_embeddding_weights,
+    is_base_embedding_weights,
     parse_fine_tuned_lora_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -29,12 +29,17 @@ class LoRAModel:
         lora_model_id: int,
         rank: int,
         loras: dict[str, LoRALayerWeights],
+        is_3d_lora_weight: bool = False,
     ) -> None:
         """
         Args:
             lora_model_id: The integer id for the lora model.
             rank: lora rank.
             loras: module name -> weights for lora-replaced layers.
+            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+                fused (gate_up_proj / down_proj) layout. Propagated from the
+                originating LoRARequest. Only consulted by the LoRA model
+                manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -44,6 +49,7 @@ class LoRAModel:
         )
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
+        self.is_3d_lora_weight = is_3d_lora_weight
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -53,6 +59,7 @@ class LoRAModel:
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
+            is_3d_lora_weight=self.is_3d_lora_weight,
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -86,7 +93,7 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            if is_base_embeddding_weights(tensor_name):
+            if is_base_embedding_weights(tensor_name):
                 continue
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
@@ -162,7 +169,7 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
-                if is_base_embeddding_weights(lora_module):
+                if is_base_embedding_weights(lora_module):
                     continue
                 # Handle PEFT file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
@@ -203,6 +210,7 @@ class LoRAModel:
             tensors = TensorDeserializer(
                 lora_tensor_path,
                 dtype=tensorizer_config.dtype,
+                device=device,
                 **tensorizer_args.deserialization_kwargs,
             )
             check_unexpected_modules(tensors)
