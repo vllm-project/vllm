@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FLYDSL_KDA: bool = False
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1120,6 +1121,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Whether to use AITER's FlyDSL-compiled gated delta rule decode kernel
+    # (aiter.ops.flydsl.linear_attention_kernels.flydsl_gdr_decode) in place of
+    # the FLA triton fused_recurrent_kda kernel for Kimi-Linear / KimiDelta
+    # attention decode on ROCm. Opt-in (default False) because: (1) kernel is
+    # very new (FlyDSL 0.1.3.1), (2) it fuses the kda gate computation
+    # internally and takes raw pre-gate g / pre-sigmoid beta, (3) production
+    # correctness against [H*D] dt_bias shape still needs more validation.
+    # Microbench (bs=1..4, head_dim=128, H in {4,8,16}) shows ~3.8-4.5x
+    # speedup over the FLA path. See
+    # benchmarks/flydsl_mla/results/kda_kernel_microbench_mi355x.json.
+    "VLLM_ROCM_USE_AITER_FLYDSL_KDA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_KDA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
