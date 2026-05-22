@@ -177,7 +177,9 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             }
         return self._metric_cache[cache_key]
 
-    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+    def observe(self, transfer_stats_data: dict[str, Any] | None, engine_idx: int = 0):
+        if not transfer_stats_data:
+            return
         for operation, records in transfer_stats_data.items():
             assert isinstance(records, list)
             for record in records:

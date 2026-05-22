@@ -789,7 +789,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
         current_batch_keys: list[str] = key_list_c
         batch_bytes = 0
-        load_get_start = time.perf_counter()
         try:
             for batch_keys, batch_addrs, batch_sizes in load_batches:
                 current_batch_keys = batch_keys
@@ -797,6 +796,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 tiers_by_key: dict[str, str] | None = None
                 if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
+                    # Reset so the recorded RPC duration excludes tier lookup.
                 load_get_start = time.perf_counter()
                 res = self.store.batch_get_into_multi_buffers(
                     batch_keys, batch_addrs, batch_sizes
