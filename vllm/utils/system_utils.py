@@ -234,10 +234,15 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: str | None = None) -> None:
+def decorate_logs(
+    process_name: str | None = None, *, skip_if_decorated: bool = False
+) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
+    if skip_if_decorated and hasattr(sys.stdout, "_original_write"):
         return
 
     if process_name is None:
