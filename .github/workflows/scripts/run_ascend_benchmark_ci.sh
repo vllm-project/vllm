@@ -75,6 +75,12 @@ server_group_pid=""
 marker_pid_file=""
 marker_pgid_file=""
 selected_device=""
+NPU_SMI_BIN=${NPU_SMI_BIN:-$(command -v npu-smi || true)}
+
+USER_PROVIDED_ASCEND_VISIBLE_DEVICES=0
+if [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" || -n "${ASCEND_VISIBLE_DEVICES:-}" ]]; then
+  USER_PROVIDED_ASCEND_VISIBLE_DEVICES=1
+fi
 
 NODE_ENV_RETRY_EXIT_CODE=86
 INVALID_BENCHMARK_RESULT_EXIT_CODE=${INVALID_BENCHMARK_RESULT_EXIT_CODE:-77}
@@ -86,6 +92,205 @@ is_node_env_failure_text() {
 
 runtime_ready_log_indicates_sudo_auth_failure() {
   [[ -f "$RUNTIME_READY_LOG" ]] && grep -qE 'sudo: (a password is required|a terminal is required|sorry, you must have a tty|is not allowed to execute)' "$RUNTIME_READY_LOG"
+}
+
+select_ascend_device() {
+  ASCEND_DEVICE_SELECTION_ATTEMPT="${1:-1}" NPU_SMI_BIN="$NPU_SMI_BIN" "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+def parse_logical_map(mapping_output: str) -> dict[tuple[str, str], int]:
+  logical_map = {}
+  for line in mapping_output.splitlines():
+    parts = line.split()
+    if len(parts) < 3:
+      continue
+    npu_id, chip_id, logical_id = parts[:3]
+    if npu_id.isdigit() and chip_id.isdigit() and logical_id.isdigit():
+      logical_map[(npu_id, chip_id)] = int(logical_id)
+  return logical_map
+
+
+def list_status_devices(info_output: str) -> list[int]:
+  status_devices = set()
+  for raw_line in info_output.splitlines():
+    line = raw_line.strip()
+    if not line.startswith("|"):
+      continue
+
+    parts = [part.strip() for part in line.strip("|").split("|")]
+    if len(parts) < 2:
+      continue
+
+    left_column = parts[0].split()
+    if len(left_column) >= 2 and left_column[0].isdigit() and parts[1] and ":" not in parts[1]:
+      status_devices.add(int(left_column[0]))
+
+  return sorted(status_devices)
+
+
+def list_devnode_devices() -> list[int]:
+  devnode_devices = set()
+  for device_path in Path("/dev").glob("davinci[0-9]*"):
+    suffix = device_path.name.removeprefix("davinci")
+    if suffix.isdigit():
+      devnode_devices.add(int(suffix))
+  return sorted(devnode_devices)
+
+
+def run_npu_smi(*args: str) -> subprocess.CompletedProcess[str] | None:
+  npu_smi_bin = os.environ.get("NPU_SMI_BIN")
+  if not npu_smi_bin:
+    return None
+
+  clean_env = {
+    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "HOME": os.environ.get("HOME", ""),
+    "LANG": os.environ.get("LANG", "C.UTF-8"),
+    "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+    "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+  }
+
+  try:
+    result = subprocess.run(
+      [npu_smi_bin, *args],
+      check=False,
+      capture_output=True,
+      text=True,
+      timeout=5,
+      env=clean_env,
+    )
+    if result.returncode == 0 or os.geteuid() == 0:
+      return result
+
+    sudo_bin = shutil.which("sudo", path=clean_env["PATH"])
+    if not sudo_bin:
+      return result
+
+    sudo_result = subprocess.run(
+      [sudo_bin, "-n", npu_smi_bin, *args],
+      check=False,
+      capture_output=True,
+      text=True,
+      timeout=5,
+      env=clean_env,
+    )
+    if sudo_result.returncode == 0:
+      return sudo_result
+    return result
+  except Exception as exc:  # noqa: BLE001
+    print(f"npu-smi {' '.join(args)} failed: {exc}", file=sys.stderr)
+    return None
+
+
+def select_best_idle_device(info_output: str, logical_map: dict[tuple[str, str], int]) -> tuple[int, str] | None:
+  hbm_usage_pattern = re.compile(r"(\d+)\s*/\s*(\d+)\s*$")
+  device_stats = []
+  current_npu_id = None
+  current_health = None
+
+  for raw_line in info_output.splitlines():
+    line = raw_line.strip()
+    if not line.startswith("|"):
+      continue
+
+    parts = [part.strip() for part in line.strip("|").split("|")]
+    if len(parts) < 3:
+      continue
+
+    left_column = parts[0].split()
+    if len(left_column) >= 2 and left_column[0].isdigit() and parts[1] and ":" not in parts[1]:
+      current_npu_id = left_column[0]
+      current_health = parts[1]
+      continue
+
+    if current_npu_id is None or current_health != "OK":
+      continue
+
+    if len(left_column) != 1 or not left_column[0].isdigit() or ":" not in parts[1]:
+      continue
+
+    chip_id = left_column[0]
+    logical_id = logical_map.get((current_npu_id, chip_id))
+    device_source = "idle"
+    if logical_id is None:
+      if chip_id != "0":
+        continue
+      logical_id = int(current_npu_id)
+      device_source = "status-fallback"
+
+    hbm_match = hbm_usage_pattern.search(parts[2])
+    if hbm_match is None:
+      continue
+
+    used_memory_mb = int(hbm_match.group(1))
+    total_memory_mb = int(hbm_match.group(2))
+    free_memory_mb = max(0, total_memory_mb - used_memory_mb)
+    device_stats.append((logical_id, free_memory_mb, device_source))
+
+  if not device_stats:
+    return None
+
+  device_stats.sort(key=lambda item: (-item[1], item[0], item[2]))
+  selected_device, _, selected_source = device_stats[0]
+  return selected_device, selected_source
+
+
+mapping_result = run_npu_smi("info", "-m")
+logical_map = {}
+if mapping_result is not None and mapping_result.returncode == 0:
+  logical_map = parse_logical_map(mapping_result.stdout)
+
+selection_attempt = max(1, int(os.environ.get("ASCEND_DEVICE_SELECTION_ATTEMPT", "1")))
+info_result = run_npu_smi("info")
+if info_result is not None and info_result.returncode == 0:
+  selected_device = select_best_idle_device(info_result.stdout, logical_map)
+  if selected_device is not None:
+    device_id, device_source = selected_device
+    print(f"{device_id}\t{device_source}")
+    raise SystemExit(0)
+
+  status_devices = list_status_devices(info_result.stdout)
+  if status_devices:
+    fallback_device = status_devices[(selection_attempt - 1) % len(status_devices)]
+    print(f"{fallback_device}\tstatus-round-robin")
+    raise SystemExit(0)
+
+devnode_devices = list_devnode_devices()
+if devnode_devices:
+  fallback_device = devnode_devices[(selection_attempt - 1) % len(devnode_devices)]
+  print(f"{fallback_device}\tdevnode-round-robin")
+PY
+}
+
+configure_single_card_ascend_device() {
+  local selection_attempt="${1:-1}"
+  local selected_device_info=""
+  local visible_devices_display="${ASCEND_RT_VISIBLE_DEVICES:-${ASCEND_VISIBLE_DEVICES:-<unset>}}"
+
+  if [[ "$USER_PROVIDED_ASCEND_VISIBLE_DEVICES" == "1" ]]; then
+  export VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE="${VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE:-npu:0}"
+  echo "using explicit Ascend visible devices from environment: $visible_devices_display"
+  echo "skipping automatic single-card Ascend device selection"
+  return 0
+  fi
+
+  selected_device_info="$(select_ascend_device "$selection_attempt")"
+  if [[ -n "$selected_device_info" ]]; then
+  IFS=$'\t' read -r SELECTED_ASCEND_DEVICE SELECTED_ASCEND_DEVICE_SOURCE <<<"$selected_device_info"
+  export ASCEND_RT_VISIBLE_DEVICES="$SELECTED_ASCEND_DEVICE"
+  export VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE="npu:0"
+  echo "selected single-card Ascend device: $ASCEND_RT_VISIBLE_DEVICES (${SELECTED_ASCEND_DEVICE_SOURCE})"
+  else
+  unset ASCEND_RT_VISIBLE_DEVICES
+  unset VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE
+  echo "Could not resolve a single-card Ascend device; probing runtime without device scoping"
+  fi
 }
 
 SUDO_PRESERVE_ENV_VARS=(
@@ -161,6 +366,7 @@ SUDO_PRESERVE_ENV_VARS=(
   SAME_SPEC_SPEC_FILE
   TMPDIR
   TRANSFORMERS_CACHE
+  VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE
   VLLM_CACHE_ROOT
   VLLM_HUST_BENCHMARK_REPO
   VLLM_CONFIG_ROOT
@@ -1069,6 +1275,9 @@ fi
 
 if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
   echo "Skipping runner-user torch.npu.device_count() probe because sudo mode delegates device access checks to the root helper."
+  if [[ "$CHIP_COUNT" == "1" ]]; then
+    configure_single_card_ascend_device "${ASCEND_DEVICE_SELECTION_ATTEMPT:-1}"
+  fi
   if ! verify_root_helper_ready; then
     exit 1
   fi
