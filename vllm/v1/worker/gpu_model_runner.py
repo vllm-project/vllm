@@ -548,7 +548,6 @@ class GPUModelRunner(
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
-                | Step3p5MTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -2411,7 +2410,6 @@ class GPUModelRunner(
                         EagleProposer,
                         DFlashProposer,
                         Gemma4Proposer,
-                        Step3p5MTPProposer,
                         ExtractHiddenStatesProposer,
                     ),
                 ):
@@ -4400,32 +4398,21 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer
-                    | Step3p5MTPProposer,
+                    | Gemma4Proposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
                 elif self.valid_sampled_token_count_event is not None:
                     assert spec_decode_common_attn_metadata is not None
-                    if isinstance(self.drafter, Step3p5MTPProposer):
-                        next_token_ids, valid_sampled_tokens_count = (
-                            self.drafter.prepare_next_token_ids_padded(
-                                sampled_token_ids,
-                                self.requests,
-                                self.input_batch,
-                                self.discard_request_mask.gpu,
-                            )
+                    next_token_ids, valid_sampled_tokens_count = (
+                        self.drafter.prepare_next_token_ids_padded(
+                            sampled_token_ids,
+                            self.requests,
+                            self.input_batch,
+                            self.discard_request_mask.gpu,
                         )
-                    else:
-                        next_token_ids, valid_sampled_tokens_count = (
-                            self.drafter.prepare_next_token_ids_padded(
-                                sampled_token_ids,
-                                self.requests,
-                                self.input_batch,
-                                self.discard_request_mask.gpu,
-                            )
-                        )
+                    )
                     self._copy_valid_sampled_token_count(
                         next_token_ids, valid_sampled_tokens_count
                     )
@@ -4876,11 +4863,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | Gemma4Proposer
-                | Step3p5MTPProposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -4906,24 +4889,14 @@ class GPUModelRunner(
                     "sampled_token_ids should be a torch.Tensor when"
                     "padded-batch is enabled."
                 )
-                if isinstance(self.drafter, Step3p5MTPProposer):
-                    next_token_ids, valid_sampled_tokens_count = (
-                        self.drafter.prepare_next_token_ids_padded(
-                            sampled_token_ids,
-                            self.requests,
-                            self.input_batch,
-                            self.discard_request_mask.gpu,
-                        )
+                next_token_ids, valid_sampled_tokens_count = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_mask.gpu,
                     )
-                else:
-                    next_token_ids, valid_sampled_tokens_count = (
-                        self.drafter.prepare_next_token_ids_padded(
-                            sampled_token_ids,
-                            self.requests,
-                            self.input_batch,
-                            self.discard_request_mask.gpu,
-                        )
-                    )
+                )
                 self._copy_valid_sampled_token_count(
                     next_token_ids, valid_sampled_tokens_count
                 )
@@ -5838,8 +5811,7 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer
-                    | Step3p5MTPProposer,
+                    | Gemma4Proposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -6656,11 +6628,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | Gemma4Proposer
-                | Step3p5MTPProposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -6716,8 +6684,7 @@ class GPUModelRunner(
                 EagleProposer
                 | DFlashProposer
                 | ExtractHiddenStatesProposer
-                | Gemma4Proposer
-                | Step3p5MTPProposer,
+                | Gemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
