@@ -900,12 +900,18 @@ class ParallelConfig:
                 # (torch.distributed.batch_isend_irecv doesn't
                 # support stateless mode), so we use PyNCCL backend
                 self.eplb_config.communicator = "pynccl"
-            elif self.eplb_config.use_async:
-                # Torch Gloo is a backend that allows avoiding hangs
-                # due to NCCL multi-thread conflicts in async EPLB
-                self.eplb_config.communicator = "torch_gloo"
             else:
-                self.eplb_config.communicator = "torch_nccl"
+                # Avoid torch_nccl: NCCL is fundamentally incompatible
+                # with async EPLB due to multi-stream conflicts, and
+                # batched isend/irecv hangs under high load.
+                # See https://github.com/pytorch/pytorch/issues/174288
+                # Prefer nixl when available; fall back to torch_gloo.
+                from vllm.distributed.nixl_utils import is_nixl_available
+
+                if is_nixl_available():
+                    self.eplb_config.communicator = "nixl"
+                else:
+                    self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:
