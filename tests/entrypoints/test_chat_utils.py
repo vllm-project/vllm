@@ -2180,6 +2180,47 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
 
 
+def test_parse_chat_messages_input_audio_with_uuid_uses_nested_payload(
+    qwen2_audio_model_config,
+    audio_url,
+):
+    audio_uuid = "abcd"
+    audio_data = audio_url.split(",", 1)[1]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_data,
+                            "format": "wav",
+                        },
+                        "uuid": audio_uuid,
+                    },
+                    {"type": "text", "text": "What does the audio say?"},
+                ],
+            }
+        ],
+        qwen2_audio_model_config,
+        content_format="string",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the "
+            "audio say?",
+        }
+    ]
+    _assert_mm_data_inputs(mm_data, {"audio": 1})
+    assert mm_data is not None
+    assert mm_data["audio"][0] is not None
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
+
+
 @pytest.mark.asyncio
 async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,

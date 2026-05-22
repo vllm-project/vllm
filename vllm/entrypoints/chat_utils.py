@@ -5,7 +5,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -1516,8 +1516,9 @@ def _parse_chat_message_content_mm_part(
                 # with url as a dict of {"url": url}
                 audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
-        if part.get("input_audio") is not None:
-            input_audio_params = cast(dict[str, str], part)
+        input_audio = cast(Mapping[str, object], part).get("input_audio")
+        if input_audio is not None:
+            input_audio_params = cast(InputAudio, input_audio)
             return "input_audio", input_audio_params
         if "video_url" in part:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam, part)
