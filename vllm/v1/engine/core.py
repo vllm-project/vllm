@@ -1437,6 +1437,7 @@ class EngineCoreProc(EngineCore):
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
                 dp_stats_address=self.frontend_stats_publish_address,
+                dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
@@ -1817,6 +1818,8 @@ class DPEngineCoreProc(EngineCoreProc):
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            # Publish request counts before and after GPU step to ensure freshness.
+            self._maybe_publish_request_counts()
 
             if self.eep_scaling_state is not None:
                 _ = self.eep_scaling_state.progress()

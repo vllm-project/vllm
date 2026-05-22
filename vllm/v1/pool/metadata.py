@@ -64,7 +64,11 @@ class PoolingMetadata:
             for pooling_param in pooling_params
             if (task := pooling_param.task) is not None
         ]
-        assert len(pooling_params) == len(tasks)
+        if len(pooling_params) != len(tasks):
+            raise ValueError(
+                "Every pooling param must have a task set, but got "
+                f"{len(tasks)} tasks for {len(pooling_params)} pooling params"
+            )
 
         self.tasks = tasks
 
@@ -84,23 +88,30 @@ class PoolingMetadata:
             else self.pooling_cursor[indices],
         )
 
-    def get_prompt_token_ids(self) -> list[torch.Tensor]:
-        prompt_token_ids = self.prompt_token_ids
-        assert prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`"
-        )
+    def _get_prompt_token_ids(
+        self,
+        prompt_token_ids: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if prompt_token_ids is None:
+            raise ValueError(
+                "prompt_token_ids is required but was not set. "
+                "Please set `requires_token_ids=True` in `get_pooling_updates`"
+            )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
+    def get_prompt_token_ids(self) -> list[torch.Tensor]:
+        return self._get_prompt_token_ids(self.prompt_token_ids)
+
     def get_prompt_token_ids_cpu(self) -> list[torch.Tensor]:
-        prompt_token_ids = self.prompt_token_ids_cpu
-        assert prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`"
-        )
-        return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
+        return self._get_prompt_token_ids(self.prompt_token_ids_cpu)
 
     def get_pooling_cursor(self) -> PoolingCursor:
         pooling_cursor = self.pooling_cursor
-        assert pooling_cursor is not None, "Should call `build_pooling_cursor` first"
+        if pooling_cursor is None:
+            raise RuntimeError(
+                "pooling_cursor has not been initialized. "
+                "Call `build_pooling_cursor` before accessing it"
+            )
 
         return pooling_cursor
 
@@ -114,7 +125,11 @@ class PoolingMetadata:
         n_seq = len(num_scheduled_tokens_np)
         prompt_lens = self.prompt_lens
 
-        assert len(prompt_lens) == n_seq
+        if len(prompt_lens) != n_seq:
+            raise ValueError(
+                f"prompt_lens length ({len(prompt_lens)}) does not match "
+                f"the number of sequences ({n_seq})"
+            )
 
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
         if query_start_loc_gpu is None:
