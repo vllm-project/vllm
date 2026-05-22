@@ -336,13 +336,25 @@ class GroupCoordinator:
         self_cpu_group = None
 
         for ranks in group_ranks:
+            logger.info(
+                "new_group[%s][rank=%d]: creating device_group for ranks=%s",
+                self.group_name, self.rank, ranks,
+            )
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
+            )
+            logger.info(
+                "new_group[%s][rank=%d]: device_group created, creating cpu_group",
+                self.group_name, self.rank,
             )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            logger.info(
+                "new_group[%s][rank=%d]: cpu_group created",
+                self.group_name, self.rank,
+            )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1429,6 +1441,11 @@ def init_distributed_environment(
             )
             backend = "gloo"
         # this backend is used for WORLD
+        logger.info(
+            "init_process_group[rank=%d]: calling torch.distributed.init_process_group "
+            "(world_size=%d, backend=%s)",
+            rank, world_size, backend,
+        )
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
@@ -1436,6 +1453,7 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        logger.info("init_process_group[rank=%d]: completed successfully", rank)
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
                 backend="gloo", timeout=timeout
@@ -1646,9 +1664,15 @@ def initialize_model_parallel(
             .unbind(0)
         )
         group_ranks = [x.tolist() for x in group_ranks]
+    my_pp_group = [g for g in group_ranks if rank in g]
+    logger.info(
+        "pp_group[rank=%d]: creating PP group, my_group=%s, total_groups=%d",
+        rank, my_pp_group[0] if my_pp_group else "N/A", len(group_ranks),
+    )
     _PP = init_model_parallel_group(
         group_ranks, get_world_group().local_rank, backend, group_name="pp"
     )
+    logger.info("pp_group[rank=%d]: PP group created successfully", rank)
 
     global _DP
     assert _DP is None, "data parallel group is already initialized"

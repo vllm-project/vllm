@@ -587,6 +587,13 @@ class WorkerProc:
         is_driver_worker: bool,
     ):
         self.rank = rank
+        logger.info(
+            "WorkerProc[rank=%d]: starting worker init "
+            "(local_rank=%d, is_driver=%s, pp=%d, tp=%d)",
+            rank, local_rank, is_driver_worker,
+            vllm_config.parallel_config.pipeline_parallel_size,
+            vllm_config.parallel_config.tensor_parallel_size,
+        )
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -600,15 +607,19 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
+        logger.info("WorkerProc[rank=%d]: calling init_worker", rank)
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
+        logger.info("WorkerProc[rank=%d]: init_worker completed", rank)
 
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
 
         # Load model
+        logger.info("WorkerProc[rank=%d]: calling init_device", rank)
         self.worker.init_device()
+        logger.info("WorkerProc[rank=%d]: init_device completed", rank)
         # Update process title now that parallel groups are initialized
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
@@ -616,7 +627,9 @@ class WorkerProc:
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.worker.elastic_ep_execute("load_model")
         else:
+            logger.info("WorkerProc[rank=%d]: calling load_model", rank)
             self.worker.load_model()
+            logger.info("WorkerProc[rank=%d]: load_model completed", rank)
 
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling

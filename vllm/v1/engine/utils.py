@@ -187,6 +187,11 @@ class CoreEngineProcManager:
                     ),
                 ):
                     proc.start()
+                    logger.info(
+                        "CoreEngineProcManager: EngineCore started "
+                        "(name=%s, pid=%d, local_dp_rank=%d)",
+                        proc.name, proc.pid, local_dp_rank,
+                    )
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -1229,6 +1234,10 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
+            logger.info(
+                "frontend_handshake: received HELLO from engine %s (local=%s)",
+                eng_index, local,
+            )
             # Send init message with DP config info.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(

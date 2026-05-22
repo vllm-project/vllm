@@ -83,7 +83,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = int(os.environ.get("VLLM_HANDSHAKE_TIMEOUT_MINS", "5"))
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -115,7 +115,14 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
+        logger.info(
+            "engine_core: creating model executor (%s) with PP=%d, TP=%d",
+            executor_class.__name__,
+            vllm_config.parallel_config.pipeline_parallel_size,
+            vllm_config.parallel_config.tensor_parallel_size,
+        )
         self.model_executor = executor_class(vllm_config)
+        logger.info("engine_core: model executor created")
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -1053,6 +1060,10 @@ class EngineCoreProc(EngineCore):
         parallel_config: ParallelConfig | None = None,
     ) -> EngineZmqAddresses:
         # Send registration message.
+        logger.info(
+            "handshake: sending HELLO (local=%s, headless=%s, timeout=%dmin)",
+            local_client, headless, HANDSHAKE_TIMEOUT_MINS,
+        )
         handshake_socket.send(
             msgspec.msgpack.encode(
                 {
@@ -1065,7 +1076,9 @@ class EngineCoreProc(EngineCore):
 
         # Receive initialization message.
         logger.debug("Waiting for init message from front-end.")
-        if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
+        poll_ret = handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000)
+        logger.info("handshake: poll returned %s", "TIMEOUT" if not poll_ret else "MESSAGE")
+        if not poll_ret:
             raise RuntimeError(
                 "Did not receive response from front-end "
                 f"process within {HANDSHAKE_TIMEOUT_MINS} "
@@ -1086,6 +1099,11 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+        logger.info(
+            "run_engine_core: EngineCore process started "
+            "(dp_rank=%d, local_dp_rank=%d, pid=%d)",
+            dp_rank, local_dp_rank, os.getpid(),
+        )
 
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
