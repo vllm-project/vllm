@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
@@ -75,7 +76,7 @@ class _MockVllmConfig:
         self.parallel_config = _MockParallelConfig()
 
 
-class _MockModel:
+class _MockModel(SupportsEncoderCudaGraph):
     """Minimal mock implementing SupportsEncoderCudaGraph for __init__."""
 
     def __init__(self, min_budget: int = 4, max_budget: int = 128):
@@ -250,15 +251,13 @@ def _count_output_tokens(
     return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
 
 
-class SimpleMockViTModel(torch.nn.Module):
+class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     """Minimal ViT model for CUDA graph tests.
 
     Implements the SupportsEncoderCudaGraph protocol by providing
     all required methods. The forward pass projects patches and
     simulates spatial merge by averaging groups of m^2 patches.
     """
-
-    supports_encoder_cudagraph = True
 
     def __init__(self):
         super().__init__()
