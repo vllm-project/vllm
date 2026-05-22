@@ -589,8 +589,6 @@ def _make_ct_config(*, target: str = "Linear") -> CompressedTensorsConfig:
         },
         ignore=[],
         quant_format="pack-quantized",
-        sparsity_scheme_map={},
-        sparsity_ignore_list=[],
     )
 
 

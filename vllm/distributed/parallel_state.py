@@ -335,6 +335,10 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+
+        timeout = get_cpu_distributed_timeout_or_none()
+
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
@@ -342,7 +346,9 @@ class GroupCoordinator:
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=timeout
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -476,9 +482,15 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
+        from vllm.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator)
+            assert isinstance(
+                self.device_communicator,
+                (CudaCommunicator, XpuCommunicator),
+            )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
