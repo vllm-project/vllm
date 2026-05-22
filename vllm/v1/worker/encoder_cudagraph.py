@@ -407,11 +407,13 @@ class EncoderCudaGraphManager:
                     # If so, fallback to eager to avoid shape mismatch.
                     token_budget = None
                     logger.warning(
-                        "Input video frames exceeds capture capacity, "
+                        "Input video frames %s exceeds capture capacity %s, "
                         "fallback to eagar, please manually set "
                         "'encoder_cudagraph_max_vision_items_per_batch "
                         "and 'encoder_cudagraph_max_frames_per_batch' "
-                        "in 'compilation-config'"
+                        "in 'compilation-config'",
+                        batch_max_frames,
+                        self.max_frames_per_batch // self.max_batch_size,
                     )
 
             if token_budget is None:
