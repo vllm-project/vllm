@@ -120,12 +120,9 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             name="vllm:mooncake_store_operation_time_seconds",
             documentation="Histogram of Mooncake store communication time.",
             buckets=[
-                1e-4,
-                5e-4,
                 1e-3,
                 5e-3,
                 1e-2,
-                2.5e-2,
                 5e-2,
                 1e-1,
                 2e-1,
@@ -136,6 +133,8 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
                 1.0,
                 1.5,
                 2.0,
+                3.0,
+                4.0,
             ],
             labelnames=metric_labelnames,
         )
