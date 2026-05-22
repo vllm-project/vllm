@@ -30,11 +30,15 @@ requires_flashinfer = pytest.mark.skipif(
 )
 
 
-def _make_backend(*, enable_stochastic_rounding: bool = False) -> FlashInferSSUBackend:
+def _make_backend(
+    *,
+    checkpoint_interval: int = 1,
+    enable_stochastic_rounding: bool = False,
+) -> FlashInferSSUBackend:
     return FlashInferSSUBackend(
         MambaConfig(
             backend=MambaBackendEnum.FLASHINFER,
-            checkpoint_interval=1,
+            checkpoint_interval=checkpoint_interval,
             enable_stochastic_rounding=enable_stochastic_rounding,
             stochastic_rounding_philox_rounds=10,
         )
@@ -507,11 +511,11 @@ def test_checkpointing_ssu_stp_large_batch_outputs_match_old_flashinfer(
     head_dim = 64
     dstate = 128
     ngroups = 8
-    max_window = 1
+    max_window = 6
     generator = torch.Generator(device=device).manual_seed(123)
 
     old_backend = _make_backend()
-    new_backend = _make_backend()
+    new_backend = _make_backend(checkpoint_interval=max_window)
     initial_state = 0.01 * torch.randn(
         cache_size,
         nheads,
@@ -590,6 +594,8 @@ def test_checkpointing_ssu_stp_large_batch_outputs_match_old_flashinfer(
             f"large-batch STP output mismatch at decode step {step}: "
             f"max_abs_error={max_abs_error.item()}"
         )
+        tracked_tokens = cache["prev_num_accepted_tokens"][slots.to(torch.long)]
+        assert int(tracked_tokens.max().item()) == 1
 
 
 @requires_flashinfer
