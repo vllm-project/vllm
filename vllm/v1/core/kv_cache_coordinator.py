@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
+from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -15,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -23,6 +26,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class KVCacheCoordinator(ABC):
@@ -406,6 +411,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        local_kv_retention_interval: int | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -432,6 +438,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
+
+        self.local_kv_retention_interval = local_kv_retention_interval
+        # align with lcm_block_size
+        if (
+            self.local_kv_retention_interval is not None
+            and self.local_kv_retention_interval > 0
+        ):
+            self.local_kv_retention_interval = max(
+                self.lcm_block_size,
+                cdiv(local_kv_retention_interval, self.lcm_block_size)
+                * self.lcm_block_size,
+            )
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -490,15 +508,41 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # aligned region, SWA groups only consult a subset of blocks per
         # ``lcm_block_size``-segment so the unused blocks also stay out of the
         # prefix-cache hash map.
+        prompt_complete = num_computed_tokens >= request.num_prompt_tokens
         num_computed_tokens = (
             num_computed_tokens // self.lcm_block_size * self.lcm_block_size
         )
-        for manager in self.single_type_managers:
-            manager.cache_blocks(
-                request,
-                num_computed_tokens,
-                alignment_tokens=self.lcm_block_size,
+
+        # Cache the latest prompt boundary in addition to the interval boundaries.
+        latest_retention_boundary: int | None = None
+        if self.local_kv_retention_interval is not None and prompt_complete:
+            # get_computed_blocks() caps hits at prompt_length - 1 so logits
+            # can be recomputed. Use the same replayable boundary for the
+            # extra latest checkpoint.
+            retention_boundary = (
+                (request.num_prompt_tokens - 1)
+                // self.lcm_block_size
+                * self.lcm_block_size
             )
+            latest_retention_boundary = retention_boundary if retention_boundary > 0 else None
+
+        for manager in self.single_type_managers:
+            if self.local_kv_retention_interval is not None and isinstance(
+                manager, SlidingWindowManager
+            ):
+                manager.cache_blocks_at_boundaries(
+                    request=request,
+                    num_tokens=num_computed_tokens,
+                    alignment_tokens=self.lcm_block_size,
+                    interval_tokens=self.local_kv_retention_interval,
+                    latest_boundary_token=latest_retention_boundary,
+                )
+            else:
+                manager.cache_blocks(
+                    request,
+                    num_computed_tokens,
+                    alignment_tokens=self.lcm_block_size,
+                )
 
     def find_longest_cache_hit(
         self,
@@ -617,8 +661,14 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    local_kv_retention_interval: int | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
+    if (
+        local_kv_retention_interval is not None
+        and len(kv_cache_config.kv_cache_groups) == 1
+    ):
+        raise ValueError("local_kv_retention_interval requires a hybrid KV cache model")
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,
@@ -654,5 +704,6 @@ def get_kv_cache_coordinator(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
         hash_block_size=hash_block_size,
+        local_kv_retention_interval=local_kv_retention_interval,
         metrics_collector=metrics_collector,
     )

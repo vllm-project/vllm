@@ -506,6 +506,9 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    prefix_cache_retention_interval: int | None = get_field(
+        CacheConfig, "prefix_cache_retention_interval"
+    )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     offload_backend: str = OffloadConfig.offload_backend
@@ -1141,6 +1144,10 @@ class EngineArgs:
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument(
+            "--prefix-cache-retention-interval",
+            **cache_kwargs["prefix_cache_retention_interval"],
+        )
+        cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
         cache_group.add_argument(
@@ -1766,6 +1773,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,

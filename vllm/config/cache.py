@@ -106,6 +106,10 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
+    prefix_cache_retention_interval: int | None = Field(default=None, ge=0)
+    """Retain local sliding-window KV checkpoints at this token interval for
+    prefix caching. "None" preserves the default dense local checkpointing
+    behavior. "0" retains only the latest completed prompt boundary."""
     calculate_kv_scales: bool = False
     """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
@@ -194,6 +198,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "hash_block_size",
             "mamba_page_size_padded",

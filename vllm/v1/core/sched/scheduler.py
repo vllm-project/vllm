@@ -233,6 +233,7 @@ class Scheduler(SchedulerInterface):
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
             hash_block_size=hash_block_size,
+            local_kv_retention_interval=self.cache_config.prefix_cache_retention_interval,
             metrics_collector=self.kv_metrics_collector,
         )
         # Bind GPU block pool to the KV connector. This must happen after
