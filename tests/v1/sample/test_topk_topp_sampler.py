@@ -1474,6 +1474,7 @@ class TestCpuTopkToppRobustness:
 # =============================================================================
 
 
+@pytest.mark.skipif(not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable")
 class TestCpuDistributionMatch:
     """Chi-square goodness-of-fit: CPU sampler reproduces expected distribution.
 
