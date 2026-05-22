@@ -126,6 +126,29 @@ class MiniMaxM2MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Pre-compute whether the prepared MoE input fast path is available.
+        # Static checks must happen here — torch.compile Dynamo cannot trace
+        # through lru_cache-wrapped platform helpers like
+        # is_device_capability / fp8_dtype.
+        self._prepared_moe_block_k: int | None = None
+        if (
+            config.hidden_size == 3072
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and not self.experts.apply_router_weight_on_input
+            and self.experts.quant_method.supports_prepared_inputs
+        ):
+            quant_config = self.experts.moe_quant_config
+            if (
+                quant_config is not None
+                and quant_config.block_shape == [128, 128]
+                and not quant_config.per_act_token_quant
+                and quant_config.a1_scale is None
+                and quant_config.a1_gscale is None
+                and quant_config.quant_dtype == current_platform.fp8_dtype()
+            ):
+                self._prepared_moe_block_k = quant_config.block_shape[1]
+
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
@@ -136,34 +159,16 @@ class MiniMaxM2MoE(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if (
-            hidden_states.shape[-1] != 3072
+            self._prepared_moe_block_k is None
             or hidden_states.dtype != torch.bfloat16
             or hidden_states.stride(-1) != 1
             or not hidden_states.is_cuda
-            or not current_platform.is_cuda()
-            or self.experts.apply_router_weight_on_input
-            or not self.experts.quant_method.supports_prepared_inputs
         ):
             return None, None
 
-        device_id = hidden_states.device.index
-        if device_id is None:
-            device_id = hidden_states.get_device()
-        if not current_platform.is_device_capability(90, device_id=device_id):
-            return None, None
-
-        quant_config = self.experts.moe_quant_config
-        if (
-            quant_config is None
-            or quant_config.block_shape != [128, 128]
-            or quant_config.per_act_token_quant
-            or quant_config.a1_scale is not None
-            or quant_config.a1_gscale is not None
-            or quant_config.quant_dtype != current_platform.fp8_dtype()
-        ):
-            return None, None
-
-        return per_token_group_quant_fp8(hidden_states, quant_config.block_shape[1])
+        return per_token_group_quant_fp8(
+            hidden_states, self._prepared_moe_block_k
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
