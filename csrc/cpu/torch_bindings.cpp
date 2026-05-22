@@ -4,8 +4,10 @@
 
 #include <torch/library.h>
 
-// CMake supplies -DTORCH_EXTENSION_NAME=<lib> per target (_C, _C_AVX512,
-// _C_AVX2). No source-level override needed.
+// Force all ISA-specific libs (_C_AVX512, _C_AVX2) to register under _C so
+// vllm/_custom_ops.py can use torch.ops._C.* uniformly (cpu.py:390).
+#undef TORCH_EXTENSION_NAME
+#define TORCH_EXTENSION_NAME _C
 
 void release_dnnl_matmul_handler(int64_t handler);
 

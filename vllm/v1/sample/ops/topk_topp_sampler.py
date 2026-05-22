@@ -189,16 +189,12 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0]:
+        if not generators:
+            # Common case: no per-request seeds — torch.compile path is fastest.
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        q = torch.empty_like(probs)
-        q.exponential_()
-        for i, generator in generators.items():
-            q[i].exponential_(generator=generator)
-
-        return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
+        return random_sample(probs, generators), logits_to_return
 
     def forward_hip(
         self,
@@ -404,9 +400,9 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     if not _HAS_CPU_SAMPLING_OPS:
         return apply_top_k_only(logits, k)
-    out = logits.contiguous().clone()
-    _cpu_topk_sampling_op(out, k.to(torch.int32))
-    return out
+    logits = logits.contiguous()
+    _cpu_topk_sampling_op(logits, k.to(torch.int32))
+    return logits
 
 
 def apply_top_k_top_p_cpu(
@@ -419,24 +415,20 @@ def apply_top_k_top_p_cpu(
         return logits
 
     if p is None:
-        assert k is not None
         return _apply_top_k_only_cpu(logits, k)
 
-    k_disabled = k is None
-
-    if k_disabled:
+    if k is None:
         if _HAS_CPU_SAMPLING_OPS:
-            out = logits.contiguous().clone()
-            _cpu_topp_sampling_op(out, p.float())
-            return out
+            logits = logits.contiguous()
+            _cpu_topp_sampling_op(logits, p.float())
+            return logits
         return apply_top_k_top_p_pytorch(logits, None, p, allow_cpu_sync=True)
 
     # Joint k+p path.
-    assert k is not None
     if _HAS_CPU_SAMPLING_OPS:
-        out = logits.contiguous().clone()
-        _cpu_topk_topp_sampling_op(out, k.to(torch.int32), p.float())
-        return out
+        logits = logits.contiguous()
+        _cpu_topk_topp_sampling_op(logits, k.to(torch.int32), p.float())
+        return logits
 
     # Fallback: sequential top-k then top-p.
     logits = _apply_top_k_only_cpu(logits, k)

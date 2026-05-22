@@ -876,6 +876,10 @@ class TestFlashInferDistributionMatch:
 # =============================================================================
 
 
+@pytest.mark.skipif(
+    not _HAS_CPU_TOPP_OP,
+    reason="CPU top-k/top-p C++ kernels not available on this build",
+)
 class TestCpuTopkTopp:
     """Tests for the CPU top-k/top-p kernel.
 

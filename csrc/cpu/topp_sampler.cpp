@@ -628,6 +628,11 @@ static void top_p_row(float* __restrict__ row, int V, float p_val,
 
   float dup_logit = logf(boundary_prob * sum_exp) + max_l;
 
+  // NaN or overflow above max_l means binary search degenerated; skip masking.
+  if (!(dup_logit <= max_l)) {
+    return;
+  }
+
   int n_at_boundary = count_within_tol(row, V, dup_logit, kBoundaryTol);
 
   int n_keep_at_boundary = 0;
@@ -791,6 +796,12 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
       binary_search_buffer(sbuf, sn, p_val, buf_lo, buf_hi, &sum_above);
 
   float dup_logit = logf(boundary_prob * sum_exp) + max_l;
+
+  // NaN or overflow above max_l means binary search degenerated; skip masking.
+  if (!(dup_logit <= max_l)) {
+    return;
+  }
+
   int n_at_boundary = count_within_tol(row, V, dup_logit, kBoundaryTol);
   int n_keep_at_boundary = 0;
   if (n_at_boundary > 0) {
@@ -813,6 +824,8 @@ static void top_k_p_row(float* __restrict__ row, int V, int k_val, float p_val,
 
 void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
   TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
+  TORCH_CHECK(p.is_cpu(), "p must be CPU");
   TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
   TORCH_CHECK(p.dtype() == torch::kFloat32, "p must be float32");
   TORCH_CHECK(p.dim() == 1 && p.size(0) == logits.size(0),
@@ -841,6 +854,8 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
 
 void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
   TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
+  TORCH_CHECK(k.is_cpu(), "k must be CPU");
   TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
   TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
               "k must be 1D with size == batch size");
@@ -868,6 +883,9 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
 void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
                             const torch::Tensor& p) {
   TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
+  TORCH_CHECK(logits.is_cpu(), "logits must be CPU");
+  TORCH_CHECK(k.is_cpu(), "k must be CPU");
+  TORCH_CHECK(p.is_cpu(), "p must be CPU");
   TORCH_CHECK(logits.dtype() == torch::kFloat32, "logits must be float32");
   TORCH_CHECK(k.dim() == 1 && k.size(0) == logits.size(0),
               "k must be 1D with size == batch size");
