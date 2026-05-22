@@ -1350,17 +1350,18 @@ class Gemma4VisionEncoder(nn.Module):
         attention_mask: torch.Tensor,
         pixel_position_ids: torch.Tensor,
     ) -> BaseModelOutputWithPast:
+        seq_len = attention_mask.shape[1]
+        attention_mask = attention_mask[:, None, None, :].expand(
+            attention_mask.shape[0], 1, seq_len, seq_len
+        )
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, pixel_position_ids)
-        extended_attention_mask = self._make_attention_mask(
-            inputs_embeds, attention_mask
-        )
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
-                attention_mask=extended_attention_mask,
+                attention_mask=attention_mask,
                 position_ids=pixel_position_ids,
             )
 
