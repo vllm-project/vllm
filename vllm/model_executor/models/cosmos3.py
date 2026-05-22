@@ -3,7 +3,6 @@
 
 import regex
 
-from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 
@@ -41,14 +40,4 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         },
     )
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        overrides = getattr(
-            vllm_config.model_config.hf_config, "allow_patterns_overrides", None
-        )
-        if overrides:
-            self.allow_patterns_overrides = list(overrides)
-            # default_loader auto-detects safetensors only when the pattern is
-            # exactly "*.safetensors"; nested patterns route to pt_weights_iterator.
-            if any(p.endswith(".safetensors") for p in self.allow_patterns_overrides):
-                vllm_config.load_config.load_format = "safetensors"
+    allow_patterns_overrides = ["transformer/*.safetensors"]
