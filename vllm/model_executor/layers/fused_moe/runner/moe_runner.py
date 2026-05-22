@@ -17,6 +17,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -70,6 +71,8 @@ if TYPE_CHECKING:
 else:
     _layer_name_type = LayerName if _USE_LAYERNAME else str
 
+logger = init_logger(__name__)
+
 
 @torch.compiler.assume_constant_result
 def _resolve_layer_name(layer_name: str | LayerName) -> str:
@@ -92,6 +95,8 @@ def _moe_forward(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prepared_a1q: torch.Tensor | None,
+    prepared_a1q_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -102,6 +107,8 @@ def _moe_forward(
         router_logits,
         shared_experts_input,
         input_ids,
+        prepared_a1q,
+        prepared_a1q_scale,
     )
 
 
@@ -110,6 +117,8 @@ def _moe_forward_fake(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prepared_a1q: torch.Tensor | None,
+    prepared_a1q_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
@@ -127,6 +136,8 @@ def _moe_forward_shared(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prepared_a1q: torch.Tensor | None,
+    prepared_a1q_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -137,6 +148,8 @@ def _moe_forward_shared(
         router_logits,
         shared_experts_input,
         input_ids,
+        prepared_a1q,
+        prepared_a1q_scale,
     )
 
 
@@ -145,6 +158,8 @@ def _moe_forward_shared_fake(
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
+    prepared_a1q: torch.Tensor | None,
+    prepared_a1q_scale: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -500,6 +515,8 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -527,6 +544,16 @@ class MoERunner(MoERunnerInterface):
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
+            prepared_kwargs = {}
+            if (
+                prepared_a1q is not None
+                and self._quant_method.supports_prepared_inputs
+            ):
+                prepared_kwargs = {
+                    "prepared_a1q": prepared_a1q,
+                    "prepared_a1q_scale": prepared_a1q_scale,
+                }
+
             fused_out = self._quant_method.apply(
                 layer=layer,
                 x=hidden_states,
@@ -534,6 +561,7 @@ class MoERunner(MoERunnerInterface):
                 topk_ids=topk_ids,
                 shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
+                **prepared_kwargs,
             )
 
         self._maybe_apply_shared_experts(
@@ -594,6 +622,8 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -631,12 +661,23 @@ class MoERunner(MoERunnerInterface):
             hidden_states,
         )
         hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
+        if prepared_a1q is not None and prepared_a1q.shape != hidden_states.shape:
+            logger.debug_once(
+                "Discarding prepared MoE input because its shape %s does not "
+                "match padded routed hidden_states shape %s.",
+                tuple(prepared_a1q.shape),
+                tuple(hidden_states.shape),
+            )
+            prepared_a1q = None
+            prepared_a1q_scale = None
 
         result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
             input_ids,
+            prepared_a1q,
+            prepared_a1q_scale,
             self._encode_layer_name(),
             self._trtllm_mxfp4_unpadded_dim(),
         )
@@ -746,6 +787,8 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
@@ -791,6 +834,8 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                prepared_a1q=prepared_a1q,
+                prepared_a1q_scale=prepared_a1q_scale,
             )
 
             return self._maybe_combine(

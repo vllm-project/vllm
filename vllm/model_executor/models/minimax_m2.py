@@ -52,6 +52,9 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -61,6 +64,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
@@ -127,14 +131,54 @@ class MiniMaxM2MoE(nn.Module):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
 
+    def _maybe_prepare_fp8_moe_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if (
+            hidden_states.shape[-1] != 3072
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.stride(-1) != 1
+            or not hidden_states.is_cuda
+            or not current_platform.is_cuda()
+            or self.experts.apply_router_weight_on_input
+            or not self.experts.quant_method.supports_prepared_inputs
+        ):
+            return None, None
+
+        device_id = hidden_states.device.index
+        if device_id is None:
+            device_id = hidden_states.get_device()
+        if not current_platform.is_device_capability(90, device_id=device_id):
+            return None, None
+
+        quant_config = self.experts.moe_quant_config
+        if (
+            quant_config is None
+            or quant_config.block_shape != [128, 128]
+            or quant_config.per_act_token_quant
+            or quant_config.a1_scale is not None
+            or quant_config.a1_gscale is not None
+            or quant_config.quant_dtype != current_platform.fp8_dtype()
+        ):
+            return None, None
+
+        return per_token_group_quant_fp8(hidden_states, quant_config.block_shape[1])
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(torch.float32))
+        prepared_a1q, prepared_a1q_scale = self._maybe_prepare_fp8_moe_input(
+            hidden_states
+        )
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            prepared_a1q=prepared_a1q,
+            prepared_a1q_scale=prepared_a1q_scale,
         )
 
         return final_hidden_states.view(num_tokens, hidden_dim)

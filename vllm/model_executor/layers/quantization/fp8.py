@@ -876,6 +876,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
+    @property
+    def supports_prepared_inputs(self) -> bool:
+        return (
+            self.moe_kernel is not None
+            and self.moe_kernel.supports_prepared_inputs()
+        )
+
     def apply_monolithic(
         self,
         layer: RoutedExperts,
@@ -908,6 +915,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
@@ -923,6 +932,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prepared_a1q=prepared_a1q,
+            prepared_a1q_scale=prepared_a1q_scale,
         )
 
 

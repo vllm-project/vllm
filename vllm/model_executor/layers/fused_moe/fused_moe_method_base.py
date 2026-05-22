@@ -48,6 +48,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
+    @property
+    def supports_prepared_inputs(self) -> bool:
+        return False
+
     @abstractmethod
     def create_weights(
         self,
@@ -168,6 +172,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
