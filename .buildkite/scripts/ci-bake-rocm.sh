@@ -21,7 +21,7 @@ DEFAULT_CI_BASE_DOCKERFILE_STAGES="base build_rixl build_rocshmem build_deepep m
 IMAGE_EXISTED_BEFORE_BUILD=0
 
 TARGET=""
-CI_HCL_SOURCE=""
+CI_HCL_SOURCE="${CI_HCL_SOURCE:-}"
 CI_HCL_PATH=""
 CI_BASE_LABEL_OVERRIDE_PATH=""
 CSRC_CACHE_OVERRIDE_PATH=""
@@ -571,7 +571,7 @@ create_and_bootstrap_builder() {
 init_config() {
     TARGET="${1:-test-ci}"
     BAKE_TARGETS=("${TARGET}")
-    CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${CI_HCL_URL:-${DEFAULT_CI_HCL_SOURCE}}}}"
+    CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${DEFAULT_CI_HCL_SOURCE}}}"
     VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake-rocm.hcl}"
     BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
     BUILDKIT_SOCKET="${BUILDKIT_SOCKET:-/run/buildkit/buildkitd.sock}"
@@ -611,23 +611,23 @@ validate_inputs() {
         exit 1
     fi
 
-    if [[ -n "${CI_HCL_SOURCE:-}" ]] && ! is_url_like "${CI_HCL_SOURCE}" \
-        && [[ ! -f "${CI_HCL_SOURCE}" ]]; then
+    if [[ -n "${CI_HCL_SOURCE:-}" ]] && is_url_like "${CI_HCL_SOURCE}"; then
+        echo "Error: remote CI HCL sources are not supported: ${CI_HCL_SOURCE}"
+        echo "Use the vLLM-owned docker/ci-rocm.hcl or set CI_HCL_SOURCE to a local file."
+        exit 1
+    fi
+
+    if [[ -n "${CI_HCL_SOURCE:-}" && ! -f "${CI_HCL_SOURCE}" ]]; then
         echo "Error: CI HCL file not found at ${CI_HCL_SOURCE}"
-        echo "Set CI_HCL_SOURCE to a local path or URL if you need an override."
+        echo "Set CI_HCL_SOURCE to a local file if you need an override."
         exit 1
     fi
 }
 
 load_ci_hcl() {
     echo "--- :page_facing_up: Loading ci.hcl"
-    if is_url_like "${CI_HCL_SOURCE}"; then
-        curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_SOURCE}"
-        echo "Downloaded ${CI_HCL_SOURCE} to ${CI_HCL_PATH}"
-    else
-        cp "${CI_HCL_SOURCE}" "${CI_HCL_PATH}"
-        echo "Copied ${CI_HCL_SOURCE} to ${CI_HCL_PATH}"
-    fi
+    cp "${CI_HCL_SOURCE}" "${CI_HCL_PATH}"
+    echo "Copied ${CI_HCL_SOURCE} to ${CI_HCL_PATH}"
 }
 
 compute_ci_base_hash_if_needed() {
