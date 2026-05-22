@@ -380,12 +380,13 @@ class EncoderCudaGraphManager:
 
         # extract actual frames per item
         actual_frames_per_item = None
-        if self.max_frames_per_batch > 0:
+        if num_items > 0 and self.max_frames_per_batch > 0:
             grid_thw_key = f"{self.model.get_input_modality(mm_kwargs)}_grid_thw"
-            grid_thw = mm_kwargs[grid_thw_key]
-            if not isinstance(grid_thw, list):
-                grid_thw = grid_thw.tolist()
-            actual_frames_per_item = [t for t, h, w in grid_thw]
+            grid_thw = mm_kwargs.get(grid_thw_key)
+            if grid_thw is not None:
+                if not isinstance(grid_thw, list):
+                    grid_thw = grid_thw.tolist()
+                actual_frames_per_item = [t for t, h, w in grid_thw]
 
         # outputs_by_orig_idx maps each original image index to its output
         # tensor. Needed because greedy packing reorders images; we restore
