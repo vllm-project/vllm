@@ -218,6 +218,7 @@ jobs:
             local try=1
             local parent_dir
             local temp_dir
+            local checkout_ref
 
             parent_dir=$(dirname "$target_dir")
             temp_dir="${parent_dir}/.checkout-benchmark-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -227,10 +228,12 @@ jobs:
             while [[ "$try" -le "$attempts" ]]; do
               if git clone --depth 1 "$repo_url" "$temp_dir"; then
                 if [[ -n "$target_ref" ]]; then
+                  checkout_ref="$target_ref"
                   if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_ref^{commit}" >/dev/null; then
                     git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
+                    checkout_ref=FETCH_HEAD
                   fi
-                  git -C "$temp_dir" checkout --force "$target_ref"
+                  git -C "$temp_dir" checkout --force "$checkout_ref"
                 fi
                 mv "$temp_dir" "$target_dir"
                 return 0
