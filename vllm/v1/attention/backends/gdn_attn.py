@@ -3,6 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -94,7 +95,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             _resolve_gdn_prefill_backend,
         )
 
-        _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        _, gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"] = (
+            gdn_prefill_backend
+        )
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
