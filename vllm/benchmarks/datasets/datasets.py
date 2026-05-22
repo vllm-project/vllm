@@ -1399,6 +1399,7 @@ class ShareGPTDataset(BenchmarkDataset):
         )
         return samples
 
+
 class TimedTrace(BenchmarkDataset):
     """
     Implements a base class to replay various timed traces.
@@ -1683,7 +1684,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
     )
-    
+
     timed_trace_group = parser.add_argument_group("timed-trace dataset options")
     timed_trace_group.add_argument(
         "--timed-trace-chunk-hash-size",
