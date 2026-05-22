@@ -281,6 +281,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_USE_FLASHINFER_ROPE: bool = False
 
 
 def get_default_cache_root():
@@ -1974,6 +1975,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # If set to 1, use the FlashInfer's rotary embedding kernel
+    "VLLM_USE_FLASHINFER_ROPE": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_ROPE", "0"))
+    ),
 }
 
 
