@@ -34,9 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bee_eval_checker import BeeEvalTask, EvalSample, get_task
 
 DEFAULT_MAX_TOKENS = 4096
-# since most test pass with a accuracy above 0.25 on the nightly CI tests
-# we use 0.24 as the default minimum score to pass the test
-DEFAULT_MIN_SCORE = 0.24
+# since most test pass with a accuracy above 0.40 on the nightly CI tests
+# we use 0.40 as the default minimum score to pass the test
+DEFAULT_MIN_SCORE = 0.40
 DEFAULT_THINKING_BUDGET = 2048
 
 
@@ -49,7 +49,7 @@ class TaskConfig:
 
 
 TASK_CONFIG: dict[str, TaskConfig] = {
-    "mmlupro": TaskConfig("mmlupro_16samples.jsonl", min_score=0.4),
+    "mmlupro": TaskConfig("mmlupro_16samples.jsonl", min_score=0.6),
     "ocrbench": TaskConfig("ocrbench_16samples.jsonl"),
     "infovqa": TaskConfig("infovqa_16samples.jsonl"),
     "mathvista": TaskConfig("mathvista_16samples.json"),
@@ -57,13 +57,13 @@ TASK_CONFIG: dict[str, TaskConfig] = {
         "aime_2025_16samples.csv",
         thinking_budget=16384,
         max_tokens=32768,
-        min_score=0.24,
+        min_score=0.50,
     ),
     "mgsm": TaskConfig("mgsm_ja_16samples.csv"),
     "mbpp_plus": TaskConfig(
         "mbpp_plus_16samples.jsonl", thinking_budget=4096, max_tokens=8192
     ),
-    "niah": TaskConfig("niah_16samples.jsonl"),
+    "niah": TaskConfig("niah_16samples.jsonl", min_score=0.24),
 }
 
 
@@ -122,7 +122,8 @@ async def send_sample(
             model=model,
             messages=sample.messages,
             max_tokens=max_tokens,
-            temperature=0,
+            temperature=0.6,
+            top_p=0.95,
             extra_body=extra_body,
         )
         msg = resp.choices[0].message
