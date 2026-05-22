@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import functools
+from typing import Literal
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -61,10 +64,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.gdn_attn import (
-    GDNAttentionMetadata,
-    _resolve_gdn_prefill_backend,
-)
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 # Optional ROCm AITER Triton kernels for the GDN decode fast-path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -81,6 +81,136 @@ if GDN_AITER_TRITON_AVAILABLE:
     )
 
 logger = init_logger(__name__)
+
+
+# TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
+# ``_resolve_gdn_prefill_backend`` once the upstream packaging bug is
+# fixed and the broken wheels are yanked / superseded on PyPI:
+#   https://github.com/NVIDIA/cutlass/issues/3170
+#   https://github.com/NVIDIA/cutlass/issues/3259
+@functools.cache
+def _is_libs_cu13_install_intact() -> bool:
+    """Return True if every file installed by ``nvidia-cutlass-dsl-libs-cu13``
+    matches the SHA-256 declared in its wheel ``RECORD``.
+
+    ``nvidia-cutlass-dsl-libs-base`` and ``nvidia-cutlass-dsl-libs-cu13``
+    both ship into the shared ``nvidia_cutlass_dsl/`` namespace and
+    write many of the same on-disk paths (the runtime ``.so``, the MLIR
+    Python bindings, cuTe-DSL Python sources, ...) with different
+    content. Whichever wheel extracts last wins; with a parallel
+    installer (e.g. ``uv``) the order is racy and the resulting venv
+    can end up with a mix of files from both variants. The
+    ``-libs-base`` variant fails MLIR legalization when JIT-compiling
+    the FlashInfer Blackwell GDN prefill kernel, and any other
+    cuTe-DSL-based kernel can break too if on-disk files diverge from
+    what ``-libs-cu13``'s wheel expects. Tracked upstream at:
+
+      * https://github.com/NVIDIA/cutlass/issues/3170
+      * https://github.com/NVIDIA/cutlass/issues/3259
+
+    This helper re-hashes every file the ``-libs-cu13`` wheel claims to
+    own and compares against its declared SHA-256. Returns False on any
+    error (uninstalled, missing RECORD, missing file, hash mismatch).
+    Result is cached per-process.
+    """
+    import hashlib
+    import importlib.metadata
+
+    import pybase64 as base64
+
+    try:
+        dist = importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+    files = dist.files
+    if not files:
+        return False
+
+    for pkg_path in files:
+        file_hash = pkg_path.hash
+        # Skip RECORD rows without a hash (RECORD itself, generated
+        # ``.pyc`` files, ...) and any non-SHA-256 hash modes.
+        if file_hash is None or not file_hash.value:
+            continue
+        if file_hash.mode != "sha256":
+            continue
+        try:
+            with open(pkg_path.locate(), "rb") as f:
+                digest = hashlib.sha256(f.read()).digest()
+        except OSError:
+            return False
+        actual = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+        if actual != file_hash.value:
+            return False
+
+    return True
+
+
+def _resolve_gdn_prefill_backend(
+    vllm_config: VllmConfig,
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+    """Resolve GDN prefill backend.
+
+    FlashInfer's GDN prefill kernel is chosen when:
+    * ``requested in ["flashinfer", "auto"]``;
+    * ``platform == cuda``;
+    * one of the following:
+      - Hopper (SM90) — no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
+        and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
+        (see :func:`_is_libs_cu13_install_intact`).
+
+    In-tree CuteDSL GDN prefill kernel is chosen when:
+    * "cutedsl" is requested; (opt-in only)
+    * Blackwell (SM10.x) with ``head_k_dim == 128``;
+    """
+    additional_config = vllm_config.additional_config
+    backend_cfg = (
+        additional_config.get("gdn_prefill_backend", "auto")
+        if isinstance(additional_config, dict)
+        else "auto"
+    )
+    backend = str(backend_cfg).strip().lower()
+    head_k_dim = getattr(
+        vllm_config.model_config.hf_config, "linear_key_head_dim", None
+    )
+    is_cuda = current_platform.is_cuda()
+
+    supports_flashinfer = False
+    if is_cuda and current_platform.is_device_capability(90):
+        supports_flashinfer = True
+    elif (
+        is_cuda
+        and current_platform.is_device_capability_family(100)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_flashinfer = _is_libs_cu13_install_intact()
+        if not supports_flashinfer:
+            logger.warning_once(
+                "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
+                "-libs-cu13 install, but some on-disk files do not match the "
+                "SHA-256 declared in its RECORD (install-order race in "
+                "nvidia-cutlass-dsl packaging -- see "
+                "https://github.com/NVIDIA/cutlass/issues/3170 and "
+                "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
+                "to Triton/FLA. Repair with: pip install --force-reinstall "
+                "--no-deps nvidia-cutlass-dsl-libs-cu13"
+            )
+
+    supports_cutedsl = (
+        is_cuda
+        and current_platform.is_device_capability_family(100)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    )
+
+    if backend in ["flashinfer", "auto"] and supports_flashinfer:
+        return backend, "flashinfer"
+    if backend == "cutedsl" and supports_cutedsl:
+        return backend, "cutedsl"
+    return backend, "triton"
 
 
 def _log_gdn_backend_decision(
