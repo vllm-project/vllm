@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.common.ops import (
-    combine_topk_swa_indices,
-    dequantize_and_gather_k_cache,
-)
+from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionLayer,
@@ -42,6 +39,127 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
+
+
+# ROCm sparse prefill keeps this dense combine local so AMD-specific SWA changes
+# do not touch the shared DeepSeek V4 cache utilities.
+_SPARSE_PREFILL_TOPK_ALIGNMENT = 128
+
+
+@triton.jit
+def _combine_topk_swa_indices_kernel(
+    combined_indices_ptr,
+    combined_indices_stride,
+    combined_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    gather_lens_ptr,
+    M,
+    N,
+    TOP_K: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+    TOPK_WIDTH: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    base = tl.load(query_start_loc_ptr)
+    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    gather_len = tl.load(gather_lens_ptr + batch_idx)
+    start_pos = seq_len - query_len
+    gather_start = seq_len - gather_len
+
+    for token_idx in range(query_start + worker_id, query_end, num_workers):
+        token_idx_in_query = token_idx - query_start
+        pos = start_pos + token_idx_in_query
+        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+
+        topk_offset = tl.arange(0, PADDED_TOP_K)
+        topk_mask = topk_offset < topk_len
+        safe_topk_offset = tl.where(topk_offset < TOPK_WIDTH, topk_offset, 0)
+        topk_indices = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + safe_topk_offset,
+            mask=topk_mask,
+            other=-1,
+        )
+        valid_topk = (topk_indices >= 0) & (topk_indices < N)
+        topk_indices = tl.where(valid_topk, topk_indices + M * batch_idx, -1)
+        tl.store(
+            combined_indices_ptr + token_idx * combined_indices_stride + topk_offset,
+            topk_indices,
+            mask=topk_mask,
+        )
+
+        swa_offset = tl.arange(0, WINDOW_SIZE)
+        tl.store(
+            combined_indices_ptr
+            + token_idx * combined_indices_stride
+            + topk_len
+            + swa_offset,
+            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
+            mask=swa_offset < swa_len,
+        )
+
+        tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
+
+
+def combine_topk_swa_indices(
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens = topk_indices.shape[0]
+    num_reqs = seq_lens.shape[0]
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+
+    num_workers = 128
+    _combine_topk_swa_indices_kernel[(num_reqs, num_workers)](
+        combined_indices,
+        combined_indices.stride(0),
+        combined_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        M,
+        N,
+        TOP_K=topk,
+        COMPRESS_RATIO=compress_ratio,
+        WINDOW_SIZE=window_size,
+        TOPK_WIDTH=topk_indices.shape[-1],
+        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+    )
+    return combined_indices, combined_lens
 
 
 @triton.jit

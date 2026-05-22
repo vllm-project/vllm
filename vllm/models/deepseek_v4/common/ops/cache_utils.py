@@ -206,7 +206,6 @@ def _dequantize_and_gather_k_kernel(
     gather_lens_ptr,
     # Constants
     max_blocks_per_seq: tl.constexpr,
-    max_out_tokens: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
     bf16_dim: tl.constexpr,  # 64
     scale_dim: tl.constexpr,  # 8
@@ -240,32 +239,20 @@ def _dequantize_and_gather_k_kernel(
 
         # Get physical block index from block table
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
-        valid_block = (block_in_seq >= 0) & (block_in_seq < max_blocks_per_seq)
-        safe_block_in_seq = tl.where(valid_block, block_in_seq, 0)
-        physical_block_idx = tl.load(
-            block_table_row_ptr + safe_block_in_seq, mask=valid_block, other=-1
-        )  # int32
-        out_token_idx = offset + i
-        valid_out = out_token_idx < max_out_tokens
-        valid = valid_block & (physical_block_idx >= 0) & valid_out
-        safe_physical_block_idx = tl.where(valid, physical_block_idx, 0)
-        safe_pos_in_block = tl.where(valid, pos_in_block, 0)
-        safe_out_token_idx = tl.where(valid_out, out_token_idx, 0)
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
-        cache_block_ptr = (
-            k_cache_ptr + safe_physical_block_idx.to(tl.int64) * block_stride
-        )
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
 
         # Token data pointer
-        token_data_ptr = cache_block_ptr + safe_pos_in_block * token_data_size
+        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
 
         # Scale pointer: after all token data
         token_scale_ptr = (
             cache_block_ptr
             + cache_block_size * token_data_size
-            + safe_pos_in_block * scale_dim
+            + pos_in_block * scale_dim
         )
 
         # Token data layout: [0:448] fp8, [448:576] bf16
@@ -273,9 +260,7 @@ def _dequantize_and_gather_k_kernel(
         token_bf16_ptr = token_data_ptr + fp8_dim
 
         # Output pointer for this token (flattened)
-        output_row_ptr = (
-            out_ptr + batch_idx * out_stride0 + safe_out_token_idx * out_stride1
-        )
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
 
         # ========== Dequantize FP8 portion using UE8M0 ==========
         for qblock_idx in tl.static_range(n_quant_blocks):
@@ -286,7 +271,7 @@ def _dequantize_and_gather_k_kernel(
                 mask = offsets < fp8_dim
 
                 # Load quantized fp8 values (stored as uint8)
-                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask & valid, other=0)
+                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
 
                 # Bitcast uint8 back to fp8
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
@@ -296,9 +281,7 @@ def _dequantize_and_gather_k_kernel(
 
                 # Load and decode UE8M0 scale
                 # UE8M0: scale = 2^(stored_value - 127)
-                encoded_scale = tl.load(
-                    token_scale_ptr + qblock_idx, mask=valid, other=0
-                )
+                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
                 exponent = encoded_scale.to(tl.float32) - 127.0
                 scale = tl.exp2(exponent)
 
@@ -306,11 +289,7 @@ def _dequantize_and_gather_k_kernel(
                 x_dequant = x_float * scale
 
                 # Store as bf16
-                tl.store(
-                    output_row_ptr + offsets,
-                    x_dequant.to(tl.bfloat16),
-                    mask=mask & valid,
-                )
+                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
 
         # ========== Copy BF16 portion directly ==========
         bf16_output_offset = fp8_dim  # After 448 elements in output
@@ -321,12 +300,8 @@ def _dequantize_and_gather_k_kernel(
         # Process in chunks of 16
         for j in tl.static_range(bf16_dim // 16):
             chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid, other=0.0)
-            tl.store(
-                output_row_ptr + bf16_output_offset + chunk_offsets,
-                bf16_vals,
-                mask=valid,
-            )
+            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
 def dequantize_and_gather_k_cache_triton(
@@ -362,7 +337,6 @@ def dequantize_and_gather_k_cache_triton(
         offset,
         gather_lens,
         max_blocks_per_seq=block_table.shape[-1],
-        max_out_tokens=out.shape[1],
         fp8_dim=TOKEN_FP8_DIM,
         bf16_dim=TOKEN_BF16_DIM,
         scale_dim=TOKEN_SCALE_DIM,
@@ -542,7 +516,6 @@ def combine_topk_swa_indices(
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
-        TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
     )
     return combined_indices, combined_lens
@@ -563,7 +536,6 @@ def _combine_topk_swa_indices_kernel(
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
-    TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
@@ -596,17 +568,13 @@ def _combine_topk_swa_indices_kernel(
 
         offset = tl.arange(0, PADDED_TOP_K)
         mask = offset < topk_len
-        safe_offset = tl.where(offset < TOPK_WIDTH, offset, 0)
         topk_indices = tl.load(
-            topk_indices_ptr + token_idx * topk_indices_stride + safe_offset,
+            topk_indices_ptr + token_idx * topk_indices_stride + offset,
             mask=mask,
-            other=-1,
         )
-        valid_topk = (topk_indices >= 0) & (topk_indices < N)
-        topk_indices = tl.where(valid_topk, topk_indices + M * batch_idx, -1)
         tl.store(
             combined_indices_ptr + token_idx * combined_indices_stride + offset,
-            topk_indices,
+            topk_indices + M * batch_idx,
             mask=mask,
         )
         offset = tl.arange(0, WINDOW_SIZE)
