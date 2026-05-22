@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from copy import deepcopy
-from itertools import chain
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -70,6 +69,20 @@ def get_dynamic_override(
     return default_value
 
 
+def flatten_list(lst: list[Any]) -> list[Any]:
+    output = []
+
+    def _flatten(lst: list[Any]):
+        for i in lst:
+            if isinstance(type(i), list):
+                _flatten(i)
+            else:
+                output.append(i)
+
+    _flatten(lst)
+    return output
+
+
 def is_layer_gptq_quantized(
     prefix: str,
     quantized_layers: list[str],
@@ -84,7 +97,7 @@ def is_layer_gptq_quantized(
 
     proj_name = prefix.split(".")[-1]
 
-    quantized_layers = list(chain.from_iterable(quantized_layers))
+    quantized_layers = flatten_list(quantized_layers)
 
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name
