@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 /// Python emits utility ids as MessagePack integers, including values that may
 /// require unsigned 64-bit encoding. Keep MessagePack's signed/unsigned
 /// integer distinction instead of flattening to `i64` or `u64` at decode time.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct UtilityCallId(rmpv::Integer);
 
 impl UtilityCallId {
@@ -59,6 +59,12 @@ impl TryFrom<Value> for UtilityCallId {
 impl PartialEq<u64> for UtilityCallId {
     fn eq(&self, other: &u64) -> bool {
         self.as_u64() == Some(*other)
+    }
+}
+
+impl fmt::Debug for UtilityCallId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
