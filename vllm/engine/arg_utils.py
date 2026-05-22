@@ -2469,8 +2469,7 @@ class EngineArgs:
                 modality = max(max_tokens, key=max_tokens.__getitem__)
                 return (max_tokens[modality], modality)
         except Exception as e:
-            logger.warning(
-                "Failed to determine min multimodal batched tokens: %s", e)
+            logger.warning("Failed to determine min multimodal batched tokens: %s", e)
         return None
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
@@ -2528,8 +2527,7 @@ class EngineArgs:
             # Raise the floor to accommodate the largest per-item token count.
             if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
                 result = self._get_min_mm_batched_tokens(model_config)
-                if (result is not None
-                        and result[0] > self.max_num_batched_tokens):
+                if result is not None and result[0] > self.max_num_batched_tokens:
                     mm_min, modality = result
                     logger.info(
                         "Raising max_num_batched_tokens from %d to %d to "

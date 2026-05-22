@@ -110,18 +110,21 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         enforce_eager=True,
     )
 
-    with patch.object(
-        type(engine_args),
-        "_get_min_mm_batched_tokens",
-        staticmethod(lambda _mc: fake_mm_min),
-    ), patch(
-        "vllm.config.ModelConfig.is_multimodal_model",
-        new_callable=lambda: property(lambda self: True),
-    ), patch(
-        "vllm.config.ModelConfig.is_mm_prefix_lm",
-        new_callable=lambda: property(lambda self: True),
+    with (
+        patch.object(
+            type(engine_args),
+            "_get_min_mm_batched_tokens",
+            staticmethod(lambda _mc: fake_mm_min),
+        ),
+        patch(
+            "vllm.config.ModelConfig.is_multimodal_model",
+            new_callable=lambda: property(lambda self: True),
+        ),
+        patch(
+            "vllm.config.ModelConfig.is_mm_prefix_lm",
+            new_callable=lambda: property(lambda self: True),
+        ),
     ):
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.OPENAI_API_SERVER)
+        vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
