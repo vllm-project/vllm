@@ -100,11 +100,12 @@ def _is_cu13_libcute_dsl_runtime() -> bool:
     missing file, hash mismatch); the caller should fall back to the
     Triton/FLA path.
     """
-    import base64
     import csv
     import hashlib
     import importlib.metadata
     import os
+
+    import pybase64 as base64
 
     target_rel = "nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so"
 
