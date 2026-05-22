@@ -55,10 +55,8 @@ from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
-    create_attn_groups,
-    get_attention_cg_support_info,
     get_kv_cache_spec,
-    init_attn_metadata_builders,
+    init_attn_backend,
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -105,7 +103,6 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import prepare_kernel_block_sizes
 
 logger = init_logger(__name__)
 
@@ -364,14 +361,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
-        self.attn_groups = create_attn_groups(
-            self.kv_cache_config,
-            self.vllm_config,
-        )
-        self.kernel_block_sizes = prepare_kernel_block_sizes(
-            self.kv_cache_config, self.attn_groups
-        )
-
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
             # Cross-attention block tables need to index encoder tokens
@@ -404,6 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
+        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
+            self.kv_cache_config, self.vllm_config, self.device
+        )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -414,16 +406,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
-        )
-        init_attn_metadata_builders(
-            self.attn_groups,
-            self.vllm_config,
-            self.device,
-            self.kernel_block_sizes,
-        )
-        attn_cg_support = get_attention_cg_support_info(
-            self.attn_groups,
-            self.vllm_config,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config

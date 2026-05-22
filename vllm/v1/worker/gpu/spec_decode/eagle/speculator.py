@@ -16,8 +16,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
-    create_attn_groups,
-    init_attn_metadata_builders,
+    init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -174,16 +173,11 @@ class EagleSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups = create_attn_groups(
+        self.attn_groups, _, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
-            active_layer_names=self.draft_attn_layer_names,
-        )
-        init_attn_metadata_builders(
-            self.attn_groups,
-            self.vllm_config,
             self.device,
-            block_tables.kernel_block_sizes,
+            active_layer_names=self.draft_attn_layer_names,
         )
         self.block_tables = block_tables
 

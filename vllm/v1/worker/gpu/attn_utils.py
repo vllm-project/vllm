@@ -26,6 +26,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
+    prepare_kernel_block_sizes,
 )
 
 
@@ -49,7 +50,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
-
 def get_shared_kv_cache_layers(vllm_config: VllmConfig):
     attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
     return {
@@ -62,8 +62,10 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig):
 def create_attn_groups(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
+    device: torch.device,
     active_layer_names: set[str] | None = None,
-) -> list[list[AttentionGroup]]:
+) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
+    # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
     # Add KV-sharing layers to their target's kv cache group so they are
@@ -103,29 +105,25 @@ def create_attn_groups(
                 group_map[key].layer_names.append(layer_name)
 
         attn_groups.append([group_map[key] for key in group_order])
-    return attn_groups
 
+    # Phase 2: pick a kernel block size per kv cache group that is supported
+    # by all backends within that group.
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
-def init_attn_metadata_builders(
-    attn_groups: list[list[AttentionGroup]],
-    vllm_config: VllmConfig,
-    device: torch.device,
-    kernel_block_sizes: list[int],
-    num_metadata_builders: int = 1,
-) -> None:
+    # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
-        kernel_block_size = (
-            kernel_block_sizes[kv_cache_group_id]
-            if kv_cache_group_id < len(kernel_block_sizes)
-            else None
-        )
+        kernel_block_size = None
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
-                num_metadata_builders=num_metadata_builders,
+                num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
             if attn_backend_workspace is None:
@@ -134,18 +132,6 @@ def init_attn_metadata_builders(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-
-
-def get_attention_cg_support_info(
-    attn_groups: list[list[AttentionGroup]],
-    vllm_config: VllmConfig,
-) -> AttentionCGSupportInfo:
-    # Find minimum cudagraph support across all attention backends
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
-    for kv_cache_group_id, groups in enumerate(attn_groups):
-        for group in groups:
-            builder = group.get_metadata_builder(0)
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
@@ -155,10 +141,10 @@ def get_attention_cg_support_info(
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
 
-    return AttentionCGSupportInfo(
-        min_cg_support=min_cg_support,
-        min_cg_attn_backend=min_cg_attn_backend,
+    attn_cg_support_info = AttentionCGSupportInfo(
+        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
     )
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def _allocate_kv_cache(
@@ -363,9 +349,8 @@ def init_kv_cache(
 
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
-        attn_groups=flattened_attn_groups,
+        attn_groups=(group for groups in attn_groups for group in groups),
         kv_cache_raw_tensors=kv_cache_raw_tensors,
         kernel_block_sizes=kernel_block_sizes,
         cache_dtype=cache_dtype,
