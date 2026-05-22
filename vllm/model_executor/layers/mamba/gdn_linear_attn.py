@@ -1094,7 +1094,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             )
 
         core_attn_out.zero_()
-        z_out.zero_()
         num_tokens_all = qkvz.shape[0]
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
