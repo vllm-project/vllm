@@ -1183,12 +1183,11 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     graph output in DSv3.2's residual carry; it is returned as a pattern output
     so the matcher can substitute the bf16 norm in its place.
 
-    Two variants are registered (``use_triton_quant=True/False``) because FP8
-    group-quant call sites in the same model lower to different ops: the
-    indexer-fan-out site goes through ``QuantFP8.forward_hip`` and emits
-    ``vllm.triton_per_token_group_quant_fp8``, while other sites route through
-    AITER and emit ``vllm.rocm_aiter_group_fp8_quant`` (matched via
-    ``MatcherQuantFP8``, consistent with the sibling patterns above).
+    The trailing FP8 group-quant is matched via ``MatcherQuantFP8`` (consistent
+    with the sibling patterns above), which traces both ``QuantFP8.forward_hip``
+    and ``forward_native`` paths and so matches whichever op the call site
+    lowers to (``vllm.triton_per_token_group_quant_fp8`` or
+    ``vllm.rocm_aiter_group_fp8_quant``).
     """
 
     def __init__(
@@ -1197,26 +1196,23 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         dtype: torch.dtype,
         device: str | None,
         group_size: int = 128,
-        use_triton_quant: bool = True,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.dtype = dtype
         self.group_size = group_size
-        self.use_triton_quant = use_triton_quant
         self.FUSED_AR_RMS_QUANT_BF16_OP = (
             rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op()  # noqa: E501
         )
-        if not use_triton_quant:
-            self.quant_dtype = current_platform.fp8_dtype()
-            self.quant_matcher = MatcherQuantFP8(
-                QuantKey(
-                    dtype=self.quant_dtype,
-                    scale=ScaleDesc(torch.float32, False, GroupShape(1, group_size)),
-                    symmetric=True,
-                ),
-                match_rocm_aiter=True,
-            )
+        self.quant_dtype = current_platform.fp8_dtype()
+        self.quant_matcher = MatcherQuantFP8(
+            QuantKey(
+                dtype=self.quant_dtype,
+                scale=ScaleDesc(torch.float32, False, GroupShape(1, group_size)),
+                symmetric=True,
+            ),
+            match_rocm_aiter=True,
+        )
 
     def get_inputs(self) -> list[torch.Tensor]:
         h = self.group_size
@@ -1231,8 +1227,6 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     @property
     def pattern(self):
         eps = self.epsilon
-        gs = self.group_size
-        use_triton = self.use_triton_quant
 
         def _pattern(
             residual: torch.Tensor,
@@ -1246,10 +1240,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
             rms, res_out = vllm.ir.ops.fused_add_rms_norm(
                 ar_out, residual, norm_weight, eps
             )
-            if use_triton:
-                q, s = torch.ops.vllm.triton_per_token_group_quant_fp8(rms, gs)
-            else:
-                q, s = self.quant_matcher(rms)
+            q, s = self.quant_matcher(rms)
             idx = torch.ops.vllm.rocm_unquantized_gemm(rms, indexer_weight)
             return q, s, res_out, idx, rms
 
@@ -1380,15 +1371,13 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             # Register larger subgraphs first (DeepSeek indexer fan-out, then
             # quant-only AR+RMS+quant, then AR+RMS-only).
             if supports_per_group_quant:
-                for use_triton_quant in (True, False):
-                    self.register(
-                        AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
-                            epsilon,
-                            self.model_dtype,
-                            self.device,
-                            use_triton_quant=use_triton_quant,
-                        )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
                     )
+                )
                 self.register(
                     AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                         epsilon,
