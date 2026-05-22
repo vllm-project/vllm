@@ -145,6 +145,23 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def supports_expert_map(self) -> bool:
         return True
 
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        """
+        Humming kernels handle input quantization internally via
+        HummingMethod.may_quant_input() in the apply() method.
+
+        This property tells the prepare/finalize step to skip input
+        quantization (by setting defer_input_quant=True) and pass
+        unquantized inputs to the experts. This prevents double
+        quantization: once in prepare and once in Humming's apply().
+
+        Returns:
+            True to indicate that this expert expects unquantized inputs
+            and will handle quantization internally.
+        """
+        return True
+
     @staticmethod
     def _supports_current_device() -> bool:
         platform = current_platform
@@ -365,45 +382,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         return buffers
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
-    ):
-        assert not apply_router_weight_on_input
-
-        self.main_apply(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            workspace1=workspace13,
-            workspace2=workspace2,
-            expert_tokens_meta=expert_tokens_meta,
-        )
-
-    def main_apply(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        workspace1: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-    ):
-        raise NotImplementedError
+    # Note: apply method is implemented by subclasses following the
+    # standard FusedMoEExpertsModular.apply signature
 
     @staticmethod
     def is_supported_config(
@@ -496,27 +476,45 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         return moe_kwargs1, moe_kwargs2
 
-    def main_apply(
+    def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        workspace1: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-    ):
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """
+        Standard apply implementation for Humming indexed experts.
+
+        Note: Humming kernels handle weights and quantization internally through
+        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        The output is written into workspace13 via the buffer management.
+        """
+        assert not apply_router_weight_on_input
+
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         buffers = self.prepare_buffers(
-            workspace1,
+            workspace13,
             workspace2,
             topk_ids.size(0),
             topk_ids.size(1),
-            self.layer.activation,
+            activation,
         )
 
         moe_kwargs1, moe_kwargs2 = self.prepare_humming_moe_kwargs(
             topk_ids=topk_ids,
-            expert_map=self.layer.expert_map,
+            expert_map=expert_map,
             expert_tokens_meta=expert_tokens_meta,
         )
 
@@ -537,7 +535,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         )
 
         self.apply_activation(
-            activation=self.layer.activation,
+            activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
         )
@@ -562,9 +560,12 @@ class HummingIndexedExperts(HummingExpertsBase):
             inputs=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=self.layer.expert_map,
+            expert_map=expert_map,
             outputs=buffers["output"],
         )
+
+        # Note: output is already written to buffers["output"]
+        # which aliases workspace13/output
 
 
 class HummingGroupedExperts(HummingExpertsBase):
@@ -579,32 +580,50 @@ class HummingGroupedExperts(HummingExpertsBase):
     def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_CONTIGUOUS
 
-    def main_apply(
+    def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        workspace1: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-    ):
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """
+        Standard apply implementation for Humming grouped experts.
+
+        Note: Humming kernels handle weights and quantization internally through
+        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        The output is written into workspace13 via the buffer management.
+        """
+        assert not apply_router_weight_on_input
+
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
 
         buffers = self.prepare_buffers(
-            workspace1,
+            workspace13,
             workspace2,
             topk_ids.size(0),
             topk_ids.size(1),
-            self.layer.activation,
+            activation,
         )
 
         hidden_states, _, expert_first_token_offset, inv_perm, _ = moe_permute(
             hidden_states=hidden_states,
             a1q_scale=None,
             topk_ids=topk_ids,
-            n_expert=self.global_num_experts,
+            n_expert=global_num_experts,
             n_local_expert=self.num_experts,
-            expert_map=self.layer.expert_map,
+            expert_map=expert_map,
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(
@@ -627,7 +646,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
 
         self.apply_activation(
-            activation=self.layer.activation,
+            activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
         )
@@ -659,6 +678,9 @@ class HummingGroupedExperts(HummingExpertsBase):
             expert_first_token_offset=expert_first_token_offset,
         )
 
+        # Note: output is already written to buffers["output"]
+        # which aliases workspace13/output
+
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -672,26 +694,44 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
     def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_MASKED
 
-    def main_apply(
+    def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        workspace1: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-    ):
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """
+        Standard apply implementation for Humming batched grouped experts.
+
+        Note: Humming kernels handle weights and quantization internally through
+        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        The output is written into workspace13 via the buffer management.
+        """
+        assert not apply_router_weight_on_input
         assert expert_tokens_meta is not None
+
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
         buffers = self.prepare_buffers(
-            workspace1,
+            workspace13,
             workspace2,
             topk_ids.size(0),
             topk_ids.size(1),
-            self.layer.activation,
+            activation,
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(
@@ -714,7 +754,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         )
 
         self.apply_activation(
-            activation=self.layer.activation,
+            activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
         )
@@ -737,3 +777,6 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w2_tuning_config_str,
             sublayer_name="w2",
         )
+
+        # Note: output is already written to buffers["down_output"]
+        # which aliases workspace13/output

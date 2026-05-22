@@ -889,21 +889,35 @@ class HummingMoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        workspace1, workspace2, output = self.moe_kernel.make_workspaces(
-            M=topk_ids.size(0),
-            topk=topk_ids.size(1),
-            activation=layer.activation,
-        )
+        """
+        Apply Humming-quantized MoE computation using the standard kernel flow.
 
-        assert workspace1.data_ptr() == output.data_ptr()
+        This method uses FusedMoEKernel.apply() which orchestrates:
+        1. Preparation (quantization if needed - skipped for Humming via
+           expects_unquantized_inputs=True to prevent double quantization)
+        2. Expert computation (via experts.apply())
+        3. Finalization (weight application & reduction - no-op for Humming
+           since it's already done internally)
 
-        self.moe_kernel.main_apply(
+        Humming handles all quantization, weight application, and reduction
+        internally in the experts.apply() method via HummingMethod calls.
+
+        Note: Although w1/w2 weights are passed to the kernel for interface
+        consistency, Humming's experts.apply() reads weights directly from
+        the layer object via HummingMethod.forward_layer() and ignores the
+        w1/w2 parameters.
+        """
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             hidden_states=x,
-            topk_weights=topk_weights,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_ids=topk_ids,
-            workspace1=workspace1,
-            workspace2=workspace2,
-            expert_tokens_meta=None,
+            topk_weights=topk_weights,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=False,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
-
-        return output
