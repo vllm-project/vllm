@@ -20,6 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any, Optional, cast
@@ -484,9 +485,24 @@ direct_register_custom_op(
 )
 
 
+MHC_DEBUG_LOG_DIR = "/home/yuantao/code/debug_log"
+
+
 def piecewise_print(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
-    if "model.layers.0" in prefix:
-        print(f"[DEBUG] {name}, tensor.shape: {tensor.shape}, tensor.float().sum(): {tensor.float().sum()}, tensor.ptr: {tensor.data_ptr()}, tensor[:5]: {tensor.flatten()[:5]}")
+    if "model.layers.0" not in prefix:
+        return tensor
+    if tensor.shape[0] in (32768, 1024):
+        return tensor
+    log_msg = (
+        f"[DEBUG] {name}, tensor.shape: {tensor.shape}, "
+        f"tensor.float().sum(): {tensor.float().sum()}, "
+        f"tensor.ptr: {tensor.data_ptr()}, "
+        f"tensor[:5]: {tensor.flatten()[:5]}\n"
+    )
+    print(log_msg, end="")
+    os.makedirs(MHC_DEBUG_LOG_DIR, exist_ok=True)
+    with open(os.path.join(MHC_DEBUG_LOG_DIR, f"{name}.log"), "a") as f:
+        f.write(log_msg)
     return tensor
 
 def piecewise_print_fake(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
@@ -2059,9 +2075,7 @@ class OpenPanguDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
 
-        # torch.ops.vllm.piecewise_print(hidden_states, self.layer_name, "hidden_states")
         hidden_states, h_post, h_res = self.attn_mhc_module.hc_pre(hidden_states)
-        # torch.ops.vllm.piecewise_print(hidden_states, self.layer_name, "hidden_states after attn_mhc_module.hc_pre")
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             positions=positions,
