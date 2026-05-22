@@ -15,6 +15,11 @@ from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kStaticTensorScale,
+)
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerNameType,
@@ -25,15 +30,12 @@ from vllm.utils.torch_utils import (
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import (
-    MatcherRotaryEmbedding,
-)
-from .rms_quant_fusion import (
-    empty_bf16,
-    empty_i64,
-)
+from .matcher_utils import MatcherQuantFP8, MatcherRotaryEmbedding
+from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def fused_rope_and_unified_kv_cache_update_impl(
@@ -44,6 +46,8 @@ def fused_rope_and_unified_kv_cache_update_impl(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
+    query_quant_scale: torch.Tensor | None = None,
+    query_quant_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     This impl fetches the KV cache and slot mapping from the forward context,
@@ -53,7 +57,9 @@ def fused_rope_and_unified_kv_cache_update_impl(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
         attn_layer.impl.do_rope_and_kv_cache_update(
             attn_layer,
@@ -65,6 +71,9 @@ def fused_rope_and_unified_kv_cache_update_impl(
             is_neox,
             kv_cache,
             layer_slot_mapping,
+            attn_metadata,
+            query_quant_scale,
+            query_quant_out,
         )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
@@ -78,6 +87,8 @@ def fused_rope_and_unified_kv_cache_update_fake(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
+    query_quant_scale: torch.Tensor | None = None,
+    query_quant_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(0, device=query.device, dtype=query.dtype)
 
@@ -85,7 +96,7 @@ def fused_rope_and_unified_kv_cache_update_fake(
 direct_register_custom_op(
     op_name="fused_rope_and_unified_kv_cache_update",
     op_func=fused_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["query", "key"],
+    mutates_args=["query", "key", "query_quant_out"],
     fake_impl=fused_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -223,6 +234,178 @@ class RopeReshapeKVCachePattern:
         )
 
 
+class RopeQuantReshapeKVCachePattern:
+    """
+    This pattern matches the following unfused inplace ops:
+      q, k = rotary_embedding(positions, q, k, head_size, cos_sin_cache, is_neox)
+      q = static_scaled_fp8_quant(q, scale)
+      kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
+
+    and replaces it with the fused inplace op:
+      kv_cache_dummy = fused_rope_and_unified_kv_cache_update(
+        q, k, v, positions, cos_sin_cache, is_neox, layer_name, scale
+      )
+    """
+
+    FUSED_OP = torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
+
+    def __init__(
+        self,
+        layer: Attention,
+        quant_key: QuantKey,
+        is_neox: bool,
+        use_flashinfer_rope: bool = False,
+    ) -> None:
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.num_kv_heads = layer.num_kv_heads
+        self.head_size = layer.head_size
+        self.head_size_v = layer.head_size_v
+        self.is_neox = is_neox
+        self.use_flashinfer_rope = use_flashinfer_rope
+
+        self.q_size = self.num_heads * self.head_size
+        self.k_size = self.num_kv_heads * self.head_size
+        self.v_size = self.num_kv_heads * self.head_size_v
+
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            use_flashinfer=self.use_flashinfer_rope,
+        )
+        self.quant_key = quant_key
+        self.quant_matcher = MatcherQuantFP8(quant_key)
+
+    def get_inputs(self) -> list:
+        T = 5
+        L = 4096
+        qkv = empty_bf16(T, self.q_size + self.k_size + self.v_size)
+        positions = empty_i64(T)
+        cos_sin_cache = empty_fp32(L, self.head_size)
+        query_quant_scale = empty_fp32(1, 1)
+        inputs: list = [qkv, positions, cos_sin_cache, query_quant_scale]
+        if _USE_LAYERNAME:
+            inputs.append(_encode_layer_name(self.layer_name))
+        return inputs
+
+    def _mk_pattern_with_layer_name_input(self, _ln):
+        """Pattern/replacement with layer_name as an explicit input."""
+
+        def pattern(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            query_quant_scale: torch.Tensor,
+            layer_name: LayerNameType,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q, _ = self.quant_matcher(q, query_quant_scale)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, layer_name)
+            return dummy, q, k, v
+
+        def replacement(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            query_quant_scale: torch.Tensor,
+            layer_name: LayerNameType,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            q_quant_out = torch.empty_like(q, dtype=self.quant_key.dtype)
+            results = auto_functionalized(
+                self.FUSED_OP,
+                query=q,
+                key=k,
+                value=v,
+                positions=positions,
+                cos_sin_cache=cos_sin_cache.to(torch.float32),
+                is_neox=self.is_neox,
+                layer_name=layer_name,
+                query_quant_scale=query_quant_scale,
+                query_quant_out=q_quant_out,
+            )
+            return results[0], results[3], results[2], v
+
+        return pattern, replacement
+
+    def _mk_pattern_with_layer_name_closure(self, _ln):
+        """Pattern/replacement with layer_name as a closure constant."""
+
+        def pattern(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            query_quant_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q, _ = self.quant_matcher(q, query_quant_scale)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, _ln)
+            return dummy, q, k, v
+
+        def replacement(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+            query_quant_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            q_quant_out = torch.empty_like(q, dtype=self.quant_key.dtype)
+            results = auto_functionalized(
+                self.FUSED_OP,
+                query=q,
+                key=k,
+                value=v,
+                positions=positions,
+                cos_sin_cache=cos_sin_cache.to(torch.float32),
+                is_neox=self.is_neox,
+                layer_name=_ln,
+                query_quant_scale=query_quant_scale,
+                query_quant_out=q_quant_out,
+            )
+            return results[0], results[3], results[2], v
+
+        return pattern, replacement
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        _ln = _encode_layer_name(self.layer_name)
+
+        if _USE_LAYERNAME:
+            pattern, replacement = self._mk_pattern_with_layer_name_input(_ln)
+        else:
+            pattern, replacement = self._mk_pattern_with_layer_name_closure(_ln)
+
+        # NOTE: use view_to_reshape to unify view/reshape to simplify
+        # pattern and increase matching opportunities
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            fwd_and_view_to_reshape,
+            pm_pass,
+        )
+
+
 class RopeKVCacheFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses the rotary embedding and KV cache update operations
@@ -247,18 +430,36 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         cc = config.compilation_config
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
+        quant_key = None
+        # Only CUDA supports RoPE + Query Quant + KV Cache Pattern
+        if current_platform.is_cuda():
+            quant_key = QuantKey(
+                dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=True
+            )
+
         attn_layers = get_layers_from_vllm_config(config, Attention)
         # When _USE_LAYERNAME is enabled, layer_name is a wildcard so all
         # layers produce the same pattern — register once then break.
         for _, layer in attn_layers.items():
-            if layer.impl.fused_rope_kvcache_supported():
-                for is_neox in [True, False]:
+            if not layer.impl.fused_rope_kvcache_supported(quant_key):
+                continue
+            for is_neox in [True, False]:
+                if current_platform.is_cuda():
+                    for use_flashinfer_rope in [True, False]:
+                        assert quant_key is not None
+                        RopeQuantReshapeKVCachePattern(
+                            layer=layer,
+                            quant_key=quant_key,
+                            is_neox=is_neox,
+                            use_flashinfer_rope=use_flashinfer_rope,
+                        ).register(self.patterns)
+                elif current_platform.is_rocm():
                     RopeReshapeKVCachePattern(
                         layer=layer,
                         is_neox=is_neox,
                     ).register(self.patterns)
-                if _USE_LAYERNAME:
-                    break
+            if _USE_LAYERNAME:
+                break
 
         self.dump_patterns(config, self.patterns)
 
@@ -274,4 +475,6 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         return compile_range.end <= self.max_token_num
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)
+        return VllmInductorPass.hash_source(
+            self, RopeReshapeKVCachePattern, RopeQuantReshapeKVCachePattern
+        )

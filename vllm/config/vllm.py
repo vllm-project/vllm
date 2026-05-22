@@ -147,9 +147,12 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     use_inductor_graph_partition is enabled.
     """
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
 
     return (
-        rocm_aiter_ops.is_enabled()
+        current_platform.is_cuda_alike()
+        and (rocm_aiter_ops.is_enabled() or has_flashinfer())
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
         and (
             cfg.compilation_config.use_inductor_graph_partition
