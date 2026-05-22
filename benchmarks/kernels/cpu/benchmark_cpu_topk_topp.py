@@ -1,26 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Microbenchmark: CPU top-p / top-k / joint sampling kernels.
 
-Usage:
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py --avx2
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py --both
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py \
-      --mode topk
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py \
-      --mode joint
-  numactl -m 4 -N 4 .venv/bin/python benchmarks/kernels/benchmark_cpu_topp.py \
-      --mode all
-"""
-
-import argparse
 import os
 import subprocess
 import sys
 import time
 
 import torch
+
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 CONFIGS_TOPP = [
     (1, 128256, 0.9),
@@ -55,12 +43,12 @@ def _time_fn(fn, warmup, iters):
         fn()
     times = []
     for _ in range(iters):
-        t0 = time.perf_counter()
+        t0 = time.perf_counter_ns()
         fn()
-        times.append(time.perf_counter() - t0)
+        times.append((time.perf_counter_ns() - t0) / 1e6)
     times.sort()
     trim = max(1, len(times) // 10)
-    return sum(times[trim:-trim]) / len(times[trim:-trim]) * 1e3
+    return sum(times[trim:-trim]) / len(times[trim:-trim])
 
 
 def _ops_ns():
@@ -131,9 +119,8 @@ def run_bench_topk(warmup: int = 5, iters: int = 20) -> None:
 
 def run_bench_joint(warmup: int = 5, iters: int = 20) -> None:
     ns = _ops_ns()
-    cpu_topp_sampling = ns.cpu_topp_sampling
     cpu_topk_topp_sampling = ns.cpu_topk_topp_sampling
-    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_only
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
     col_fmt = f"{'B':>4}  {'V':>7}  {'k':>5}  {'p':>4}"
 
@@ -142,10 +129,9 @@ def run_bench_joint(warmup: int = 5, iters: int = 20) -> None:
         k = torch.full((B,), top_k, dtype=torch.int32)
         p = torch.full((B,), top_p, dtype=torch.float32)
 
-        def before(lg=logits, ki=k, pp=p):
-            tmp = apply_top_k_only(lg.clone(), ki.long())
-            cpu_topp_sampling(tmp.contiguous().clone(), pp)
-
+        before = lambda lg=logits, ki=k, pp=p: apply_top_k_top_p_pytorch(  # noqa: E731
+            lg.clone(), ki, pp, allow_cpu_sync=True
+        )
         after = lambda lg=logits, ki=k, pp=p: cpu_topk_topp_sampling(  # noqa: E731
             lg.clone(), ki, pp
         )
@@ -164,7 +150,9 @@ def spawn_for_isa(isa: str, extra_args: list) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = FlexibleArgumentParser(
+        description="Benchmark the CPU top-p/top-k sampling kernels."
+    )
     parser.add_argument(
         "--avx2", action="store_true", help="Benchmark the AVX2 path only"
     )

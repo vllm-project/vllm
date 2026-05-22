@@ -27,9 +27,6 @@ try:
 except (ImportError, AttributeError):
     _HAS_CPU_SAMPLING_OPS = False
 
-# Legacy alias; callers that imported _HAS_CPU_TOPP_OP directly still work.
-_HAS_CPU_TOPP_OP = _HAS_CPU_SAMPLING_OPS
-
 logger = init_logger(__name__)
 
 
@@ -413,6 +410,12 @@ def apply_top_k_top_p_cpu(
     """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
     if p is None and k is None:
         return logits
+
+    if k is not None:
+        # k=0 is not valid; callers use k=vocab_size to disable top-k.
+        assert (k > 0).all(), (
+            "k values must be > 0; use k=vocab_size to disable top-k filtering"
+        )
 
     if p is None:
         return _apply_top_k_only_cpu(logits, k)

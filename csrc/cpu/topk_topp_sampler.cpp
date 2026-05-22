@@ -9,10 +9,10 @@
 namespace {
 constexpr float kPadSentinel = -1e30f;      // logits below this are PAD
 constexpr float kBoundaryTol = 1e-5f;       // tie tolerance for top-p cut
-constexpr int kMeanStdSampleN = 8192;       // Pass 0 sample size
+constexpr int kMeanStdSampleN = 8192;       // mean/std sample cap
 constexpr int kBsearchMaxIters = 32;        // binary-search iteration cap
 constexpr int kTernarySearchMaxIters = 18;  // matches Triton
-constexpr float kKDuplicateTol = 1e-9f;  // top-k tie tolerance; matches Triton
+constexpr float kKDuplicateTol = 1e-9f;     // tie tolerance for top-k (Triton)
 }  // namespace
 
 // Matches _NORMAL_CDF_TO_SIGMA_TABLE in topk_topp_triton.py (200 entries).
@@ -324,6 +324,9 @@ static inline void compute_mean_std(const float* row, int V, float* avg_out,
     }
   }
   float avg = nf > 0 ? sum_s / nf : 0.f;
+  // E[X²] - (E[X])² is numerically unstable for large logit magnitudes, but
+  // this is only a heuristic pivot initializer; the ternary/binary search
+  // converges correctly regardless of pivot quality.
   float var = nf > 0 ? sum_sq / nf - avg * avg : 1.f;
   *avg_out = avg;
   *std_out = sqrtf(var > 0.f ? var : 0.f);
@@ -411,6 +414,9 @@ static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
   }
   *num_above = na;
   *min_above = ma;
+  // count_within_tol runs over the full buf; elements below pivot are all
+  // < min_above, so only ULP-equal values fall within kKDuplicateTol and
+  // are legitimately counted as boundary duplicates.
   *num_at_min = count_within_tol(buf, n, ma, tol);
 }
 

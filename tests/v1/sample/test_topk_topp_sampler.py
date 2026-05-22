@@ -6,7 +6,7 @@ from torch import Generator
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import (
-    _HAS_CPU_TOPP_OP,
+    _HAS_CPU_SAMPLING_OPS,
     apply_top_k_top_p_cpu,
     apply_top_k_top_p_pytorch,
     random_sample,
@@ -345,139 +345,6 @@ class TestTritonTopkTopp:
         p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
 
         self._compare_results(logits, k, p)
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_top_k_keeps_exactly_k_with_boundary_ties(self):
-        """top_k_row must keep exactly k elements when duplicates sit at the
-        k-boundary. Previously kept n_above (5) instead of k (3)."""
-        from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
-
-        row = torch.tensor(
-            [[10.0, 9.0, 8.0, 8.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]],
-            dtype=torch.float32,
-        )
-        k = torch.tensor([3], dtype=torch.int32)
-        _cpu_topk_sampling_op(row, k)
-        n_kept = (row != float("-inf")).sum().item()
-        assert n_kept == 3, f"Expected 3 survivors, got {n_kept}"
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_top_k_p_keeps_exactly_k_with_boundary_ties(self):
-        """Fused top_k_p_row must also keep exactly k elements with ties at
-        the k-boundary. p < 1.0 ensures the p_val >= 1.0 early return is
-        bypassed so the top-k boundary-tie path is exercised."""
-        from vllm._custom_ops import (
-            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
-        )
-
-        row = torch.tensor(
-            [[10.0, 9.0, 8.0, 8.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]],
-            dtype=torch.float32,
-        )
-        k = torch.tensor([3], dtype=torch.int32)
-        p = torch.tensor([1.0], dtype=torch.float32) - 1e-6
-        _cpu_topk_topp_sampling_op(row, k, p)
-        n_kept = (row != float("-inf")).sum().item()
-        assert n_kept == 3, f"Expected 3 survivors, got {n_kept}"
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_top_p_zero_matches_pytorch(self):
-        """top_p_row with p=0 must keep only the argmax tier, not wipe the
-        entire row to -inf."""
-        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
-        torch.manual_seed(42)
-        logits = torch.randn(1, 128, dtype=torch.float32)
-
-        ref = logits.clone()
-        p_ref = torch.tensor([0.0], dtype=torch.float32)
-        ref_masked = apply_top_k_top_p_pytorch(ref, None, p_ref, allow_cpu_sync=True)
-
-        kernel = logits.clone()
-        p_kernel = torch.tensor([0.0], dtype=torch.float32)
-        _cpu_topp_sampling_op(kernel, p_kernel)
-
-        ref_finite = (ref_masked != float("-inf")).sum().item()
-        ker_finite = (kernel != float("-inf")).sum().item()
-        assert ker_finite > 0, "Kernel wiped the entire row for p=0"
-        assert ker_finite == ref_finite, (
-            f"Kernel kept {ker_finite} tokens, reference kept {ref_finite}"
-        )
-        assert torch.equal((kernel != float("-inf")), (ref_masked != float("-inf"))), (
-            "Kernel and reference disagree on which tokens survive p=0"
-        )
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_v_equals_zero_no_crash(self):
-        """All three ops must handle V=0 without crashing."""
-        from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
-        from vllm._custom_ops import (
-            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
-        )
-        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
-        empty = torch.empty([1, 0], dtype=torch.float32)
-        k = torch.tensor([0], dtype=torch.int32)
-        p = torch.tensor([0.5], dtype=torch.float32)
-
-        _cpu_topp_sampling_op(empty.clone(), p)
-        _cpu_topk_sampling_op(empty.clone(), k)
-        _cpu_topk_topp_sampling_op(empty.clone(), k, p)
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_p_dtype_float64_rejected(self):
-        """cpu_topp_sampling and cpu_topk_topp_sampling must reject p tensors
-        with dtype != float32."""
-        from vllm._custom_ops import (
-            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
-        )
-        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
-        logits = torch.randn(1, 32, dtype=torch.float32)
-        p64 = torch.tensor([0.5], dtype=torch.float64)
-        k = torch.tensor([5], dtype=torch.int32)
-
-        with pytest.raises(RuntimeError):
-            _cpu_topp_sampling_op(logits.clone(), p64)
-
-        with pytest.raises(RuntimeError):
-            _cpu_topk_topp_sampling_op(logits.clone(), k, p64)
-
-    @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
-    )
-    def test_denormal_boundary_prob_no_overflow(self):
-        """(int)ceil on a denormal boundary_prob must not produce INT_MAX or
-        a negative value. V=1024 exercises the SIMD path."""
-        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
-        row_data = [10.0] + [-50.0] * 9 + [-700.0] * 1014
-        logits = torch.tensor([row_data], dtype=torch.float32)
-        p = torch.tensor([0.99], dtype=torch.float32)
-
-        kernel = logits.clone()
-        _cpu_topp_sampling_op(kernel, p)
-
-        assert not kernel.isnan().any(), "NaN in output"
-        n_finite = (kernel != float("-inf")).sum().item()
-        assert n_finite > 0, "Kernel wiped the entire row"
-
-        ref = logits.clone()
-        ref_masked = apply_top_k_top_p_pytorch(ref, None, p, allow_cpu_sync=True)
-        ref_finite = (ref_masked != float("-inf")).sum().item()
-        assert n_finite == ref_finite, (
-            f"Kernel kept {n_finite} tokens, reference kept {ref_finite}"
-        )
 
     # -----------------------------------------------------------------
     # Tests for -inf logits (e.g. from grammar / structured output masks)
@@ -1010,7 +877,7 @@ class TestFlashInferDistributionMatch:
 
 
 @pytest.mark.skipif(
-    not _HAS_CPU_TOPP_OP,
+    not _HAS_CPU_SAMPLING_OPS,
     reason="CPU top-k/top-p C++ kernels not available on this build",
 )
 class TestCpuTopkTopp:
@@ -1426,7 +1293,7 @@ class TestCpuTopkTopp:
                 assert kept > 0, f"Row {i}: no tokens kept"
 
     @pytest.mark.skipif(
-        not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable"
+        not _HAS_CPU_SAMPLING_OPS, reason="CPU top-p/top-k kernel unavailable"
     )
     @pytest.mark.parametrize("vocab_size", [17, 128, 1024, 32000])
     @pytest.mark.parametrize("batch_size", [1, 8, 32])
@@ -1478,13 +1345,147 @@ class TestCpuTopkTopp:
             f"Max abs diff: {(fused - seq).abs().max().item():.2e}"
         )
 
+    # -----------------------------------------------------------------
+    # Regression tests: boundary-tie, p=0, V=0, dtype guard, ceil overflow
+    # -----------------------------------------------------------------
+
+    def test_top_k_keeps_exactly_k_with_boundary_ties(self):
+        """top_k_row must keep exactly k elements when duplicates sit at the
+        k-boundary. Previously kept n_above (5) instead of k (3)."""
+        from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+
+        row = torch.tensor(
+            [[10.0, 9.0, 8.0, 8.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]],
+            dtype=torch.float32,
+        )
+        k = torch.tensor([3], dtype=torch.int32)
+        _cpu_topk_sampling_op(row, k)
+        n_kept = (row != float("-inf")).sum().item()
+        assert n_kept == 3, f"Expected 3 survivors, got {n_kept}"
+
+    def test_top_k_p_keeps_exactly_k_with_boundary_ties(self):
+        """Fused top_k_p_row must also keep exactly k elements with ties at
+        the k-boundary. p < 1.0 ensures the p_val >= 1.0 early return is
+        bypassed so the top-k boundary-tie path is exercised."""
+        from vllm._custom_ops import (
+            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+        )
+
+        row = torch.tensor(
+            [[10.0, 9.0, 8.0, 8.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]],
+            dtype=torch.float32,
+        )
+        k = torch.tensor([3], dtype=torch.int32)
+        p = torch.tensor([1.0], dtype=torch.float32) - 1e-6
+        _cpu_topk_topp_sampling_op(row, k, p)
+        n_kept = (row != float("-inf")).sum().item()
+        assert n_kept == 3, f"Expected 3 survivors, got {n_kept}"
+
+    def test_top_p_zero_matches_pytorch(self):
+        """top_p_row with p=0 must keep only the argmax tier, not wipe the
+        entire row to -inf."""
+        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+        torch.manual_seed(42)
+        logits = torch.randn(1, 128, dtype=torch.float32)
+
+        ref = logits.clone()
+        p_ref = torch.tensor([0.0], dtype=torch.float32)
+        ref_masked = apply_top_k_top_p_pytorch(ref, None, p_ref, allow_cpu_sync=True)
+
+        kernel = logits.clone()
+        p_kernel = torch.tensor([0.0], dtype=torch.float32)
+        _cpu_topp_sampling_op(kernel, p_kernel)
+
+        ref_finite = (ref_masked != float("-inf")).sum().item()
+        ker_finite = (kernel != float("-inf")).sum().item()
+        assert ker_finite > 0, "Kernel wiped the entire row for p=0"
+        assert ker_finite == ref_finite, (
+            f"Kernel kept {ker_finite} tokens, reference kept {ref_finite}"
+        )
+        assert torch.equal((kernel != float("-inf")), (ref_masked != float("-inf"))), (
+            "Kernel and reference disagree on which tokens survive p=0"
+        )
+
+    def test_v_equals_zero_no_crash(self):
+        """All three C++ ops must handle V=0 without crashing."""
+        from vllm._custom_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+        from vllm._custom_ops import (
+            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+        )
+        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+        empty = torch.empty([1, 0], dtype=torch.float32)
+        # k=0 is valid at the C++ layer for an empty vocabulary (V=0);
+        # this test calls the ops directly, bypassing the Python k>0 guard.
+        k = torch.tensor([0], dtype=torch.int32)
+        p = torch.tensor([0.5], dtype=torch.float32)
+
+        _cpu_topp_sampling_op(empty.clone(), p)
+        _cpu_topk_sampling_op(empty.clone(), k)
+        _cpu_topk_topp_sampling_op(empty.clone(), k, p)
+
+    def test_p_dtype_float64_rejected(self):
+        """cpu_topp_sampling and cpu_topk_topp_sampling must reject p tensors
+        with dtype != float32."""
+        from vllm._custom_ops import (
+            cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+        )
+        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+        logits = torch.randn(1, 32, dtype=torch.float32)
+        p64 = torch.tensor([0.5], dtype=torch.float64)
+        k = torch.tensor([5], dtype=torch.int32)
+
+        with pytest.raises(RuntimeError):
+            _cpu_topp_sampling_op(logits.clone(), p64)
+
+        with pytest.raises(RuntimeError):
+            _cpu_topk_topp_sampling_op(logits.clone(), k, p64)
+
+    def test_denormal_boundary_prob_no_overflow(self):
+        """(int)ceil on a denormal boundary_prob must not produce INT_MAX or
+        a negative value. V=1024 exercises the SIMD path."""
+        from vllm._custom_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+        row_data = [10.0] + [-50.0] * 9 + [-700.0] * 1014
+        logits = torch.tensor([row_data], dtype=torch.float32)
+        p = torch.tensor([0.99], dtype=torch.float32)
+
+        kernel = logits.clone()
+        _cpu_topp_sampling_op(kernel, p)
+
+        assert not kernel.isnan().any(), "NaN in output"
+        n_finite = (kernel != float("-inf")).sum().item()
+        assert n_finite > 0, "Kernel wiped the entire row"
+
+        ref = logits.clone()
+        ref_masked = apply_top_k_top_p_pytorch(ref, None, p, allow_cpu_sync=True)
+        ref_finite = (ref_masked != float("-inf")).sum().item()
+        assert n_finite == ref_finite, (
+            f"Kernel kept {n_finite} tokens, reference kept {ref_finite}"
+        )
+
+    def test_k_zero_raises(self):
+        """apply_top_k_top_p_cpu must reject k=0 (use k=vocab_size to disable top-k)."""
+        logits = torch.randn(4, 64, dtype=torch.float32)
+        k_zero = torch.zeros(4, dtype=torch.int32)
+        with pytest.raises(AssertionError):
+            apply_top_k_top_p_cpu(logits, k_zero, p=None)
+        # Also rejected when p is active.
+        p = torch.full((4,), 0.9, dtype=torch.float32)
+        with pytest.raises(AssertionError):
+            apply_top_k_top_p_cpu(logits, k_zero, p)
+
 
 # =============================================================================
 # CPU robustness tests (mirrors TestFlashInferTopkToppRobustness)
 # =============================================================================
 
 
-@pytest.mark.skipif(not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable")
+@pytest.mark.skipif(
+    not _HAS_CPU_SAMPLING_OPS, reason="CPU top-p/top-k kernel unavailable"
+)
 class TestCpuTopkToppRobustness:
     """Robustness of CPU top-k / top-p sampling to NaN / Inf logits.
 
@@ -1591,11 +1592,20 @@ class TestCpuTopkToppRobustness:
                 sampled = probs_norm.multinomial(1).squeeze(-1)
                 self._check_tokens(sampled, ctx=f"pattern={pattern}, path={path}")
 
-    def test_cross_row_isolation(self):
+    @pytest.mark.parametrize("path", ["topk_only", "topp_only", "topk_topp"])
+    def test_cross_row_isolation(self, path: str):
         """Row 0 poisoned with NaN must not corrupt rows 1..B-1."""
         logits = self._make_logits("nan_one_row")
-        k = torch.full((self.BATCH,), self.TOPK, dtype=torch.int32)
-        p = torch.full((self.BATCH,), self.TOPP, dtype=torch.float32)
+        k = (
+            torch.full((self.BATCH,), self.TOPK, dtype=torch.int32)
+            if path in ("topk_only", "topk_topp")
+            else None
+        )
+        p = (
+            torch.full((self.BATCH,), self.TOPP, dtype=torch.float32)
+            if path in ("topp_only", "topk_topp")
+            else None
+        )
         masked = apply_top_k_top_p_cpu(logits.clone().contiguous(), k, p)
         for i in range(1, self.BATCH):
             assert masked[i].isfinite().any(), f"row {i} corrupted: no finite values"
@@ -1607,7 +1617,9 @@ class TestCpuTopkToppRobustness:
 # =============================================================================
 
 
-@pytest.mark.skipif(not _HAS_CPU_TOPP_OP, reason="CPU top-p/top-k kernel unavailable")
+@pytest.mark.skipif(
+    not _HAS_CPU_SAMPLING_OPS, reason="CPU top-p/top-k kernel unavailable"
+)
 class TestCpuDistributionMatch:
     """Chi-square goodness-of-fit: CPU sampler reproduces expected distribution.
 
