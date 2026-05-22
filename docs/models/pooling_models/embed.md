@@ -103,7 +103,7 @@ If your model is not in the above list, we will try to automatically convert the
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
 !!! note
-    `Qwen3-VL-Embedding` officially uses qwen_vl_utils for image preprocessing, while vLLM uses transformers' video_processing_qwen3_vl, which leads to slightly different results compared with the HF repo's example. Example code for offline inference using qwen_vl_utils can be found at [this link](../../../examples/pooling/embed/vision_embedding_offline.py).
+    `Qwen3-VL-Embedding` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples. Example code for offline inference using `qwen_vl_utils` can be found in the [vision_embedding_offline.py](../../../examples/pooling/embed/vision_embedding_offline.py) example.
 
 !!! note
     Although vLLM supports automatically converting models of any architecture into embedding models via --convert embed, to get the best results, you should use pooling models that are specifically trained as such.
