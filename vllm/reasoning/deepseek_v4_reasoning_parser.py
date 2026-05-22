@@ -98,9 +98,7 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
     ) -> bool:
         if super().is_reasoning_end_streaming(input_ids, delta_ids):
             return True
-        if self._implicit_end_seen:
-            return True
-        return False
+        return bool(self._implicit_end_seen)
 
     def extract_reasoning_streaming(
         self,
