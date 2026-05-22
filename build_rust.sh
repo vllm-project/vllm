@@ -9,10 +9,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 RUST_DIR="$REPO_ROOT/rust"
-TARGET_PATH="$REPO_ROOT/vllm/vllm-rs"
+TARGET_PATH="${VLLM_RS_TARGET_PATH:-$REPO_ROOT/vllm/vllm-rs}"
 
 # Read the required toolchain from rust-toolchain.toml.
-TOOLCHAIN=$(grep '^channel' "$RUST_DIR/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
+TOOLCHAIN=$(grep '^channel' "$REPO_ROOT/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
 
 # Ensure rustup and the required toolchain are available.
 if ! command -v rustup &>/dev/null; then
@@ -39,5 +39,6 @@ cargo +"$TOOLCHAIN" build "${PROFILE_ARGS[@]}" \
     --bin vllm-rs \
     --features native-tls-vendored
 
+mkdir -p "$(dirname "$TARGET_PATH")"
 cp "$RUST_DIR/target/$PROFILE_DIR/vllm-rs" "$TARGET_PATH"
 echo "Installed vllm-rs to $TARGET_PATH"
