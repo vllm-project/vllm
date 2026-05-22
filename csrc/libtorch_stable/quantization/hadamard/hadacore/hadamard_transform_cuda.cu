@@ -796,7 +796,7 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace)
 
     VLLM_STABLE_DISPATCH_HALF_TYPES(x.scalar_type(), "hadacore_transform_runfht", [&] {
       auto constexpr SCALAR_TYPE = torch::headeronly::CppTypeToScalarType<scalar_t>::value;
-      hadacore::run_fht<SCALAR_TYPE>(x.data_ptr(), x.data_ptr(), x.numel(), had_size, stream);
+      hadacore::run_fht<SCALAR_TYPE>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
     });
 
     if (numel % 256 != 0) {
