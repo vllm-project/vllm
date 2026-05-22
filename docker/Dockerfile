@@ -240,22 +240,23 @@ ARG BUILD_OS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install protoc (used by tonic-build/prost-build) and a basic C toolchain
-# (some rust crates compile C in their build.rs scripts).
+# Install a basic C toolchain (some rust crates compile C in their build.rs
+# scripts) and unzip (used to extract the pinned protoc release below).
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         dnf install -y --setopt=install_weak_deps=False \
-            ca-certificates curl git gcc gcc-c++ make \
-            protobuf-compiler protobuf-devel \
+            ca-certificates curl git gcc gcc-c++ make unzip \
         && dnf clean all && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
         && apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential \
-            protobuf-compiler libprotobuf-dev \
+            ca-certificates curl git build-essential unzip \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal --default-toolchain none
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -264,14 +265,8 @@ WORKDIR /workspace
 
 # Copy only the rust workspace — the binary is the sole artifact we need.
 COPY rust rust
-
-# Fail loudly if the rust submodule was not initialized on the host before
-# `docker build`. Without this check, cargo would emit a confusing error.
-RUN if [ ! -f rust/Cargo.toml ]; then \
-        echo "ERROR: rust/ submodule is not initialized."; \
-        echo "Run 'git submodule update --init --recursive' on the host before building."; \
-        exit 1; \
-    fi
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -283,9 +278,7 @@ ENV CARGO_BUILD_JOBS=4
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/workspace/rust/target \
-    cd rust \
-    && cargo build --release --bin vllm-rs --features native-tls-vendored \
-    && cp target/release/vllm-rs /workspace/vllm-rs
+    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
