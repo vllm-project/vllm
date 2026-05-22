@@ -409,7 +409,7 @@ class EncoderCudaGraphManager:
                     token_budget = None
                     logger.warning(
                         "Input video frames %s exceeds capture capacity %s, "
-                        "fallback to eagar, please manually set "
+                        "fallback to eager, please manually set "
                         "'encoder_cudagraph_max_vision_items_per_batch "
                         "and 'encoder_cudagraph_max_frames_per_batch' "
                         "in 'compilation-config'",
