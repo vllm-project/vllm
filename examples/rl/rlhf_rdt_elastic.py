@@ -40,7 +40,7 @@ import os
 import sys
 
 import ray
-from ray.util.placement_group import placement_group, remove_placement_group
+from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
@@ -229,8 +229,7 @@ sync_replica(llm2, "Replica 2")
 generate_and_print(llm2, "Replica 2: AFTER sync (trainer weights)")
 generate_and_print(llm1, "Replica 1: final state (unchanged since Phase 1)")
 
-# Clean up the elastically-added replica's resources -- the same operation
-# would simulate a replica failure (kill + free its placement group).
-ray.kill(llm2)
-remove_placement_group(pg2)
-print("\nReplica 2 torn down. Replica 1 + trainer still live.")
+# Ray.shutdown() handles teardown of both replicas + trainer on exit. The
+# same elastic property runs in reverse: ray.kill(llmN) + remove_placement_
+# group(pgN) would tear down any single replica without affecting the others
+# or the trainer, since none of them share a process group.
