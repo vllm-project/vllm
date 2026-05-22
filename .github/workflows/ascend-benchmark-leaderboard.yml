@@ -88,6 +88,7 @@ jobs:
       - docker
     timeout-minutes: 60
     env:
+      DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
       HF_HOME: ${{ github.workspace }}/../.hf-cache
@@ -116,6 +117,8 @@ jobs:
       HARDWARE_CHIP_MODEL: 910B3
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
+      ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_HUST_BENCHMARK_USE_SUDO || '1' }}
+      ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
@@ -128,6 +131,36 @@ jobs:
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
+      - name: Pre-clean stale checkout state
+        shell: bash
+        run: |
+          legacy_paths=(
+            "${GITHUB_WORKSPACE}/.benchmarks"
+            "${GITHUB_WORKSPACE}/.ci-runtime"
+            "${GITHUB_WORKSPACE}/vllm-hust-benchmark"
+            "${GITHUB_WORKSPACE}/vllm-hust-website"
+            "${GITHUB_WORKSPACE}/vllm-ascend-hust"
+            "${GITHUB_WORKSPACE}/ascend-runtime-manager"
+          )
+
+          shopt -s nullglob dotglob
+          workspace_entries=("${GITHUB_WORKSPACE}"/*)
+          shopt -u nullglob dotglob
+          cleanup_paths=("${legacy_paths[@]}" "${workspace_entries[@]}")
+
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]] \
+            && command -v sudo >/dev/null 2>&1 \
+            && [[ -x "$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER" ]] \
+            && sudo -n "$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER" cleanup-paths "${cleanup_paths[@]}"; then
+            exit 0
+          fi
+
+          rm -rf "${cleanup_paths[@]}" || {
+            echo "Failed to clear stale benchmark workspace state as the runner user." >&2
+            echo "Install or refresh the benchmark root helper at $DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER, then rerun the workflow." >&2
+            exit 1
+          }
+
       - name: Checkout target repo with retry
         run: |
           clone_with_retry() {
@@ -251,6 +284,76 @@ jobs:
 
           clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$GITHUB_WORKSPACE/vllm-ascend-hust"
 
+      - name: Preflight benchmark root helper
+        shell: bash
+        run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" != "1" ]]; then
+            echo "Skipping benchmark root helper preflight because ASCEND_BENCHMARK_USE_SUDO=${ASCEND_BENCHMARK_USE_SUDO}."
+            exit 0
+          fi
+
+          repo_helper="$GITHUB_WORKSPACE/vllm-ascend-hust/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh"
+          install_script="$GITHUB_WORKSPACE/vllm-ascend-hust/scripts/install_ascend_benchmark_root_helper.sh"
+          configured_helper="${ASCEND_BENCHMARK_ROOT_HELPER:-}"
+          system_helper="$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER"
+          helper_fix="sudo RUNNER_USER=grunner bash $install_script"
+
+          write_failure_summary() {
+            local reason="$1"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              {
+                echo "## Ascend Benchmark Root Helper Preflight"
+                echo
+                echo "Status: FAIL"
+                echo
+                echo "Reason: $reason"
+                echo
+                echo "Runner host fix: \`$helper_fix\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          if [[ ! -f "$repo_helper" ]]; then
+            reason="Runner checkout is missing the repository helper source: $repo_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if [[ ! -f "$install_script" ]]; then
+            reason="Runner checkout is missing the helper install script: $install_script"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if [[ -n "$configured_helper" && "$configured_helper" != "$system_helper" ]]; then
+            if [[ ! -x "$configured_helper" ]]; then
+              reason="Configured benchmark root helper is not executable: $configured_helper"
+              echo "$reason" >&2
+              write_failure_summary "$reason"
+              exit 1
+            fi
+            echo "Benchmark root helper preflight passed with configured helper: $configured_helper"
+            exit 0
+          fi
+
+          if [[ ! -x "$system_helper" ]]; then
+            reason="Installed benchmark root helper is missing or not executable: $system_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if ! cmp -s "$system_helper" "$repo_helper"; then
+            reason="Installed benchmark root helper is stale: $system_helper does not match $repo_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          echo "Benchmark root helper preflight passed: $system_helper matches $repo_helper"
+
       - name: Checkout ascend-runtime-manager repo
         run: |
           clone_with_retry() {
@@ -301,6 +404,11 @@ jobs:
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]]; then
+            echo "Skipping runner-user preinstall NPU preflight because benchmark startup is configured to use the root helper."
+            exit 0
+          fi
+
           PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/preinstall-preflight"
           mkdir -p "$PRECHECK_DIR"
 
@@ -392,6 +500,11 @@ jobs:
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]]; then
+            echo "Skipping runner-user prebenchmark NPU preflight because benchmark startup is configured to use the root helper."
+            exit 0
+          fi
+
           PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/prebenchmark-preflight"
           mkdir -p "$PRECHECK_DIR"
 
