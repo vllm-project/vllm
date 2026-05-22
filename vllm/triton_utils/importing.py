@@ -113,5 +113,6 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.int32 = None
         self.tensor = None
         self.exp = None
+        self.exp2 = None
         self.log = None
         self.log2 = None
