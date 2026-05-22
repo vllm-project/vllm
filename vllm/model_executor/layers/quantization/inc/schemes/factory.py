@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..resolver import INCLayerConfig
+    from ..config_parser import INCLayerConfig
     from .base import INCScheme
 
 

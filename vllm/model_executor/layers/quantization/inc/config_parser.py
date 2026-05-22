@@ -45,7 +45,7 @@ class INCLayerConfig:
         return self.data_type == "mx_fp" and self.bits == 8
 
 
-class INCConfigResolver:
+class INCConfigParser:
     def __init__(self, config: "INCConfig") -> None:
         self._config = config
 

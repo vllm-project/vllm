@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-from .resolver import INCConfigResolver
+from .config_parser import INCConfigParser
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -89,7 +89,7 @@ class INCConfig(QuantizationConfig):
         self.data_type = data_type
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
-        self.resolver = INCConfigResolver(self)
+        self.resolver = INCConfigParser(self)
 
     def __repr__(self) -> str:
         return (

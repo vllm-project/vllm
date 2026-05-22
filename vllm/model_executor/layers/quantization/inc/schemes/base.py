@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
     from ..inc import INCConfig
-    from ..resolver import INCLayerConfig
+    from ..config_parser import INCLayerConfig
 
 
 class INCScheme(ABC):

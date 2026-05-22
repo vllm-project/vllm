@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     import torch
 
     from ..inc import INCConfig
-    from ..resolver import INCLayerConfig
+    from ..config_parser import INCLayerConfig
 
 logger = init_logger(__name__)
 

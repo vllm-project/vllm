@@ -19,7 +19,7 @@ from .base import INCLinearScheme
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from ..resolver import INCLayerConfig
+    from ..config_parser import INCLayerConfig
 
 
 @lru_cache(maxsize=1)

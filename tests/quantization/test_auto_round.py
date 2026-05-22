@@ -15,7 +15,7 @@ from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMetho
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
-from vllm.model_executor.layers.quantization.inc.resolver import INCLayerConfig
+from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.schemes import (
     INCWna16Scheme,
     resolve_scheme,
@@ -97,7 +97,7 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     return INCLayerConfig(**kwargs)
 
 
-def test_inc_resolver_exact_match() -> None:
+def test_inc_config_parser_exact_match() -> None:
     config = make_config(
         extra_config={
             "layers.0.self_attn.q_proj": {
@@ -131,7 +131,7 @@ def test_inc_model_prefix_early_exit() -> None:
     assert isinstance(result, UnquantizedLinearMethod)
 
 
-def test_inc_resolver_regex_match() -> None:
+def test_inc_config_parser_regex_match() -> None:
     config = make_config(
         extra_config={
             r"layers\.\d+\.self_attn\.(q|k|v)_proj": {
@@ -149,7 +149,7 @@ def test_inc_resolver_regex_match() -> None:
     assert layer_config.sym is False
 
 
-def test_inc_resolver_invalid_regex_ignored() -> None:
+def test_inc_config_parser_invalid_regex_ignored() -> None:
     config = make_config(
         extra_config={
             "[invalid": {
@@ -167,7 +167,7 @@ def test_inc_resolver_invalid_regex_ignored() -> None:
     assert layer_config.sym is True
 
 
-def test_inc_resolver_block_name_to_quantize_marks_unquantized() -> None:
+def test_inc_config_parser_block_name_to_quantize_marks_unquantized() -> None:
     config = make_config(block_name_to_quantize=["layers.1"])
 
     layer_config = config.resolver.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
@@ -178,7 +178,7 @@ def test_inc_resolver_block_name_to_quantize_marks_unquantized() -> None:
     assert layer_config.quantized is False
 
 
-def test_inc_resolver_parallel_lm_head_defaults_to_unquantized() -> None:
+def test_inc_config_parser_parallel_lm_head_defaults_to_unquantized() -> None:
     layer = object.__new__(ParallelLMHead)
     config = make_config()
 
@@ -188,7 +188,7 @@ def test_inc_resolver_parallel_lm_head_defaults_to_unquantized() -> None:
     assert layer_config.bits == 16
 
 
-def test_inc_resolver_fused_moe_requires_consistent_configs() -> None:
+def test_inc_config_parser_fused_moe_requires_consistent_configs() -> None:
     config = make_config(
         extra_config={
             "layers.0.block_sparse_moe.experts.0.w1": {
@@ -208,7 +208,7 @@ def test_inc_resolver_fused_moe_requires_consistent_configs() -> None:
         config.resolver.resolve(DummyFusedMoE(), "layers.0.block_sparse_moe")
 
 
-def test_inc_resolver_fused_module_requires_consistent_configs() -> None:
+def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
     config = make_config(
         extra_config={
             "layers.0.self_attn.q_proj": {

@@ -16,7 +16,7 @@ from .base import INCLinearScheme
 if TYPE_CHECKING:
     import torch
 
-    from ..resolver import INCLayerConfig
+    from ..config_parser import INCLayerConfig
 
 
 class INCWNA16LinearScheme(INCLinearScheme):

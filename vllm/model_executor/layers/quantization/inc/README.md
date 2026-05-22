@@ -13,7 +13,7 @@
 │                            INCConfig                                 │
 │                                                                      │
 │  get_quant_method(layer, prefix):                                    │
-│    1. resolver.resolve(layer, prefix) → INCLayerConfig               │
+│    1. config_parser.resolve(layer, prefix) → INCLayerConfig               │
 │    2. resolve_scheme(layer_config)    → INCScheme                    │
 │    3. isinstance dispatch:                                           │
 │         LinearBase → scheme.get_linear_method() → INCLinearMethod    │
@@ -60,7 +60,7 @@ resolve config → resolve scheme → scheme.get_xxx_method()
 ```bash
 inc/
 ├── inc.py              # INCConfig (entry point + dispatch)
-├── resolver.py         # INCLayerConfig + INCConfigResolver
+├── config_parser.py         # INCLayerConfig + INCConfigParser
 ├── inc_linear.py       # INCLinearMethod
 └── schemes/
     ├── base.py         # INCScheme ABC + INCLinearScheme ABC
