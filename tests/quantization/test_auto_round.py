@@ -14,8 +14,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
+from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
     INCWna16Scheme,
     resolve_scheme,
@@ -108,7 +108,9 @@ def test_inc_config_parser_exact_match() -> None:
         }
     )
 
-    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "layers.0.self_attn.q_proj"
+    )
 
     assert layer_config.bits == 8
     assert layer_config.group_size == 64
@@ -142,7 +144,9 @@ def test_inc_config_parser_regex_match() -> None:
         }
     )
 
-    layer_config = config.config_parser.resolve(DummyLayer(), "layers.3.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "layers.3.self_attn.q_proj"
+    )
 
     assert layer_config.bits == 8
     assert layer_config.group_size == 64
@@ -160,7 +164,9 @@ def test_inc_config_parser_invalid_regex_ignored() -> None:
         }
     )
 
-    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "layers.0.self_attn.q_proj"
+    )
 
     assert layer_config.bits == 4
     assert layer_config.group_size == 128
@@ -170,7 +176,9 @@ def test_inc_config_parser_invalid_regex_ignored() -> None:
 def test_inc_config_parser_block_name_to_quantize_marks_unquantized() -> None:
     config = make_config(block_name_to_quantize=["layers.1"])
 
-    layer_config = config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.q_proj")
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "layers.0.self_attn.q_proj"
+    )
 
     assert layer_config.bits == 16
     assert layer_config.group_size == -1

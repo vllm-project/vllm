@@ -15,8 +15,8 @@ from .base import INCScheme
 if TYPE_CHECKING:
     import torch
 
-    from ..inc import INCConfig
     from ..config_parser import INCLayerConfig
+    from ..inc import INCConfig
 
 logger = init_logger(__name__)
 

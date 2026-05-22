@@ -11,8 +11,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearMethodBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
-    from ..inc import INCConfig
     from ..config_parser import INCLayerConfig
+    from ..inc import INCConfig
 
 
 class INCScheme(ABC):
