@@ -635,7 +635,8 @@ jobs:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          max_attempts=2
+          max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
+          retry_delay_seconds=${NODE_ENV_RETRY_DELAY_SECONDS:-30}
           attempt=1
           while [[ "$attempt" -le "$max_attempts" ]]; do
             echo "[benchmark] attempt ${attempt}/${max_attempts}"
@@ -649,8 +650,9 @@ jobs:
             fi
 
             if [[ "$rc" -eq 86 && "$attempt" -lt "$max_attempts" ]]; then
-              echo "Detected node-level Ascend runtime failure (87/507899); retrying benchmark once on next scheduling opportunity."
+              echo "Detected node-level Ascend runtime failure (87/507899); retrying benchmark after ${retry_delay_seconds}s backoff."
               bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh || true
+              sleep "$retry_delay_seconds"
               attempt=$((attempt + 1))
               continue
             fi
