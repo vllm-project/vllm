@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # test_audio.py
 import math
+import wave
+from io import BytesIO
 from unittest.mock import patch
 
 import numpy as np
@@ -788,3 +790,54 @@ class TestAudioChunking:
         )
 
         assert len(chunks_48k) >= 2
+
+
+class TestLoadAudioPyAV:
+    """Regression tests for `load_audio_pyav` (PyAV/FFmpeg audio loader)."""
+
+    @staticmethod
+    def _int16_wav(signal: np.ndarray, sr: int) -> BytesIO:
+        """Encode a float waveform in [-1, 1] as an int16-PCM WAV buffer."""
+        pcm = (np.clip(signal, -1.0, 1.0) * 32767.0).astype("<i2")
+        buf = BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+        buf.seek(0)
+        return buf
+
+    @pytest.mark.parametrize("sr_arg", [None, 22050, 8000])
+    def test_int16_pcm_is_normalized(self, sr_arg):
+        """An int16-PCM WAV must decode to a normalized float32 waveform.
+
+        Regression test for the Gemma 4 audio/ASR hallucination (#40095):
+        when no resample was needed (``sr=None`` -> ``sr == native_sr``),
+        ``load_audio_pyav`` appended raw int16 frames and cast them to
+        float32 *without scaling*, so the waveform came out at ~±32768
+        instead of ±1.0 and every downstream log-mel feature was wrong.
+        """
+        pytest.importorskip("av")
+        from vllm.multimodal.media.audio import load_audio_pyav
+
+        native_sr = 22050
+        amplitude = 0.5
+        t = np.linspace(0.0, 1.0, native_sr, endpoint=False)
+        signal = amplitude * np.sin(2 * np.pi * 440.0 * t)
+
+        waveform, out_sr = load_audio_pyav(
+            self._int16_wav(signal, native_sr), sr=sr_arg
+        )
+
+        assert waveform.dtype == np.float32
+        assert waveform.ndim == 1
+        peak = float(np.max(np.abs(waveform)))
+        # The bug produced a peak of ~16384 (amplitude * 32768); a correctly
+        # normalized waveform stays within [-1, 1] ...
+        assert peak <= 1.0, f"waveform not normalized (peak={peak})"
+        # ... and preserves the amplitude rather than merely clipping.
+        assert peak == pytest.approx(amplitude, abs=0.05)
+        # Sample rate is returned as an int (like load_audio_soundfile).
+        assert isinstance(out_sr, int)
+        assert out_sr == (sr_arg or native_sr)
