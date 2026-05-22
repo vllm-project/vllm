@@ -115,6 +115,9 @@ void scaled_fp4_quant_out(torch::stable::Tensor const& input,
                           torch::stable::Tensor& output,
                           torch::stable::Tensor& output_scale);
 
+torch::stable::Tensor repack_nvfp4_scale(
+    torch::stable::Tensor const& row_major_scale);
+
 void scaled_fp4_experts_quant(
     torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
     torch::stable::Tensor const& input,

@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     SCALED_FP4_QUANT_OUT_OVERLOAD = torch.ops._C.scaled_fp4_quant.out
     SCALED_FP4_QUANT_DEFAULT_OVERLOAD = torch.ops._C.scaled_fp4_quant.default
+if hasattr(torch.ops._C, "repack_nvfp4_scale"):
+    REPACK_NVFP4_SCALE_OVERLOAD = torch.ops._C.repack_nvfp4_scale.default
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
@@ -411,12 +413,13 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
                 rms,
                 input_global_scale,
-                True,
+                False,
             )
+            gathered_scale = self._all_gather(quant[1])
             return (
                 self._all_gather(quant[0]),
                 reduce_scatter,
-                self._all_gather(quant[1]),
+                REPACK_NVFP4_SCALE_OVERLOAD(gathered_scale),
             )
 
         pm.register_replacement(
@@ -483,9 +486,14 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
                 rms,
                 input_global_scale,
-                True,
+                False,
             )
-            return self._all_gather(quant[0]), residual_out, self._all_gather(quant[1])
+            gathered_scale = self._all_gather(quant[1])
+            return (
+                self._all_gather(quant[0]),
+                residual_out,
+                REPACK_NVFP4_SCALE_OVERLOAD(gathered_scale),
+            )
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
@@ -567,7 +575,10 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
 
-            if "SCALED_FP4_QUANT_OUT_OVERLOAD" in globals():
+            if (
+                "SCALED_FP4_QUANT_OUT_OVERLOAD" in globals()
+                and "REPACK_NVFP4_SCALE_OVERLOAD" in globals()
+            ):
                 FirstAllReduceRMSNormStaticNVFP4Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)

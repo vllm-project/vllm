@@ -28,6 +28,9 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
                              torch::stable::Tensor const& output_sf,
                              torch::stable::Tensor const& input_sf,
                              bool is_sf_swizzled_layout);
+
+void repack_nvfp4_scale_sm1xxa(torch::stable::Tensor const& row_major_scale,
+                               torch::stable::Tensor& output_scale);
 #endif
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
@@ -115,6 +118,32 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> scaled_fp4_quant_func(
   scaled_fp4_quant_out(input, input_sf, is_sf_swizzled_layout, output,
                        output_sf);
   return {output, output_sf};
+}
+
+torch::stable::Tensor repack_nvfp4_scale(
+    torch::stable::Tensor const& row_major_scale) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  STD_TORCH_CHECK(nvfp4_quant_sm_supported(),
+                  "No compiled nvfp4 scale repack kernel for SM ",
+                  get_sm_version_num(),
+                  ". Recompile with the appropriate CUDA arch.");
+  STD_TORCH_CHECK(row_major_scale.dim() == 2,
+                  "row_major_scale must be a matrix");
+  STD_TORCH_CHECK(
+      row_major_scale.scalar_type() == torch::headeronly::ScalarType::Byte,
+      "row_major_scale must be uint8");
+
+  auto [sf_m, sf_n] = vllm::computeSwizzledSFShape(
+      row_major_scale.size(0), row_major_scale.size(1) * CVT_FP4_SF_VEC_SIZE);
+  auto output_scale =
+      torch::stable::empty({sf_m, sf_n}, torch::headeronly::ScalarType::Int,
+                           std::nullopt, row_major_scale.device());
+  repack_nvfp4_scale_sm1xxa(row_major_scale, output_scale);
+  return output_scale;
+#endif
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(false,
+                                  "No compiled nvfp4 scale repack kernel");
 }
 
 void scaled_fp4_experts_quant(
