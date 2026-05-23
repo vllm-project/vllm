@@ -133,15 +133,15 @@ def rocm_unquantized_gemm_impl(
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
     wavefront_width = 64  # MI3XX (CDNA3); matches Utils::get_warp_size() on device
-    waves_per_group = 4  # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
+    waves_per_block = 4  # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
     # Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
-    # Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
+    # Scaled up by wavefronts_sharing_b below to account for wavefronts sharing M-tiles.
     cus_needed_naive = ((m + wavefront_width - 1) // wavefront_width) * ((k + 512 - 1) // 512)
-    # How many of waves_per_group waves in a group can work on same 16 Ms at same time?
-    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
-    GrpsShrB = min(N_p2 // 16, waves_per_group)
+    # How many of waves_per_block wavefronts can cooperatively load the same B tile into LDS?
+    # Maximize this first — more sharing = fewer redundant HBM loads, but more CUs needed.
+    wavefronts_sharing_b = min(N_p2 // 16, waves_per_block)
     # Given the above, how many CUs would we need?
-    cus_needed = cus_needed_naive * GrpsShrB
+    cus_needed = cus_needed_naive * wavefronts_sharing_b
     # candidate for atomic reduce count splitk?
     fits_wvsplitkrc = (
         N_p2 * m * ((k + 512 - 1) // 512)
