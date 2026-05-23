@@ -216,7 +216,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             + 1  # 1B pad
         )
 
-        # Will be None on ROCm for now.
         self.aux_stream_list = mla_modules.aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -346,8 +345,27 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         return self.wo_b(z.flatten(1))
 
-    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
+    def _aux_streams_for_step(
+        self,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> list[torch.cuda.Stream] | None:
         aux_streams = self.aux_stream_list
+        if current_platform.is_rocm():
+            # HIP multi-stream/event ordering for this layer currently wedges
+            # decode on MI355X, both under replayed graphs and eager piecewise
+            # execution. Keep ROCm on the current stream until the lower-level
+            # ordering issue is fixed.
+            return None
+
+        return aux_streams
+
+    def attn_gemm_parallel_execute(
+        self,
+        hidden_states: torch.Tensor,
+        aux_streams: list[torch.cuda.Stream] | None,
+    ) -> tuple[Any, ...]:
         if aux_streams is not None:
             assert len(aux_streams) >= 3
             aux_streams = aux_streams[:3]
@@ -355,7 +373,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # On ROCm, aux_streams is None and execute_in_parallel runs serially.
+        # ROCm keeps aux_streams as None in this wrapper and falls back to
+        # sequential execution on the current stream.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -414,9 +433,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        aux_streams = self._aux_streams_for_step(attn_metadata)
 
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm_parallel_execute(hidden_states)
+            self.attn_gemm_parallel_execute(hidden_states, aux_streams)
         )
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
@@ -432,8 +452,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # on the default stream so q stays on its consumer stream (mla_attn
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
+        post_aux_streams = None if current_platform.is_rocm() else aux_streams
         if self.indexer is not None:
-            aux_streams = self.aux_stream_list
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
             assert self.compressor is not None
@@ -458,18 +478,23 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                         indexer_weights,
                         positions,
                         self.indexer_rotary_emb,
+                        use_aux_stream=post_aux_streams is not None,
                     ),
                     lambda: compressor(kv_score, positions, self.rotary_emb),
                 ],
                 self.ln_events[0],
                 [self.ln_events[1], self.ln_events[2]],
-                [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
-                enable=aux_streams is not None,
+                (
+                    [post_aux_streams[0], post_aux_streams[1]]
+                    if post_aux_streams is not None
+                    else None
+                ),
+                enable=post_aux_streams is not None,
             )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
             aux_stream = (
-                self.aux_stream_list[0] if self.aux_stream_list is not None else None
+                post_aux_streams[0] if post_aux_streams is not None else None
             )
             compressor = self.compressor
 
@@ -881,6 +906,7 @@ class DeepseekV4Indexer(nn.Module):
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
+        use_aux_stream: bool = True,
     ) -> torch.Tensor:
         compressor = self.compressor
 
@@ -905,6 +931,6 @@ class DeepseekV4Indexer(nn.Module):
             lambda: compressor(compressed_kv_score, positions, rotary_emb),
             self.ln_events[0],
             self.ln_events[1],
-            self.aux_stream,
+            self.aux_stream if use_aux_stream else None,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)
