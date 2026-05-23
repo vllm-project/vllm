@@ -468,12 +468,13 @@ def fp8_mqa_logits_torch(
     seq_len_kv = k_fp8.shape[0]
     k = k_fp8.to(torch.bfloat16)
     q = q.to(torch.bfloat16)
+    device = q.device
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -1355,7 +1356,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
     assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
     assert indptr.ndim == 1, f"expected indptr=[sq+1], got {indptr.shape}"
-    assert q.is_cuda and kv.is_cuda and indices.is_cuda and indptr.is_cuda
+    assert not q.is_cpu and not kv.is_cpu and not indices.is_cpu and not indptr.is_cpu
 
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
@@ -1459,10 +1460,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     )
     assert main_indptr.ndim == 1, f"expected main_indptr=[b+1], got {main_indptr.shape}"
     assert (
-        q.is_cuda
-        and main_cache.is_cuda
-        and main_indices.is_cuda
-        and main_indptr.is_cuda
+        not q.is_cpu
+        and not main_cache.is_cpu
+        and not main_indices.is_cpu
+        and not main_indptr.is_cpu
     )
 
     main_indices = _as_int32_contiguous_1d(main_indices)

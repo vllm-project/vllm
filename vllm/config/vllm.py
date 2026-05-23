@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import is_dataclass
 from datetime import datetime
@@ -733,6 +734,17 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
+        # Check if KV connector requires chunked prefill to be disabled.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
+            and self.scheduler_config.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
+            )
+
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
@@ -2204,7 +2216,7 @@ T = TypeVar("T")
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
-    layer_names: list[str] | None = None,
+    layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.
@@ -2215,14 +2227,12 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
+    if layer_names is None:
+        layer_names = forward_context.keys()
 
     return {
-        layer_name: forward_context[layer_name]
+        layer_name: layer
         for layer_name in layer_names
-        if layer_name in forward_context
-        and isinstance(forward_context[layer_name], layer_type)
+        if isinstance(layer := forward_context.get(layer_name), layer_type)
     }
