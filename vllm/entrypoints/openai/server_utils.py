@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import URL, Headers, MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
@@ -35,6 +35,9 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 logger = init_logger("vllm.entrypoints.openai.server_utils")
 
 
+GUARDED_PREFIX = ("/v1", "/v2", "/inference")
+
+
 class AuthenticationMiddleware:
     """
     Pure ASGI middleware that authenticates each request by checking
@@ -44,7 +47,7 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
     """
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
@@ -77,10 +80,10 @@ class AuthenticationMiddleware:
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
         root_path = scope.get("root_path", "")
-        url_path = URL(scope=scope).path.removeprefix(root_path)
+        url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)

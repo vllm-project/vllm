@@ -248,9 +248,11 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches
             ),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", num_images),
+            image_token_id=MultiModalFieldConfig.shared(
+                "image", num_images, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
@@ -476,7 +478,7 @@ class InternVLMultiModalProcessor(
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches
             ),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             video_token_id=MultiModalFieldConfig.shared("video", num_videos),
         )
 

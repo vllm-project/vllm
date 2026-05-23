@@ -75,4 +75,12 @@ void shuffle_rows(const torch::Tensor& input_tensor,
 // Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
 void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
                       const torch::Tensor& mat_b);
+
+// Fused RMSNorm + router GEMV for DeepSeek V4. Produces both:
+//   normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
+//   logits[m,n]        = sum_k(normed_x[m,k] * gate_weight[n,k])
+// in a single kernel launch. Same dim/dtype constraints as dsv3_router_gemm.
+void dsv4_norm_router_gemm(at::Tensor& logits, at::Tensor& normed_x,
+                           at::Tensor const& x, at::Tensor const& norm_weight,
+                           at::Tensor const& gate_weight, double eps);
 #endif

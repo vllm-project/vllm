@@ -238,8 +238,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
-    "CohereMoeForCausalLM": _HfExamplesInfo(
-        "/host/engines/cohere-moe",
+    "Cohere2MoeForCausalLM": _HfExamplesInfo(
+        "CohereLabs/command-a-plus-05-2026",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -988,6 +988,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
     ),
+    "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Preview",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
         extras={
@@ -1098,6 +1103,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_6",
+        min_transformers_version="5.7.0",
+    ),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
@@ -1193,6 +1202,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                 "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
             )
         },
+    ),
+    "OpenVLAForActionPrediction": _HfExamplesInfo(
+        "openvla/openvla-7b",
+        trust_remote_code=True,
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
@@ -1330,7 +1343,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
-        "Skywork/Skywork-R1V-38B", trust_remote_code=True
+        "Skywork/Skywork-R1V-38B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "SkyworkChatModel.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
+            )
+        },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
@@ -1375,7 +1397,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
@@ -1406,6 +1428,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_num_seqs=32,
     ),
     # [Eagle]
+    "EagleCohereForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        speculative_model="/host/engines/cohere-moe/eagle",
+        tokenizer="/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
@@ -1482,6 +1511,21 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
     ),
+    # [PEagle]
+    "PEagleDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
+    "PeagleLlamaForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
     # [MTP]
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
@@ -1493,6 +1537,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "Gemma4MTPModel": _HfExamplesInfo(
+        "google/gemma-4-E4B-it",
+        speculative_model="google/gemma-4-E4B-it-assistant",
+        trust_remote_code=True,
+        min_transformers_version="5.8.0",
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
