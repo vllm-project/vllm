@@ -240,15 +240,15 @@ class SpecDecodeBaseProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
+            from vllm.models.deepseek_v4.amd.rocm import (
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
+            )
             from vllm.v1.attention.backends.mla.indexer import (
                 DeepseekV32IndexerMetadata,
             )
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
                 ROCMAiterMLASparseMetadata,
-            )
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
-                DeepseekV4ROCMAiterMLASparseMetadata,
-                DeepseekV4ROCMAiterSparseSWAMetadata,
             )
             from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 
