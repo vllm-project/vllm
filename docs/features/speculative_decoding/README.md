@@ -140,6 +140,25 @@ vllm serve <target-model> \
   }'
 ```
 
+#### DFlash
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `dynamic_verifying` | `float` or `"auto"` | `None` | Dynamically truncates DFlash draft tokens when draft confidence falls below the threshold. A float must be in `(0, 1)`. `"auto"` uses an adaptive per-request threshold. |
+| `dynamic_verifying_min_length` | `0 <= integer <= num_speculative_tokens` | `0` | Minimum number of draft tokens to keep when dynamic verification is enabled. |
+
+Example:
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "<dflash-draft-model>",
+    "num_speculative_tokens": 15,
+    "dynamic_verifying": "auto"
+  }'
+
+
 ### Notes
 
 - `--speculative-config` expects a JSON object on the CLI. In YAML config
