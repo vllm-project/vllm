@@ -1780,7 +1780,6 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   dim3 grid(CuCount);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  // const int max_lds_len = get_lds_size() / 2;
 
   // Base estimate: one CU per 64-row M-tile per 512-element K-shard.
   // Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
@@ -1792,12 +1791,12 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   int GrpsShrB = min(N_p2 / 16, 4);
 
   // Given the above, how many CUs would we need?
-  int CuNeeded = cus_needed_naive * GrpsShrB;
+  int cus_needed = cus_needed_naive * GrpsShrB;
 
-  if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
+  if (cus_needed > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
   // Can we increase SplitK by shrinking the K-shared to 256?
-  int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+  int chunkk = (cus_needed * 2 <= CuCount) ? 2 : 1;
 
   static torch::Tensor axl_glbl =
       torch::zeros(

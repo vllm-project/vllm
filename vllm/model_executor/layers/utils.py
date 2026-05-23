@@ -140,12 +140,12 @@ def rocm_unquantized_gemm_impl(
     # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
-    CuNeeded = cus_needed_naive * GrpsShrB
+    cus_needed = cus_needed_naive * GrpsShrB
     # candidate for atomic reduce count splitk?
     fits_wvsplitkrc = (
         N_p2 * m * ((k + 512 - 1) // 512)
     ) <= 128 * 1024 * 12  # deterministic
-    fits_wvsplitkrc &= CuNeeded <= cu_count
+    fits_wvsplitkrc &= cus_needed <= cu_count
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
