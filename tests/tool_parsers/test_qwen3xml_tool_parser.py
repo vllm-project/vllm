@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 
 import pytest
 
@@ -8,6 +9,11 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
 
 class TestQwen3xmlToolParser(ToolParserTests):
@@ -70,3 +76,46 @@ class TestQwen3xmlToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+def test_qwen3xml_parses_json_literals_in_deferred_array_params():
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "AskUserQuestion",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "multiSelect": {"type": "boolean"},
+                                    "metadata": {"type": "object"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    model_output = """<tool_call>
+<function=AskUserQuestion>
+<parameter=questions>
+[{"question": "Pick one", "multiSelect": false, "metadata": null}]
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3XMLToolParser(tokenizer=None, tools=tools)  # type: ignore[arg-type]
+    request = ChatCompletionRequest(model="test", messages=[], tools=tools)
+    extracted = parser.extract_tool_calls(model_output, request=request)
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["questions"] == [
+        {"question": "Pick one", "multiSelect": False, "metadata": None}
+    ]

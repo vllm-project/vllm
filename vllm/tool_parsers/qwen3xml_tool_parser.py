@@ -513,7 +513,7 @@ class StreamingXMLToolCallParser:
             if processed.startswith("</parameter>"):
                 body_text = self._pre_param_buffer
                 # Trigger deferred parsing mode
-                # literal_eval+json output in end_element
+                # JSON/Python literal parsing happens in end_element
                 self.defer_current_parameter = True
                 self.deferred_param_raw_value = body_text
                 # Clean up state
@@ -821,7 +821,10 @@ class StreamingXMLToolCallParser:
                         raw_for_parse = raw_text + "\n"
                     else:
                         raw_for_parse = raw_text
-                    parsed_value = ast.literal_eval(raw_for_parse)
+                    try:
+                        parsed_value = json.loads(raw_for_parse.strip())
+                    except json.JSONDecodeError:
+                        parsed_value = ast.literal_eval(raw_for_parse)
                     output_arguments = json.dumps(parsed_value, ensure_ascii=False)
                 except Exception:
                     # Fallback: output as string as-is
