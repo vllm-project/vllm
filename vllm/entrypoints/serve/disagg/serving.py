@@ -476,10 +476,12 @@ class ServingTokens(OpenAIServing):
                         logprob=max(step_token.logprob, -9999.0),
                         top_logprobs=[
                             ChatCompletionLogProb(
-                                token=f"token_id:{p[0]}",
-                                logprob=max(p[1].logprob, -9999.0),
+                                token=f"token_id:{token_id}",
+                                logprob=max(logprob.logprob, -9999.0),
                             )
-                            for i, p in enumerate(step_top_logprobs.items())
+                            for i, (token_id, logprob) in enumerate(
+                                step_top_logprobs.items()
+                            )
                             if num_output_top_logprobs is not None
                             and i < max(num_output_top_logprobs, 1)
                         ],
