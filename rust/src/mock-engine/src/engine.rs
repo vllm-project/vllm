@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash as _, Hasher as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -198,7 +198,7 @@ impl ActiveRequest {
 struct Engine {
     engine_index: u32,
     opt: Opt,
-    active_requests: BTreeMap<String, ActiveRequest>,
+    active_requests: HashMap<String, ActiveRequest>,
 }
 
 impl Engine {
@@ -312,17 +312,14 @@ impl Engine {
             return Vec::new();
         }
 
-        let request_ids = self.active_requests.keys().cloned().collect::<Vec<_>>();
         let mut outputs_by_client =
             BTreeMap::<u32, (Vec<EngineCoreOutput>, BTreeSet<String>)>::new();
         let mut all_finished_requests = BTreeSet::new();
 
-        for request_id in request_ids {
-            let Some(request) = self.active_requests.get_mut(&request_id) else {
-                continue;
-            };
+        for request in self.active_requests.values_mut() {
             let client_index = request.client_index;
             let output = request.step(&self.opt);
+            let request_id = request.request_id.clone();
             let finished = output.finished();
             if output.finished() {
                 all_finished_requests.insert(request_id.clone());
@@ -378,7 +375,7 @@ pub(crate) async fn run_engine_loop(
     let mut engine = Engine {
         engine_index,
         opt,
-        active_requests: BTreeMap::new(),
+        active_requests: HashMap::new(),
     };
 
     loop {
