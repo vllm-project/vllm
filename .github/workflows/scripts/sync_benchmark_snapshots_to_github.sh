@@ -17,6 +17,7 @@ GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-benchmark-bot@vllm-hust.local}
 BENCHMARK_REPO_REMOTE=${BENCHMARK_REPO_REMOTE:-origin}
 BENCHMARK_REPO_SLUG=${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}
 BENCHMARK_REPO_GH_TOKEN=${BENCHMARK_REPO_GH_TOKEN:-}
+BENCHMARK_REPO_SSH_KEY=${BENCHMARK_REPO_SSH_KEY:-}
 
 required_submission_files=(leaderboard_manifest.json run_leaderboard.json)
 required_snapshot_files=(
@@ -37,15 +38,23 @@ write_github_env() {
 configure_push_remote() {
   local remote_url=
 
-  if [[ -z "$BENCHMARK_REPO_GH_TOKEN" ]]; then
-    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-      echo "BENCHMARK_REPO_GH_TOKEN is required for direct benchmark publication in GitHub Actions" >&2
-      exit 2
-    fi
+  if [[ -n "$BENCHMARK_REPO_GH_TOKEN" ]]; then
+    remote_url="https://x-access-token:${BENCHMARK_REPO_GH_TOKEN}@github.com/${BENCHMARK_REPO_SLUG}.git"
+    git -C "$BENCHMARK_REPO_DIR" remote set-url "$BENCHMARK_REPO_REMOTE" "$remote_url"
     return 0
   fi
 
-  remote_url="https://x-access-token:${BENCHMARK_REPO_GH_TOKEN}@github.com/${BENCHMARK_REPO_SLUG}.git"
+  if [[ -n "$BENCHMARK_REPO_SSH_KEY" ]]; then
+    remote_url="git@github.com:${BENCHMARK_REPO_SLUG}.git"
+    git -C "$BENCHMARK_REPO_DIR" remote set-url "$BENCHMARK_REPO_REMOTE" "$remote_url"
+    return 0
+  fi
+
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "Either BENCHMARK_REPO_GH_TOKEN or BENCHMARK_REPO_SSH_KEY is required for direct benchmark publication in GitHub Actions" >&2
+    exit 2
+  fi
+
   git -C "$BENCHMARK_REPO_DIR" remote set-url "$BENCHMARK_REPO_REMOTE" "$remote_url"
 }
 

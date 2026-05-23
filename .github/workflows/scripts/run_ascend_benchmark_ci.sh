@@ -905,6 +905,7 @@ sync_benchmark_publication_to_github() {
   PYTHON_BIN="$PYTHON_BIN" \
   BENCHMARK_REPO_SLUG="${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}" \
   BENCHMARK_REPO_GH_TOKEN="${BENCHMARK_REPO_GH_TOKEN:-}" \
+  BENCHMARK_REPO_SSH_KEY="${BENCHMARK_REPO_SSH_KEY:-}" \
   SNAPSHOT_COMMIT_MESSAGE="chore(data): sync benchmark publication $RUN_ID" \
   RUN_ID="$RUN_ID" \
   "$publisher_script"

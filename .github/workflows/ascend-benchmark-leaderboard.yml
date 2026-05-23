@@ -130,6 +130,7 @@ jobs:
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_HUST_BENCHMARK_GH_TOKEN }}
+      BENCHMARK_REPO_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
       BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || '' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
@@ -166,6 +167,49 @@ jobs:
             echo "Install or refresh the benchmark root helper at $DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER, then rerun the workflow." >&2
             exit 1
           }
+
+      - name: Configure GitHub SSH checkout
+        if: ${{ env.BENCHMARK_REPO_SSH_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          key_file="$HOME/.ssh/vllm_hust_benchmark_key"
+          printf '%s\n' "$BENCHMARK_REPO_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          known_hosts_tmp="$(mktemp)"
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "$known_hosts_tmp" 2>/dev/null
+          if [[ ! -s "$known_hosts_tmp" ]]; then
+            echo "Unable to scan github.com host keys." >&2
+            exit 2
+          fi
+          cat "$known_hosts_tmp" >> "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          cat > "$HOME/.ssh/config" <<EOF
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile $key_file
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
+          ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
+          echo "$ssh_output"
+          if [[ "$ssh_output" == *"Permission denied"* ]]; then
+            echo "GitHub SSH authentication failed for the configured key." >&2
+            exit 2
+          fi
+          if [[ "$ssh_status" -ne 0 && "$ssh_status" -ne 1 ]]; then
+            echo "GitHub SSH probe failed with status $ssh_status." >&2
+            exit "$ssh_status"
+          fi
 
       - name: Checkout target repo with retry
         run: |
