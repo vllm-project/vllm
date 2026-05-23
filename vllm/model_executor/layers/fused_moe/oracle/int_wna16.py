@@ -87,6 +87,9 @@ def _get_priority_backends(
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
 
+    if not may_have_bias:
+        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
+
     return _AVAILABLE_BACKENDS
 
 
@@ -769,6 +772,7 @@ def convert_to_wna16_moe_kernel_format(
                 "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
                 f"QuantizationArgs, got {type(quant_config).__name__}."
             )
+
         if w13_g_idx is None or w2_g_idx is None:
             raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
         return _process_weights_marlin(
@@ -801,10 +805,14 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.TRITON:
-        # No processing needed for Triton.
+        # Convert from int32 to uint8 format for Triton kernel.
+        # This changes the shape from (E, N, K // 8) to (E, N, K // 2) for int4,
+        # which matches what the Triton kernel expects.
+        w13_uint8 = w13.view(torch.uint8)
+        w2_uint8 = w2.view(torch.uint8)
         return (
-            w13,
-            w2,
+            w13_uint8,
+            w2_uint8,
             w13_scale,
             w2_scale,
             None,

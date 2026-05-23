@@ -523,7 +523,9 @@ class TritonWNA16Experts(TritonExperts):
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
+            assert hidden_states.size(-1) // 2 == w1.size(2), (
+                f"Hidden size mismatch {hidden_states.size(-1) // 2} == {w1.size(2)}"
+            )
         else:
             assert hidden_states.size(-1) == w1.size(2), (
                 f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"
