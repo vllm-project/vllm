@@ -80,7 +80,7 @@ class AuthenticationMiddleware:
         url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if url_path.startswith(("/v1", "/v2", "/inference")) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
