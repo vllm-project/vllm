@@ -521,7 +521,7 @@ class _MockGDNLayer:
         self.head_v_dim = head_v_dim
         self.tp_size = tp_size
 
-        from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+        from vllm.model_executor.layers.mamba.gdn.base import (
             GatedDeltaNetAttention,
         )
 
