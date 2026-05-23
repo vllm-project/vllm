@@ -4,7 +4,7 @@
 Define LoRA functionality mixin for model runners.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TypeAlias
 
 import numpy as np
@@ -70,6 +70,13 @@ class LoRAModelRunnerMixin:
         if not hasattr(self, "lora_manager"):
             raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
+    def _get_torchax_context(self):
+        try:
+            import torchax
+            return torchax.default_env()
+        except ImportError:
+            return nullcontext()
+
     def set_active_loras(
         self,
         input_batch: InputBatch,
@@ -117,14 +124,7 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, num_loras + 1)
             }
 
-            try:
-                import torchax
-                torchax_ctx = torchax.default_env()
-            except ImportError:
-                from contextlib import nullcontext
-                torchax_ctx = nullcontext()
-
-            with torchax_ctx, self.lora_manager.dummy_lora_cache():
+            with self._get_torchax_context(), self.lora_manager.dummy_lora_cache():
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to
                 # load from disk.
                 for lr in lora_requests:
@@ -134,7 +134,7 @@ class LoRAModelRunnerMixin:
 
             # __exit__ code
             if remove_lora:
-                with torchax_ctx:
+                with self._get_torchax_context():
                     self.lora_manager.remove_all_adapters()
 
     @contextmanager
@@ -232,14 +232,7 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, effective_num_loras + 1)
             }
 
-            try:
-                import torchax
-                torchax_ctx = torchax.default_env()
-            except ImportError:
-                from contextlib import nullcontext
-                torchax_ctx = nullcontext()
-
-            with torchax_ctx:
+            with self._get_torchax_context():
                 self._set_active_loras(
                     tuple(sample_lora_mapping),
                     tuple(token_lora_mapping),
