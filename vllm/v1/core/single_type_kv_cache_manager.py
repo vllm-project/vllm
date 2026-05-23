@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import Literal
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -26,6 +27,10 @@ from vllm.v1.kv_cache_interface import (
     TQFullAttentionSpec,
 )
 from vllm.v1.request import Request
+
+AUTO_RETENTION_BASE = 1024
+AUTO_RETENTION_INTERVAL = 32768
+RetentionInterval = int | Literal["auto"]
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -731,30 +736,36 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         alignment_tokens: int,
-        interval_tokens: int,
+        interval_tokens: RetentionInterval,
         latest_boundary_token: int | None,
     ) -> None:
         """Cache local tails at retained checkpoint boundaries.
 
-        "interval_tokens" selects regular checkpoint boundaries. "0" means
-        no regular interval checkpoints. "latest_boundary_token" optionally
-        adds the prompt replay boundary that exact prompt replays can hit.
+        "interval_tokens" selects regular checkpoint boundaries. "auto" uses
+        the default retention schedule, and "0" means no regular interval
+        checkpoints. "latest_boundary_token" optionally adds the prompt replay
+        boundary that exact prompt replays can hit.
         """
         assert alignment_tokens % self.block_size == 0
-        assert interval_tokens == 0 or interval_tokens % alignment_tokens == 0
+        if isinstance(interval_tokens, int) and interval_tokens > 0:
+            interval_tokens = self._align_retention_boundary(
+                interval_tokens, alignment_tokens
+            )
+        assert (
+            interval_tokens == "auto"
+            or interval_tokens == 0
+            or interval_tokens % alignment_tokens == 0
+        )
 
         request_id = request.request_id
 
-        # Iterate over interval boundaries and cache the local tail at each
-        # boundary.
-        if interval_tokens > 0:
-            last_boundary = self._last_interval_retention_boundary.get(request_id, 0)
-            boundary = ((last_boundary // interval_tokens) + 1) * interval_tokens
-            while boundary <= num_tokens:
-                self._cache_tail_at_boundary(request, boundary)
-                last_boundary = boundary
-                boundary += interval_tokens
-            self._last_interval_retention_boundary[request_id] = last_boundary
+        last_boundary = self._last_interval_retention_boundary.get(request_id, 0)
+        for boundary in self._retention_boundaries(
+            last_boundary, num_tokens, alignment_tokens, interval_tokens
+        ):
+            self._cache_tail_at_boundary(request, boundary)
+            last_boundary = boundary
+        self._last_interval_retention_boundary[request_id] = last_boundary
 
         # optionally cache the latest prompt boundary
         if latest_boundary_token is not None and latest_boundary_token <= num_tokens:
@@ -764,6 +775,54 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self.num_cached_block[request_id] = max(
             self.num_cached_block.get(request_id, 0),
             num_tokens // self.block_size,
+        )
+
+    def _retention_boundaries(
+        self,
+        last_boundary: int,
+        num_tokens: int,
+        alignment_tokens: int,
+        interval_tokens: RetentionInterval,
+    ) -> list[int]:
+        boundaries: list[int] = []
+        if interval_tokens == 0:
+            return boundaries
+        if interval_tokens != "auto":
+            boundary = ((last_boundary // interval_tokens) + 1) * interval_tokens
+            while boundary <= num_tokens:
+                boundaries.append(boundary)
+                boundary += interval_tokens
+            return boundaries
+
+        interval = self._align_retention_boundary(
+            AUTO_RETENTION_INTERVAL, alignment_tokens
+        )
+        emitted: set[int] = set()
+        boundary = AUTO_RETENTION_BASE
+        while boundary <= AUTO_RETENTION_INTERVAL:
+            aligned_boundary = self._align_retention_boundary(
+                boundary, alignment_tokens
+            )
+            if (
+                aligned_boundary not in emitted
+                and last_boundary < aligned_boundary <= num_tokens
+            ):
+                emitted.add(aligned_boundary)
+                boundaries.append(aligned_boundary)
+            boundary *= 2
+
+        boundary = ((last_boundary // interval) + 1) * interval
+        while boundary <= num_tokens:
+            if boundary not in emitted:
+                boundaries.append(boundary)
+            boundary += interval
+        return boundaries
+
+    @staticmethod
+    def _align_retention_boundary(boundary: int, alignment_tokens: int) -> int:
+        return max(
+            alignment_tokens,
+            cdiv(boundary, alignment_tokens) * alignment_tokens,
         )
 
     def _cache_tail_at_boundary(self, request: Request, boundary_token: int) -> None:

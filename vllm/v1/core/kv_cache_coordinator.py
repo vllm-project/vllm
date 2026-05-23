@@ -3,9 +3,9 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
+from typing import Literal
 
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -15,6 +15,8 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    AUTO_RETENTION_BASE,
+    AUTO_RETENTION_INTERVAL,
     CrossAttentionManager,
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -411,7 +413,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
-        local_kv_retention_interval: int | None = None,
+        local_kv_retention_interval: int | Literal["auto"] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -440,16 +442,35 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.verify_and_split_kv_cache_groups()
 
         self.local_kv_retention_interval = local_kv_retention_interval
-        # align with lcm_block_size
-        if (
-            self.local_kv_retention_interval is not None
-            and self.local_kv_retention_interval > 0
-        ):
-            self.local_kv_retention_interval = max(
-                self.lcm_block_size,
-                cdiv(local_kv_retention_interval, self.lcm_block_size)
-                * self.lcm_block_size,
+        if self.local_kv_retention_interval is not None:
+            has_sliding_window_group = any(
+                isinstance(manager, SlidingWindowManager)
+                for manager in self.single_type_managers
             )
+            if has_sliding_window_group:
+                if self.local_kv_retention_interval == "auto":
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain "
+                        "sliding-window checkpoint tails at powers of 2 from %d to "
+                        "%d tokens, then every %d tokens, plus the latest replayable "
+                        "prompt boundary.",
+                        AUTO_RETENTION_BASE,
+                        AUTO_RETENTION_INTERVAL,
+                        AUTO_RETENTION_INTERVAL,
+                    )
+                elif self.local_kv_retention_interval == 0:
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain only "
+                        "the latest replayable prompt boundary."
+                    )
+                else:
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain "
+                        "sliding-window checkpoint tails at the configured "
+                        "%d-token interval after prefix-cache alignment, plus "
+                        "the latest replayable prompt boundary.",
+                        self.local_kv_retention_interval,
+                    )
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -524,7 +545,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 // self.lcm_block_size
                 * self.lcm_block_size
             )
-            latest_retention_boundary = retention_boundary if retention_boundary > 0 else None
+            latest_retention_boundary = (
+                retention_boundary if retention_boundary > 0 else None
+            )
 
         for manager in self.single_type_managers:
             if self.local_kv_retention_interval is not None and isinstance(
@@ -661,7 +684,7 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
-    local_kv_retention_interval: int | None = None,
+    local_kv_retention_interval: int | Literal["auto"] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     if (

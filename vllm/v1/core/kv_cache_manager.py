@@ -120,7 +120,7 @@ class KVCacheManager:
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        local_kv_retention_interval: int | None = None,
+        local_kv_retention_interval: int | Literal["auto"] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len

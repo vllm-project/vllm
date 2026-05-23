@@ -68,6 +68,7 @@ from vllm.config.cache import (
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
+    PrefixCacheRetentionInterval,
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
@@ -157,6 +158,27 @@ def optional_type(return_type: Callable[[str], T]) -> Callable[[str], T | None]:
         return parse_type(return_type)(val)
 
     return _optional_type
+
+
+def prefix_cache_retention_interval(
+    val: str,
+) -> PrefixCacheRetentionInterval:
+    if val == "" or val == "None":
+        return None
+    if val == "auto":
+        return "auto"
+    try:
+        interval = int(val)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            "prefix-cache-retention-interval must be 'auto', 'None', or a "
+            "non-negative integer"
+        ) from e
+    if interval < 0:
+        raise argparse.ArgumentTypeError(
+            "prefix-cache-retention-interval must be non-negative"
+        )
+    return interval
 
 
 def union_dict_and_str(val: str) -> str | dict[str, str] | None:
@@ -506,7 +528,7 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
-    prefix_cache_retention_interval: int | None = get_field(
+    prefix_cache_retention_interval: PrefixCacheRetentionInterval = get_field(
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
@@ -1143,9 +1165,14 @@ class EngineArgs:
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
+        prefix_cache_retention_kwargs = {
+            **cache_kwargs["prefix_cache_retention_interval"]
+        }
+        prefix_cache_retention_kwargs["type"] = prefix_cache_retention_interval
+        prefix_cache_retention_kwargs.pop("choices", None)
         cache_group.add_argument(
             "--prefix-cache-retention-interval",
-            **cache_kwargs["prefix_cache_retention_interval"],
+            **prefix_cache_retention_kwargs,
         )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
