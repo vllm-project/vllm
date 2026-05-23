@@ -802,7 +802,7 @@ class TestMaybeCombineReasoningAndToolCall:
         assert result is None
 
 
-class TestConstructInputMessagesInstructionsLeak:
+class TestConstructInputMessagesInstructionsLeakRegression:
     """Regression tests for #37697: instructions from a prior response
     should NOT leak through previous_response_id."""
 

@@ -138,9 +138,9 @@ class KVCacheManager:
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
-        # When unset, fall back to `max_model_len` so the recycling-aware cap
-        # collapses to the prior (uncapped) admission behavior. The scheduler
-        # always supplies the real value at runtime.
+            # When unset, fall back to `max_model_len` so the recycling-aware cap
+            # collapses to the prior (uncapped) admission behavior. The scheduler
+            # always supplies the real value at runtime.
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,

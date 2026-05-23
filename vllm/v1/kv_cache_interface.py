@@ -461,6 +461,7 @@ class SlidingWindowSpec(AttentionSpec):
         )
         return max_blocks * self.page_size_bytes
 
+
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
     """Sliding window attention with MLA cache format."""

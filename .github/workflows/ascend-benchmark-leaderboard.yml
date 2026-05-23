@@ -88,6 +88,7 @@ jobs:
       - docker
     timeout-minutes: 60
     env:
+      DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
       HF_HOME: ${{ github.workspace }}/../.hf-cache
@@ -116,14 +117,100 @@ jobs:
       HARDWARE_CHIP_MODEL: 910B3
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
+      SAME_SPEC_BENCHMARK_ENABLED: ${{ vars.VLLM_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1' }}
+      SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || '' }}
+      SAME_SPEC_CONSTRAINTS_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_CONSTRAINTS_FILE || '' }}
+      ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_HUST_BENCHMARK_USE_SUDO || '1' }}
+      ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
-      TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
+      BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
+      BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
+      BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_HUST_BENCHMARK_GH_TOKEN }}
+      BENCHMARK_REPO_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
+      BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || '' }}
+      WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
+      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
+      HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
+      - name: Pre-clean stale checkout state
+        shell: bash
+        run: |
+          legacy_paths=(
+            "${GITHUB_WORKSPACE}/.benchmarks"
+            "${GITHUB_WORKSPACE}/.ci-runtime"
+            "${GITHUB_WORKSPACE}/vllm-hust-benchmark"
+            "${GITHUB_WORKSPACE}/vllm-hust-website"
+            "${GITHUB_WORKSPACE}/vllm-ascend-hust"
+            "${GITHUB_WORKSPACE}/ascend-runtime-manager"
+          )
+
+          shopt -s nullglob dotglob
+          workspace_entries=("${GITHUB_WORKSPACE}"/*)
+          shopt -u nullglob dotglob
+          cleanup_paths=("${legacy_paths[@]}" "${workspace_entries[@]}")
+
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]] \
+            && command -v sudo >/dev/null 2>&1 \
+            && [[ -x "$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER" ]] \
+            && sudo -n "$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER" cleanup-paths "${cleanup_paths[@]}"; then
+            exit 0
+          fi
+
+          rm -rf "${cleanup_paths[@]}" || {
+            echo "Failed to clear stale benchmark workspace state as the runner user." >&2
+            echo "Install or refresh the benchmark root helper at $DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER, then rerun the workflow." >&2
+            exit 1
+          }
+
+      - name: Configure GitHub SSH checkout
+        if: ${{ env.BENCHMARK_REPO_SSH_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          key_file="$HOME/.ssh/vllm_hust_benchmark_key"
+          printf '%s\n' "$BENCHMARK_REPO_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          known_hosts_tmp="$(mktemp)"
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com > "$known_hosts_tmp" 2>/dev/null
+          if [[ ! -s "$known_hosts_tmp" ]]; then
+            echo "Unable to scan github.com host keys." >&2
+            exit 2
+          fi
+          cat "$known_hosts_tmp" >> "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          cat > "$HOME/.ssh/config" <<EOF
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile $key_file
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
+          ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
+          echo "$ssh_output"
+          if [[ "$ssh_output" == *"Permission denied"* ]]; then
+            echo "GitHub SSH authentication failed for the configured key." >&2
+            exit 2
+          fi
+          if [[ "$ssh_status" -ne 0 && "$ssh_status" -ne 1 ]]; then
+            echo "GitHub SSH probe failed with status $ssh_status." >&2
+            exit "$ssh_status"
+          fi
+
       - name: Checkout target repo with retry
         run: |
           clone_with_retry() {
@@ -171,16 +258,34 @@ jobs:
           clone_with_retry() {
             local repo_url=$1
             local target_dir=$2
+            local target_ref=${3:-}
             local attempts=4
             local delay_seconds=15
             local try=1
+            local parent_dir
+            local temp_dir
+            local checkout_ref
 
-            rm -rf "$target_dir"
+            parent_dir=$(dirname "$target_dir")
+            temp_dir="${parent_dir}/.checkout-benchmark-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+            mkdir -p "$parent_dir"
+            rm -rf "$target_dir" "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if git clone --depth 1 "$repo_url" "$temp_dir"; then
+                if [[ -n "$target_ref" ]]; then
+                  checkout_ref="$target_ref"
+                  if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_ref^{commit}" >/dev/null; then
+                    git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
+                    checkout_ref=FETCH_HEAD
+                  fi
+                  git -C "$temp_dir" checkout --force "$checkout_ref"
+                fi
+                mv "$temp_dir" "$target_dir"
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
+              rm -rf "$temp_dir"
               if [[ "$try" -lt "$attempts" ]]; then
                 sleep "$delay_seconds"
               fi
@@ -191,7 +296,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" "$GITHUB_WORKSPACE/vllm-hust-benchmark"
+          clone_with_retry "$BENCHMARK_REPO_URL" "$GITHUB_WORKSPACE/vllm-hust-benchmark" "$BENCHMARK_REPO_REF"
 
       - name: Checkout website repo
         run: |
@@ -218,7 +323,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-hust-website.git" "$GITHUB_WORKSPACE/vllm-hust-website"
+          clone_with_retry "$WEBSITE_REPO_URL" "$GITHUB_WORKSPACE/vllm-hust-website"
 
       - name: Checkout vllm-ascend-hust repo
         run: |
@@ -245,7 +350,77 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust"
+          clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$GITHUB_WORKSPACE/vllm-ascend-hust"
+
+      - name: Preflight benchmark root helper
+        shell: bash
+        run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" != "1" ]]; then
+            echo "Skipping benchmark root helper preflight because ASCEND_BENCHMARK_USE_SUDO=${ASCEND_BENCHMARK_USE_SUDO}."
+            exit 0
+          fi
+
+          repo_helper="$GITHUB_WORKSPACE/vllm-ascend-hust/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh"
+          install_script="$GITHUB_WORKSPACE/vllm-ascend-hust/scripts/install_ascend_benchmark_root_helper.sh"
+          configured_helper="${ASCEND_BENCHMARK_ROOT_HELPER:-}"
+          system_helper="$DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER"
+          helper_fix="sudo RUNNER_USER=grunner bash $install_script"
+
+          write_failure_summary() {
+            local reason="$1"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              {
+                echo "## Ascend Benchmark Root Helper Preflight"
+                echo
+                echo "Status: FAIL"
+                echo
+                echo "Reason: $reason"
+                echo
+                echo "Runner host fix: \`$helper_fix\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          if [[ ! -f "$repo_helper" ]]; then
+            reason="Runner checkout is missing the repository helper source: $repo_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if [[ ! -f "$install_script" ]]; then
+            reason="Runner checkout is missing the helper install script: $install_script"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if [[ -n "$configured_helper" && "$configured_helper" != "$system_helper" ]]; then
+            if [[ ! -x "$configured_helper" ]]; then
+              reason="Configured benchmark root helper is not executable: $configured_helper"
+              echo "$reason" >&2
+              write_failure_summary "$reason"
+              exit 1
+            fi
+            echo "Benchmark root helper preflight passed with configured helper: $configured_helper"
+            exit 0
+          fi
+
+          if [[ ! -x "$system_helper" ]]; then
+            reason="Installed benchmark root helper is missing or not executable: $system_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          if ! cmp -s "$system_helper" "$repo_helper"; then
+            reason="Installed benchmark root helper is stale: $system_helper does not match $repo_helper"
+            echo "$reason" >&2
+            write_failure_summary "$reason"
+            exit 1
+          fi
+
+          echo "Benchmark root helper preflight passed: $system_helper matches $repo_helper"
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -272,7 +447,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$GITHUB_WORKSPACE/ascend-runtime-manager"
+          clone_with_retry "$HUST_ASCEND_MANAGER_REPO_URL" "$GITHUB_WORKSPACE/ascend-runtime-manager"
 
       - name: Prepare Hugging Face cache directories
         run: |
@@ -293,6 +468,83 @@ jobs:
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
+      - name: Runner health preflight (before install)
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]]; then
+            echo "Skipping runner-user preinstall NPU preflight because benchmark startup is configured to use the root helper."
+            exit 0
+          fi
+
+          PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/preinstall-preflight"
+          mkdir -p "$PRECHECK_DIR"
+
+          normalize_visible_devices() {
+            local raw_value="${1:-}"
+            local device
+            local -a devices=()
+
+            IFS=',' read -r -a raw_devices <<< "${raw_value}"
+            for device in "${raw_devices[@]}"; do
+              device="${device//[[:space:]]/}"
+              if [[ -n "${device}" ]]; then
+                devices+=("${device}")
+              fi
+            done
+
+            if [[ "${#devices[@]}" -eq 0 ]]; then
+              return 1
+            fi
+
+            local normalized_devices
+            normalized_devices="$(IFS=','; echo "${devices[*]}")"
+            printf '%s\n' "${normalized_devices}"
+          }
+
+          log_ascend_visibility() {
+            local stage="$1"
+            echo "[ascend-visibility][${stage}] ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "[ascend-visibility][${stage}] ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          }
+
+          log_ascend_visibility before-sanitize
+          resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+          if [[ -z "${resolved_rt_visible_devices}" && -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
+            unset ASCEND_RT_VISIBLE_DEVICES
+            echo "[ascend-visibility] Unset empty ASCEND_RT_VISIBLE_DEVICES before preinstall preflight"
+          fi
+
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          log_ascend_visibility after-source
+          {
+            echo "ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          } > "$PRECHECK_DIR/visible-devices.txt"
+
+          max_attempts=2
+          attempt=1
+          while [[ "$attempt" -le "$max_attempts" ]]; do
+            echo "[preinstall-preflight] attempt ${attempt}/${max_attempts}"
+            if hust_ascend_manager_run runtime check \
+              --repo "$GITHUB_WORKSPACE" \
+              --python "$PYTHON_BIN" \
+              --require-npu \
+              --json | tee "$PRECHECK_DIR/runtime-check-attempt-${attempt}.json"; then
+              break
+            fi
+            if [[ "$attempt" -eq "$max_attempts" ]]; then
+              hust_ascend_manager_run doctor --json >"$PRECHECK_DIR/doctor.json" 2>&1 || true
+              npu-smi info >"$PRECHECK_DIR/npu-smi-info.txt" 2>&1 || true
+              npu-smi info -m >"$PRECHECK_DIR/npu-smi-map.txt" 2>&1 || true
+              echo "Runner health preflight failed before installation" >&2
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -305,14 +557,119 @@ jobs:
 
       - name: Verify installation
         env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           "${PYTHON_BIN}" --version
-          "${PYTHON_BIN}" -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
-          "${PYTHON_BIN}" -c "import importlib; importlib.import_module('vllm.entrypoints.cli.main'); print('vLLM CLI module import: ok')"
+          "${PYTHON_BIN}" - <<'PY'
+          import importlib.metadata as metadata
+          import importlib.util
+          import os
+          from pathlib import Path
 
-      - name: Run benchmark CI and optional HF sync
+
+          def module_path(module_name: str) -> Path:
+            spec = importlib.util.find_spec(module_name)
+            if spec is None or spec.origin is None:
+              raise SystemExit(f"{module_name} is not importable")
+            return Path(spec.origin).resolve()
+
+
+          def dist_version(*dist_names: str) -> str:
+            for dist_name in dist_names:
+              try:
+                return metadata.version(dist_name)
+              except metadata.PackageNotFoundError:
+                continue
+            return "<unknown>"
+
+
+          expected_repo = Path(os.environ["VLLM_ASCEND_HUST_REPO"]).resolve()
+          vllm_path = module_path("vllm")
+          vllm_ascend_path = module_path("vllm_ascend")
+          platform_plugins = metadata.entry_points(group="vllm.platform_plugins")
+          ascend_plugin = [ep for ep in platform_plugins if ep.name == "ascend"]
+
+          print(f"vLLM version: {dist_version('vllm-hust', 'vllm')}")
+          print(f"vllm_ascend version: {dist_version('vllm-ascend-hust', 'vllm-ascend')}")
+          print(f"vLLM module path: {vllm_path}")
+          print(f"vllm_ascend module path: {vllm_ascend_path}")
+          print(f"vllm.platform_plugins ascend entry point: {ascend_plugin[0].value if ascend_plugin else '<missing>'}")
+
+          if expected_repo not in vllm_ascend_path.parents:
+            raise SystemExit(
+              "vllm_ascend is not resolved from the checked-out workspace: "
+              f"{vllm_ascend_path} (expected under {expected_repo})"
+            )
+
+          if not ascend_plugin:
+            raise SystemExit("ascend platform plugin entry point is not installed")
+          PY
+
+      - name: Runner health preflight (before benchmark)
+        env:
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+        run: |
+          if [[ "${ASCEND_BENCHMARK_USE_SUDO}" == "1" ]]; then
+            echo "Skipping runner-user prebenchmark NPU preflight because benchmark startup is configured to use the root helper."
+            exit 0
+          fi
+
+          PRECHECK_DIR="${GITHUB_WORKSPACE}/.benchmarks/ci/prebenchmark-preflight"
+          mkdir -p "$PRECHECK_DIR"
+
+          normalize_visible_devices() {
+            local raw_value="${1:-}"
+            local device
+            local -a devices=()
+
+            IFS=',' read -r -a raw_devices <<< "${raw_value}"
+            for device in "${raw_devices[@]}"; do
+              device="${device//[[:space:]]/}"
+              if [[ -n "${device}" ]]; then
+                devices+=("${device}")
+              fi
+            done
+
+            if [[ "${#devices[@]}" -eq 0 ]]; then
+              return 1
+            fi
+
+            local normalized_devices
+            normalized_devices="$(IFS=','; echo "${devices[*]}")"
+            printf '%s\n' "${normalized_devices}"
+          }
+
+          log_ascend_visibility() {
+            local stage="$1"
+            echo "[ascend-visibility][${stage}] ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "[ascend-visibility][${stage}] ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          }
+
+          log_ascend_visibility before-sanitize
+          resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+          if [[ -z "${resolved_rt_visible_devices}" && -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
+            unset ASCEND_RT_VISIBLE_DEVICES
+            echo "[ascend-visibility] Unset empty ASCEND_RT_VISIBLE_DEVICES before prebenchmark preflight"
+          fi
+
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          log_ascend_visibility after-source
+          {
+            echo "ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-<unset>}"
+            echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          } > "$PRECHECK_DIR/visible-devices.txt"
+
+          hust_ascend_manager_run runtime check \
+            --repo "$GITHUB_WORKSPACE" \
+            --python "$PYTHON_BIN" \
+            --require-plugin \
+            --require-npu \
+            --json | tee "$PRECHECK_DIR/runtime-check.json"
+
+      - name: Run benchmark CI and optional formal publish
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -322,7 +679,30 @@ jobs:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+          max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
+          retry_delay_seconds=${NODE_ENV_RETRY_DELAY_SECONDS:-30}
+          attempt=1
+          while [[ "$attempt" -le "$max_attempts" ]]; do
+            echo "[benchmark] attempt ${attempt}/${max_attempts}"
+            set +e
+            bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+            rc=$?
+            set -e
+
+            if [[ "$rc" -eq 0 ]]; then
+              break
+            fi
+
+            if [[ "$rc" -eq 86 && "$attempt" -lt "$max_attempts" ]]; then
+              echo "Detected node-level Ascend runtime failure (87/507899); retrying benchmark after ${retry_delay_seconds}s backoff."
+              bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh || true
+              sleep "$retry_delay_seconds"
+              attempt=$((attempt + 1))
+              continue
+            fi
+
+            exit "$rc"
+          done
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
@@ -350,18 +730,26 @@ jobs:
           comment_path = result_root / 'benchmark_comment.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           bench_scenario = os.environ.get('BENCH_SCENARIO', 'random-online')
-          publish_mode = 'hf-sync' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
+          publish_mode = 'formal-publish' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
           model_name = os.environ.get('MODEL_NAME', 'unknown')
           hf_repo = os.environ.get('HF_REPO_ID', 'unknown')
           leaderboard_url = os.environ.get('WEBSITE_LEADERBOARD_URL', '').strip()
 
           result_root.mkdir(parents=True, exist_ok=True)
 
+          artifact = None
+          if leaderboard_entry.is_file():
+            artifact = json.loads(leaderboard_entry.read_text(encoding='utf-8'))
+
+          display_model_name = model_name
+          if isinstance(artifact, dict):
+            display_model_name = artifact.get('model_name') or model_name
+
           lines = [
             '## Ascend Benchmark Summary',
             f'- Run ID: `{run_id}`',
             f'- Scenario: `{bench_scenario}`',
-            f'- Model: `{model_name}`',
+            f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
@@ -369,17 +757,17 @@ jobs:
             '<!-- ascend-benchmark-leaderboard-comment -->',
             '## Ascend Benchmark Result',
             f'- Scenario: `{bench_scenario}`',
-            f'- Model: `{model_name}`',
+            f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
           if runner_preflight_failure.is_file():
-            skip_note = (
+            failure_note = (
               '- Runner health: `unhealthy` '
-              '(benchmark skipped before vLLM startup because torch_npu basic allocation failed)'
+              '(benchmark failed before vLLM startup because all visible torch_npu allocations failed)'
             )
-            lines.append(skip_note)
-            comment_lines.append(skip_note)
+            lines.append(failure_note)
+            comment_lines.append(failure_note)
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [
@@ -394,9 +782,17 @@ jobs:
             lines.append('- Raw benchmark result: `missing`')
             comment_lines.append('- Raw benchmark result: `missing`')
           if leaderboard_entry.is_file():
-            artifact = json.loads(leaderboard_entry.read_text(encoding='utf-8'))
             lines.append(f"- Leaderboard engine version: `{artifact.get('engine_version')}`")
             comment_lines.append(f"- Leaderboard engine version: `{artifact.get('engine_version')}`")
+            same_spec = artifact.get('same_spec') if isinstance(artifact, dict) else None
+            if isinstance(same_spec, dict):
+              spec_id = same_spec.get('spec_id') or 'unknown'
+              spec_hash = str(same_spec.get('resolved_spec_hash') or '')
+              spec_note = f'- Same-spec goal artifact: `{spec_id}`'
+              if spec_hash:
+                spec_note += f' (`{spec_hash[:8]}`)'
+              lines.append(spec_note)
+              comment_lines.append(spec_note)
           else:
             lines.append('- Leaderboard entry: `missing`')
             comment_lines.append('- Leaderboard entry: `missing`')
@@ -408,7 +804,7 @@ jobs:
             lines.append(f'- Constraints file: `{constraints_path}`')
             comment_lines.append(f'- Dataset path: `{dataset_path}`')
             comment_lines.append(f'- Constraints file: `{constraints_path}`')
-          elif publish_mode == 'artifact-preview':
+          elif publish_mode == 'artifact-preview' and not (artifact and isinstance(artifact.get('same_spec'), dict)):
             note = '- Note: random-online runs stay as preview artifacts unless random preview publish is explicitly enabled.'
             lines.append(note)
             comment_lines.append(note)

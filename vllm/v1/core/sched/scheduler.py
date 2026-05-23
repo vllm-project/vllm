@@ -204,9 +204,7 @@ class Scheduler(SchedulerInterface):
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-        self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size
-        )
+        self.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -1965,7 +1963,9 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        structured_output_cache_stats = self.structured_output_manager.make_cache_stats()
+        structured_output_cache_stats = (
+            self.structured_output_manager.make_cache_stats()
+        )
         connector_prefix_cache_stats: PrefixCacheStats | None = None
         if self.connector_prefix_cache_stats is not None:
             connector_prefix_cache_stats = self.connector_prefix_cache_stats

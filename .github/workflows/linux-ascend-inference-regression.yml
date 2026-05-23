@@ -27,19 +27,47 @@ jobs:
       - docker
     timeout-minutes: 45
     env:
+      DEFAULT_SYSTEM_ASCEND_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      ASCEND_E2E_USE_SUDO: ${{ vars.VLLM_HUST_ASCEND_E2E_USE_SUDO || '1' }}
+      ASCEND_E2E_ROOT_HELPER: ${{ vars.VLLM_HUST_ASCEND_E2E_ROOT_HELPER || '' }}
       SOC_VERSION: ascend910b3
-      TARGET_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
+      HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
 
     steps:
+      - name: Pre-clean stale checkout state
+        shell: bash
+        run: |
+          legacy_paths=(
+            "${GITHUB_WORKSPACE}/.ci-runtime"
+            "${GITHUB_WORKSPACE}/vllm-ascend-hust"
+            "${GITHUB_WORKSPACE}/ascend-runtime-manager"
+          )
+
+          shopt -s nullglob dotglob
+          workspace_entries=("${GITHUB_WORKSPACE}"/*)
+          shopt -u nullglob dotglob
+          cleanup_paths=("${legacy_paths[@]}" "${workspace_entries[@]}")
+
+          if [[ "${ASCEND_E2E_USE_SUDO}" == "1" ]] \
+            && command -v sudo >/dev/null 2>&1 \
+            && [[ -x "$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER" ]] \
+            && sudo -n "$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER" cleanup-paths "${cleanup_paths[@]}"; then
+            exit 0
+          fi
+
+          rm -rf "${cleanup_paths[@]}"
+
       - name: Checkout target repo with retry
         run: |
           clone_with_retry() {
@@ -119,7 +147,52 @@ jobs:
             return 1
           }
 
-          clone_with_retry "${{ github.server_url }}/vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
+          clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$VLLM_ASCEND_HUST_REPO"
+
+      - name: Preflight root helper
+        shell: bash
+        run: |
+          if [[ "${ASCEND_E2E_USE_SUDO}" != "1" ]]; then
+            echo "Skipping Ascend E2E root helper preflight because ASCEND_E2E_USE_SUDO=${ASCEND_E2E_USE_SUDO}."
+            exit 0
+          fi
+
+          repo_helper="$GITHUB_WORKSPACE/vllm-ascend-hust/.github/workflows/scripts/run_ascend_benchmark_root_helper.sh"
+          install_script="$GITHUB_WORKSPACE/vllm-ascend-hust/scripts/install_ascend_benchmark_root_helper.sh"
+          configured_helper="${ASCEND_E2E_ROOT_HELPER:-}"
+          system_helper="$DEFAULT_SYSTEM_ASCEND_ROOT_HELPER"
+          helper_fix="sudo RUNNER_USER=grunner bash $install_script"
+
+          if [[ ! -f "$repo_helper" ]]; then
+            echo "Runner checkout is missing the repository helper source: $repo_helper" >&2
+            echo "Runner host fix: $helper_fix" >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$install_script" ]]; then
+            echo "Runner checkout is missing the helper install script: $install_script" >&2
+            exit 1
+          fi
+
+          if [[ -n "$configured_helper" && "$configured_helper" != "$system_helper" ]]; then
+            [[ -x "$configured_helper" ]] || {
+              echo "Configured Ascend E2E root helper is not executable: $configured_helper" >&2
+              exit 1
+            }
+            exit 0
+          fi
+
+          [[ -x "$system_helper" ]] || {
+            echo "Installed Ascend E2E root helper is missing or not executable: $system_helper" >&2
+            echo "Runner host fix: $helper_fix" >&2
+            exit 1
+          }
+
+          cmp -s "$system_helper" "$repo_helper" || {
+            echo "Installed Ascend E2E root helper is stale: $system_helper does not match $repo_helper" >&2
+            echo "Runner host fix: $helper_fix" >&2
+            exit 1
+          }
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -146,7 +219,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "${{ github.server_url }}/vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
+          clone_with_retry "$HUST_ASCEND_MANAGER_REPO_URL" "$HUST_ASCEND_MANAGER_REPO"
 
       - name: Resolve Ascend Python runtime
         run: |

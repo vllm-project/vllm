@@ -11,7 +11,6 @@ from vllm.v1.metrics.loggers import LoggingStatLogger, PrometheusStatLogger
 from vllm.v1.metrics.reader import Counter, get_metrics_snapshot
 from vllm.v1.metrics.stats import SchedulerStats, StructuredOutputCacheStats
 
-
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 

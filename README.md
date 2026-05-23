@@ -122,6 +122,16 @@ This workspace also provides a trusted Ascend benchmark publication workflow in
   `VLLM_HUST_PR_BENCHMARK_SCENARIO`
 - Preview-publication gate: `VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH=1`
 - Required secret for Hugging Face publication: `HF_TOKEN`
+- Required credential for benchmark-repo Git publication:
+  `VLLM_HUST_BENCHMARK_GH_TOKEN` (HTTPS PAT) or
+  `VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY` (historical SSH bot key kept for
+  trusted-runner compatibility)
+
+When formal publication is enabled, the trusted runner writes the exported
+submission under `submissions/<run-id>/` and refreshes
+`leaderboard-data/snapshots/` in one direct commit to
+`vllm-hust-benchmark@main`. That GitHub-first commit then triggers the
+benchmark repository's downstream Hugging Face sync workflow.
 
 Leaderboard display semantics are intentionally repo-scoped and stable:
 

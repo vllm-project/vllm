@@ -83,9 +83,15 @@ def infer_accelerator_scheduling_defaults(
     if is_xpu:
         if "a770" in device_name or not is_data_center_gpu:
             return COMPACT_ACCELERATOR_DEFAULTS
-        if any(name in device_name for name in ("1550", "max 1550")) or device_memory >= 96 * GiB_bytes:
+        if (
+            any(name in device_name for name in ("1550", "max 1550"))
+            or device_memory >= 96 * GiB_bytes
+        ):
             return BALANCED_ACCELERATOR_DEFAULTS
-        if any(name in device_name for name in ("1100", "max 1100")) or device_memory >= 48 * GiB_bytes:
+        if (
+            any(name in device_name for name in ("1100", "max 1100"))
+            or device_memory >= 48 * GiB_bytes
+        ):
             return GRAPH_LIGHT_BALANCED_ACCELERATOR_DEFAULTS
         return COMPACT_ACCELERATOR_DEFAULTS
 
