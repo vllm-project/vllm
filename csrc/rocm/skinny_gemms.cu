@@ -1787,9 +1787,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   int cus_needed_naive = ((M_in + wavefront_width - 1) / wavefront_width) * ((K_in + 512 - 1) / 512);
 
   constexpr int waves_per_block = 4;  // wavefronts per block
+  constexpr int ntile = 16;           // MFMA output tile height (matches NTILE in kernel)
   // How many of the waves_per_block wavefronts can cooperatively load the same B tile into LDS?
   // Maximize this first — more sharing = fewer redundant HBM loads, but more CUs needed.
-  int wavefronts_sharing_b = min(N_p2 / 16, waves_per_block);
+  int wavefronts_sharing_b = min(N_p2 / ntile, waves_per_block);
 
   // Given the above, how many CUs would we need?
   int cus_needed = cus_needed_naive * wavefronts_sharing_b;
