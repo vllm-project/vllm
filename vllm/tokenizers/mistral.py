@@ -1,22 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+from mistral_common.guidance.grammar_factory import GrammarFactory
+from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
 from mistral_common.protocol.instruct.request import (
     ReasoningEffort,
 )
-from mistral_common.protocol.instruct.tool_calls import Function, Tool
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
     SpecialTokens,
+    Tokenizer,
 )
-from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+from mistral_common.tokens.tokenizers.instruct import (
+    InstructTokenizerBase,
+    InstructTokenizerV13,
+)
+from mistral_common.tokens.tokenizers.mistral import (
+    MistralTokenizer as MistralCommonTokenizer,
+)
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
@@ -26,22 +35,36 @@ from pydantic import ValidationError
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
+from vllm.tokenizers.protocol import TokenizerLike
 
-from .protocol import TokenizerLike
+try:
+    # Transformers v5
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+except ImportError:
+    # Transformers v4
+    from transformers.tokenization_mistral_common import (
+        MistralCommonTokenizer as MistralCommonBackend,
+    )
 
 if TYPE_CHECKING:
+    import llguidance
     from transformers import BatchEncoding
 
-    try:
-        # Transformers v5
-        from transformers.tokenization_mistral_common import MistralCommonBackend
-    except ImportError:
-        # Transformers v4
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as MistralCommonBackend,
-        )
-
 logger = init_logger(__name__)
+
+
+def _pop_unallowed_keys_and_warn(
+    dictionary: dict[str, Any], allowed_keys: set[str], err_dict_name: str
+):
+    keys = list(dictionary.keys())
+    for key in keys:
+        if key not in allowed_keys:
+            dictionary.pop(key)
+            logger.warning_once(
+                f"'{key=}' is not supported by mistral-common "
+                f"for {err_dict_name}. It has been popped from the "
+                "object."
+            )
 
 
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
@@ -113,12 +136,11 @@ def truncate_tool_call_ids(request: "MistralChatCompletionRequest"):
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 
-def _prepare_apply_chat_template_tools_and_messages(
+def _validate_apply_chat_template_args(
     messages: list["ChatCompletionMessageParam"],
-    tools: list[dict[str, Any]] | None = None,
     continue_final_message: bool = False,
     add_generation_prompt: bool = False,
-) -> tuple[list["ChatCompletionMessageParam"], list[dict[str, Any]] | None]:
+) -> None:
     if add_generation_prompt and continue_final_message:
         raise ValueError(
             "Cannot set both `add_generation_prompt` and "
@@ -141,54 +163,6 @@ def _prepare_apply_chat_template_tools_and_messages(
             "Cannot set `continue_final_message` to True when "
             "the last message is not from the assistant."
         )
-
-    # mistral-common requires AssistantMessage content to be string [1].
-    #
-    # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
-    for message in messages:
-        # Remove reasoning as unsupported by Mistral
-        _ = message.pop("reasoning", None)  # type: ignore
-
-    # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict and the "description" string to be present
-    # even if they are empty.
-    if tools:
-        for function in [
-            tool["function"] for tool in tools if tool["type"] == "function"
-        ]:
-            if function.get("parameters") is None:
-                function["parameters"] = {}
-            if function.get("description") is None:
-                function["description"] = ""
-
-        # We filter not supported arguments to avoid throwing an error.
-        # TODO(juliendenize): remove this once OpenAI API is better supported by
-        # `mistral-common`.
-        tools_fields = set(Tool.model_fields.keys())
-        function_fields = set(Function.model_fields.keys())
-        for tool in tools:
-            tool_keys = list(tool.keys())
-            for tool_key in tool_keys:
-                if tool_key not in tools_fields:
-                    tool.pop(tool_key)
-                    logger.warning_once(
-                        f"'{tool_key}' is not supported by mistral-common for tools. "
-                        "It has been popped from the tool definition."
-                    )
-                if tool["type"] == "function":
-                    function_keys = list(tool["function"].keys())
-                    for function_key in function_keys:
-                        if function_key not in function_fields:
-                            tool["function"].pop(function_key)
-                            logger.warning_once(
-                                f"'{function_key}' is not supported by mistral-common "
-                                "for function tools. It has been popped from the "
-                                "function definition."
-                            )
-                else:
-                    raise ValueError("mistral-common only supports function tools.")
-
-    return messages, tools
 
 
 def validate_request_params(request: "ChatCompletionRequest"):
@@ -235,15 +209,6 @@ class MistralTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> "MistralTokenizer":
-        try:
-            # Transformers v5
-            from transformers.tokenization_mistral_common import MistralCommonBackend
-        except ImportError:
-            # Transformers v4
-            from transformers.tokenization_mistral_common import (
-                MistralCommonTokenizer as MistralCommonBackend,
-            )
-
         tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
@@ -255,13 +220,13 @@ class MistralTokenizer(TokenizerLike):
 
         return cls(tokenizer)
 
-    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
+    def __init__(self, tokenizer: MistralCommonBackend) -> None:
         super().__init__()
 
-        self.transformers_tokenizer = tokenizer
-        self.mistral = tokenizer.tokenizer
-        self.instruct = self.mistral.instruct_tokenizer
-        self.tokenizer = self.instruct.tokenizer
+        self.transformers_tokenizer: MistralCommonBackend = tokenizer
+        self.mistral: MistralCommonTokenizer = tokenizer.tokenizer
+        self.instruct: InstructTokenizerBase = self.mistral.instruct_tokenizer
+        self.tokenizer: Tokenizer = self.instruct.tokenizer
 
         mode = self.mistral._chat_completion_request_validator._mode
         if mode != ValidationMode.test:
@@ -437,8 +402,8 @@ class MistralTokenizer(TokenizerLike):
         if self.version >= 15:
             version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
 
-        messages, tools = _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, continue_final_message, add_generation_prompt
+        _validate_apply_chat_template_args(
+            messages, continue_final_message, add_generation_prompt
         )
 
         return self.transformers_tokenizer.apply_chat_template(
@@ -483,7 +448,11 @@ class MistralTokenizer(TokenizerLike):
         return self.transformers_tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        to_decode_special_tokens = {SpecialTokens.tool_calls}
+        to_decode_special_tokens = {
+            SpecialTokens.tool_calls,
+            SpecialTokens.begin_think,
+            SpecialTokens.end_think,
+        }
         if self.is_tekken:
             assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
             tokens = [
@@ -573,3 +542,24 @@ class MistralTokenizer(TokenizerLike):
             ]
 
         return tokens
+
+    @property
+    def supports_grammar(self) -> bool:
+        return GrammarFactory.is_supported(self.mistral)
+
+    @cached_property
+    def grammar_factory(self) -> GrammarFactory:
+        if not self.supports_grammar:
+            raise AttributeError(
+                "This tokenizer does not support `grammar_factory`. "
+                "This is only supported for tekken tokenizers with "
+                "version >= 11."
+            )
+        # Cache grammar factory to avoid creating a llguidance tokenizer at every usage.
+        return GrammarFactory(self.mistral)
+
+    @cached_property
+    def llg_tokenizer(self) -> "llguidance.LLTokenizer":
+        if not self.is_tekken:
+            raise ValueError("`llg_tokenizer` is only supported for Tekkenizers.")
+        return from_mistral_tokenizer(self.mistral)

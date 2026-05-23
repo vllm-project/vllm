@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
@@ -23,6 +23,25 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+class AsyncOutputFuture(Future):
+    def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
+        self.async_output = async_output
+        self.single_value = single_value
+        super().__init__()
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise RuntimeError("timeout not implemented")
+
+        if not super().done():
+            try:
+                output = self.async_output.get_output()
+                self.set_result(output if self.single_value else [output])
+            except Exception as e:
+                self.set_exception(e)
+        return super().result()
+
+
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
@@ -37,18 +56,14 @@ class UniProcExecutor(Executor):
             shared_worker_lock=Lock(),
         )
 
-        self.async_output_thread: ThreadPoolExecutor | None = None
-        if self.max_concurrent_batches > 1:
-            self.async_output_thread = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="WorkerAsyncOutput"
-            )
-
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        if not is_eep_new_worker:
-            self.driver_worker.init_device()
+        self.driver_worker.init_device()
+
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.driver_worker.elastic_ep_execute("load_model")
+        else:
             self.driver_worker.load_model()
-            current_platform.update_block_size_for_backend(self.vllm_config)
+        current_platform.update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -81,15 +96,7 @@ class UniProcExecutor(Executor):
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
-                if (async_thread := self.async_output_thread) is not None:
-                    if single_value:
-                        return async_thread.submit(result.get_output)
-
-                    def get_output_list() -> list[Any]:
-                        return [result.get_output()]
-
-                    return async_thread.submit(get_output_list)
-                result = result.get_output()
+                return AsyncOutputFuture(result, single_value)
             future = Future[Any]()
             future.set_result(result if single_value else [result])
         except Exception as e:
@@ -134,6 +141,10 @@ class UniProcExecutor(Executor):
         if worker := self.driver_worker:
             worker.shutdown()
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
+
 
 class ExecutorWithExternalLauncher(UniProcExecutor):
     """An executor that uses external launchers to launch engines,
@@ -141,7 +152,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     offline inference with tensor parallelism.
 
     see https://github.com/vllm-project/vllm/issues/11400 for
-    the motivation, and examples/offline_inference/torchrun_example.py
+    the motivation, and examples/features/torchrun/torchrun_example_offline.py
     for the usage example.
 
     The key idea: although it is tensor-parallel inference, we only

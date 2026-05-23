@@ -7,9 +7,9 @@ ColPali is a multi-vector retrieval model based on PaliGemma backbone
 It produces per-token embeddings for both text and image inputs.
 """
 
-import base64
 from io import BytesIO
 
+import pybase64 as base64
 import pytest
 import torch
 from PIL import Image
@@ -18,7 +18,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 
@@ -114,7 +114,7 @@ def _run_late_interaction_test(
     dtype: str,
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
-    from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+    from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
     with vllm_runner(
         model,

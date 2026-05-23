@@ -145,12 +145,16 @@ class LlamaModel(nn.Module):
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
 
-        eagle_config = getattr(self.config, "eagle_config", None)
-        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+        eagle_config = getattr(self.config, "eagle_config", None) or {}
+        if "use_aux_hidden_state" in eagle_config:
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
-        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
+        self.norm_before_fc = bool(
+            eagle_config.get(
+                "norm_before_fc", getattr(self.config, "norm_before_fc", False)
+            )
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -172,19 +176,40 @@ class LlamaModel(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
-            if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * 3
-            else:
-                fc_input_size = self.config.hidden_size * 3
+            self.num_aux_hidden_states = getattr(
+                self.config, "num_aux_hidden_states", None
+            )
+            if self.num_aux_hidden_states is None:
+                eagle_config = getattr(self.config, "eagle_config", None) or {}
+                layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+                self.num_aux_hidden_states = len(layer_ids) if layer_ids else 3
+
+            target_hidden_size = getattr(
+                self.config, "target_hidden_size", self.config.hidden_size
+            )
+            self.fc_input_size = target_hidden_size * self.num_aux_hidden_states
+
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
-                    fc_input_size,
+                    self.fc_input_size,
                     eps=self.config.rms_norm_eps,
                 )
             else:
                 self.input_norm = None
+
+            use_fc_norm = getattr(self.config, "fc_norm", False)
+            if use_fc_norm:
+                self.fc_norm = nn.ModuleList(
+                    [
+                        RMSNorm(target_hidden_size, eps=self.config.rms_norm_eps)
+                        for _ in range(self.num_aux_hidden_states)
+                    ]
+                )
+            else:
+                self.fc_norm = None
+
             self.fc = ReplicatedLinear(
-                input_size=fc_input_size,
+                input_size=self.fc_input_size,
                 output_size=self.config.hidden_size,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,
@@ -192,6 +217,8 @@ class LlamaModel(nn.Module):
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
             )
+
+        self.norm_output = getattr(self.config, "norm_output", False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -220,7 +247,11 @@ class LlamaModel(nn.Module):
                 residual=residual,
             )
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
-        return hidden_states, hidden_prenorm
+
+        # norm_output variant uses the post-norm hidden states.
+        aux_output = hidden_states if self.norm_output else hidden_prenorm
+
+        return hidden_states, aux_output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -287,13 +318,16 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=get_draft_quant_config(vllm_config),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
@@ -309,11 +343,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         if self.use_parallel_drafting:
             self.register_buffer(
                 "mask_hidden",
-                torch.zeros(
-                    1,
-                    (3 if self.model.use_aux_hidden_state else 1)
-                    * self.config.hidden_size,
-                ),
+                torch.zeros(1, self.model.fc_input_size),
                 persistent=False,
             )
 
@@ -368,6 +398,16 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
 
         if self.model.norm_before_fc:
             hidden_states = self.model.input_norm(hidden_states)
+
+        # `norm_before_fc` adds a single RMSNorm before the FC layer, whereas `fc_norm`
+        # applies separate RMSNorms to each chunk of the hidden states.
+        if self.model.fc_norm is not None:
+            chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
+            hidden_states = torch.cat(
+                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
+                dim=-1,
+            )
+
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

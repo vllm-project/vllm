@@ -96,6 +96,10 @@ class Mamba2AttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
         return Mamba2AttentionMetadataBuilder
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
+
 
 @dataclass
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
@@ -133,7 +137,9 @@ class Mamba2AttentionMetadataBuilder(
         **kwargs: Any,
     ) -> Mamba2AttentionMetadata:
         common = self._compute_common_metadata(
-            common_attn_metadata, num_accepted_tokens=kwargs.get("num_accepted_tokens")
+            common_attn_metadata,
+            num_accepted_tokens=kwargs.get("num_accepted_tokens"),
+            prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
         )
 
         seq_idx_p = None

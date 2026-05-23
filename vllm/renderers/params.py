@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -153,6 +153,14 @@ class TokenizeParams:
     - `-1` maps to `max_input_tokens`.
     """
 
+    truncation_side: Literal["left", "right"] | None = None
+    """
+    Which side to truncate from when ``truncate_prompt_tokens`` is active:
+    - ``"right"`` keeps the first N tokens (truncate from the end).
+    - ``"left"``  keeps the last  N tokens (truncate from the start).
+    - ``None``    falls back to the tokenizer default.
+    """
+
     do_lower_case: bool = False
     """Whether to normalize text to lower case before tokenization."""
 
@@ -190,13 +198,20 @@ class TokenizeParams:
         max_input_tokens = self.max_input_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
 
+        if self.truncation_side not in (None, "left", "right"):
+            raise VLLMValidationError(
+                "`truncation_side` must be either 'left' or 'right'.",
+                parameter="truncation_side",
+                value=self.truncation_side,
+            )
+
         if (
             max_output_tokens is not None
             and max_total_tokens is not None
             and max_output_tokens > max_total_tokens
         ):
             raise VLLMValidationError(
-                f"{self.max_output_tokens_param}={max_output_tokens}"
+                f"{self.max_output_tokens_param}={max_output_tokens} "
                 f"cannot be greater than "
                 f"{self.max_total_tokens_param}={max_total_tokens=}. "
                 f"Please request fewer output tokens.",
@@ -225,6 +240,9 @@ class TokenizeParams:
         )
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", self.truncate_prompt_tokens
+        )
+        truncation_side = tokenization_kwargs.pop(
+            "truncation_side", self.truncation_side
         )
         do_lower_case = tokenization_kwargs.pop("do_lower_case", self.do_lower_case)
         add_special_tokens = tokenization_kwargs.pop(
@@ -271,6 +289,7 @@ class TokenizeParams:
             ),
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=truncation_side,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
@@ -285,6 +304,16 @@ class TokenizeParams:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
+
+        # Explicit truncation-side overrides require the full token sequence so
+        # we can slice from the requested side in _token_truncation. Disable
+        # tokenizer-level truncation because generation tokenizers default to
+        # left truncation while callers may request right truncation.
+        if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
+            return dict(
+                truncation=False,
+                add_special_tokens=self.add_special_tokens,
+            )
 
         return dict(
             truncation=max_length is not None,
@@ -375,7 +404,10 @@ class TokenizeParams:
         if max_length == 0:
             return tokens[:0]
 
-        if getattr(tokenizer, "truncation_side", "left") == "left":
+        side = self.truncation_side or (
+            tokenizer.truncation_side if tokenizer is not None else None
+        )
+        if side == "left":
             return tokens[-max_length:]
 
         return tokens[:max_length]

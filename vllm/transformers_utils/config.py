@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
@@ -10,8 +11,10 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import get_safetensors_metadata
+import torch
+from huggingface_hub import constants, get_safetensors_metadata
 from packaging.version import Version
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -28,6 +31,7 @@ from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
@@ -62,6 +66,13 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+if Version(version("transformers")) < Version("5.0.0"):
+    logger.warning(
+        "Support for Transformers v4 is deprecated. The Transformers v4 codepath will "
+        "become unmaintained in vLLM v0.22.0 and will be removed in vLLM v0.24.0. "
+        "Please upgrade to Transformers v5: pip install --upgrade transformers"
+    )
+
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -76,17 +87,23 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     bagel="BagelConfig",
+    umm="CheersConfig",
     chatglm="ChatGLMConfig",
-    colmodernvbert="ColModernVBertConfig",
+    modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    deepseek_v4="DeepseekV4Config",
     flex_olmo="FlexOlmoConfig",
+    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
+    granite4_vision="Granite4VisionConfig",
+    hyperclovax_vlm="HCXVisionConfig",
     hunyuan_vl="HunYuanVLConfig",
+    hy_v3="HYV3Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
@@ -98,23 +115,28 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
+    moondream3="Moondream3Config",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
-    olmo3="Olmo3Config",
     olmo_hybrid="OlmoHybridConfig",
+    openvla="OpenVLAConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
     step3p5="Step3p5Config",
+    qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
+
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -133,6 +155,19 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     if not rope_parameters:
         return False
     return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+
+
+@contextmanager
+def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+    hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
+    hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
+    constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
+    constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
+    try:
+        yield
+    finally:
+        constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
+        constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
 class HFConfigParser(ConfigParserBase):
@@ -174,7 +209,7 @@ class HFConfigParser(ConfigParserBase):
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
-        if model_type in _CONFIG_REGISTRY:
+        if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,
@@ -184,6 +219,25 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            if model_type in _CONFIG_REGISTRY:
+                # Register the config class to AutoConfig to ensure it's used
+                # in future calls to `from_pretrained` (e.g. from
+                # AutoTokenizer or AutoProcessor).
+                config_class = _CONFIG_REGISTRY[model_type]
+                config_class.model_type = model_type
+                AutoConfig.register(model_type, config_class, exist_ok=True)
+                # If the on-disk model_type differs from the overridden
+                # one, register under both so AutoConfig.from_pretrained
+                # returns the correct class regardless of what the
+                # checkpoint says
+                if (
+                    config_model_type := config_dict.get("model_type")
+                ) and config_model_type != model_type:
+                    config_class.model_type = config_model_type
+                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    config_class.model_type = model_type
+                # Now that it is registered, it is not considered remote code anymore
+                trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
@@ -244,6 +298,25 @@ class MistralConfigParser(ConfigParserBase):
             )
         except OSError:  # Not found
             hf_config_dict = {}
+
+        if config_dict.get("dtype") is None:
+            with _mistral_patch_hf_hub_constants():
+                model_str = model if isinstance(model, str) else model.as_posix()
+                param_mt = get_safetensors_params_metadata(model_str, revision=revision)
+            if param_mt:
+                param_dtypes: set[torch.dtype] = {
+                    _SAFETENSORS_TO_TORCH_DTYPE[dtype]
+                    for info in param_mt.values()
+                    if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
+                }
+
+                if param_dtypes:
+                    config_dict["dtype"] = common_broadcastable_dtype(param_dtypes)
+                    logger.info_once(
+                        "Inferred from consolidated*.safetensors files "
+                        f"{config_dict['dtype']} dtype."
+                    )
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
@@ -329,6 +402,57 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
         config.rope_parameters["rope_theta"] = default_theta
 
 
+def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
+    """Patch legacy RoPE type fields for backwards compatibility with
+    older custom models which would otherwise fail to load."""
+
+    # No RoPE parameters to patch
+    if rope_parameters is None:
+        return
+
+    def _patch_legacy_rope_type(rope_parameters: dict[str, Any]) -> None:
+        # Case 1: Both legacy and modern fields present - check for conflicts
+        if "rope_type" in rope_parameters and "type" in rope_parameters:
+            rope_type = rope_parameters["rope_type"]
+            rope_type_legacy = rope_parameters["type"]
+            if (rope_type_legacy == "su" and rope_type == "longrope") or (
+                rope_type_legacy == "mrope" and rope_type == "default"
+            ):
+                pass  # No action needed
+            elif rope_type != rope_type_legacy:
+                raise ValueError(
+                    f"Found conflicts between 'rope_type={rope_type}' (modern "
+                    f"field) and 'type={rope_type_legacy}' (legacy field). "
+                    "You should only specify one of them."
+                )
+        # Case 2: Only legacy field present - patch to modern format with warning
+        if "rope_type" not in rope_parameters and "type" in rope_parameters:
+            rope_parameters["rope_type"] = rope_parameters["type"]
+            logger.info("Replacing legacy 'type' key with 'rope_type'")
+        # Case 3: No rope_type field at all - cannot determine RoPE type, raise error
+        if "rope_type" not in rope_parameters:
+            raise ValueError("rope_parameters should have a 'rope_type' key")
+        # Patch legacy rope_type values with warning
+        if rope_parameters["rope_type"] == "su":
+            rope_parameters["rope_type"] = "longrope"
+            logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
+        elif rope_parameters["rope_type"] == "mrope":
+            if "mrope_section" not in rope_parameters:
+                raise ValueError(
+                    "Legacy rope_type 'mrope' requires "
+                    "'mrope_section' in rope_parameters"
+                )
+            rope_parameters["rope_type"] = "default"
+            logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if is_rope_parameters_nested(rope_parameters):
+        for rope_parameters_layer_type in rope_parameters.values():
+            _patch_legacy_rope_type(rope_parameters_layer_type)
+    else:
+        _patch_legacy_rope_type(rope_parameters)
+
+
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
@@ -342,22 +466,28 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     ompe = getattr(config, "original_max_position_embeddings", None)
 
     if Version(version("transformers")) < Version("5.0.0"):
-        # Transformers v4 installed, legacy config fields may be present
-        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
-            config.rope_parameters = rope_scaling
-        if (
-            rope_theta is not None
-            or partial_rotary_factor is not None
-            or ompe is not None
-        ) and not getattr(config, "rope_parameters", None):
-            config.rope_parameters = {"rope_type": "default"}
-        # Patch legacy fields into rope_parameters
-        if rope_theta is not None:
-            config.rope_parameters["rope_theta"] = rope_theta
-        if partial_rotary_factor is not None:
-            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-        if ompe is not None:
-            config.rope_parameters["original_max_position_embeddings"] = ompe
+        # Transformers v4 installed, legacy config fields may be present.
+        if is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
+            # Loading nested rope_parameters (from Transformers v5) in Transformers v4.
+            # Skip legacy patching since it should already be in the correct format.
+            pass
+        else:
+            if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
+                config.rope_parameters = rope_scaling
+            if (
+                rope_theta is not None
+                or partial_rotary_factor is not None
+                or ompe is not None
+            ) and not getattr(config, "rope_parameters", None):
+                config.rope_parameters = {"rope_type": "default"}
+            # Patch legacy fields into rope_parameters
+            if rope_theta is not None:
+                config.rope_parameters["rope_theta"] = rope_theta
+            if partial_rotary_factor is not None:
+                config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+            if ompe is not None:
+                config.rope_parameters["original_max_position_embeddings"] = ompe
+            patch_legacy_rope_type(getattr(config, "rope_parameters", None))
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
         # Patch these fields in case they used non-standard names
@@ -366,53 +496,9 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
+        patch_legacy_rope_type(getattr(config, "rope_parameters", None))
         config.standardize_rope_params()
         config.validate_rope()
-
-    # No RoPE parameters to patch
-    if getattr(config, "rope_parameters", None) is None:
-        return
-
-    # Handle nested rope_parameters in interleaved sliding attention models
-    if is_rope_parameters_nested(config.rope_parameters):
-        for rope_parameters_layer_type in config.rope_parameters.values():
-            patch_rope_parameters_dict(rope_parameters_layer_type)
-    else:
-        patch_rope_parameters_dict(config.rope_parameters)
-
-
-def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
-    if "rope_type" in rope_parameters and "type" in rope_parameters:
-        rope_type = rope_parameters["rope_type"]
-        rope_type_legacy = rope_parameters["type"]
-        if (rope_type_legacy == "su" and rope_type == "longrope") or (
-            rope_type_legacy == "mrope" and rope_type == "default"
-        ):
-            pass  # No action needed
-        elif rope_type != rope_type_legacy:
-            raise ValueError(
-                f"Found conflicts between 'rope_type={rope_type}' (modern "
-                f"field) and 'type={rope_type_legacy}' (legacy field). "
-                "You should only specify one of them."
-            )
-
-    if "rope_type" not in rope_parameters and "type" in rope_parameters:
-        rope_parameters["rope_type"] = rope_parameters["type"]
-        logger.info("Replacing legacy 'type' key with 'rope_type'")
-
-    if "rope_type" not in rope_parameters:
-        raise ValueError("rope_parameters should have a 'rope_type' key")
-
-    if rope_parameters["rope_type"] == "su":
-        rope_parameters["rope_type"] = "longrope"
-        logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_parameters["rope_type"] == "mrope":
-        if "mrope_section" not in rope_parameters:
-            raise ValueError(
-                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
-            )
-        rope_parameters["rope_type"] = "default"
-        logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
@@ -506,6 +592,7 @@ def maybe_override_with_speculators(
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
+    hf_token: bool | str | None = None,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """
@@ -520,6 +607,7 @@ def maybe_override_with_speculators(
         trust_remote_code: Whether to trust remote code
         revision: Model revision
         vllm_speculative_config: Existing vLLM speculative config
+        hf_token: HuggingFace token for authenticated model access
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
@@ -536,6 +624,7 @@ def maybe_override_with_speculators(
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
+        token=hf_token,
         **without_trust_remote_code(kwargs),
     )
     speculators_config = config_dict.get("speculators_config")
@@ -1018,6 +1107,7 @@ def try_get_generation_config(
     trust_remote_code: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
+    hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
     # GGUF files don't have generation_config.json - their config is embedded
     # in the file header. Skip all filesystem lookups to avoid re-reading the
@@ -1030,6 +1120,7 @@ def try_get_generation_config(
         return GenerationConfig.from_pretrained(
             model,
             revision=revision,
+            token=hf_token,
         )
     except OSError:  # Not found
         try:
@@ -1038,6 +1129,7 @@ def try_get_generation_config(
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 config_format=config_format,
+                token=hf_token,
             )
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
@@ -1112,6 +1204,15 @@ def try_get_dense_modules(
         return None
 
 
+def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
+    return {
+        param_name: info
+        for file_path in local_dir.glob("*.safetensors")
+        if file_path.is_file()
+        for param_name, info in parse_safetensors_file_metadata(file_path).items()
+    }
+
+
 def get_safetensors_params_metadata(
     model: str,
     *,
@@ -1120,24 +1221,36 @@ def get_safetensors_params_metadata(
     """
     Get the safetensors parameters metadata for remote/local model repository.
     """
-    full_metadata = {}
     if (model_path := Path(model)).exists():
-        safetensors_to_check = model_path.glob("*.safetensors")
-        full_metadata = {
-            param_name: info
-            for file_path in safetensors_to_check
-            if file_path.is_file()
-            for param_name, info in parse_safetensors_file_metadata(file_path).items()
+        return _read_safetensors_metadata_in_dir(model_path)
+
+    repo_mt = try_get_safetensors_metadata(model, revision=revision)
+    if repo_mt and (files_mt := repo_mt.files_metadata):
+        return {
+            param_name: asdict(info)
+            for file_mt in files_mt.values()
+            for param_name, info in file_mt.tensors.items()
         }
-    else:
-        repo_mt = try_get_safetensors_metadata(model, revision=revision)
-        if repo_mt and (files_mt := repo_mt.files_metadata):
-            full_metadata = {
-                param_name: asdict(info)
-                for file_mt in files_mt.values()
-                for param_name, info in file_mt.tensors.items()
-            }
-    return full_metadata
+
+    # Hub fetch failed (e.g. 429, network unreachable). Fall back to the
+    # local HF cache: weights may already be cached from a prior run, and
+    # weight loading itself uses the same cache.
+    try:
+        local_dir = huggingface_hub.snapshot_download(
+            repo_id=model,
+            revision=revision,
+            allow_patterns=["*.safetensors"],
+            local_files_only=True,
+        )
+    except huggingface_hub.errors.LocalEntryNotFoundError as e:
+        logger.warning_once(
+            "Could not retrieve safetensors metadata for %s "
+            "(Hub fetch failed and no local cache snapshot is available): %s.",
+            model,
+            str(e),
+        )
+        return {}
+    return _read_safetensors_metadata_in_dir(Path(local_dir))
 
 
 def _download_mistral_config_file(model, revision) -> dict:

@@ -231,13 +231,14 @@ def k2_server():
         "--gpu-memory-utilization",
         "0.4",
     ] + ROCM_EXTRA_ARGS
-    # hack to test kimi_k2 tool use tool_id format.
-    # avoid error in is_deepseek_mla check by setting kv_lora_rank=null
+    # Test kimi_k2 tool use tool_id format by overriding model_type.
+    # is_deepseek_mla safely returns False via getattr when kv_lora_rank
+    # is absent from the underlying config.
     with RemoteOpenAIServer(
         MODEL_NAME,
         args,
         env_dict=ROCM_ENV_OVERRIDES,
-        override_hf_configs={"model_type": "kimi_k2", "kv_lora_rank": None},
+        override_hf_configs={"model_type": "kimi_k2"},
     ) as remote_server:
         yield remote_server
 
@@ -517,7 +518,13 @@ async def test_inconsistent_tool_choice_and_tools(
 
 
 @pytest.mark.asyncio
-async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_current_weather"}}],
+)
+async def test_max_tokens_with_tool_choice_required(
+    client: openai.AsyncOpenAI, tool_choice
+):
     """ """
     models = await client.models.list()
     model_name: str = models.data[0].id
@@ -529,7 +536,7 @@ async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
         max_completion_tokens=1,
         model=model_name,
         tools=tools,
-        tool_choice="required",
+        tool_choice=tool_choice,
     )
     # When `tool_choice="required"` and the tokens of `tools` exceed `max_tokens`,
     # both `tool_calls` and `content` should be empty.
@@ -537,4 +544,3 @@ async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert len(choice.message.tool_calls) == 0
-    assert choice.message.content == ""

@@ -15,13 +15,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import URL, Headers, MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import terminate_if_errored
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    GenerationError,
+)
 from vllm.entrypoints.utils import create_error_response, sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -29,6 +33,9 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger("vllm.entrypoints.openai.server_utils")
+
+
+GUARDED_PREFIX = ("/v1", "/v2", "/inference")
 
 
 class AuthenticationMiddleware:
@@ -40,7 +47,7 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
     """
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
@@ -65,15 +72,18 @@ class AuthenticationMiddleware:
         return token_match
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] not in ("http", "websocket") or scope["method"] == "OPTIONS":
+        if (
+            scope["type"] not in ("http", "websocket")
+            or scope.get("method") == "OPTIONS"
+        ):
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
         root_path = scope.get("root_path", "")
-        url_path = URL(scope=scope).path.removeprefix(root_path)
+        url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
@@ -354,9 +364,20 @@ async def engine_error_handler(
     return JSONResponse(err.model_dump(), status_code=err.error.code)
 
 
+async def generation_error_handler(req: Request, exc: GenerationError):
+    """Handle GenerationError without logging stack traces.
+
+    GenerationError is a known, expected error (e.g. KV cache load failure)
+    that should be returned to the client as a 500 response without polluting
+    server logs with stack traces.
+    """
+    err = create_error_response(exc)
+    return JSONResponse(err.model_dump(), status_code=err.error.code)
+
+
 async def exception_handler(req: Request, exc: Exception):
     if req.app.state.args.log_error_stack:
-        logger.exception(
+        logger.error(
             "Exception caught. Request id: %s",
             req.state.request_metadata.request_id
             if hasattr(req.state, "request_metadata")

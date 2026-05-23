@@ -10,7 +10,6 @@
 # and the platform is not ROCm.
 
 import importlib.util
-import os
 
 import pytest
 import torch
@@ -20,11 +19,8 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
-# This environment variable must be set so ops will be registered.
-os.environ["VLLM_ROCM_USE_AITER"] = "1"
-
 # this import statement is needed to ensure the ops are registered
-import vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe  # noqa: F401
+import vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe  # noqa: F401
 
 # need to import once to ensure the ops are registered
 # Check if aiter package is installed

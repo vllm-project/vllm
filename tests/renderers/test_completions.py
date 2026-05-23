@@ -15,7 +15,6 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers.registry import tokenizer_args_from_config
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -39,6 +38,12 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
+    hidden_size: int = 768
+    dtype: torch.dtype = torch.float32
+
+    def get_hidden_size(self) -> int:
+        return self.hidden_size
 
 
 @dataclass
@@ -81,8 +86,6 @@ def _build_renderer(
     truncation_side: str = "left",
     max_chars_per_token: int = 1,
 ):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
     renderer = HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer=(
@@ -129,7 +132,7 @@ class TestValidatePrompt:
 
 
 class TestRenderPrompt:
-    def test_token_input(self):
+    def test_tokens_input(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [101, 7592, 2088]
@@ -339,7 +342,7 @@ class TestRenderPrompt:
                 TokenizeParams(max_total_tokens=100),
             )
 
-    def test_token_input_with_needs_detokenization(self):
+    def test_tokens_input_with_needs_detokenization(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [1, 2, 3, 4]
@@ -386,12 +389,13 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
     def test_multiple_prompt_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 512
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         # Create multiple test tensors
         tensor_inputs = [
-            torch.randn(8, 512, dtype=torch.float32),
-            torch.randn(12, 512, dtype=torch.float32),
+            torch.randn(8, hidden_size, dtype=torch.float32),
+            torch.randn(12, hidden_size, dtype=torch.float32),
         ]
 
         prompts = renderer.render_prompts(
@@ -434,13 +438,15 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], expected)
 
     def test_prompt_embed_different_dtypes(self):
-        renderer = _build_renderer(MockModelConfig())
-
+        hidden_size = 256
         # Test different supported dtypes
         dtypes = [torch.float32, torch.float16, torch.bfloat16]
 
         for dtype in dtypes:
-            tensor_input = torch.randn(5, 256, dtype=dtype)
+            renderer = _build_renderer(
+                MockModelConfig(hidden_size=hidden_size, dtype=dtype)
+            )
+            tensor_input = torch.randn(5, hidden_size, dtype=dtype)
 
             prompts = renderer.render_prompts(
                 _preprocess_prompt(
@@ -476,10 +482,11 @@ class TestRenderEmbedPrompt:
         assert results[0]["prompt_embeds"].shape == (10, 768)
 
     def test_both_prompts_and_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 256
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         text_input = "Hello world"
-        tensor_input = torch.randn(5, 256, dtype=torch.float32)
+        tensor_input = torch.randn(5, hidden_size, dtype=torch.float32)
 
         prompts = renderer.render_prompts(
             _preprocess_prompt(

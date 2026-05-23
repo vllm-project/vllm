@@ -35,23 +35,6 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-wait_for_clean_gpus() {
-  local timeout=${1:-300}
-  local start=$SECONDS
-  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
-  while true; do
-    if grep -q clean /opt/amdgpu/etc/gpu_state; then
-      echo "GPUs state is \"clean\""
-      return
-    fi
-    if (( SECONDS - start >= timeout )); then
-      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
-      exit 1
-    fi
-    sleep 3
-  done
-}
-
 cleanup_docker() {
   # Get Docker's root directory
   docker_root=$(docker info -f '{{.DockerRootDir}}')
@@ -131,8 +114,7 @@ handle_pytest_exit() {
 # unquoted since they have no spaces and work fine.
 #
 # Already-quoted expressions (containing literal single quotes) are passed
-# through untouched to avoid double-quoting values injected by
-# apply_rocm_test_overrides.
+# through untouched to avoid double-quoting well-formed shell fragments.
 #
 # NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
 # double-quotes stripped by the calling shell (see header comment).
@@ -265,116 +247,15 @@ re_quote_pytest_markers() {
 }
 
 ###############################################################################
-# ROCm-specific pytest command rewrites
-#
-# These apply ignore flags and environment overrides for tests that are not
-# yet supported or behave differently on ROCm hardware. Kept as a single
-# function so new exclusions are easy to add in one place.
-###############################################################################
-
-apply_rocm_test_overrides() {
-  local cmds="$1"
-
-  # --- Model registry filter ---
-  if [[ $cmds == *"pytest -v -s models/test_registry.py"* ]]; then
-    cmds=${cmds//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
-  fi
-
-  # --- LoRA: disable custom paged attention ---
-  if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
-  fi
-
-  # --- Kernel ignores ---
-  if [[ $cmds == *" kernels/core"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/core/test_fused_quant_layernorm.py \
-    --ignore=kernels/core/test_permute_cols.py"
-  fi
-
-  if [[ $cmds == *" kernels/attention"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/attention/test_attention_selector.py \
-    --ignore=kernels/attention/test_encoder_decoder_attn.py \
-    --ignore=kernels/attention/test_flash_attn.py \
-    --ignore=kernels/attention/test_flashinfer.py \
-    --ignore=kernels/attention/test_prefix_prefill.py \
-    --ignore=kernels/attention/test_cascade_flash_attn.py \
-    --ignore=kernels/attention/test_mha_attn.py \
-    --ignore=kernels/attention/test_lightning_attn.py \
-    --ignore=kernels/attention/test_attention.py"
-  fi
-
-  if [[ $cmds == *" kernels/quantization"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/quantization/test_int8_quant.py \
-    --ignore=kernels/quantization/test_machete_mm.py \
-    --ignore=kernels/quantization/test_block_fp8.py \
-    --ignore=kernels/quantization/test_block_int8.py \
-    --ignore=kernels/quantization/test_marlin_gemm.py \
-    --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
-    --ignore=kernels/quantization/test_int8_kernel.py"
-  fi
-
-  if [[ $cmds == *" kernels/mamba"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/mamba/test_mamba_mixer2.py \
-    --ignore=kernels/mamba/test_causal_conv1d.py \
-    --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
-  fi
-
-  if [[ $cmds == *" kernels/moe"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
-  fi
-
-  # --- Entrypoint ignores ---
-  if [[ $cmds == *" entrypoints/openai "* ]]; then
-    cmds=${cmds//" entrypoints/openai "/" entrypoints/openai \
-    --ignore=entrypoints/openai/test_audio.py \
-    --ignore=entrypoints/openai/test_shutdown.py \
-    --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/test_models.py \
-    --ignore=entrypoints/openai/test_lora_adapters.py \
-    --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
-    --ignore=entrypoints/openai/test_root_path.py \
-    --ignore=entrypoints/openai/test_tokenization.py \
-    --ignore=entrypoints/openai/test_prompt_validation.py "}
-  fi
-
-  if [[ $cmds == *" entrypoints/llm "* ]]; then
-    cmds=${cmds//" entrypoints/llm "/" entrypoints/llm \
-    --ignore=entrypoints/llm/test_chat.py \
-    --ignore=entrypoints/llm/test_accuracy.py \
-    --ignore=entrypoints/llm/test_init.py \
-    --ignore=entrypoints/llm/test_prompt_validation.py "}
-  fi
-
-  # Clean up escaped newlines from --ignore appends
-  cmds=$(echo "$cmds" | sed 's/ \\ / /g')
-
-  echo "$cmds"
-}
-
-###############################################################################
 # Main
 ###############################################################################
 
 # --- GPU initialization ---
-echo "--- Confirming Clean Initial State"
-wait_for_clean_gpus
-
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker housekeeping ---
 cleanup_docker
-
-echo "--- Resetting GPUs"
-echo "reset" > /opt/amdgpu/etc/gpu_state
-wait_for_clean_gpus
 
 # --- Pull test image ---
 echo "--- Pulling container"
@@ -400,9 +281,11 @@ HF_MOUNT="/root/.cache/huggingface"
 # double-quotes will have been stripped by the calling shell.
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 else
   commands="$*"
+  commands_source="argv"
   if [[ -z "$commands" ]]; then
     echo "Error: No test commands provided." >&2
     echo "Usage:" >&2
@@ -419,11 +302,16 @@ fi
 
 echo "Raw commands: $commands"
 
-# Fix quoting before ROCm overrides (so overrides see correct structure)
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+# Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
+# VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
+# can corrupt embedded echo strings or otherwise well-formed shell fragments.
+if [[ "$commands_source" == "argv" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 
-commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"
 
 MYPYTHONPATH=".."
@@ -494,6 +382,7 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -509,6 +398,7 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"

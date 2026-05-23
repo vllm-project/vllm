@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -364,7 +365,9 @@ class NgramProposerGPU:
         )
         token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
-        num_tokens_tmp = num_tokens_no_spec + valid_sampled_tokens_count
+        num_tokens_tmp = (num_tokens_no_spec + valid_sampled_tokens_count).to(
+            torch.int32
+        )
 
         # Compute validity masks.
         sampled_flags = valid_sampled_tokens_count > 0
@@ -437,7 +440,7 @@ class NgramProposerGPU:
         )
 
         # Count valid tokens per request.
-        valid_sampled_tokens_count = valid_mask.sum(dim=1)
+        valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
 
         # Rightmost valid index per row.
         last_valid_indices = valid_sampled_tokens_count - 1
@@ -567,8 +570,8 @@ def update_ngram_gpu_tensors_incremental(
             reorder_dst.append(curr_idx)
 
     if reorder_src:
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+        src_tensor = async_tensor_h2d(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = async_tensor_h2d(reorder_dst, dtype=torch.long, device=device)
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()

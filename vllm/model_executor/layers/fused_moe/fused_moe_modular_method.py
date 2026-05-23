@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
     FusedMoEPrepareAndFinalizeModular,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 
 logger = init_logger(__name__)
 
@@ -28,7 +31,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
         self, old_quant_method: FusedMoEMethodBase, moe_kernel: FusedMoEKernel
     ):
-        super().__init__(old_quant_method.moe)
+        super().__init__(moe_kernel.moe_config)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = moe_kernel
         self.disable_expert_map = getattr(
@@ -39,12 +42,15 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
+    @property
+    def wraps_legacy_quant_method(self) -> bool:
+        return not self.old_quant_method.supports_internal_mk
+
     @staticmethod
     def make(
         moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        shared_experts: torch.nn.Module | None,
         inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
@@ -52,8 +58,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             FusedMoEKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-                shared_experts,
-                moe_parallel_config=moe_layer.moe_parallel_config,
                 inplace=inplace,
             ),
         )
@@ -84,12 +88,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
@@ -101,5 +106,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )

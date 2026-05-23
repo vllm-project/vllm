@@ -92,7 +92,7 @@ class ExampleConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -181,16 +181,16 @@ class ExampleConnector(KVConnectorBase_V1):
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE/MLP etc.
-                kv_cache_attr = getattr(layer, "kv_cache", None)
-                if kv_cache_attr is None:
+                kv_cache_layer = getattr(layer, "kv_cache", None)
+                if kv_cache_layer is None:
                     continue
-
-                kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
 
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
+                kv_cache = safetensors.torch.load_file(
+                    filename, device=str(kv_cache_layer.device)
+                )["kv_cache"]
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
