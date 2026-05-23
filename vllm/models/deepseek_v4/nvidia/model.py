@@ -65,6 +65,23 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
+    # Three aux streams: one per non-default input GEMM in
+    # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
+    # (compressor kv_score, indexer.weights_proj, indexer.compressor
+    # kv_score). fused_wqa_wkv stays on the default stream.
+    #
+    # ROCm uses the same attention-side stream choreography as CUDA:
+    # c4a layers overlap indexer, main KV compression, and SWA insertion;
+    # c128a layers overlap main KV compression and SWA insertion.
+    # XPU keeps the serial fallback.
+    if current_platform.is_rocm():
+        return [torch.cuda.Stream() for _ in range(3)]
+    if current_platform.is_xpu():
+        return None
+    return [torch.cuda.Stream() for _ in range(3)]
+
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -1094,16 +1111,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm / XPU because of hang issues / no overlap.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm() or current_platform.is_xpu()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = make_deepseek_v4_aux_streams()
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
