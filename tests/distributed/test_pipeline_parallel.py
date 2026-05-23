@@ -356,7 +356,6 @@ def _compare_tp(
         pp_env,
         tp_env,
         method=method,
-        force_v1_runner=True,
     )
 
 

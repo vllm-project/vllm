@@ -22,7 +22,6 @@ def test_cpu_offload_fp8():
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
-        force_v1_runner=True,
     )
 
 
@@ -39,7 +38,6 @@ def test_cpu_offload_gptq(monkeypatch):
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
-        force_v1_runner=True,
     )
 
 
@@ -56,7 +54,6 @@ def test_cpu_offload_awq(monkeypatch):
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
-        force_v1_runner=True,
     )
 
 
@@ -74,5 +71,4 @@ def test_cpu_offload_compressed_tensors(monkeypatch):
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
         include_seeded_sampling=False,
-        force_v1_runner=True,
     )

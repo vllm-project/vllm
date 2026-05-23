@@ -141,7 +141,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         model_name,
         common_args,
         pp_args,
-        force_v1_runner=True,
     )
 
 
