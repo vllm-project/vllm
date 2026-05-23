@@ -8,6 +8,17 @@ from typing import Any
 import torch
 
 
+def _record_result_stream(result: Any, stream: torch.cuda.Stream) -> None:
+    if isinstance(result, torch.Tensor):
+        result.record_stream(stream)
+    elif isinstance(result, (tuple, list)):
+        for item in result:
+            _record_result_stream(item, stream)
+    elif isinstance(result, dict):
+        for item in result.values():
+            _record_result_stream(item, stream)
+
+
 class AuxStreamType(Enum):
     Attention = 1
 
@@ -45,13 +56,15 @@ def maybe_execute_in_parallel(
         Tuple of (fn0_result, fn1_result).
     """
     if aux_stream is not None:
-        event0.record()
+        current_stream = torch.cuda.current_stream()
+        event0.record(current_stream)
         result0 = fn0()
         with torch.cuda.stream(aux_stream):
-            event0.wait()
+            aux_stream.wait_event(event0)
             result1 = fn1()
-            event1.record()
-        event1.wait()
+            event1.record(aux_stream)
+        current_stream.wait_event(event1)
+        _record_result_stream(result1, current_stream)
     else:
         result0 = fn0()
         result1 = fn1()
@@ -108,21 +121,24 @@ def execute_in_parallel(
     )
 
     aux_results = [None] * len(aux_fns)
-    pending: list[torch.cuda.Event] = []
+    current_stream = torch.cuda.current_stream()
+    pending: list[tuple[torch.cuda.Event, Any]] = []
 
-    start_event.record()
+    start_event.record(current_stream)
     for i, fn in enumerate(aux_fns):
         if fn is None:
             continue
-        with torch.cuda.stream(aux_streams[i]):
-            start_event.wait()
+        aux_stream = aux_streams[i]
+        with torch.cuda.stream(aux_stream):
+            aux_stream.wait_event(start_event)
             aux_results[i] = fn()
-            done_events[i].record()
-        pending.append(done_events[i])
+            done_events[i].record(aux_stream)
+        pending.append((done_events[i], aux_results[i]))
 
     default_result = default_fn()
 
-    for ev in pending:
-        ev.wait()
+    for ev, result in pending:
+        current_stream.wait_event(ev)
+        _record_result_stream(result, current_stream)
 
     return default_result, aux_results
