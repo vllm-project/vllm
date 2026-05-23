@@ -254,6 +254,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for. More efficient "
+            "than `top_logprobs=-1` when only a small fixed label set is "
+            "needed (e.g. multilabel scoring where each label corresponds to "
+            "a known vocab id). Returned logprobs are emitted alongside the "
+            "sampled token's top_logprobs."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
@@ -615,6 +625,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             stop_token_ids=self.stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,

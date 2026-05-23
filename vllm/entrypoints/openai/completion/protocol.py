@@ -89,6 +89,15 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    logprob_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Specific vocab token IDs to return logprobs for. More efficient "
+            "than `top_logprobs=-1` when only a small fixed label set is "
+            "needed (e.g. multilabel scoring where each label corresponds to "
+            "a known vocab id)."
+        ),
+    )
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -327,6 +336,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
+            logprob_token_ids=self.logprob_token_ids,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
