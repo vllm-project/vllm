@@ -1,6 +1,5 @@
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
 #include "layernorm_utils.cuh"
@@ -134,63 +133,71 @@ __global__ void rms_norm_per_block_quant_kernel(
 // Residual add + RMS norm + dynamic per token
 template <typename scalar_in_t>
 void rms_norm_dynamic_per_token_quant_dispatch(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual) {
+    torch::stable::Tensor& out,           // [..., hidden_size]
+    torch::stable::Tensor const& input,   // [..., hidden_size]
+    torch::stable::Tensor const& weight,  // [hidden_size]
+    torch::stable::Tensor& scales,        // [num_tokens]
+    double const var_epsilon,  // Variance epsilon used in norm calculation
+    std::optional<torch::stable::Tensor> const& scale_ub,
+    std::optional<torch::stable::Tensor>& residual) {
   int32_t hidden_size = input.size(-1);
-  int32_t input_stride = input.view({-1, hidden_size}).stride(0);
+  int32_t input_stride =
+      torch::stable::view(input, {-1, hidden_size}).stride(0);
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
 
-  VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
-    VLLM_DISPATCH_QUANT_TYPES(
+  VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+    VLLM_STABLE_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
           vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
                                                         has_residual>
               <<<grid, block, 0, stream>>>(
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+                  out.mutable_data_ptr<scalar_t>(),
+                  scales.mutable_data_ptr<float>(),
+                  input.const_data_ptr<scalar_in_t>(),
+                  weight.const_data_ptr<scalar_in_t>(),
+                  scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                       : nullptr,
                   var_epsilon, hidden_size, input_stride,
-                  has_residual ? residual->data_ptr<scalar_in_t>() : nullptr);
+                  has_residual ? residual->mutable_data_ptr<scalar_in_t>()
+                               : nullptr);
         });
   });
 }
 
 void rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
-  static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-  TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(input.stride(-1) == 1,
-              "Input must be contiguous in the last dimension");
+    torch::stable::Tensor& out,           // [..., hidden_size]
+    torch::stable::Tensor const& input,   // [..., hidden_size]
+    torch::stable::Tensor const& weight,  // [hidden_size]
+    torch::stable::Tensor& scales,        // [num_tokens]
+    double const var_epsilon,  // Variance epsilon used in norm calculation
+    std::optional<torch::stable::Tensor> scale_ub,
+    std::optional<torch::stable::Tensor> residual) {
+  static torch::headeronly::ScalarType kFp8Type =
+      is_fp8_ocp() ? torch::headeronly::ScalarType::Float8_e4m3fn
+                   : torch::headeronly::ScalarType::Float8_e4m3fnuz;
+  STD_TORCH_CHECK(out.scalar_type() == kFp8Type ||
+                  out.scalar_type() == torch::headeronly::ScalarType::Char);
+  STD_TORCH_CHECK(out.is_contiguous());
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "Input must be contiguous in the last dimension");
 
   if (scale_ub.has_value()) {
-    TORCH_CHECK(out.dtype() == kFp8Type);
+    STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  TORCH_CHECK(weight.dtype() == input.dtype());
-  TORCH_CHECK(scales.dtype() == torch::kFloat32);
+  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
-    TORCH_CHECK(residual->is_contiguous());
+    STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+    STD_TORCH_CHECK(residual->is_contiguous());
   }
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
         rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
             out, input, weight, scales, var_epsilon, scale_ub, residual);
@@ -199,101 +206,113 @@ void rms_norm_dynamic_per_token_quant(
 
 // Residual add + RMS norm + dynamic per token
 void rms_norm_per_block_quant_dispatch(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens, hidden_size / group_size] or
-                                  // [hidden_size / group_size, num_tokens]
+    torch::stable::Tensor& out,           // [..., hidden_size]
+    torch::stable::Tensor const& input,   // [..., hidden_size]
+    torch::stable::Tensor const& weight,  // [hidden_size]
+    torch::stable::Tensor& scales,        // [num_tokens, hidden_size /
+                                          // group_size] or
+                                          // [hidden_size / group_size,
+                                          // num_tokens]
     int32_t group_size,
     double const var_epsilon,  // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual, bool is_scale_transposed) {
+    std::optional<torch::stable::Tensor> const& scale_ub,
+    std::optional<torch::stable::Tensor>& residual, bool is_scale_transposed) {
   int32_t hidden_size = input.size(-1);
-  int32_t input_stride = input.view({-1, hidden_size}).stride(0);
+  int32_t input_stride =
+      torch::stable::view(input, {-1, hidden_size}).stride(0);
 
-  TORCH_CHECK(hidden_size % 4 == 0,
-              "Hidden size must be divisible by 4 for vectorized access");
-  TORCH_CHECK(input_stride % 4 == 0,
-              "Input stride must be divisible by 4 for vectorized access");
-  TORCH_CHECK(group_size % 4 == 0,
-              "Group size must be divisible by 4 for vectorized access");
+  STD_TORCH_CHECK(hidden_size % 4 == 0,
+                  "Hidden size must be divisible by 4 for vectorized access");
+  STD_TORCH_CHECK(input_stride % 4 == 0,
+                  "Input stride must be divisible by 4 for vectorized access");
+  STD_TORCH_CHECK(group_size % 4 == 0,
+                  "Group size must be divisible by 4 for vectorized access");
 
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   const int max_block_size = (num_tokens <= 256) ? 512 : 256;
   dim3 block(std::min(hidden_size, max_block_size));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_per_block_quant_fp_dispatch", [&] {
         using scalar_in_t = scalar_t;
-        VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
-          VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
-            VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
-              VLLM_DISPATCH_QUANT_TYPES(
-                  out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-                    vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t,
-                                                          has_residual,
-                                                          transpose_scale, gs>
-                        <<<grid, block, 0, stream>>>(
-                            out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                            input.data_ptr<scalar_in_t>(),
-                            weight.data_ptr<scalar_in_t>(),
-                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                                 : nullptr,
+        VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+          VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+            VLLM_STABLE_DISPATCH_BOOL(
+                is_scale_transposed, transpose_scale, [&] {
+                  VLLM_STABLE_DISPATCH_QUANT_TYPES(
+                      out.scalar_type(), "rms_norm_per_block_quant_kernel",
+                      [&] {
+                        vllm::rms_norm_per_block_quant_kernel<
+                            scalar_in_t, scalar_t, has_residual,
+                            transpose_scale, gs><<<grid, block, 0, stream>>>(
+                            out.mutable_data_ptr<scalar_t>(),
+                            scales.mutable_data_ptr<float>(),
+                            input.const_data_ptr<scalar_in_t>(),
+                            weight.const_data_ptr<scalar_in_t>(),
+                            scale_ub.has_value()
+                                ? scale_ub->const_data_ptr<float>()
+                                : nullptr,
                             var_epsilon, hidden_size, input_stride,
-                            has_residual ? residual->data_ptr<scalar_in_t>()
-                                         : nullptr,
+                            has_residual
+                                ? residual->mutable_data_ptr<scalar_in_t>()
+                                : nullptr,
                             scales.stride(1));
-                  });
-            });
+                      });
+                });
           });
         });
       });
 }
 
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const var_epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
+void rms_norm_per_block_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor const& weight,
+                              torch::stable::Tensor& scales,
+                              double const var_epsilon,
+                              std::optional<torch::stable::Tensor> scale_ub,
+                              std::optional<torch::stable::Tensor> residual,
                               int64_t group_size, bool is_scale_transposed) {
-  static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-  TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(input.stride(-1) == 1,
-              "Input must be contiguous in the last dimension");
+  static torch::headeronly::ScalarType kFp8Type =
+      is_fp8_ocp() ? torch::headeronly::ScalarType::Float8_e4m3fn
+                   : torch::headeronly::ScalarType::Float8_e4m3fnuz;
+  STD_TORCH_CHECK(out.scalar_type() == kFp8Type ||
+                  out.scalar_type() == torch::headeronly::ScalarType::Char);
+  STD_TORCH_CHECK(out.is_contiguous());
+  STD_TORCH_CHECK(input.stride(-1) == 1,
+                  "Input must be contiguous in the last dimension");
 
   if (scale_ub.has_value()) {
-    TORCH_CHECK(out.dtype() == kFp8Type);
+    STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  TORCH_CHECK(weight.dtype() == input.dtype());
-  TORCH_CHECK(scales.dtype() == torch::kFloat32);
+  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
-    TORCH_CHECK(residual->is_contiguous());
+    STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
+    STD_TORCH_CHECK(residual->is_contiguous());
   }
 
-  TORCH_CHECK(group_size == 128 || group_size == 64,
-              "Unsupported group size: ", group_size);
+  STD_TORCH_CHECK(group_size == 128 || group_size == 64,
+                  "Unsupported group size: ", group_size);
 
   if (scales.stride(1) > 1) {
-    TORCH_CHECK(is_scale_transposed,
-                "Outer scale stride must be 1 when scales are not transposed");
+    STD_TORCH_CHECK(
+        is_scale_transposed,
+        "Outer scale stride must be 1 when scales are not transposed");
   }
 
   int64_t hidden_size = input.size(-1);
-  TORCH_CHECK(hidden_size > 0 && hidden_size % group_size == 0,
-              "hidden_size must be a positive multiple of group_size");
+  STD_TORCH_CHECK(hidden_size > 0 && hidden_size % group_size == 0,
+                  "hidden_size must be a positive multiple of group_size");
   int64_t num_tokens = input.numel() / hidden_size;
   int64_t num_groups = hidden_size / group_size;
-  TORCH_CHECK(scales.numel() >= num_tokens * num_groups,
-              "scales buffer too small: need ", num_tokens * num_groups,
-              " elements, got ", scales.numel());
+  STD_TORCH_CHECK(scales.numel() >= num_tokens * num_groups,
+                  "scales buffer too small: need ", num_tokens * num_groups,
+                  " elements, got ", scales.numel());
 
   rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
                                     var_epsilon, scale_ub, residual,

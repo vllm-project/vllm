@@ -181,6 +181,15 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
 
+    NVFP4_BACKENDS_WITH_CLAMP = {
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    }
+
+    if config.swiglu_limit is not None:
+        AVAILABLE_BACKENDS = [
+            b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
+        ]
+
     use_batched = config.moe_parallel_config.use_batched_activation_format
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -234,6 +243,16 @@ def select_nvfp4_moe_backend(
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
+        if (
+            config.swiglu_limit is not None
+            and requested_backend not in NVFP4_BACKENDS_WITH_CLAMP
+        ):
+            raise ValueError(
+                f"Model sets swiglu_limit={config.swiglu_limit}, but the "
+                f"explicitly requested moe_backend={runner_backend!r} does "
+                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm' or "
+                f"'flashinfer_cutlass' instead."
+            )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -242,17 +261,32 @@ def select_nvfp4_moe_backend(
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
             # If the user rejects FlashInfer remove those backends.
             for b in FLASHINFER_NVFP4_MOE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(b)
+                if b in AVAILABLE_BACKENDS:
+                    AVAILABLE_BACKENDS.remove(b)
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
             backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            if (
+                config.swiglu_limit is not None
+                and backend not in NVFP4_BACKENDS_WITH_CLAMP
+            ):
+                raise ValueError(
+                    f"Model sets swiglu_limit={config.swiglu_limit}, but the "
+                    f"FlashInfer backend selected via VLLM_FLASHINFER_MOE_BACKEND "
+                    f"({backend.value}) does not apply the SwiGLU clamp."
+                )
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
         else:
             # If the user is not explicit about the backend, try each.
-            for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
+            fi_backends = [
+                b
+                for b in FLASHINFER_NVFP4_MOE_BACKENDS
+                if config.swiglu_limit is None or b in NVFP4_BACKENDS_WITH_CLAMP
+            ]
+            for backend in fi_backends:
                 for k_cls in backend_to_kernel_cls(backend):
                     supported, reason = k_cls.is_supported_config(
                         k_cls,
@@ -439,6 +473,7 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -455,6 +490,7 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
@@ -478,6 +514,7 @@ def make_nvfp4_moe_quant_config(
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 

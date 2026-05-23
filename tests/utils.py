@@ -660,7 +660,8 @@ class RemoteVLLMServer:
         )
 
     def url_for(self, *parts: str) -> str:
-        return self.url_root + "/" + "/".join(parts)
+        path = "/".join(part.strip("/") for part in parts if part)
+        return f"{self.url_root}/{path}"
 
     def get_client(self, **kwargs):
         if "timeout" not in kwargs:

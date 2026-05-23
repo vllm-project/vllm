@@ -120,6 +120,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         },
         max_model_len=128,
         enforce_eager=True,
+        enable_chunked_prefill=False,
         trust_remote_code=True,
         load_format="dummy",  # Don't try to load real weights
     )
@@ -184,6 +185,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         },
         max_model_len=256,
         enforce_eager=True,
+        enable_chunked_prefill=False,
         gpu_memory_utilization=0.4,
         load_format="dummy",
     )
