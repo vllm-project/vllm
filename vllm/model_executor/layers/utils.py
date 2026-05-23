@@ -132,7 +132,7 @@ def rocm_unquantized_gemm_impl(
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
-    wavefront_width = 64  # MI3XX (CDNA3) wavefront size
+    wavefront_width = 64  # MI3XX (CDNA3); matches Utils::get_warp_size() on device
     # Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
     # Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
     cus_needed_naive = ((m + wavefront_width - 1) // wavefront_width) * ((k + 512 - 1) // 512)
