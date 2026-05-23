@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import is_dataclass
 from datetime import datetime
@@ -223,9 +224,7 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -246,9 +245,7 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        # Disabled for now due to correctness issues:
-        # https://github.com/flashinfer-ai/flashinfer/issues/3197
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": True,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -737,6 +734,17 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
+        # Check if KV connector requires chunked prefill to be disabled.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
+            and self.scheduler_config.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
+            )
+
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
@@ -790,7 +798,7 @@ class VllmConfig:
         # pins memory, so we conservatively reject the combination whenever
         # any KV connector is configured.
         #
-        # Sleep mode is exempt: CuMemAllocator.use_memory_pool toggles
+        # CuMem allocator is exempt: CuMemAllocator.use_memory_pool toggles
         # expandable_segments off around its pool (see #40812), so the KV
         # cache allocated within that context lands on stable physical pages
         # even when the env var is set.
@@ -798,17 +806,18 @@ class VllmConfig:
             "PYTORCH_CUDA_ALLOC_CONF", ""
         ):
             return
-        if self.model_config is not None and self.model_config.enable_sleep_mode:
+        if self.model_config is not None and (self.model_config.enable_cumem_allocator):
             return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
             "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "unless enable_sleep_mode is also enabled. PyTorch's CUDA VMM "
+            "unless enable_cumem_allocator is also enabled. PyTorch's CUDA VMM "
             "allocator can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
-            "unset expandable_segments:True or enable sleep mode (which "
+            "unset expandable_segments:True or enable the cumem allocator "
+            "(sleep mode does this automatically and also "
             "routes KV allocations through CuMemAllocator's pool, where "
             "expandable_segments is automatically disabled)."
         )
@@ -1904,12 +1913,13 @@ class VllmConfig:
                 )
                 self.load_config.load_format = "runai_streamer"
             elif self.load_config.load_format not in (
+                "modelexpress",
                 "runai_streamer",
                 "runai_streamer_sharded",
             ):
                 raise ValueError(
                     f"To load a model from object storage (S3/GCS/Azure), "
-                    f"'load_format' must be 'runai_streamer' or "
+                    f"'load_format' must be 'modelexpress', 'runai_streamer' or "
                     f"'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
@@ -1991,6 +2001,10 @@ class VllmConfig:
                 unsupported.append("ngram/ngram_gpu speculative decoding")
             elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
+            if speculative_config.parallel_drafting:
+                unsupported.append("parallel drafting for speculative decoding")
 
             if (
                 speculative_config.method == "eagle3"
@@ -2218,7 +2232,7 @@ T = TypeVar("T")
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
-    layer_names: list[str] | None = None,
+    layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.
@@ -2230,58 +2244,11 @@ def get_layers_from_vllm_config(
     """
 
     forward_context = vllm_config.compilation_config.static_forward_context
-
-    # If no explicit layer names requested, return all matching layers
     if layer_names is None:
-        return {
-            layer_name: layer_obj
-            for layer_name, layer_obj in forward_context.items()
-            if isinstance(layer_obj, layer_type)
-        }
+        layer_names = forward_context.keys()
 
-    resolved: dict[str, T] = {}
-
-    for req_name in layer_names:
-        # Try the requested name first
-        if req_name in forward_context and isinstance(
-            forward_context[req_name], layer_type
-        ):
-            resolved[req_name] = forward_context[req_name]
-            continue
-
-        # Try variants to tolerate common prefix differences such as
-        # 'language_model.model.layers...' vs 'language_model.layers...'
-        tried = False
-        # Variant 1: remove a redundant '.model.' segment (only first occurrence)
-        alt = req_name.replace(".model.", ".", 1)
-        if alt != req_name and alt in forward_context and isinstance(
-            forward_context[alt], layer_type
-        ):
-            resolved[req_name] = forward_context[alt]
-            continue
-
-        # Variant 2: insert '.model.' after 'language_model' (common for some
-        # HF-to-vLLM mappings)
-        if req_name.startswith("language_model."):
-            alt2 = req_name.replace("language_model.", "language_model.model.", 1)
-            if alt2 in forward_context and isinstance(
-                forward_context[alt2], layer_type
-            ):
-                resolved[req_name] = forward_context[alt2]
-                continue
-
-        # Variant 3: collapse duplicate 'model.model.' to single 'model.'
-        if "model.model." in req_name:
-            alt3 = req_name.replace("model.model.", "model.")
-            if alt3 in forward_context and isinstance(
-                forward_context[alt3], layer_type
-            ):
-                resolved[req_name] = forward_context[alt3]
-                continue
-
-        # Not found; skip (caller may raise KeyError later). We intentionally
-        # don't raise here to preserve previous semantics, but returning the
-        # mapping keyed by requested names allows callers to index by the
-        # original keys without KeyError due to simple prefix mismatches.
-
-    return resolved
+    return {
+        layer_name: layer
+        for layer_name in layer_names
+        if isinstance(layer := forward_context.get(layer_name), layer_type)
+    }
