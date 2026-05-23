@@ -679,8 +679,21 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            # Hand off remaining content to tool parser
-            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+            # Hand off remaining content to tool parser.
+            # `is_reasoning_end` checks whether an end/tool-call token appears
+            # in the current delta's token IDs.  When the reasoning parser uses
+            # a _tool_call_pending buffer (Qwen3 style), the <tool_call> token
+            # may be in a *previous* delta and the lookahead only confirms it
+            # once <function=…> arrives in the current delta — meaning the
+            # current delta's token IDs will NOT contain <tool_call>.
+            # In that case `is_reasoning_end` returns False even though the
+            # reasoning parser has already signalled the end of reasoning by
+            # returning content.  Guard against this by also triggering the
+            # handoff when the reasoning parser emits a content field.
+            reasoning_just_ended = self.is_reasoning_end(delta_token_ids) or (
+                delta_message is not None and delta_message.content is not None
+            )
+            if self._tool_parser and reasoning_just_ended:
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if delta_message and delta_message.content:
