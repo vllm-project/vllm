@@ -59,6 +59,9 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight", weight.data.t())
         # else: already in [in, out] layout — no-op
 
+        weight_scale = layer.weight_scale.t().contiguous()
+        replace_parameter(layer, "weight_scale", weight_scale.data)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
