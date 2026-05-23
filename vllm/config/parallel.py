@@ -149,6 +149,22 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_prefix_cache_lb: bool = False
+    """Enable prefix-cache-aware routing for internal data-parallel serving.
+    When enabled, the frontend routes requests using prompt prefix signatures
+    and local DP load before falling back to regular queue-depth balancing."""
+    data_parallel_prefix_cache_lb_shallow_depth: int = Field(default=2, gt=0)
+    """Number of prompt blocks used as the shallow sticky-routing key."""
+    data_parallel_prefix_cache_lb_deep_depth: int = Field(default=4, gt=0)
+    """Maximum prompt block depth tracked for deep prefix ownership."""
+    data_parallel_prefix_cache_lb_warm_threshold: int = Field(default=3, gt=0)
+    """Observation threshold before a prefix is treated as warm routing state."""
+    data_parallel_prefix_cache_lb_load_imbalance_ratio: float = Field(
+        default=2.0, gt=1.0
+    )
+    """Load ratio at which cache-miss routing may prefer a less-loaded rank."""
+    data_parallel_prefix_cache_lb_max_prefixes: int = Field(default=100_000, gt=0)
+    """Maximum number of prefix signatures tracked by prefix-cache-aware DP LB."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
@@ -449,6 +465,27 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
+        if self.data_parallel_prefix_cache_lb:
+            if self.data_parallel_size <= 1:
+                raise ValueError(
+                    "data_parallel_prefix_cache_lb can only be set when "
+                    "data_parallel_size > 1"
+                )
+            if self.data_parallel_external_lb:
+                raise ValueError(
+                    "data_parallel_prefix_cache_lb is only supported when vLLM "
+                    "can route among local data-parallel engines. External DP "
+                    "load-balancer mode must route outside vLLM."
+                )
+            if (
+                self.data_parallel_prefix_cache_lb_deep_depth
+                <= self.data_parallel_prefix_cache_lb_shallow_depth
+            ):
+                raise ValueError(
+                    "data_parallel_prefix_cache_lb_deep_depth must be greater "
+                    "than data_parallel_prefix_cache_lb_shallow_depth"
+                )
+
         if not self.numa_bind and (
             self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
         ):
@@ -736,6 +773,12 @@ class ParallelConfig:
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
+            "data_parallel_prefix_cache_lb",
+            "data_parallel_prefix_cache_lb_shallow_depth",
+            "data_parallel_prefix_cache_lb_deep_depth",
+            "data_parallel_prefix_cache_lb_warm_threshold",
+            "data_parallel_prefix_cache_lb_load_imbalance_ratio",
+            "data_parallel_prefix_cache_lb_max_prefixes",
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
@@ -782,6 +825,13 @@ class ParallelConfig:
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
             self.world_size *= self.data_parallel_size
+
+        if self.data_parallel_prefix_cache_lb and self.enable_elastic_ep:
+            raise ValueError(
+                "data_parallel_prefix_cache_lb is not compatible with "
+                "enable_elastic_ep because elastic scaling changes the DP "
+                "rank set at runtime."
+            )
 
         if self.enable_elastic_ep:
             if not self.enable_eplb:

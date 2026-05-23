@@ -862,6 +862,16 @@ class VllmConfig:
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
         if (
+            self.parallel_config.data_parallel_prefix_cache_lb
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError(
+                "data_parallel_prefix_cache_lb requires prefix caching. "
+                "Enable prefix caching or disable data-parallel prefix-cache "
+                "load balancing."
+            )
+
+        if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
         ):
