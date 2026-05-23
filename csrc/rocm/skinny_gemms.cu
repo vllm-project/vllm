@@ -1812,6 +1812,12 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto glbl = axl_glbl.data_ptr<float>();
   auto cntr = axl_cntr.data_ptr<int>();
 
+// Template params: <scalar, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N, GrpsShrB, CHUNKK, DTRMNSTC>
+//   THRDS=64   : wavefront width (lanes per wavefront)
+//   YTILE=16   : MFMA tile height (output rows per wavefront, matches 16x16 matrix unit)
+//   WvPrGrp=4  : wavefronts per block
+//   A_CHUNK=8  : elements of A loaded per lane per LDS transaction (vectorized load width)
+//   UNRL=1     : unroll factor for the K-load loop
 #define WVSPLITKRC(_N, _GrpsShrB, _CHUNKK)                                     \
   {                                                                            \
     dim3 block(64, 4);                                                         \
