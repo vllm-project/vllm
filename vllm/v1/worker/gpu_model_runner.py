@@ -1257,14 +1257,13 @@ class GPUModelRunner(
         # Save scheduler-allocated spec lengths before trimming so
         # prev_num_draft_len keeps the optimistic count for rejection correction.
         original_num_spec_per_req: dict[str, int] = {}
-        self.dynamic_truncated_spec_tokens = {}
         if self.speculative_config is not None and(
             self.speculative_config.use_ngram_gpu()
             or self.speculative_config.dynamic_verifying
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            update_scheduler_for_invalid_drafts(
+            self.dynamic_truncated_spec_tokens = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
@@ -1426,10 +1425,6 @@ class GPUModelRunner(
             if original_num_spec_per_req:
                 orig = original_num_spec_per_req.get(req_id, 0)
                 if orig != req_state.prev_num_draft_len:
-                    # Record invalid count for dynamic verifying
-                    if self.speculative_config.dynamic_verifying:
-                        num_invalid_tokens = orig - req_state.prev_num_draft_len
-                        self.dynamic_truncated_spec_tokens[req_id] = num_invalid_tokens
                     req_state.prev_num_draft_len = orig
         
         # Add the new or resumed requests to the persistent batch.
