@@ -935,6 +935,12 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
+            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
+            # free here (outer GEMMs joined) for the inner overlap of
+            # wq_b+fused_indexer_q_rope_quant vs compressor.
+            indexer_aux_stream = (
+                aux_stream_list[2] if aux_stream_list is not None else None
+            )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -945,6 +951,7 @@ class DeepseekV4Attention(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
+                aux_stream=indexer_aux_stream,
             )
 
         mla_modules = DeepseekV4MLAModules(
