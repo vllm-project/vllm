@@ -1410,13 +1410,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.dp_prefix_cache_router = (
             DPPrefixCacheRouter(
                 parallel_config,
-                block_size=(
+                hash_block_size=(
                     vllm_config.cache_config.hash_block_size
                     or vllm_config.cache_config.block_size
                 ),
+                branch_block_size=vllm_config.cache_config.block_size,
                 hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
                 n_ranks=len(self.core_engines),
-                start_index=self.eng_start_index,
             )
             if parallel_config.data_parallel_prefix_cache_lb
             else None

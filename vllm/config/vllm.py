@@ -870,6 +870,15 @@ class VllmConfig:
                 "Enable prefix caching or disable data-parallel prefix-cache "
                 "load balancing."
             )
+        if (
+            self.parallel_config.data_parallel_prefix_cache_lb
+            and os.getenv("PYTHONHASHSEED") is None
+        ):
+            raise ValueError(
+                "data_parallel_prefix_cache_lb requires PYTHONHASHSEED to be "
+                "set so frontend routing and engine prefix-cache hashes are "
+                "deterministic across processes."
+            )
 
         if (
             self.model_config is not None

@@ -46,6 +46,7 @@ def _make_router(
     *,
     n_ranks: int = 2,
     block_size: int = 4,
+    branch_block_size: int | None = None,
     shallow_depth: int = 1,
     deep_depth: int = 2,
     warm_threshold: int = 1,
@@ -61,7 +62,8 @@ def _make_router(
     )
     return DPPrefixCacheRouter(
         parallel_config,
-        block_size=block_size,
+        hash_block_size=block_size,
+        branch_block_size=branch_block_size,
         hash_algo="sha256",
         n_ranks=n_ranks,
     )
@@ -104,6 +106,18 @@ def test_router_reuses_sticky_prefix_and_sets_branch_hint():
     assert second_decision.rank == first_decision.rank
     assert second_decision.dp_prefix_cache_prefix_len == 4
     assert second.dp_prefix_cache_prefix_len is None
+
+
+def test_router_rounds_branch_hint_to_scheduler_block_size():
+    router = _make_router(block_size=2, branch_block_size=4, deep_depth=4)
+    first = _make_engine_request([1, 2, 3, 4, 5, 6], request_id="first")
+    second = _make_engine_request([1, 2, 3, 4, 5, 6, 7, 8], request_id="second")
+    counts = [[0, 0], [0, 0]]
+
+    router.route(first, counts, _least_loaded)
+    second_decision = router.route(second, counts, _least_loaded)
+
+    assert second_decision.dp_prefix_cache_prefix_len == 4
 
 
 def test_dp_lb_client_attaches_branch_hint_to_request():
@@ -251,6 +265,20 @@ def test_vllm_config_requires_prefix_caching_for_dp_prefix_cache_lb():
         )
 
 
+def test_vllm_config_requires_pythonhashseed_for_dp_prefix_cache_lb(monkeypatch):
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+
+    with pytest.raises(ValueError, match="PYTHONHASHSEED"):
+        VllmConfig(
+            cache_config=CacheConfig(enable_prefix_caching=True),
+            device_config=DeviceConfig("cpu"),
+            parallel_config=ParallelConfig(
+                data_parallel_size=2,
+                data_parallel_prefix_cache_lb=True,
+            ),
+        )
+
+
 def test_ready_response_sets_resolved_hash_block_size():
     vllm_config = SimpleNamespace(
         cache_config=CacheConfig(hash_block_size=None),
@@ -261,7 +289,10 @@ def test_ready_response_sets_resolved_hash_block_size():
         EngineCoreReadyResponse(
             max_model_len=1024,
             num_gpu_blocks=1,
+            block_size=16,
             dp_stats_address=None,
+            dtype="float16",
+            vllm_version="test",
             hash_block_size=8,
         )
     )
@@ -269,6 +300,7 @@ def test_ready_response_sets_resolved_hash_block_size():
     AsyncMPClient._apply_ready_response(client, payload)  # type: ignore[arg-type]
 
     assert vllm_config.cache_config.hash_block_size == 8
+    assert vllm_config.cache_config.block_size == 16
 
 
 def test_ready_response_rejects_hash_block_size_mismatch():
@@ -281,7 +313,10 @@ def test_ready_response_rejects_hash_block_size_mismatch():
         EngineCoreReadyResponse(
             max_model_len=1024,
             num_gpu_blocks=1,
+            block_size=16,
             dp_stats_address=None,
+            dtype="float16",
+            vllm_version="test",
             hash_block_size=8,
         )
     )

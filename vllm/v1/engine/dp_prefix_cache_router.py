@@ -54,13 +54,18 @@ class DPPrefixCacheRouter:
         self,
         parallel_config: ParallelConfig,
         *,
-        block_size: int | None,
+        hash_block_size: int | None,
+        branch_block_size: int | None = None,
         hash_algo: str,
         n_ranks: int,
         start_index: int = 0,
     ) -> None:
         self.n_ranks = n_ranks
-        self.block_size = max(block_size or 1, 1)
+        # Hashes are computed at the engine-resolved hash granularity, while
+        # scheduler branch hints must be aligned to the scheduler's cache block
+        # boundary.
+        self.hash_block_size = max(hash_block_size or 1, 1)
+        self.branch_block_size = max(branch_block_size or self.hash_block_size, 1)
         self.start_index = start_index
         self.shallow_depth = parallel_config.data_parallel_prefix_cache_lb_shallow_depth
         self.deep_depth = parallel_config.data_parallel_prefix_cache_lb_deep_depth
@@ -113,7 +118,7 @@ class DPPrefixCacheRouter:
 
         dp_prefix_cache_prefix_len = None
         if rank == overlap_rank and 0 < overlap_depth < len(full_signatures):
-            dp_prefix_cache_prefix_len = overlap_depth * self.block_size
+            dp_prefix_cache_prefix_len = self._branch_prefix_len(overlap_depth)
 
         self._record_session(session_key, rank)
         self._record_assignment(rank, full_signatures)
@@ -136,7 +141,7 @@ class DPPrefixCacheRouter:
             cache_salt=request.cache_salt,
             prompt_embeds=request.prompt_embeds,
             prompt_embeds_per_block_hashes={},
-            block_size=self.block_size,
+            block_size=self.hash_block_size,
             caching_hash_fn=self.caching_hash_fn,
         )
 
@@ -163,9 +168,14 @@ class DPPrefixCacheRouter:
         return rank
 
     def _hash_rank(self, key: BlockHash) -> int:
-        return (int.from_bytes(bytes(key)[:8], byteorder="big") + self.start_index) % (
+        return (int.from_bytes(key[:8], byteorder="big") + self.start_index) % (
             self.n_ranks
         )
+
+    def _branch_prefix_len(self, depth: int) -> int | None:
+        prefix_len = depth * self.hash_block_size
+        prefix_len -= prefix_len % self.branch_block_size
+        return prefix_len or None
 
     def _would_miss(self, rank: int, signatures: list[BlockHash]) -> bool:
         if rank >= self.n_ranks:
