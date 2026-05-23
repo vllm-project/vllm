@@ -444,6 +444,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
+ARG VLLM_VERSION_OVERRIDE=""
 ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -512,6 +513,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
+    export VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE}" && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 # Copy extension wheels from extensions-build stage for later use
