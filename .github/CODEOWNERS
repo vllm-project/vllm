@@ -170,13 +170,13 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa
-/docker/Dockerfile.rocm* @gshtras @tjtanaa
-/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
-/csrc/rocm @gshtras @tjtanaa
+/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/docker/Dockerfile.rocm* @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
+/vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd
 /requirements/*rocm* @tjtanaa
 /tests/**/*rocm* @tjtanaa
 /docs/**/*rocm* @tjtanaa

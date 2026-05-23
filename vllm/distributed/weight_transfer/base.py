@@ -76,10 +76,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
-            model: The local model instance which will receive the weights.
-                Backends that need to inspect the module graph (e.g. to
-                infer per-parameter sharding placements) consume it;
-                backends that don't can ignore it.
+            model: The local model instance which will receive the weights
         """
         self.config = config
         self.parallel_config = parallel_config

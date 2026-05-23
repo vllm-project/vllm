@@ -136,7 +136,7 @@ class IPCWeightTransferEngine(
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
-            model: The local model instance (unused for IPC).
+            model: The local model instance which will receive the weights
         """
         super().__init__(config, parallel_config, model)
 

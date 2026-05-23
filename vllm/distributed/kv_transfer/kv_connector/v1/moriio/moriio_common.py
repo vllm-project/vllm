@@ -189,6 +189,7 @@ class MoRIIOConfig:
     dp_rank: int
     dp_size: int
     tp_size: int
+    backend: str = "rdma"
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -213,6 +214,12 @@ class MoRIIOConfig:
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
+        backend = str(extra_config.get("backend", "rdma")).lower()
+        if backend not in ("rdma", "xgmi"):
+            raise ValueError(
+                f"Invalid MoRIIO backend {backend!r} in kv_connector_extra_config; "
+                "must be one of 'rdma' or 'xgmi'."
+            )
 
         return cls(
             local_ip=get_ip(),
@@ -227,6 +234,7 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
+            backend=backend,
         )
 
 
