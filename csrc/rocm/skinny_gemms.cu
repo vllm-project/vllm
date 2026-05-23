@@ -1288,10 +1288,8 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 
 // Skinny GEMM for cases where the M dimension is too small to fill all CUs.
 // Uses a wave-level split-K strategy with atomic reduction across K chunks.
-#if defined(__HIP__GFX9__)
-  #if defined(__gfx950__)
-    #define WVSPLITKRC_1KPASS
-  #endif
+#if defined(__HIP__MI3XX__)
+  #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1745,7 +1743,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             int* cntr, scalar_t* C,
                             const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add __HIP__GFX1X__ (RDNA) support
+#endif  // defined(__HIP__MI3XX__) TODO: Add __HIP__GFX9__ (MI200) and __HIP__GFX1X__ (RDNA) support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
