@@ -250,6 +250,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
     use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
+    pdl_kwargs = {"launch_pdl": True} if use_gdc else {}
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
@@ -273,8 +274,8 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         HALF_ROPE=half_rope,
         TMA_ALIGNED_SCALES=tma_aligned_scales,
         USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
         num_stages=1,
+        **pdl_kwargs,
         num_warps=1,
     )
     return fp8_buf, scale_buf

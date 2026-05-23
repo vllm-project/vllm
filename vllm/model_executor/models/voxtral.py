@@ -349,6 +349,10 @@ class VoxtralForConditionalGeneration(
                 dim=config.text_config.hidden_size,
             )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get module prefix for multimodal models to filter LoRA modules."""
         return MultiModelKeys.from_string_field(
