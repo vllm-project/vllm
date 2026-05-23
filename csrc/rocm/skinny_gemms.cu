@@ -1501,7 +1501,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                 /* dst */ (int*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))]),
                 16, 0, 0);
   #else
-            /* dst */ *((bigType*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
+                /* dst */ *((bigType*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
                 /* src */ *((bigType*)(&A[min__(
                     Kap * actlN - A_CHUNK,
                     kOffcp + Kap * (n / CHUNKK +

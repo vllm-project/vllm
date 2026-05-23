@@ -8,7 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx9, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -125,7 +125,7 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+@pytest.mark.skipif(not on_gfx9(), reason="wvSplitKrc targets GFX9 (CDNA): gfx950 uses global_load_lds intrinsic, other GFX9 uses bigType/float4 fallback")
 def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
