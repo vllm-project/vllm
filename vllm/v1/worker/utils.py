@@ -441,6 +441,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
     """
+    if not shared_kv_cache_layers:
+        return
+
     layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
     for kv_cache_group in kv_cache_groups:
         for layer_name in kv_cache_group.layer_names:
@@ -519,12 +522,8 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled.
-
-    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
-    - In full-graph compilation mode (no splitting ops or using inductor graph
-      partition), SP is always applied
-    - Otherwise, SP is only applied for specific shapes in compile_sizes
+    parallelism and tensor parallelism is enabled. SP is only supported in
+    full-graph compilation mode.
     """
     if not vllm_config.compilation_config.pass_config.enable_sp:
         return False
@@ -534,16 +533,13 @@ def is_residual_scattered_for_sp(
     if tp == 1:
         return False
 
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        or not vllm_config.compilation_config.splitting_ops
+    ), "Sequence parallelism requires full-graph compilation"
+
     # When sequence parallelism is enabled, we always pad num_input_tokens
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    if (
-        not vllm_config.compilation_config.splitting_ops
-        or vllm_config.compilation_config.use_inductor_graph_partition
-    ):
-        return True
-    compile_sizes = vllm_config.compilation_config.compile_sizes
-    if compile_sizes is None:
-        return False
-    return num_input_tokens in compile_sizes
+    return True

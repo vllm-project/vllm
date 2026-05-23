@@ -44,7 +44,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_minimax_qk_norm`\*     | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
-| `fuse_attn_quant` (MLA)\*    | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static(untested)\*                   |
+| `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -152,7 +152,7 @@ standard `Attention` and `MLAAttention` (used by DeepSeek-V2/V3/R1 models). Patt
 
 - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
-`MLAAttention → FP8 static quant` / `MLAAttention → NVFP4 dynamic quant`:
+`MLAAttention → FP8 static, FP8 per-group, NVFP4 dynamic quant`
 
 The MLA fusion operates at the graph level on the `unified_mla_attention_with_output` op and works
 with all MLA decode and prefill backend combinations. Unlike standard `Attention` backends (where

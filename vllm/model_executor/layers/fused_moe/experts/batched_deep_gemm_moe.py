@@ -210,9 +210,9 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    cuda_arch = current_platform.get_device_capability(
-        device_id=y.device.index
-    ).to_int()
+    device_capability = current_platform.get_device_capability(device_id=y.device.index)
+    assert device_capability is not None
+    cuda_arch = device_capability.to_int()
 
     if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
@@ -369,7 +369,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             logger.warning_once(
                 "DPMetadata unavailable. Defaulting expected_m to "
                 f"{max_tokens_per_expert}.",
-                scope="local",
             )
             return max_tokens_per_expert
 

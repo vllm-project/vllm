@@ -4,11 +4,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -18,9 +19,16 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    add_kv_sharing_layers_to_kv_cache_groups,
+    bind_kv_cache,
+    prepare_kernel_block_sizes,
+)
 
 
 @dataclass(frozen=True)
@@ -34,10 +42,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            # This layer will use KV cache of the sharing target layer.
+            continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
+
+
+def get_shared_kv_cache_layers(vllm_config: VllmConfig):
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    return {
+        layer_name: kv_tgt_layer
+        for layer_name, attn_module in attn_layers.items()
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+    }
 
 
 def init_attn_backend(
@@ -49,13 +69,18 @@ def init_attn_backend(
     dict[str, type[AttentionBackend]],
     list[list[AttentionGroup]],
     AttentionCGSupportInfo,
+    list[int],
 ]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
-    attn_backend_workspace: torch.Tensor | None = None
-    # Find minimum cudagraph support across all attention backends
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
+
+    # Add KV-sharing layers to their target's kv cache group so they are
+    # discovered alongside the target layer in Phase 1 below.
+    add_kv_sharing_layers_to_kv_cache_groups(
+        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+    )
+
+    # Phase 1: discover attention groups for each kv cache group.
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
@@ -80,21 +105,32 @@ def init_attn_backend(
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
                 group_map[key].layer_names.append(layer_name)
 
-        groups = [group_map[key] for key in group_order]
+        attn_groups.append([group_map[key] for key in group_order])
+
+    # Phase 2: pick a kernel block size per kv cache group that is supported
+    # by all backends within that group.
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    # Phase 3: create metadata builders and determine cudagraph support.
+    attn_backend_workspace: torch.Tensor | None = None
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for kv_cache_group_id, groups in enumerate(attn_groups):
+        kv_cache_group_spec = kv_cache_config.kv_cache_groups[kv_cache_group_id]
+        kernel_block_size = None
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
-                kernel_block_size=None,
+                kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
@@ -111,8 +147,7 @@ def init_attn_backend(
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
-                min_cg_attn_backend = attn_backend.__name__
-        attn_groups.append(groups)
+                min_cg_attn_backend = group.backend.__name__
 
     return (
         attn_backends,
@@ -121,10 +156,13 @@ def init_attn_backend(
             min_cg_support=min_cg_support,
             min_cg_attn_backend=min_cg_attn_backend,
         ),
+        kernel_block_sizes,
     )
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
+def _allocate_kv_cache(
+    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -135,7 +173,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), (
+    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
@@ -146,46 +184,149 @@ def _reshape_kv_cache(
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
-) -> dict[str, torch.Tensor]:
-    kv_caches: dict[str, torch.Tensor] = {}
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    kernel_block_sizes: list[int],
+    shared_kv_cache_layers: dict[str, str],
+) -> dict[str, Any]:
+    kv_caches: dict[str, Any] = {}
+    has_attn, has_mamba = False, False
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
         for layer_name in kv_cache_group_spec.layer_names:
+            if layer_name in shared_kv_cache_layers:
+                # Shared layer — tensor will be aliased to its target later.
+                continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
-            assert isinstance(kv_cache_spec, AttentionSpec)
 
-            raw_tensor = kv_cache_raw_tensors[layer_name]
-            assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-            num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+            kv_raw_tensor = kv_cache_raw_tensors[layer_name]
+            assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+            num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
-            attn_backend = attn_backends[layer_name]
-            kv_cache_shape = attn_backend.get_kv_cache_shape(
-                num_blocks,
-                kv_cache_spec.block_size,
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                cache_dtype,
-            )
+            if isinstance(kv_cache_spec, AttentionSpec):
+                has_attn = True
+                attn_backend = attn_backends[layer_name]
 
-            # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                assert len(kv_cache_stride_order) == len(kv_cache_shape)
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                if kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+                    num_blocks *= kv_cache_spec.block_size // kernel_block_size
+                else:
+                    kernel_block_size = kv_cache_spec.block_size
 
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-            inv_order = [
-                kv_cache_stride_order.index(i)
-                for i in range(len(kv_cache_stride_order))
-            ]
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
 
-            dtype = kv_cache_spec.dtype
-            raw_tensor = raw_tensor.view(dtype)
-            raw_tensor = raw_tensor.view(kv_cache_shape)
-            kv_caches[layer_name] = raw_tensor.permute(*inv_order)
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    num_blocks,
+                    shape_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
+
+                # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
+                try:
+                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                    assert len(kv_cache_stride_order) == len(kv_cache_shape)
+                except (AttributeError, NotImplementedError):
+                    kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+
+                kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+                inv_order = [
+                    kv_cache_stride_order.index(i)
+                    for i in range(len(kv_cache_stride_order))
+                ]
+
+                dtype = kv_cache_spec.dtype
+                kv_tensor = kv_raw_tensor.view(dtype)
+                if kv_cache_spec.page_size_padded is not None:
+                    # Use strided view to handle page_size_bytes that
+                    # include padding. This follows the same pattern as
+                    # MambaSpec handling in gpu_model_runner.py.
+                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                    # (i.e. the first physical dimension is the block
+                    # index), which holds for MLA backends but NOT for
+                    # standard attention backends whose shape starts with
+                    # a K/V dimension of size 2.
+                    dtype_size = get_dtype_size(dtype)
+                    page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                    strides = list(torch.empty(kv_cache_shape).stride())
+                    strides[inv_order[0]] = page_stride
+                    kv_cache = torch.as_strided(
+                        kv_tensor,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                    )
+                else:
+                    # No padding — safe to use a contiguous view.
+                    kv_cache = kv_tensor.view(kv_cache_shape)
+                kv_caches[layer_name] = kv_cache.permute(*inv_order)
+
+            elif isinstance(kv_cache_spec, MambaSpec):
+                has_mamba = True
+                state_tensors = []
+                storage_offset_bytes = 0
+                for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    dtype_size = get_dtype_size(dtype)
+                    num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+                    target_shape = (num_blocks, *shape)
+                    stride = torch.empty(target_shape).stride()
+                    target_stride = (num_element_per_page, *stride[1:])
+                    assert storage_offset_bytes % dtype_size == 0
+                    tensor = torch.as_strided(
+                        kv_raw_tensor.view(dtype),
+                        size=target_shape,
+                        stride=target_stride,
+                        storage_offset=storage_offset_bytes // dtype_size,
+                    )
+                    state_tensors.append(tensor)
+                    storage_offset_bytes += stride[0] * dtype_size
+                kv_caches[layer_name] = state_tensors
+            else:
+                raise NotImplementedError(
+                    f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
+                )
+
+    if has_attn and has_mamba:
+        _update_hybrid_attention_layout(kv_caches, kv_cache_config)
+
+    # Map any sharing layers to their target layer's KV cache.
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        kv_caches[layer_name] = kv_caches[target_layer_name]
+
     return kv_caches
+
+
+def _update_hybrid_attention_layout(
+    kv_caches: dict[str, Any], kv_cache_config: KVCacheConfig
+) -> None:
+    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        for layer_name in kv_cache_group_spec.layer_names:
+            if layer_name not in kv_caches:
+                # Shared layer — will be aliased to its target after this pass.
+                continue
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            kv_cache = kv_caches[layer_name]
+            if kv_cache.shape[0] == 2:
+                assert kv_cache.shape[1] != 2, (
+                    f"Cannot determine layout for tensor of shape {kv_cache.shape}"
+                )
+                hidden_size = kv_cache.shape[2:].numel()
+                kv_cache.as_strided_(
+                    size=kv_cache.shape,
+                    stride=(
+                        hidden_size,
+                        2 * hidden_size,
+                        *kv_cache.stride()[2:],
+                    ),
+                )
 
 
 def init_kv_cache(
@@ -195,10 +336,20 @@ def init_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
-) -> dict[str, torch.Tensor]:
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+) -> dict[str, Any]:
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    kv_cache_raw_tensors = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device
+    )
     kv_caches = _reshape_kv_cache(
-        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+        kv_cache_config,
+        kv_cache_raw_tensors,
+        attn_backends,
+        cache_dtype,
+        kernel_block_sizes,
+        shared_kv_cache_layers,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
@@ -227,12 +378,17 @@ def build_attn_metadata(
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
-    encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    positions: torch.Tensor | None = None,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    for_cudagraph_capture: bool = False,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if seq_lens_cpu_upper_bound is not None:
+        seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -240,10 +396,16 @@ def build_attn_metadata(
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
 
+        common_attn_metadata_extra_kwargs = (
+            model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
+            if model_specific_attn_metadata is not None
+            else {}
+        )
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             max_seq_len=max_seq_len,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
@@ -252,17 +414,30 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            positions=positions,
+            **common_attn_metadata_extra_kwargs,
         )
-        if encoder_seq_lens and i in encoder_seq_lens:
-            encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
-            common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
-            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            metadata = attn_metadata_builder.build(
-                common_prefix_len=0, common_attn_metadata=common_attn_metadata
-            )
+            if for_cudagraph_capture:
+                metadata = attn_metadata_builder.build_for_cudagraph_capture(
+                    common_attn_metadata
+                )
+            else:
+                attn_metadata_extra_kwargs = (
+                    model_specific_attn_metadata.get_extra_attn_kwargs(
+                        attn_metadata_builder,
+                        num_reqs,
+                    )
+                    if model_specific_attn_metadata is not None
+                    else {}
+                )
+                metadata = attn_metadata_builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

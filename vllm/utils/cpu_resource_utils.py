@@ -3,8 +3,8 @@
 
 import json
 import os
-import platform
 import subprocess
+import sys
 from dataclasses import dataclass
 from functools import cache
 
@@ -78,7 +78,7 @@ def parse_id_list(raw_str: str) -> list[int]:
 
 
 def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # MacOS has no memory node
         return MemoryNodeInfo(
             total_memory=psutil.virtual_memory().total,
@@ -87,7 +87,13 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
 
     meminfo_path = f"/sys/devices/system/node/node{node_id}/meminfo"
     if not os.path.exists(meminfo_path):
-        raise RuntimeError(f"{meminfo_path} doesn't exit.")
+        # Non-NUMA systems (e.g. many RISC-V boards) don't expose per-node
+        # meminfo. Fall back to system-wide numbers from psutil.
+        vm = psutil.virtual_memory()
+        return MemoryNodeInfo(
+            total_memory=vm.total,
+            available_memory=vm.available,
+        )
 
     meminfo = {}
     with open(meminfo_path) as f:
@@ -116,17 +122,14 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
     cpu_list = _get_cpu_list()
-    if platform.system() == "Darwin":
-        return cpu_list
-
-    global_allowed_cpu_id_list = os.sched_getaffinity(0)
-    logical_cpu_list = [x for x in cpu_list if x.id in global_allowed_cpu_id_list]
-
-    return logical_cpu_list
+    if sys.platform == "linux":
+        allowed = os.sched_getaffinity(0)
+        return [x for x in cpu_list if x.id in allowed]
+    return cpu_list
 
 
 def get_visible_memory_node() -> list[int]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         return [0]
 
     allowed_memory_node_list = get_memory_affinity()
@@ -147,19 +150,36 @@ def get_visible_memory_node() -> list[int]:
 
 
 @cache
+def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
+    """Synthesize a flat CPU list: each logical CPU is its own core on
+    NUMA node 0.  Used when lscpu output is unavailable or unparsable
+    (e.g. macOS, RISC-V)."""
+    cpu_count = os.cpu_count()
+    assert cpu_count
+    return [LogicalCPUInfo(i, i, 0) for i in range(cpu_count)]
+
+
 def _get_cpu_list() -> list[LogicalCPUInfo]:
-    if platform.system() == "Darwin":
+    if sys.platform == "darwin":
         # For MacOS, no user-level CPU affinity and SMT, return all CPUs
-        cpu_count = os.cpu_count()
-        assert cpu_count
-        return [LogicalCPUInfo(i, i, 0) for i in range(cpu_count)]
+        return _synthesize_cpu_list()
 
     lscpu_output = subprocess.check_output(
         "lscpu --json --extended=CPU,CORE,NODE --online", shell=True, text=True
     )
 
-    # For platform without NUMA, replace '-' to '0'
-    lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": 0\1', lscpu_output)
+    # For platforms without NUMA, map bare `-` node to 0 so non-NUMA
+    # systems keep the existing behavior from #39781.
+    lscpu_output = re.sub(r'"node":\s*-\s*(,|\n|\})', r'"node": 0\1', lscpu_output)
+
+    # On some architectures (notably RISC-V), lscpu also emits bare `-`
+    # for cpu/core.  Quote them so the JSON parses; they will decode to
+    # -1 and be filtered out below, triggering the synthesized fallback.
+    lscpu_output = re.sub(
+        r'("(?:cpu|core)":\s*)-\s*(,|\n|\})',
+        r'\1"-"\2',
+        lscpu_output,
+    )
 
     logical_cpu_list: list[LogicalCPUInfo] = json.loads(
         lscpu_output, object_hook=LogicalCPUInfo.json_decoder
@@ -169,5 +189,10 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
     logical_cpu_list = [
         x for x in logical_cpu_list if -1 not in (x.id, x.physical_core, x.numa_node)
     ]
+
+    # If lscpu returned no valid entries (e.g. RISC-V where all fields
+    # are bare `-`), fall back to synthesized topology.
+    if not logical_cpu_list:
+        logical_cpu_list = _synthesize_cpu_list()
 
     return logical_cpu_list
