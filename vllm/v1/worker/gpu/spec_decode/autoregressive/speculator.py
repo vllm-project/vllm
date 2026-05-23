@@ -3,22 +3,14 @@
 from typing import Any
 
 import torch
-import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    build_slot_mappings_by_layer,
-    init_attn_backend,
-)
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CapturedAttentionState,
@@ -26,77 +18,23 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.cudagraph import (
     DecodeSpeculatorCudaGraphManager,
     PrefillSpeculatorCudaGraphManager,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import ModelBackedSpeculator
 
 logger = init_logger(__name__)
 
 
-class AutoRegressiveSpeculator(BaseSpeculator):
+class AutoRegressiveSpeculator(ModelBackedSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        self.vllm_config = vllm_config
-        self.device = device
+        super().__init__(vllm_config, device)
 
-        assert vllm_config.speculative_config is not None
-        self.speculative_config = vllm_config.speculative_config
-        self.method = self.speculative_config.method
-        self.num_speculative_steps = self.speculative_config.num_speculative_tokens
-        self.draft_model_config = self.speculative_config.draft_model_config
-
-        self.scheduler_config = vllm_config.scheduler_config
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.draft_max_seq_len = self.max_model_len
-        # We need to get the hidden size from the draft model config because
-        # the draft model's hidden size can be different from the target model's
-        # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
-        # Widen for HC-multiplexed residuals (e.g. DeepSeek V4 feeds the MTP
-        # draft the target's pre-hc_head (T, hc_mult * hidden_size) residual).
-        # Non-HC models default to hc_mult=1 and are unaffected.
-        hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
-        self.hidden_size = self.hidden_size * hc_mult
-        self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.dtype = vllm_config.model_config.dtype
-        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
-
-        # DP configuration
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-
-        self.input_buffers = InputBuffers(
-            max_num_reqs=self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
-            device=device,
-        )
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-        )
-        self.idx_mapping = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
-        self.temperature = torch.zeros(
-            self.max_num_reqs, dtype=torch.float32, device=device
-        )
-        self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
-        self.draft_tokens = torch.zeros(
-            self.max_num_reqs,
-            self.num_speculative_steps,
-            dtype=torch.int64,
-            device=device,
-        )
         self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
-        )
-        self.arange = torch.arange(
-            self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
 
         self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
@@ -105,16 +43,6 @@ class AutoRegressiveSpeculator(BaseSpeculator):
         if self.supports_mm_inputs:
             self.inputs_embeds = torch.zeros(
                 self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-            )
-
-        self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=torch.float32,
-                device=device,
             )
 
         self.prefill_cudagraph_manager: PrefillSpeculatorCudaGraphManager | None = None
@@ -139,47 +67,6 @@ class AutoRegressiveSpeculator(BaseSpeculator):
         False: returns a single tensor used for both — standard MTP (DeepSeek).
         """
         return True
-
-    def load_model(self, target_model: nn.Module) -> None:
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(
-                self.vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
-        )
-
-        self.model = self.load_draft_model(target_model, target_attn_layer_names)
-
-        all_attn_layers = set[str](
-            get_layers_from_vllm_config(
-                self.vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
-        )
-        self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
-
-    def load_draft_model(
-        self,
-        target_model: nn.Module,
-        target_attn_layer_names: set[str],
-    ) -> nn.Module:
-        raise NotImplementedError
-
-    def set_attn(
-        self,
-        model_state: ModelState,
-        kv_cache_config: KVCacheConfig,
-        block_tables: BlockTables,
-    ) -> None:
-        self.model_state = model_state
-        self.kv_cache_config = kv_cache_config
-        self.attn_groups, _, _ = init_attn_backend(
-            kv_cache_config,
-            self.vllm_config,
-            self.device,
-            active_layer_names=self.draft_attn_layer_names,
-        )
-        self.block_tables = block_tables
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
@@ -275,38 +162,24 @@ class AutoRegressiveSpeculator(BaseSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
+        if aux_hidden_states:
+            assert self.method == "eagle3"
+
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
-        max_query_len = input_batch.num_scheduled_tokens.max()
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
-
-        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we maintain the size of input_ids and
-        # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
-        if aux_hidden_states:
-            assert self.method == "eagle3"
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
-        self.hidden_states[:num_tokens].copy_(hidden_states)
-
-        # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
-        # NOTE(woosuk): For draft sampling, we only consider the temperature
-        # and ignore the other sampling parameters such as top_k and top_p,
-        # for simplicity and performance.
-        # While this may slightly degrade the acceptance rate, it does not
-        # affect the output distribution after rejection sampling.
-        self.temperature.copy_(temperature)
-        self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(input_batch.idx_mapping)
+        self._copy_inputs_from_target(
+            num_tokens,
+            num_reqs,
+            last_hidden_states,
+            aux_hidden_states,
+            input_batch.idx_mapping,
+            temperature,
+            seeds,
+        )
 
         # Get the input ids and last token indices for the speculator.
         prepare_prefill_inputs(
@@ -328,7 +201,7 @@ class AutoRegressiveSpeculator(BaseSpeculator):
             # Use the actual number of tokens without padding added by
             # the target model during FULL cudagraph.
             input_batch.num_tokens,
-            max_query_len,
+            input_batch.num_scheduled_tokens.max(),
         )
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
@@ -610,36 +483,6 @@ class AutoRegressiveSpeculator(BaseSpeculator):
             self.num_speculative_steps,
             advance_draft_positions=self.advance_draft_positions,
         )
-
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-    ) -> dict[str, Any] | None:
-        query_start_loc_cpu = torch.clamp(
-            self.arange[: num_reqs_padded + 1], max=num_reqs
-        )
-        block_tables = [
-            x[:num_reqs_padded] for x in self.block_tables.input_block_tables
-        ]
-        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
-        attn_metadata = build_attn_metadata(
-            attn_groups=self.attn_groups,
-            num_reqs=num_reqs_padded,
-            num_tokens=num_tokens_padded,
-            query_start_loc_gpu=self.input_buffers.query_start_loc[
-                : num_reqs_padded + 1
-            ],
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=1,
-            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-            max_seq_len=self.draft_max_seq_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=self.kv_cache_config,
-        )
-        return attn_metadata
 
 
 @triton.jit

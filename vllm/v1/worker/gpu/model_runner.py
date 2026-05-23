@@ -103,6 +103,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+from vllm.v1.worker.gpu.spec_decode.speculator import ModelBackedSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -307,7 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
-            if self.speculator is not None:
+            if isinstance(self.speculator, ModelBackedSpeculator):
                 self.speculator.load_model(self.model)
                 eplb_models_added = self.eplb.maybe_register_speculator(
                     self.speculator, self.speculative_config, load_dummy_weights
@@ -457,7 +458,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         check_attention_cp_compatibility(self.vllm_config)
-        if self.speculator is not None:
+        if isinstance(self.speculator, ModelBackedSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.model_state, self.kv_cache_config, self.block_tables
