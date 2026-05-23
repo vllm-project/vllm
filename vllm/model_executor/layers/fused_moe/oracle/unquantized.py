@@ -425,6 +425,3 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         return make_unquantized_moe_kernel(
             quant_config, moe_config, backend, experts_cls, routing_tables
         )
-
-    # `make_quant_config` inherits the base-class default, which raises
-    # NotImplementedError: unquantized MoE has no quant config to build.
