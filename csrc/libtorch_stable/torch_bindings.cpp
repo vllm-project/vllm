@@ -267,9 +267,62 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "float epsilon) -> ()");
+
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+
+  // Fused Layernorm + Quant kernels
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+
+  // Fused Layernorm + Block quant kernels
+  ops.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
+
+  // Rotary embedding
+  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
+  ops.def(
+      "rotary_embedding(Tensor positions, Tensor! query,"
+      "                 Tensor!? key, int head_size,"
+      "                 Tensor cos_sin_cache, bool is_neox, int "
+      "rope_dim_offset=0, bool inverse=False) -> ()");
+
+  // Function for fused QK Norm and RoPE
+  ops.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids, "
+      "int forced_token_heads_per_warp=-1) -> ()");
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
@@ -415,6 +468,24 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
+
+  // Layernorm kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm", TORCH_BOX(&rms_norm));
+  ops.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
+
+  // Layernorm-quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
+  ops.impl("fused_add_rms_norm_static_fp8_quant",
+           TORCH_BOX(&fused_add_rms_norm_static_fp8_quant));
+
+  // Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_dynamic_per_token_quant",
+           TORCH_BOX(&rms_norm_dynamic_per_token_quant));
+  ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+
+  // Positional encoding kernels (shared CUDA/ROCm)
+  ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
