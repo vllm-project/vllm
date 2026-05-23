@@ -570,6 +570,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.image_pruning_rate = multimodal_config.image_pruning_rate
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
 
@@ -578,6 +579,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -784,6 +786,7 @@ class Qwen3_5MoeForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.image_pruning_rate = multimodal_config.image_pruning_rate
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
 
@@ -792,6 +795,7 @@ class Qwen3_5MoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
