@@ -30,6 +30,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
+    swiglu_limit_func,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    is_deep_gemm_e8m0_used,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -125,6 +129,16 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
+
+    def activation(
+        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+    ) -> None:
+        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
+        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
+            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
+            return
+
+        super().activation(activation, output, input)
 
     def workspace_shapes(
         self,
@@ -283,20 +297,36 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 top_k_num=top_k_num,
             )
 
-        self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-        )
-
         a2q_scale: torch.Tensor | None = None
 
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-            quantization_emulation=self.quantization_emulation,
-        )
+        # Fuse SiLU+Mul + FP8 block quantize into a single kernel
+        # when conditions permit (gated SiLU, fp8 block quant with
+        # group_size=128, no LoRA requiring the BF16 intermediate).
+        if (
+            activation == MoEActivation.SILU
+            and self.quant_config.use_fp8_w8a8
+            and self.block_shape == [128, 128]
+            and lora_context is None
+            and not is_deep_gemm_e8m0_used()
+        ):
+            qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
+                intermediate_cache1.view(-1, N),
+                group_size=128,
+                quant_dtype=current_platform.fp8_dtype(),
+            )
+        else:
+            self.activation(
+                activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            )
+
+            qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+                intermediate_cache2,
+                a2_scale,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+                quantization_emulation=self.quantization_emulation,
+            )
 
         invoke_fused_moe_triton_kernel(
             qintermediate_cache2,
