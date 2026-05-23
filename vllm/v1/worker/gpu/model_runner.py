@@ -37,6 +37,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -431,9 +432,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
-                self.model_state,
-                self.kv_cache_config,
-                self.block_tables,
+                self.model_state, self.kv_cache_config, self.block_tables
             )
 
         self.kv_caches: list[torch.Tensor] = []
@@ -445,6 +444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.cache_config.cache_dtype,
             kernel_block_sizes,
+            self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
@@ -1084,7 +1084,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
+            if self.lora_config:
+                # program a no-LoRA mapping here so kernels early-exit instead of
+                # reading uninitialized metadata during dummy runs.
+                # FIXME: Replace this with LoRA warmup:
+                # https://github.com/vllm-project/vllm/pull/35536
+                assert hasattr(self, "lora_manager")
+                adapter_manager = self.lora_manager._adapter_manager
+                adapter_manager.set_adapter_mapping(
+                    LoRAMapping(
+                        index_mapping=(0,) * input_batch.num_tokens_after_padding,
+                        prompt_mapping=(0,) * input_batch.num_reqs,
+                        is_prefill=True,
+                    )
+                )
+                seen_wrappers: set[int] = set()
+                for punica_wrapper in adapter_manager.punica_wrapper_mapping.values():
+                    if id(punica_wrapper) in seen_wrappers:
+                        continue
+                    seen_wrappers.add(id(punica_wrapper))
+                    for kernel_meta in (
+                        punica_wrapper.token_mapping_meta,  # type: ignore[attr-defined]
+                        punica_wrapper.prompt_mapping_meta,  # type: ignore[attr-defined]
+                    ):
+                        kernel_meta.no_lora_flag_cpu[0] = False
+                        kernel_meta.num_active_loras_cpu[0] = 1
 
         attn_metadata = None
         slot_mappings_by_layer = None
