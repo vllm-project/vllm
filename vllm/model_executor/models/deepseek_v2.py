@@ -1727,7 +1727,9 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
-    pass
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["rot"])
+        return loader.load_weights(weights)
 
 
 # Compatibility with
