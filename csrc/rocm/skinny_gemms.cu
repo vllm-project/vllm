@@ -1782,9 +1782,8 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-  // Naive upper bound: one CU per 64-row M-tile per 512-element K-shard.
-  // In practice we need fewer because wavefronts within a block share M-tiles
-  // (GrpsShrB > 1), so treat this as a planning estimate, not the final count.
+  // Base estimate: one CU per 64-row M-tile per 512-element K-shard.
+  // Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
   int cus_needed_naive = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
 
   // How many of the 4 wavefronts per block can share the same 16 output rows
