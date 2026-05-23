@@ -6,6 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
+    "setuptools-rust>=1.9.0",
     "torch == 2.11.0",
     "wheel",
     "jinja2",
@@ -127,7 +128,10 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*",
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
     "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
-    "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*"]
+    "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
+    "rust/src/chat/src/renderer/deepseek_v32/fixtures/*",
+    "rust/src/tool-parser/src/gemma4.rs", "rust/src/text/src/output/decoded.rs",
+    "rust/src/tokenizer/src/incremental.rs", "rust/src/reasoning-parser/src/tests.rs"]
 ignore-hidden = false
 
 [tool.typos.default]

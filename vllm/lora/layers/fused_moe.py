@@ -9,6 +9,7 @@ from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
@@ -36,6 +37,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
+        # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
+        # matches `lora_a_stacked` length under EP.
+        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
 
         self.base_layer.ensure_moe_quant_config_init()
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
@@ -374,7 +379,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Returns True if the layer can be replaced by this LoRA layer."""
 
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 2
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
@@ -537,4 +543,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 1
