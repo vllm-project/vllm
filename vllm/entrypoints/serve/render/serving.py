@@ -170,8 +170,14 @@ class OpenAIServingRender:
 
         request_id = f"chatcmpl-{random_uuid()}"
 
+        prompt_text = prompt_components.text
+        if prompt_text is None:
+            async_tokenizer = self.renderer.get_async_tokenizer()
+            prompt_text = await async_tokenizer.decode(token_ids)
+
         return GenerateRequest(
             request_id=request_id,
+            prompt=prompt_text,
             token_ids=token_ids,
             features=self._extract_mm_features(engine_input),
             sampling_params=params,
@@ -306,10 +312,15 @@ class OpenAIServingRender:
             )
 
             request_id = f"cmpl-{random_uuid()}"
+            prompt_text = prompt_components.text
+            if prompt_text is None:
+                async_tokenizer = self.renderer.get_async_tokenizer()
+                prompt_text = await async_tokenizer.decode(token_ids)
 
             generate_requests.append(
                 GenerateRequest(
                     request_id=request_id,
+                    prompt=prompt_text,
                     token_ids=token_ids,
                     features=self._extract_mm_features(engine_input),
                     sampling_params=params,
