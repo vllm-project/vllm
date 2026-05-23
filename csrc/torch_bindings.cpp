@@ -116,6 +116,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
 
+  // Fused per-head QK RMSNorm + multimodal RoPE (mRoPE) for models like
+  // Qwen3-VL. cos/sin shape: [3, num_tokens, rotary_dim/2] (time/height/width
+  // streams).
+  ops.def(
+      "fused_qk_norm_mrope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos, Tensor sin, "
+      "bool is_neox, int mrope_section_t, int mrope_section_h) -> ()");
+  ops.impl("fused_qk_norm_mrope", torch::kCUDA, &fused_qk_norm_mrope);
+
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
   // kernel launch.
