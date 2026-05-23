@@ -654,6 +654,29 @@ class DeepseekV4MoE(nn.Module):
                 f"{config.expert_dtype!r}. Drop --kernel-config moe_backend="
                 "deep_gemm_mega_moe for this checkpoint."
             )
+        # MegaMoE expects MXFP4 weights (group=32 E8M0 scales) + fused-name MoE
+        # params (experts.w13_input_scale etc). NVFP4 ModelOpt layout uses
+        # per-expert names (experts.{E}.w{1,2,3}.input_scale) plus group=16
+        # E4M3 + per-tensor FP32 global scale + a W4A4 activation path. Without
+        # this guard the load gets all the way to the weight-mapping step
+        # before failing with a confusing KeyError. See issue #43454.
+        if self.use_mega_moe:
+            _qc = getattr(config, "quantization_config", None) or {}
+            _algo = (_qc.get("moe_quant_algo") if isinstance(_qc, dict) else None)
+            if isinstance(_algo, str) and _algo.upper() == "NVFP4":
+                raise NotImplementedError(
+                    "DeepSeek V4 MegaMoE (--moe-backend deep_gemm_mega_moe) "
+                    "does not currently dispatch NVFP4 expert layout. The "
+                    "mega-kernel expects FP8 activations + MXFP4 weights "
+                    "(group=32 E8M0 scales) and the loader registers "
+                    "fused-name parameters (e.g. experts.w13_input_scale); "
+                    "NVFP4 ModelOpt layout uses per-expert names "
+                    "(experts.{E}.w{1,2,3}.input_scale) plus group=16 E4M3 "
+                    "scales + per-tensor FP32 global scale + a different W4A4 "
+                    "activation path. Use --moe-backend flashinfer_trtllm for "
+                    "NVFP4 MoE artifacts on Blackwell, or use deep_gemm_mega_moe "
+                    "on a native MXFP4 source artifact."
+                )
 
         # Fused RMSNorm + gate: owns both ffn_norm and the gate matmul.
         self.norm_gate = NormGateLinear(
