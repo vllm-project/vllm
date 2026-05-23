@@ -46,6 +46,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.dp_prefix_cache_router import DPPrefixCacheRouter
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
@@ -1405,6 +1406,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
         ) // client_count
+        parallel_config = vllm_config.parallel_config
+        self.dp_prefix_cache_router = (
+            DPPrefixCacheRouter(
+                parallel_config,
+                block_size=(
+                    vllm_config.cache_config.hash_block_size
+                    or vllm_config.cache_config.block_size
+                ),
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                n_ranks=len(self.core_engines),
+                start_index=self.eng_start_index,
+            )
+            if parallel_config.data_parallel_prefix_cache_lb
+            else None
+        )
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
@@ -1414,19 +1430,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         ) is None:
             current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
-            min_score = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
+            if self.dp_prefix_cache_router is None:
+                eng_index = self._get_least_loaded_engine_index(current_counts)
+            else:
+                decision = self.dp_prefix_cache_router.route(
+                    request,
+                    current_counts,
+                    self._get_least_loaded_engine_index,
+                )
+                eng_index = decision.rank
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
@@ -1435,6 +1447,24 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         return chosen_engine
+
+    def _get_least_loaded_engine_index(
+        self, current_counts: Sequence[Sequence[int]]
+    ) -> int:
+        # TODO use P2C alg for larger DP sizes
+        num_engines = len(current_counts)
+        min_score = sys.maxsize
+        eng_index = 0
+        for i in range(num_engines):
+            # Start from client_index to help with balancing when engines
+            # are empty.
+            idx = (self.eng_start_index + i) % num_engines
+            waiting, running = current_counts[idx]
+            score = waiting * 4 + running
+            if score < min_score:
+                min_score = score
+                eng_index = idx
+        return eng_index
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
