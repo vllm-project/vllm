@@ -339,11 +339,24 @@ class FlashInferSSUBackend(MambaSSUBackend):
             assert prev_num_accepted_tokens is not None
             assert state_indices is not None
             kernel_state_indices = state_indices
+            self._ensure_copy_scratch(
+                (
+                    state,
+                    old_x,
+                    old_B,
+                    old_dt,
+                    old_cumAdt,
+                    cache_buf_idx,
+                    prev_num_accepted_tokens,
+                ),
+                kernel_state_indices.numel(),
+            )
             dst_indices = self._checkpointing_state_indices(dst_state_batch_indices)
             if (
                 dst_indices is not None
                 and dst_indices.numel() == state_indices.numel()
             ):
+                copied_checkpointing_slots = True
                 self._copy_checkpointing_slots(
                     (
                         state,
@@ -359,6 +372,8 @@ class FlashInferSSUBackend(MambaSSUBackend):
                     null_block_id,
                 )
                 kernel_state_indices = dst_indices
+            else:
+                copied_checkpointing_slots = False
             ckpt_cu_seqlens = (
                 None
                 if simple_decode
@@ -450,6 +465,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 rand_seed,
                 ckpt_cu_seqlens,
                 kernel_max_seqlen,
+                force_headwise_checkpointing=copied_checkpointing_slots,
             )
             self._update_checkpointing_trackers(
                 cache_buf_idx,
@@ -528,19 +544,21 @@ class FlashInferSSUBackend(MambaSSUBackend):
         rand_seed: torch.Tensor | None,
         ckpt_cu_seqlens: torch.Tensor | None,
         kernel_max_seqlen: int | None,
+        *,
+        force_headwise_checkpointing: bool = False,
     ) -> None:
-            n_groups = old_B.size(-2)
-            heads_per_group = old_x.size(2) // n_groups
-            use_grouped_checkpointing = (
-                n_groups > 1
-                and old_x.size(2) % n_groups == 0
-            )
-            if use_grouped_checkpointing:
+        n_groups = old_B.size(-2)
+        n_heads = old_x.size(2)
+        if n_groups > 1 and n_heads % n_groups == 0:
+            heads_per_group = n_heads // n_groups
+            if force_headwise_checkpointing:
                 for group_idx in range(n_groups):
                     group_head_start = group_idx * heads_per_group
                     group_head_end = group_head_start + heads_per_group
                     group_slice = slice(group_idx, group_idx + 1)
-                    old_B_snapshot = old_B[:, :, :, group_slice, :].contiguous()
+                    old_B_snapshot = old_B[
+                        :, :, :, group_slice, :
+                    ].contiguous()
                     old_B_group = torch.empty_like(old_B_snapshot)
                     for head_start in range(group_head_start, group_head_end):
                         head_end = head_start + 1
@@ -548,11 +566,15 @@ class FlashInferSSUBackend(MambaSSUBackend):
                         state_group = state[:, head_slice].contiguous()
                         old_x_group = old_x[:, :, head_slice].contiguous()
                         old_B_group.copy_(old_B_snapshot)
-                        old_dt_group = old_dt[:, :, head_slice, :].contiguous()
+                        old_dt_group = old_dt[
+                            :, :, head_slice, :
+                        ].contiguous()
                         old_cumAdt_group = old_cumAdt[
                             :, :, head_slice, :
                         ].contiguous()
-                        out_group = torch.empty_like(x_ckpt[:, :, head_slice, :])
+                        out_group = torch.empty_like(
+                            x_ckpt[:, :, head_slice, :]
+                        )
                         self._checkpointing_kernel(
                             state_group,
                             old_x_group,
@@ -574,7 +596,9 @@ class FlashInferSSUBackend(MambaSSUBackend):
                                 else None
                             ),
                             dt_bias=(
-                                dt_bias[head_slice] if dt_bias is not None else None
+                                dt_bias[head_slice]
+                                if dt_bias is not None
+                                else None
                             ),
                             dt_softplus=dt_softplus,
                             state_batch_indices=kernel_state_indices,
@@ -591,24 +615,42 @@ class FlashInferSSUBackend(MambaSSUBackend):
                         old_cumAdt[:, :, head_slice, :].copy_(old_cumAdt_group)
                         out_ckpt[:, :, head_slice, :].copy_(out_group)
                     old_B[:, :, :, group_slice, :].copy_(old_B_group)
-            else:
+                return
+
+            for group_idx in range(n_groups):
+                group_head_start = group_idx * heads_per_group
+                group_head_end = group_head_start + heads_per_group
+                head_slice = slice(group_head_start, group_head_end)
+                group_slice = slice(group_idx, group_idx + 1)
+                state_group = state[:, head_slice].contiguous()
+                old_x_group = old_x[:, :, head_slice].contiguous()
+                old_B_group = old_B[:, :, :, group_slice, :].contiguous()
+                old_dt_group = old_dt[:, :, head_slice, :].contiguous()
+                old_cumAdt_group = old_cumAdt[
+                    :, :, head_slice, :
+                ].contiguous()
+                out_group = torch.empty_like(x_ckpt[:, :, head_slice, :])
                 self._checkpointing_kernel(
-                    state,
-                    old_x,
-                    old_B,
-                    old_dt,
-                    old_cumAdt,
+                    state_group,
+                    old_x_group,
+                    old_B_group,
+                    old_dt_group,
+                    old_cumAdt_group,
                     cache_buf_idx,
                     prev_num_accepted_tokens,
-                    x_ckpt,
-                    dt_ckpt,
-                    A,
-                    B_ckpt,
-                    C_ckpt,
-                    out_ckpt,
-                    D=D,
-                    z=z_ckpt,
-                    dt_bias=dt_bias,
+                    x_ckpt[:, :, head_slice, :].contiguous(),
+                    dt_ckpt[:, :, head_slice, :],
+                    A[head_slice],
+                    B_ckpt[:, :, group_slice, :].contiguous(),
+                    C_ckpt[:, :, group_slice, :].contiguous(),
+                    out_group,
+                    D=D[head_slice] if D is not None else None,
+                    z=(
+                        z_ckpt[:, :, head_slice, :].contiguous()
+                        if z_ckpt is not None
+                        else None
+                    ),
+                    dt_bias=dt_bias[head_slice] if dt_bias is not None else None,
                     dt_softplus=dt_softplus,
                     state_batch_indices=kernel_state_indices,
                     pad_slot_id=null_block_id,
@@ -618,6 +660,70 @@ class FlashInferSSUBackend(MambaSSUBackend):
                     cu_seqlens=ckpt_cu_seqlens,
                     max_seqlen=kernel_max_seqlen,
                 )
+                state[:, head_slice].copy_(state_group)
+                old_x[:, :, head_slice].copy_(old_x_group)
+                old_B[:, :, :, group_slice, :].copy_(old_B_group)
+                old_dt[:, :, head_slice, :].copy_(old_dt_group)
+                old_cumAdt[:, :, head_slice, :].copy_(old_cumAdt_group)
+                out_ckpt[:, :, head_slice, :].copy_(out_group)
+            return
+
+        self._checkpointing_kernel(
+            state,
+            old_x,
+            old_B,
+            old_dt,
+            old_cumAdt,
+            cache_buf_idx,
+            prev_num_accepted_tokens,
+            x_ckpt,
+            dt_ckpt,
+            A,
+            B_ckpt,
+            C_ckpt,
+            out_ckpt,
+            D=D,
+            z=z_ckpt,
+            dt_bias=dt_bias,
+            dt_softplus=dt_softplus,
+            state_batch_indices=kernel_state_indices,
+            pad_slot_id=null_block_id,
+            rand_seed=rand_seed,
+            philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds
+            or 10,
+            cu_seqlens=ckpt_cu_seqlens,
+            max_seqlen=kernel_max_seqlen,
+        )
+
+    @staticmethod
+    def _pack_varlen_chunk(
+        source: torch.Tensor,
+        chunk_ends: list[tuple[int, int]],
+        total_tokens: int,
+    ) -> torch.Tensor:
+        packed = torch.empty(
+            (total_tokens, *source.shape[1:]),
+            dtype=source.dtype,
+            device=source.device,
+        )
+        offset = 0
+        for start, end in chunk_ends:
+            length = end - start
+            packed[offset : offset + length].copy_(source[start:end])
+            offset += length
+        return packed
+
+    @staticmethod
+    def _pack_optional_varlen_chunk(
+        source: torch.Tensor | None,
+        chunk_ends: list[tuple[int, int]],
+        total_tokens: int,
+    ) -> torch.Tensor | None:
+        if source is None:
+            return None
+        return FlashInferSSUBackend._pack_varlen_chunk(
+            source, chunk_ends, total_tokens
+        )
 
     def _run_varlen_checkpointing_chunks(
         self,
@@ -649,14 +755,9 @@ class FlashInferSSUBackend(MambaSSUBackend):
         boundaries = [int(v) for v in cu_seqlens.detach().cpu().tolist()]
         batch = len(boundaries) - 1
         for chunk_start in range(0, max_seqlen, checkpoint_window):
-            chunk_ends = []
+            chunk_ends: list[tuple[int, int]] = []
             chunk_lengths = []
             chunk_positions = []
-            x_parts = []
-            dt_parts = []
-            B_parts = []
-            C_parts = []
-            z_parts = [] if z is not None else None
             for seq_idx in range(batch):
                 seq_start = boundaries[seq_idx]
                 seq_end = boundaries[seq_idx + 1]
@@ -667,27 +768,25 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 chunk_positions.append(seq_idx)
                 chunk_ends.append((start, end))
                 chunk_lengths.append(end - start)
-                x_parts.append(x[start:end])
-                dt_parts.append(dt[start:end])
-                B_parts.append(B[start:end])
-                C_parts.append(C[start:end])
-                if z_parts is not None and z is not None:
-                    z_parts.append(z[start:end])
-            chunk_parts = len(x_parts)
+            chunk_parts = len(chunk_ends)
             if not chunk_parts:
                 continue
+            chunk_total = sum(chunk_lengths)
             if chunk_parts == 1:
-                x_chunk = x_parts[0]
-                dt_chunk = dt_parts[0]
-                B_chunk = B_parts[0]
-                C_chunk = C_parts[0]
-                z_chunk = z_parts[0] if z_parts is not None else None
+                start, end = chunk_ends[0]
+                x_chunk = x[start:end]
+                dt_chunk = dt[start:end]
+                B_chunk = B[start:end]
+                C_chunk = C[start:end]
+                z_chunk = z[start:end] if z is not None else None
             else:
-                x_chunk = torch.cat(x_parts, dim=0)
-                dt_chunk = torch.cat(dt_parts, dim=0)
-                B_chunk = torch.cat(B_parts, dim=0)
-                C_chunk = torch.cat(C_parts, dim=0)
-                z_chunk = torch.cat(z_parts, dim=0) if z_parts is not None else None
+                x_chunk = self._pack_varlen_chunk(x, chunk_ends, chunk_total)
+                dt_chunk = self._pack_varlen_chunk(dt, chunk_ends, chunk_total)
+                B_chunk = self._pack_varlen_chunk(B, chunk_ends, chunk_total)
+                C_chunk = self._pack_varlen_chunk(C, chunk_ends, chunk_total)
+                z_chunk = self._pack_optional_varlen_chunk(
+                    z, chunk_ends, chunk_total
+                )
             position_tensor = torch.tensor(
                 chunk_positions,
                 dtype=torch.long,
@@ -917,20 +1016,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             slot_size = tensor[0].numel()
             slot_stride = tensor.stride(0)
             scratch = self._get_copy_scratch(tensor, n_slots)
-            if scratch is None:
-                _copy_checkpointing_slots_kernel[
-                    (n_slots, triton.cdiv(slot_size, block))
-                ](
-                    tensor,
-                    src_indices,
-                    dst_indices,
-                    slot_size,
-                    slot_stride,
-                    pad_slot_id,
-                    BLOCK=block,
-                )
-                continue
-
             scratch_stride = scratch.stride(0)
             _gather_checkpointing_slots_kernel[
                 (n_slots, triton.cdiv(slot_size, block))
@@ -959,11 +1044,19 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 BLOCK=block,
             )
 
+    def _ensure_copy_scratch(
+        self,
+        tensors: tuple[torch.Tensor, ...],
+        n_slots: int,
+    ) -> None:
+        for tensor in tensors:
+            self._get_copy_scratch(tensor, n_slots)
+
     def _get_copy_scratch(
         self,
         tensor: torch.Tensor,
         n_slots: int,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         key = (
             tensor.device.type,
             tensor.device.index,
@@ -975,7 +1068,11 @@ class FlashInferSSUBackend(MambaSSUBackend):
         if scratch is not None:
             return scratch
         if tensor.is_cuda and torch.cuda.is_current_stream_capturing():
-            return None
+            raise RuntimeError(
+                "Checkpointing slot-copy scratch is unavailable during CUDA "
+                "graph capture. Warm up this tensor shape and n_slots before "
+                "capture."
+            )
         scratch = torch.empty(
             (n_slots, *tensor.shape[1:]),
             dtype=tensor.dtype,
