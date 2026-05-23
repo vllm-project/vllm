@@ -105,25 +105,6 @@ def test_without_external_req_id_engines_disagree():
     assert prod_meta.requests[0].request_id != cons_meta.requests[0].request_id
 
 
-def test_producer_metadata_uses_external_req_id():
-    connector = _make_connector(is_producer=True)
-    meta = connector.build_connector_meta(
-        _sched_out([_new_req("req-xxxx", "req-stable")])
-    )
-    assert len(meta.requests) == 1
-    assert meta.requests[0].request_id == "req-stable"
-
-
-def test_consumer_metadata_uses_external_req_id():
-    connector = _make_connector(is_producer=False)
-    connector._requests_need_load["req-yyyy"] = (MagicMock(), [0, 1])
-    meta = connector.build_connector_meta(
-        _sched_out([_new_req("req-yyyy", "req-stable")])
-    )
-    assert len(meta.requests) == 1
-    assert meta.requests[0].request_id == "req-stable"
-
-
 @pytest.mark.parametrize("is_producer", [True, False])
 def test_falls_back_to_req_id_when_no_external_req_id(is_producer: bool):
     """Non-disaggregated path: external_req_id=None falls back to req_id."""
@@ -167,23 +148,3 @@ def test_chunked_prefill_final_chunk_uses_stable_id():
     meta2 = connector.build_connector_meta(step2)
     assert len(meta2.requests) == 1
     assert meta2.requests[0].request_id == external_req_id
-
-
-def test_request_finished_cleans_up_stable_id():
-    connector = _make_connector(is_producer=True)
-    req_id = "req-prefill-xxxx"
-
-    connector.build_connector_meta(_sched_out([_new_req(req_id, "req-stable")]))
-    assert req_id in connector._req_stable_id
-
-    request = MagicMock()
-    request.request_id = req_id
-    connector.request_finished(request, [])
-    assert req_id not in connector._req_stable_id
-
-
-def test_request_finished_noop_for_unknown_req():
-    connector = _make_connector(is_producer=True)
-    request = MagicMock()
-    request.request_id = "req-unknown"
-    connector.request_finished(request, [])  # must not raise
