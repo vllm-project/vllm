@@ -588,28 +588,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         # Cache hits in this coordinator are always a multiple of
         # ``scheduler_block_size`` tokens (see ``find_longest_cache_hit``).
-        # Within an aligned region, SWA groups may only consult a subset of blocks
-        # per ``scheduler_block_size``-segment so the unused blocks also stay
-        # out of the prefix-cache hash map.
-        aligned_num_computed_tokens = (
-            num_computed_tokens // self.scheduler_block_size * self.scheduler_block_size
-        )
+        # Managers may still cache complete tail blocks after the last aligned
+        # boundary; ``find_longest_cache_hit`` keeps returned hits aligned.
         for manager in self.single_type_managers:
-            num_tokens_to_cache = aligned_num_computed_tokens
-            # EAGLE groups match one block past each aligned boundary and drop
-            # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and aligned_num_computed_tokens > 0:
-                num_tokens_to_cache = min(
-                    num_computed_tokens,
-                    aligned_num_computed_tokens + manager.block_size,
-                )
-            # The manager already knows the fine hit granularity
-            # (``scheduler_block_size``); retention is passed separately so it
-            # can keep both the coarse segment tails and the fine replay
-            # boundary (which needs the fine value).
             manager.cache_blocks(
                 request,
-                num_tokens_to_cache,
+                num_computed_tokens,
+                alignment_tokens=self.scheduler_block_size,
                 retention_interval=self.retention_interval,
             )
 
