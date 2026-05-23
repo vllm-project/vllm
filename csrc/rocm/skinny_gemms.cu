@@ -1493,23 +1493,20 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
   #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
-                (int*)(&A[min__(Kap * actlN - A_CHUNK,
-                                kOffcp + Kap * (n / CHUNKK +
-                                                (N / CHUNKK) * (threadIdx.x /
-                                                                (64 / CHUNKK)) +
-                                                (threadIdx.y % sprdN)))]),
-                (int*)(&s[(k +
-                           kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
+                /* src */ (int*)(&A[min__(
+                    Kap * actlN - A_CHUNK,
+                    kOffcp + Kap * (n / CHUNKK +
+                                    (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                                    (threadIdx.y % sprdN)))]),
+                /* dst */ (int*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))]),
                 16, 0, 0);
   #else
-            *((bigType*)(&s[k + kFitPdd *
-                                    ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
-                *((bigType*)(&A[min__(
+            /* dst */ *((bigType*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
+                /* src */ *((bigType*)(&A[min__(
                     Kap * actlN - A_CHUNK,
-                    kOffcp +
-                        Kap * (n / CHUNKK +
-                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
-                               (threadIdx.y % sprdN)))]));
+                    kOffcp + Kap * (n / CHUNKK +
+                                    (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                                    (threadIdx.y % sprdN)))]));
   #endif
           }
 
@@ -1666,14 +1663,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
   #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                               nt * THRDS * 4 * k_rnd]),
+                /* src */ (float4*)(&glbl[g_adr + M * N * ks]),
+                /* dst */ &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                                         nt * THRDS * 4 * k_rnd]),
                 16, 0, 0);
   #else
-            ((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                         nt * THRDS * 4 * k_rnd] =
-                *((const float4*)(&glbl[g_adr + M * N * ks]));
+            /* dst */ ((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                                   nt * THRDS * 4 * k_rnd] =
+                /* src */ *((const float4*)(&glbl[g_adr + M * N * ks]));
   #endif
           }
         }
