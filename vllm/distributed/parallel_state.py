@@ -1395,6 +1395,7 @@ def init_distributed_environment(
             or config.parallel_config.data_parallel_size > 1
         )
         and not enable_elastic_ep
+        and not config.parallel_config.data_parallel_external_lb
     ):
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
@@ -1546,6 +1547,8 @@ def initialize_model_parallel(
 
     config = get_current_vllm_config()
     data_parallel_size = config.parallel_config.data_parallel_size
+    if config.parallel_config.data_parallel_external_lb:
+        data_parallel_size = config.parallel_config.data_parallel_size_local
     enable_elastic_ep = config.parallel_config.enable_elastic_ep
     parallel_config = config.parallel_config
     coord_store: Store | None = None
