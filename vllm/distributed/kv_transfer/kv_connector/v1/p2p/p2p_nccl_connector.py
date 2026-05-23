@@ -104,6 +104,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             else None
         )
 
+    @property
+    def is_disagg_prefill_transfer(self) -> bool:
+        return not self.is_producer
+
     # ==============================
     # Worker-side methods
     # ==============================

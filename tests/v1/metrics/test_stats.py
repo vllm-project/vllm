@@ -244,3 +244,24 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_prompt_token_stats_disagg_transfer_not_cached():
+    """Disagg transfer tokens are excluded from cached_tokens."""
+    stats = PromptTokenStats()
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=0,
+        num_disagg_transfer_tokens=99,
+    )
+    stats.update_from_output(prefill_stats)
+
+    assert stats.cached_tokens == 0
+    assert stats.local_cache_hit == 0
+    assert stats.external_kv_transfer == 99
+    assert stats.disagg_transfer == 99
+    assert stats.computed == 1
+    assert stats.total == 100

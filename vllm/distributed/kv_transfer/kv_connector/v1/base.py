@@ -181,6 +181,15 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def is_disagg_prefill_transfer(self) -> bool:
+        """
+        True on the consumer side of a disaggregated prefill/decode connector.
+        Disagg-transferred tokens were computed on the prefill worker and must
+        not be counted as cached_tokens in the API response. Defaults to False.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
