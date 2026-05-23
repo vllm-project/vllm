@@ -2673,12 +2673,14 @@ def test_hybrid_cache_blocks_swa_eagle_disables_mask():
         )
 
 
-def test_hybrid_cache_blocks_clamped_to_lcm():
-    """HybridKVCacheCoordinator.cache_blocks() clamps to lcm_block_size.
-    Chunks past the last lcm-aligned boundary can never participate in a
-    cache hit (find_longest_cache_hit always returns lcm-aligned hits), so
-    caching them only pollutes the prefix-cache hash map and keeps blocks
-    on the LRU list that could otherwise return to the free pool."""
+def test_hybrid_cache_blocks_keeps_tail_blocks_but_hits_stay_lcm_aligned():
+    """HybridKVCacheCoordinator.cache_blocks() keeps complete tail blocks.
+
+    find_longest_cache_hit still returns lcm-aligned hits, so caching the
+    complete blocks past the last lcm boundary must not produce partial hybrid
+    cache hits. Keeping those blocks lets later turns complete a reusable
+    lcm-aligned segment instead of permanently dropping the tail.
+    """
     block_size = 16
     # Full attn block_size=32, SWA block_size=16 -> lcm=32.
     kv_cache_config = KVCacheConfig(
@@ -2713,8 +2715,9 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
         hash_block_size=block_size,
     )
 
-    # 7 hash-blocks of 16 tokens (112 tokens). With lcm=32 the clamp truncates
-    # to 96 tokens — SWA caches 6 hashes, full-attn caches 3.
+    # 7 hash-blocks of 16 tokens (112 tokens). The trailing SWA block is a
+    # complete block and should be cached, but a later hit is still capped by
+    # the full-attention group at the last 32-token lcm boundary.
     token_ids = [i for i in range(7) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
     computed_blocks, _ = manager.get_computed_blocks(req)
@@ -2728,16 +2731,18 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     assert len(req.block_hashes) == 7
 
     pool = manager.block_pool
-    # SWA group_id=1: hashes 0..5 cached (6 blocks * 16 tokens = 96), hash 6
-    # spans tokens [96, 112) past the lcm boundary and must NOT be cached.
-    for i in range(6):
+    # SWA group_id=1: all complete SWA blocks should be cached.
+    for i in range(7):
         assert (
             pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
             is not None
         ), f"SWA hash {i} should be cached"
-    assert pool.get_cached_block(req.block_hashes[6], kv_cache_group_ids=[1]) is None, (
-        "SWA hash 6 spans tokens past the lcm boundary; should not be cached"
-    )
+
+    warm = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(warm)
+    assert len(computed_blocks.blocks[0]) == 3
+    assert len(computed_blocks.blocks[1]) == 6
+    assert num_computed_tokens == 6 * block_size
 
 
 def test_block_lookup_cache_single_block_per_key():

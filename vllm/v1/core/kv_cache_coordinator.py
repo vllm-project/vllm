@@ -520,9 +520,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # aligned region, SWA groups only consult a subset of blocks per
         # ``lcm_block_size``-segment so the unused blocks also stay out of the
         # prefix-cache hash map.
-        num_computed_tokens = (
-            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
-        )
         for manager in self.single_type_managers:
             manager.cache_blocks(
                 request,
