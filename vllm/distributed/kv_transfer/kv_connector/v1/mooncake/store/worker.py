@@ -707,14 +707,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 block_id_list.append(block_id)
 
         if not key_list:
-            # Scheduler only schedules loads when there are external tokens
-            # beyond the local cache, so block_hashes is non-empty and
-            # mask_num < token_len here. The remaining way to get an empty
-            # key_list is that every chunk was filtered out by the per-group
-            # load mask -- e.g. all candidate blocks lie in the SWA
-            # pre-window that the consumer's spec wouldn't populate locally.
             logger.warning(
-                "Skipping Mooncake load for request %s: every chunk filtered "
+                "SHOULD NOT HAPPEN: Skipping Mooncake load for request %s: every chunk filtered "
                 "by per-group load mask (token_len=%d, mask_num=%d, "
                 "num_block_hashes=%d)",
                 req_id,
