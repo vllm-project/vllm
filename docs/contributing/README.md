@@ -43,6 +43,13 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
+To rebuild only the Rust frontend binary:
+
+```bash
+./build_rust.sh          # release build
+./build_rust.sh --debug  # faster build for development
+```
+
 If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
