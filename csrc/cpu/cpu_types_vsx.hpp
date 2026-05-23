@@ -886,10 +886,8 @@ inline void prefetch(const void* addr) {
 struct INT8Vec64 {
   __vector signed char data[4];
 
-  // Default constructor
   INT8Vec64() = default;
 
-  // Regular load constructor
   explicit INT8Vec64(const int8_t* ptr) {
     data[0] = vec_xl(0, ptr);
     data[1] = vec_xl(16, ptr);
@@ -902,7 +900,6 @@ struct INT8Vec64 {
     // Non-temporal load stub - falls back to regular load
   }
 
-  // Full save
   void save(int8_t* ptr) const {
     vec_xst(data[0], 0, ptr);
     vec_xst(data[1], 16, ptr);
@@ -910,17 +907,14 @@ struct INT8Vec64 {
     vec_xst(data[3], 48, ptr);
   }
 
-  // Masked save (save only elem_num elements)
   void save(int8_t* ptr, int elem_num) const {
     if (elem_num <= 0) return;
     
-    // Save full vectors
     int full_vecs = elem_num / 16;
     for (int i = 0; i < full_vecs && i < 4; i++) {
       vec_xst(data[i], i * 16, ptr);
     }
     
-    // Save remaining elements
     int remaining = elem_num % 16;
     if (remaining > 0 && full_vecs < 4) {
       // Use vec_xst_len for partial vector store
@@ -934,7 +928,7 @@ struct INT8Vec64 {
   }
 
 
-};  // struct INT8Vec64
-}  // namespace vec_op
+};
+}  
 
 #endif

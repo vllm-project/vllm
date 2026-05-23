@@ -189,7 +189,7 @@ struct ThreadSHMContext {
 #if defined(__aarch64__)
       __asm__ __volatile__("yield");
 #elif defined(__powerpc64__)
-      __asm__ __volatile__("or 1,1,1");  // POWER low-priority hint
+      __asm__ __volatile__("or 1,1,1");  
 #else
       _mm_pause();
 #endif  // __aarch64__
