@@ -140,7 +140,22 @@ def _call_fused(
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 64, 2048])
-@pytest.mark.parametrize("n_heads,padded_heads", [(8, 64), (64, 64), (64, 128)])
+@pytest.mark.parametrize(
+    "n_heads,padded_heads",
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
+)
 def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: int):
     torch.manual_seed(0)
     device = "cuda"
@@ -336,7 +351,19 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 2048])
 @pytest.mark.parametrize(
     "n_heads,padded_heads",
-    [(64, 64), (8, 64), (64, 128)],
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
 )
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_combined_q_and_kv(
