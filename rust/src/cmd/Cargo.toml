@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 thiserror-ext.workspace = true
+tikv-jemallocator.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true
