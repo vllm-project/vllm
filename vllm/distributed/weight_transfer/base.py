@@ -65,10 +65,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     def __init__(
-        self,
-        config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
-        model: torch.nn.Module,
+        self, config: WeightTransferConfig, parallel_config: ParallelConfig
     ) -> None:
         """
         Initialize the weight transfer engine.
@@ -76,11 +73,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
-            model: The local model instance which will receive the weights
         """
         self.config = config
         self.parallel_config = parallel_config
-        self.model = model
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """

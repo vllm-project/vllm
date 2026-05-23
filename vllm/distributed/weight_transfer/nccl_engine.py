@@ -109,10 +109,7 @@ class NCCLWeightTransferEngine(
     update_info_cls = NCCLWeightTransferUpdateInfo
 
     def __init__(
-        self,
-        config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
-        model: torch.nn.Module,
+        self, config: WeightTransferConfig, parallel_config: ParallelConfig
     ) -> None:
         """
         Initialize the NCCL weight transfer engine.
@@ -120,9 +117,8 @@ class NCCLWeightTransferEngine(
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
-            model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config, model)
+        super().__init__(config, parallel_config)
         self.model_update_group: PyNcclCommunicator | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
