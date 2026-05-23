@@ -18,18 +18,15 @@ from vllm.model_executor.kernels.linear import (
     init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.layers.attention import Attention, MLAAttention
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
-    RoutingMethodType,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
+    FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
+    RoutedExperts,
+    RoutingMethodType,
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -208,7 +205,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
@@ -250,7 +247,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         """
         if hf_quant_cfg is None:
             return None
-        if hf_quant_cfg.get("quant_method", "").lower() != "modelopt":
+        if not hf_quant_cfg.get("quant_method", "").lower().startswith("modelopt"):
             return None
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
@@ -779,7 +776,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -788,7 +785,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -867,7 +864,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -901,11 +898,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
+            routing_tables=layer._expert_routing_tables(),
         )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -936,7 +932,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         w1_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
         a1_scale = layer.w13_input_scale
@@ -948,11 +944,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
@@ -976,10 +973,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
@@ -994,6 +992,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
 
@@ -1393,11 +1392,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # Select experts implementation.
+        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
+        # activation_key=None every W4A4 backend's _supports_quant_scheme
+        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
+        # exactly); only Marlin survives. Marlin's MoE path drops
+        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
+        # other change is needed.
+        self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=None if self.use_a16 else kNvfp4Dynamic,
         )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -1421,7 +1426,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -1535,7 +1540,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -1589,12 +1594,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            shared_experts=layer.shared_experts,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1603,6 +1607,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
     @property
@@ -1611,7 +1616,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
@@ -1635,10 +1640,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
@@ -1653,6 +1659,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
 
@@ -1860,15 +1867,15 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
+        assert layer.intermediate_size_per_partition == intermediate_size_per_partition
+        assert layer.hidden_size == hidden_size
         layer.orig_dtype = params_dtype
 
         if hidden_size % MXFP8_BLOCK_SIZE != 0:
@@ -2051,7 +2058,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             torch.stack(w2_scale_shuffled).contiguous(),
         )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -2071,7 +2078,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -2079,7 +2086,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         # TRTLLM MXFP8 path is monolithic and does not use modular kernel config.
         return None
@@ -2090,11 +2097,11 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         from flashinfer.fused_moe.core import (
             ActivationType,
             Fp8QuantizationType,
@@ -2102,7 +2109,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         assert self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
-        if layer.enable_eplb:
+        if layer.eplb_state is not None:
             raise NotImplementedError(
                 "EPLB is not supported for FlashInfer TRTLLM MXFP8 MoE backend."
             )
@@ -2174,12 +2181,13 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         raise NotImplementedError(
             "Non-monolithic MXFP8 MoE path is not yet implemented."
@@ -2209,12 +2217,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         quantized_layers: dict[str, dict[str, Any]],
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
+        w4a16_nvfp4_config: ModelOptNvFp4Config,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
+        self.w4a16_nvfp4_config = w4a16_nvfp4_config
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2259,10 +2269,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 "'quantized_layers' mapping in the quantization config."
             )
 
-        # Determine group_size from the first NVFP4 entry if not provided.
+        # Determine group_size from the first NVFP4-family entry if not
+        # provided. Both NVFP4 (W4A4) and W4A16_NVFP4 share the same packing
+        # + group-size convention; either entry resolves the value.
         if group_size is None:
             for layer_info in quantized_layers.values():
-                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                if layer_info.get("quant_algo", "").upper() in (
+                    "NVFP4",
+                    "W4A16_NVFP4",
+                ):
                     group_size = layer_info.get("group_size", 16)
                     break
         if group_size is None:
@@ -2280,6 +2295,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=[],
             group_size=group_size,
         )
+        # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
+        # ModelOptNvFp4Config.__init__ keys LinearMethodCls off quant_method,
+        # so this instance auto-selects ModelOptNvFp4W4A16LinearMethod. The
+        # MoE side reads quant_config.quant_method == "W4A16_NVFP4" to set
+        # use_a16 → Marlin backend in ModelOptNvFp4FusedMoE.__init__.
+        w4a16_nvfp4_config = ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
 
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
@@ -2287,6 +2314,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             quantized_layers=quantized_layers,
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
+            w4a16_nvfp4_config=w4a16_nvfp4_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2295,25 +2323,29 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         Tries three strategies in order:
         1. Direct lookup in ``quantized_layers``.
         2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
-        3. Prefix-based lookup for FusedMoE (any child key starts with
+        3. Prefix-based lookup for RoutedExperts (any child key starts with
            ``prefix + "."``).
 
         Returns the upper-cased quant_algo string, or *None* if the prefix
         is not found.
         """
         # 1. Direct lookup
-        if prefix in self.quantized_layers:
-            return self.quantized_layers[prefix]["quant_algo"].upper()
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            if candidate in self.quantized_layers:
+                return self.quantized_layers[candidate]["quant_algo"].upper()
 
         # 2. Packed / fused layer lookup
         proj_name = prefix.rsplit(".", 1)[-1]
         if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
             algos: set[str] = set()
             base = prefix.rsplit(".", 1)[0]
-            for shard_name in self.packed_modules_mapping[proj_name]:
-                shard_prefix = f"{base}.{shard_name}"
-                if shard_prefix in self.quantized_layers:
-                    algos.add(self.quantized_layers[shard_prefix]["quant_algo"].upper())
+            for base_candidate in self._quantized_layer_prefix_candidates(base):
+                for shard_name in self.packed_modules_mapping[proj_name]:
+                    shard_prefix = f"{base_candidate}.{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algos.add(
+                            self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        )
             if len(algos) == 1:
                 return algos.pop()
             if len(algos) > 1:
@@ -2322,13 +2354,32 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     f"{algos}. All shards must use the same quantization."
                 )
 
-        # 3. Prefix-based lookup (for FusedMoE / parent modules)
-        prefix_dot = prefix + "."
-        for key, info in self.quantized_layers.items():
-            if key.startswith(prefix_dot):
-                return info["quant_algo"].upper()
+        # 3. Prefix-based lookup (for RoutedExperts / parent modules)
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            prefix_dot = candidate + "."
+            for key, info in self.quantized_layers.items():
+                if key.startswith(prefix_dot):
+                    return info["quant_algo"].upper()
 
         return None
+
+    @staticmethod
+    def _quantized_layer_prefix_candidates(prefix: str) -> tuple[str, ...]:
+        candidates = [prefix]
+
+        if prefix.endswith(".lm_head"):
+            candidates.append("lm_head")
+
+        if prefix.startswith("language_model.model."):
+            candidates.append(
+                "model.language_model." + prefix[len("language_model.model.") :]
+            )
+        elif prefix.startswith("model.language_model."):
+            candidates.append(
+                "language_model.model." + prefix[len("model.language_model.") :]
+            )
+
+        return tuple(dict.fromkeys(candidates))
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -2353,10 +2404,12 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptFp8LinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
                 return ModelOptFp8MoEMethod(
                     quant_config=self.fp8_config,
@@ -2365,6 +2418,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4FusedMoE(
+                    quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
                 )
             return None

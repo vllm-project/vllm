@@ -8,6 +8,7 @@ from collections.abc import Callable
 import pytest
 import torch
 
+import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
 from vllm.lora.request import LoRARequest
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpecKind,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -1933,6 +1935,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         == len(manager.block_pool.cached_block_hash_to_block)
     )
     assert len(block.token_ids) == block.block_size * len(block.block_hashes)
+    assert block.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes
@@ -1946,6 +1949,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     for blocks in events[:-1]:
+        assert isinstance(blocks, BlockRemoved)
         assert blocks.block_hashes[0] in stored_block_hash
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
@@ -2022,6 +2026,8 @@ def test_null_parent_block_hash():
     ]
     assert event.block_hashes == expected_new_hashes
     assert event.group_idx == kv_cache_group_id
+    assert event.kv_cache_spec_kind is None
+    assert event.kv_cache_spec_sliding_window is None
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None
@@ -2095,12 +2101,14 @@ def test_block_stored_event_group_idx(group_id: int):
     block_size = 4
     num_tokens = block_size * 2
 
-    pool = BlockPool(
-        num_gpu_blocks=5,
+    manager = KVCacheManager(
+        make_kv_cache_config_three_types(block_size, num_blocks=5),
+        max_model_len=8192,
         enable_caching=True,
-        hash_block_size=block_size,
         enable_kv_cache_events=True,
+        hash_block_size=block_size,
     )
+    pool = manager.block_pool
 
     req = make_request(
         "req_grp_idx",
@@ -2119,10 +2127,26 @@ def test_block_stored_event_group_idx(group_id: int):
         kv_cache_group_id=group_id,
     )
 
-    events = pool.take_events()
+    events = manager.take_events()
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == group_id
+    assert (
+        events[0].kv_cache_spec_kind
+        == [
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+            KVCacheSpecKind.MAMBA.value,
+        ][group_id]
+    )
+    assert (
+        events[0].kv_cache_spec_sliding_window
+        == [
+            None,
+            2 * block_size,
+            None,
+        ][group_id]
+    )
 
 
 def test_block_stored_event_group_idx_multiple_groups():
@@ -2137,13 +2161,38 @@ def test_block_stored_event_group_idx_multiple_groups():
     block_size = 4
     num_tokens = block_size * 2
 
-    # null block + 4 usable (2 per group)
-    pool = BlockPool(
-        num_gpu_blocks=5,
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=5,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer1"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["layer2"],
+                    SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=128,
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=8192,
         enable_caching=True,
-        hash_block_size=block_size,
         enable_kv_cache_events=True,
+        hash_block_size=block_size,
     )
+    pool = manager.block_pool
 
     req = make_request(
         "req_multi_grp",
@@ -2174,12 +2223,52 @@ def test_block_stored_event_group_idx_multiple_groups():
         kv_cache_group_id=1,
     )
 
-    events = pool.take_events()
+    events = manager.take_events()
     assert len(events) == 2
     assert isinstance(events[0], BlockStored)
     assert events[0].group_idx == 0
+    assert events[0].kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+    assert events[0].kv_cache_spec_sliding_window is None
     assert isinstance(events[1], BlockStored)
     assert events[1].group_idx == 1
+    assert events[1].kv_cache_spec_kind == KVCacheSpecKind.SLIDING_WINDOW.value
+    assert events[1].kv_cache_spec_sliding_window == 128
+
+
+def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
+    """Out-of-range group_idx events are returned without metadata annotation."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    event = BlockStored(
+        block_hashes=[1],
+        parent_block_hash=None,
+        token_ids=list(range(block_size)),
+        block_size=block_size,
+        lora_id=None,
+        medium=None,
+        lora_name=None,
+        group_idx=1,
+    )
+    manager.block_pool.kv_event_queue.append(event)
+    warnings = []
+
+    def collect_warning(message, *args, **kwargs):
+        del kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(kv_cache_manager.logger, "warning", collect_warning)
+    events = manager.take_events()
+
+    assert events == [event]
+    assert event.kv_cache_spec_kind is None
+    assert event.kv_cache_spec_sliding_window is None
+    assert warnings == ["Group index `1` not in KV cache metadata"]
 
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
@@ -2437,6 +2526,145 @@ def test_different_block_size():
     assert len(computed_blocks.blocks[0]) == 2
     assert len(computed_blocks.blocks[1]) == 4
     assert num_computed_tokens == 4 * 16
+
+
+def test_hybrid_cache_blocks_swa_tail_window_only():
+    """Within each lcm-aligned segment, SWA's ``find_longest_cache_hit`` only
+    returns the trailing ``ceil((sliding_window - 1) / block_size)`` blocks
+    (its right-to-left scan stops once a contiguous match is found). Blocks
+    earlier in the segment can never serve a hit, so
+    ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
+    polluting the prefix-cache hash map."""
+    block_size = 8
+    # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
+    # tail = ceil(7/8) = 1; per_segment = 32/8 = 4.
+    # Per-segment template = [F, F, F, T]; only the last SWA block in each
+    # 32-token segment ends up in the prefix-cache hash map.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=4 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 8 hash-blocks of 8 tokens (64 tokens, two lcm-aligned segments).
+    token_ids = [i for i in range(8) for _ in range(block_size)]
+    req = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        8 * block_size,
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(req.block_hashes) == 8
+
+    pool = manager.block_pool
+    # SWA group_id=1: only hash 3 and hash 7 (the last block of each
+    # 32-token segment) should be cached. Hashes 0,1,2,4,5,6 cannot serve
+    # a hit at any lcm-aligned length, so they must NOT be cached.
+    expected_cached = {3, 7}
+    for i in range(8):
+        cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+        if i in expected_cached:
+            assert cached is not None, f"SWA hash {i} should be cached"
+        else:
+            assert cached is None, (
+                f"SWA hash {i} cannot serve any lcm-aligned hit; should not be cached"
+            )
+
+
+def test_hybrid_cache_blocks_clamped_to_lcm():
+    """HybridKVCacheCoordinator.cache_blocks() clamps to lcm_block_size.
+    Chunks past the last lcm-aligned boundary can never participate in a
+    cache hit (find_longest_cache_hit always returns lcm-aligned hits), so
+    caching them only pollutes the prefix-cache hash map and keeps blocks
+    on the LRU list that could otherwise return to the free pool."""
+    block_size = 16
+    # Full attn block_size=32, SWA block_size=16 -> lcm=32.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size * 2,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 7 hash-blocks of 16 tokens (112 tokens). With lcm=32 the clamp truncates
+    # to 96 tokens — SWA caches 6 hashes, full-attn caches 3.
+    token_ids = [i for i in range(7) for _ in range(block_size)]
+    req = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        7 * block_size,
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(req.block_hashes) == 7
+
+    pool = manager.block_pool
+    # SWA group_id=1: hashes 0..5 cached (6 blocks * 16 tokens = 96), hash 6
+    # spans tokens [96, 112) past the lcm boundary and must NOT be cached.
+    for i in range(6):
+        assert (
+            pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+            is not None
+        ), f"SWA hash {i} should be cached"
+    assert pool.get_cached_block(req.block_hashes[6], kv_cache_group_ids=[1]) is None, (
+        "SWA hash 6 spans tokens past the lcm boundary; should not be cached"
+    )
 
 
 def test_block_lookup_cache_single_block_per_key():

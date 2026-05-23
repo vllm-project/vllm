@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import warnings
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
@@ -71,23 +70,6 @@ else:
     torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
-
-
-def __getattr__(name: str):
-    if name == "resolve_hf_chat_template":
-        from vllm.renderers.hf import resolve_chat_template
-
-        warnings.warn(
-            "`vllm.entrypoints.chat_utils.resolve_hf_chat_template` has been moved to "
-            "`vllm.renderers.hf.resolve_chat_template`. "
-            "The old name will be removed in v0.16.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return resolve_chat_template
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class ChatTemplateResolutionError(ValueError):
@@ -1535,7 +1517,7 @@ def _parse_chat_message_content_mm_part(
                 audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
         if part.get("input_audio") is not None:
-            input_audio_params = cast(dict[str, str], part)
+            input_audio_params = _InputAudioParser(part).get("input_audio", None)
             return "input_audio", input_audio_params
         if "video_url" in part:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam, part)
