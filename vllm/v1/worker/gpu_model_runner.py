@@ -548,6 +548,7 @@ class GPUModelRunner(
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
+                | Step3p5MTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]

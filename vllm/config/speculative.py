@@ -489,34 +489,8 @@ class SpeculativeConfig:
             hf_config.model_type == "step3p7"
             or hf_config.architectures[0] == "Step3p7ForConditionalGeneration"
         ):
-            outer_hf_config = hf_config
-            hf_config = get_hf_text_config(hf_config)
-            raw_config_path = getattr(outer_hf_config, "_name_or_path", None)
-            if raw_config_path:
-                import json
-                from pathlib import Path
-
-                config_path = Path(raw_config_path) / "config.json"
-                if config_path.is_file():
-                    raw_text_config = json.loads(config_path.read_text()).get(
-                        "text_config", {}
-                    )
-                    for attr in (
-                        "layer_types",
-                        "partial_rotary_factors",
-                        "rope_theta",
-                        "swiglu_limits_shared",
-                        "swiglu_limits",
-                        "use_rope_layers",
-                    ):
-                        raw_value = raw_text_config.get(attr)
-                        if isinstance(raw_value, list):
-                            setattr(hf_config, attr, raw_value)
-            if (
-                hasattr(outer_hf_config, "quantization_config")
-                and not hasattr(hf_config, "quantization_config")
-            ):
-                hf_config.quantization_config = outer_hf_config.quantization_config
+            # Promote VLM's text_config so step3p5_mtp detection below fires correctly
+            hf_config = hf_config.text_config
 
         if (
             hf_config.model_type == "step3p5"
