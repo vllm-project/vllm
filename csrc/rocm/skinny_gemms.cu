@@ -1786,10 +1786,11 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   // Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
   int cus_needed_naive = ((M_in + wavefront_width - 1) / wavefront_width) * ((K_in + 512 - 1) / 512);
 
-  // How many of the 4 wavefronts per block can share the same 16 output rows
+  constexpr int wv_pr_grp = 4;  // wavefronts per block
+  // How many of the wv_pr_grp wavefronts per block can share the same 16 output rows
   // simultaneously? Maximize this first — more sharing means fewer output rows
   // per block, which increases the number of CUs needed.
-  int GrpsShrB = min(N_p2 / 16, 4);
+  int GrpsShrB = min(N_p2 / 16, wv_pr_grp);
 
   // Given the above, how many CUs would we need?
   int cus_needed = cus_needed_naive * GrpsShrB;
@@ -1813,21 +1814,21 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto cntr = axl_cntr.data_ptr<int>();
 
 // Template params: <scalar, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N, GrpsShrB, CHUNKK, DTRMNSTC>
-//   THRDS=64   : wavefront width (lanes per wavefront)
-//   YTILE=16   : MFMA tile height (output rows per wavefront, matches 16x16 matrix unit)
-//   WvPrGrp=4  : wavefronts per block
-//   A_CHUNK=8  : elements of A loaded per lane per LDS transaction (vectorized load width)
-//   UNRL=1     : unroll factor for the K-load loop
+//   THRDS=64        : wavefront width (lanes per wavefront)
+//   YTILE=16        : MFMA tile height (output rows per wavefront, matches 16x16 matrix unit)
+//   WvPrGrp=wv_pr_grp : wavefronts per block
+//   A_CHUNK=8       : elements of A loaded per lane per LDS transaction (vectorized load width)
+//   UNRL=1          : unroll factor for the K-load loop
 #define WVSPLITKRC(_N, _GrpsShrB, _CHUNKK)                                     \
   {                                                                            \
-    dim3 block(64, 4);                                                         \
+    dim3 block(64, wv_pr_grp);                                                 \
     if (_DTRMNSTC)                                                             \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 1>          \
+      wvSplitKrc_<fptype, 64, 16, wv_pr_grp, 8, 1, _N, _GrpsShrB, _CHUNKK, 1> \
           <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
                                        af4, bf4, biasf4, glbl, cntr, c,        \
                                        CuCount);                               \
     else                                                                       \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 0>          \
+      wvSplitKrc_<fptype, 64, 16, wv_pr_grp, 8, 1, _N, _GrpsShrB, _CHUNKK, 0> \
           <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
                                        af4, bf4, biasf4, glbl, cntr, c,        \
                                        CuCount);                               \
