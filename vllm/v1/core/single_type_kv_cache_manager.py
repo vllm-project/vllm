@@ -28,6 +28,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
+# Auto retention checkpoint schedule:
+# At powers of 2 from AUTO_RETENTION_BASE until AUTO_RETENTION_INTERVAL
+# then at every following AUTO_RETENTION_INTERVAL tokens
+# e.g., [1024, 2048, 4096, ... 32768, 65536, ...]
 AUTO_RETENTION_BASE = 1024
 AUTO_RETENTION_INTERVAL = 32768
 RetentionInterval = int | Literal["auto"]
