@@ -136,18 +136,20 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
-    # Next ^2 of n
-    N_p2 = 1 << (n - 1).bit_length()
+    # Next power of 2 >= n; kernel is templated on N as a power of 2.
+    n_next_pow2 = 1 << (n - 1).bit_length()
     wavefront_width = 64
     k_shard_size = 512
     waves_per_block = 4
     ntile = 16
     m_tiles = (m + wavefront_width - 1) // wavefront_width
     k_shards = (k + k_shard_size - 1) // k_shard_size
-    wavefronts_sharing_b = min(N_p2 // ntile, waves_per_block)
+    # As high as possible — but capped by waves_per_block (LDS is per-block)
+    # and n_tiles (more sharers than N-tiles means unused compute).
+    wavefronts_sharing_b = min(n_next_pow2 // ntile, waves_per_block)
     cus_needed = m_tiles * k_shards * wavefronts_sharing_b
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = (N_p2 * m * k_shards) <= 128 * 1024 * 12
+    fits_wvsplitkrc = (n_next_pow2 * m * k_shards) <= 128 * 1024 * 12
     fits_wvsplitkrc &= cus_needed <= cu_count
 
     if not fits_wvsplitkrc:

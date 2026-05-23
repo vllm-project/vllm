@@ -1782,8 +1782,6 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       {N_in, M_in},
       torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
-  auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
-
   dim3 grid(CuCount);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -1797,10 +1795,12 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   int m_tiles = (M_in + wavefront_width - 1) / wavefront_width;
   int k_shards = (K_in + k_shard_size - 1) / k_shard_size;
 
-  // How many of the waves_per_block wavefronts can cooperatively load the same
-  // B tile into LDS? Maximize this first — more sharing = fewer redundant HBM
-  // loads, but more CUs needed.
-  int wavefronts_sharing_b = min(N_p2 / ntile, waves_per_block);
+  // Next power of 2 >= N_in; kernel is templated on N as a power of 2.
+  auto n_next_pow2 = 1U << (32 - __builtin_clz(N_in - 1));
+
+  // As high as possible — but capped by waves_per_block (LDS is per-block)
+  // and n_tiles (more sharers than N-tiles means unused compute).
+  int wavefronts_sharing_b = min(n_next_pow2 / ntile, waves_per_block);
 
   int cus_needed = m_tiles * k_shards * wavefronts_sharing_b;
 
@@ -1854,7 +1854,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
 
-    switch (N_p2) {
+    switch (n_next_pow2) {
       case 16:
         WVSPLITKRC(16, 1, 1) break;
       case 32:
