@@ -133,13 +133,14 @@ def rocm_unquantized_gemm_impl(
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
     # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-    # and each working on a 512-shard of K, how many CUs would we need?
-    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
+    # Naive upper bound: one CU per 64-row M-tile per 512-element K-shard.
+    # In practice we need fewer because wavefronts within a block share M-tiles.
+    cus_needed_naive = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
     # How many of 4 waves in a group can work on same 16 Ms at same time?
     # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
-    CuNeeded = rndup_cus * GrpsShrB
+    CuNeeded = cus_needed_naive * GrpsShrB
     # candidate for atomic reduce count splitk?
     fits_wvsplitkrc = (
         N_p2 * m * ((k + 512 - 1) // 512)

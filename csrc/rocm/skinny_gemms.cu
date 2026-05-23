@@ -1782,9 +1782,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-  // Each CU has 4 SIMDs each working on a 16x16 tile = 64 output rows per CU.
-  // Each CU also covers a 512-element K shard. Round up to get CU demand.
-  int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
+  // Naive upper bound: one CU per 64-row M-tile per 512-element K-shard.
+  // In practice we need fewer because wavefronts within a block share M-tiles
+  // (GrpsShrB > 1), so treat this as a planning estimate, not the final count.
+  int cus_needed_naive = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
 
   // How many of the 4 wavefronts per block can share the same 16 output rows
   // simultaneously? Maximize this first — more sharing means fewer output rows
@@ -1792,7 +1793,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   int GrpsShrB = min(N_p2 / 16, 4);
 
   // Given the above, how many CUs would we need?
-  int CuNeeded = rndup_cus * GrpsShrB;
+  int CuNeeded = cus_needed_naive * GrpsShrB;
 
   if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
