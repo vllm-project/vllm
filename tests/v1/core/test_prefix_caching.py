@@ -3040,6 +3040,67 @@ def test_deepseek_v4_mla_cached_prompts_do_not_block_admission():
     )
 
 
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v4_mla_prefix_hit_under_pressure_does_not_overallocate():
+    block_size = 8
+    prompt_tokens = 5 * block_size
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=12,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer_full"],
+                    MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.uint8,
+                        cache_dtype_str="fp8_ds_mla",
+                        model_version="deepseek_v4",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=512,
+        max_num_batched_tokens=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    warm_req = make_request("warm", list(range(prompt_tokens)), block_size, sha256)
+    assert manager.allocate_slots(warm_req, prompt_tokens) is not None
+    warm_req.num_computed_tokens = prompt_tokens
+    manager.free(warm_req)
+
+    pressure_blocks = manager.block_pool.get_new_blocks(
+        manager.block_pool.get_num_free_blocks() - 2
+    )
+
+    reuse_req = make_request(
+        "reuse",
+        list(range(prompt_tokens)) + list(range(10_000, 10_000 + 2 * block_size)),
+        block_size,
+        sha256,
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(reuse_req)
+
+    try:
+        assert (
+            manager.allocate_slots(
+                reuse_req,
+                2 * block_size,
+                num_new_computed_tokens=num_computed_tokens,
+                new_computed_blocks=computed_blocks,
+            )
+            is None
+        )
+        req_blocks = manager.coordinator.single_type_managers[0].req_to_blocks
+        assert "reuse" not in req_blocks
+    finally:
+        manager.block_pool.free_blocks(reversed(pressure_blocks))
+
+
 def test_reset_prefix_cache_after_deepseek_v4_mla_prompt_cache():
     block_size = 8
     prompt_tokens = 4 * block_size + 3
