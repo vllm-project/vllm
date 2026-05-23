@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
+from functools import partial
 
 import pytest
 
@@ -9,7 +10,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-from ....utils import create_new_process_for_each_test
+from ...utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
@@ -26,6 +27,7 @@ class VitCudagraphTestConfig:
     num_video_frames: int = 16
     needs_video_metadata: bool = False
     vllm_runner_kwargs: dict = field(default_factory=dict)
+    compilation_config_overrides: dict = field(default_factory=dict)
     marks: list = field(default_factory=list)
 
 
@@ -48,19 +50,14 @@ def kimi_vl_chat_template(content: str) -> str:
     )
 
 
+def step3_vl_chat_template(content: str) -> str:
+    return (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{content} <|EOT|><|BOT|>assistant\n"
+    )
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
-    "qwen3_vl": VitCudagraphTestConfig(
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        image_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
-        ),
-        video_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|video_pad|><|vision_end|>"
-            "Describe this video in one sentence."
-        ),
-        needs_video_metadata=True,
-        marks=[pytest.mark.core_model],
-    ),
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
         image_prompt=qwen_vl_chat_template(
@@ -84,14 +81,74 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "qwen3_vl": VitCudagraphTestConfig(
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+    ),
+    "qwen3_5": VitCudagraphTestConfig(
+        model="Qwen/Qwen3.5-0.8B",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+    ),
+    "qwen2_vl": VitCudagraphTestConfig(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+    ),
+    "step3_vl": VitCudagraphTestConfig(
+        model="stepfun-ai/Step3-VL-10B",
+        modalities=["image"],
+        image_prompt=step3_vl_chat_template("What is in this image?"),
+        # Single bucket sized to cover the largest test image's output
+        # tokens (1152 > 1141 for cherry_blossom). The default auto-
+        # inferred range fans out into multiple power-of-2 buckets, each
+        # holding a full ViT capture pool.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1152],
+        },
+        # Shrink to 1 text + 1 vision layer with random weights so the
+        # test runs on any CI GPU (incl. L4) and skips the 20 GiB weight
+        # download. The test only validates that encoder CG capture/
+        # replay functions correctly, not output quality.
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="StepVLForConditionalGeneration",
+            ),
+        },
+    ),
 }
 
 
-def get_compilation_config():
+def get_compilation_config(config: VitCudagraphTestConfig):
     return {
         "cudagraph_mm_encoder": True,
         "encoder_cudagraph_max_vision_items_per_batch": 1,
         "encoder_cudagraph_max_frames_per_batch": 16,
+        **config.compilation_config_overrides,
     }
 
 
@@ -102,7 +159,6 @@ def get_compilation_config():
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@create_new_process_for_each_test()
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
 
@@ -123,7 +179,7 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         limit_mm_per_prompt={"image": 1},
-        compilation_config=get_compilation_config(),
+        compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(
@@ -144,7 +200,6 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@create_new_process_for_each_test()
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
 
@@ -176,7 +231,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         limit_mm_per_prompt={"video": 1},
-        compilation_config=get_compilation_config(),
+        compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(

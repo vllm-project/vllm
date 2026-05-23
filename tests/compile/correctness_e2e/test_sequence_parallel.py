@@ -21,12 +21,14 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ...models.registry import HF_EXAMPLE_MODELS
+from ...models.registry import HF_EXAMPLE_MODELS, _HfExamplesInfo
 from ...utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_sequence_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
+NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
+NVFP4_MODEL_INFO = _HfExamplesInfo(NVFP4_MODEL_ID)
 
 
 class ParallelSetup(NamedTuple):
@@ -41,6 +43,7 @@ class ParallelSetup(NamedTuple):
 class SPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
+    model_info: _HfExamplesInfo | None = None
 
 
 @dataclass
@@ -167,9 +170,11 @@ def _compare_sp(
     num_gpus_available: int,
     use_inductor_graph_partition: bool,
     fuse_gemm_comms: bool,
+    enable_prompt_embeds: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
+    dtype: str = "float16",
 ):
     (
         tp_size,
@@ -180,14 +185,15 @@ def _compare_sp(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only = test_options.multi_node_only
+    load_format = test_options.load_format
 
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info = test_options.model_info or HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
 
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
-    hf_overrides = model_info.hf_overrides
+    hf_overrides = dict(model_info.hf_overrides)
     require_embed_inputs = model_info.require_embed_inputs
 
     if load_format == "dummy":
@@ -220,7 +226,7 @@ def _compare_sp(
     common_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "float16",
+        dtype,
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -248,6 +254,8 @@ def _compare_sp(
                 "--enable-mm-embeds",
             ]
         )
+    elif enable_prompt_embeds:
+        common_args.append("--enable-prompt-embeds")
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
@@ -257,7 +265,9 @@ def _compare_sp(
             "fuse_gemm_comms": fuse_gemm_comms,
             "fuse_norm_quant": fuse_norm_quant,
             "fuse_act_quant": fuse_act_quant,
+            "fuse_allreduce_rms": False,
             "eliminate_noops": True,
+            "sp_min_token_num": 0,
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
@@ -349,6 +359,84 @@ def test_tp_sp_generation(
         num_gpus_available,
         use_inductor_graph_partition,
         fuse_gemm_comms=fuse_gemm_comms,
+        enable_prompt_embeds=False,
         method="generate",
         is_multimodal=False,
+    )
+
+
+# Focused regression test for the SP + prompt_embeds graph-rewrite path.
+# Covers pp_size=1 (SP only) and pp_size=2 (SP + PP); kept small on purpose so
+# we don't double the matrix of `test_tp_sp_generation` above.
+SP_PROMPT_EMBEDS_PARALLEL_SETUPS = [
+    ParallelSetup(
+        tp_size=2,
+        pp_size=pp_size,
+        fuse_norm_quant=False,
+        fuse_act_quant=False,
+        eager_mode=False,
+        chunked_prefill=False,
+    )
+    for pp_size in [1, 2]
+]
+
+
+@pytest.mark.parametrize("parallel_setup", SP_PROMPT_EMBEDS_PARALLEL_SETUPS)
+@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+@create_new_process_for_each_test()
+def test_tp_sp_generation_prompt_embeds(
+    parallel_setup: ParallelSetup,
+    num_gpus_available,
+    use_inductor_graph_partition: bool,
+):
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    _compare_sp(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        parallel_setup,
+        distributed_backend="mp",
+        runner="auto",
+        test_options=SPTestOptions(multi_node_only=False, load_format=None),
+        num_gpus_available=num_gpus_available,
+        use_inductor_graph_partition=use_inductor_graph_partition,
+        fuse_gemm_comms=False,
+        enable_prompt_embeds=True,
+        method="generate",
+        is_multimodal=False,
+    )
+
+
+@create_new_process_for_each_test()
+def test_tp_sp_nvfp4_generation(num_gpus_available: int):
+    if (
+        not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("NVFP4 requires Blackwell")
+
+    _compare_sp(
+        NVFP4_MODEL_ID,
+        ParallelSetup(
+            tp_size=2,
+            pp_size=1,
+            fuse_norm_quant=True,
+            fuse_act_quant=True,
+            eager_mode=True,
+            chunked_prefill=False,
+        ),
+        "mp",
+        "auto",
+        SPTestOptions(
+            multi_node_only=False,
+            load_format="dummy",
+            model_info=NVFP4_MODEL_INFO,
+        ),
+        num_gpus_available,
+        use_inductor_graph_partition=False,
+        fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
+        method="generate",
+        is_multimodal=False,
+        dtype="bfloat16",
     )

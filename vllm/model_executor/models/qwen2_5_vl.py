@@ -84,6 +84,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -679,6 +680,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
 
+        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -737,9 +739,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        cos_thw = cos_thw[window_index_thw, :, :]
+        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
-        sin_thw = sin_thw[window_index_thw, :, :]
+        sin_thw = sin_thw[window_index_thw_dev, :, :]
         sin_thw = sin_thw.flatten(start_dim=0, end_dim=1)
 
         cu_seqlens_thw = torch.repeat_interleave(
@@ -1036,7 +1039,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _call_hf_processor(
@@ -1361,7 +1364,9 @@ class Qwen2_5_VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+            positions = compute_mrope_for_media(size, merge_size).to(
+                emb.device, non_blocking=True
+            )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
         image_embeds_split = image_embeds_out
@@ -1443,7 +1448,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device)
+            ).to(emb.device, non_blocking=True)
 
             emb = emb[retention_mask]
             positions = positions[retention_mask]
@@ -1488,8 +1493,8 @@ class Qwen2_5_VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        # Tensors.
+        input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [
@@ -1573,6 +1578,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # embedding formats between eager and cudagraph paths.
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
         return EncoderCudaGraphConfig(
             modalities=modalities,
             input_key_by_modality={
@@ -1590,6 +1596,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 "max_seqlen_window",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=max_frames,
         )
 
     def get_input_modality(
@@ -1598,7 +1605,9 @@ class Qwen2_5_VLForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        return "video"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
@@ -1644,26 +1653,21 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_thw = grid_thw.tolist()
         return grid_thw
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         m = self.visual.spatial_merge_size
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * (h // m) * (w // m) for t, h, w in grid_thw]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * h * w for t, h, w in grid_thw]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -1679,11 +1683,13 @@ class Qwen2_5_VLForConditionalGeneration(
                     "pixel_values": pixel_values[:0],
                     "image_grid_thw": [],
                 }
-            else:
+            elif self.get_input_modality(mm_kwargs) == "video":
                 return {
                     "pixel_values_videos": pixel_values[:0],
                     "video_grid_thw": [],
                 }
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         # Compute cumulative patch offsets for slicing pixel_values
         patches_per_item = [t * h * w for t, h, w in grid_thw]
@@ -1701,11 +1707,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 "pixel_values": selected_pv,
                 "image_grid_thw": selected_grid,
             }
-        else:
+        elif self.get_input_modality(mm_kwargs) == "video":
             return {
                 "pixel_values_videos": selected_pv,
                 "video_grid_thw": selected_grid,
             }
+        else:
+            raise AssertionError("This line should be unreachable.")
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1826,7 +1834,7 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
-        else:
+        elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
@@ -1835,6 +1843,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
+        else:
+            raise AssertionError("This line should be unreachable.")
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 

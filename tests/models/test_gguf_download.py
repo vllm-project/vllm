@@ -122,14 +122,17 @@ class TestGGUFModelLoader:
 
         mock_hf_download.return_value = "/downloaded/model.gguf"
 
-        # Create a simple mock ModelConfig with only the model attribute
         model_config = MagicMock()
         model_config.model = "unsloth/Qwen3-0.6B-GGUF/model.gguf"
+        model_config.revision = "abc123"
 
         result = loader._prepare_weights(model_config)
         assert result == "/downloaded/model.gguf"
         mock_hf_download.assert_called_once_with(
-            repo_id="unsloth/Qwen3-0.6B-GGUF", filename="model.gguf"
+            repo_id="unsloth/Qwen3-0.6B-GGUF",
+            filename="model.gguf",
+            revision="abc123",
+            cache_dir=None,
         )
 
     @patch("vllm.config.model.get_hf_image_processor_config", return_value=None)
