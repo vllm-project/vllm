@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
@@ -112,9 +113,12 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device, pin_memory=False)
+    pin_memory = not current_platform.is_tpu()
+    indices = async_tensor_h2d(
+        indices_list, dtype=torch.long, device=device, pin_memory=pin_memory
+    )
     prompt_mapping_tensor = async_tensor_h2d(
-        prompt_mapping, dtype=torch.long, device=device, pin_memory=False
+        prompt_mapping, dtype=torch.long, device=device, pin_memory=pin_memory
     )
     embeddings_indices = torch.stack(
         [
