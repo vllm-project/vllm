@@ -66,6 +66,17 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
+        if moe_config.is_act_and_mul and quant_config.gemm1_clamp_limit is not None:
+            device = torch.accelerator.current_device_index()
+            self.gemm1_clamp_limit = torch.full(
+                (self.local_num_experts,),
+                quant_config.gemm1_clamp_limit,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
@@ -83,6 +94,20 @@ class TrtLlmNvFp4ExpertsBase:
             torch.nn.Parameter(g1_scale_c, requires_grad=False),
         )
         self.g1_scale_c = layer.g1_scale_c
+
+        # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
+        # division so the TRTLLM kernel receives the raw-GEMM-space clamp
+        # directly. g1_alphas is set once here in process_weights_after_loading
+        # (via the in-place mul above) and never changes again, so this is a
+        # static, per-expert constant. Register on the layer so EPLB
+        # rearranges it alongside the other expert tensors.
+        if self.gemm1_clamp_limit is not None:
+            gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_clamp_limit",
+                torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
+            )
+            self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -198,6 +223,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -212,12 +238,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             gemm1_bias=None,
             gemm1_alpha=None,
             gemm1_beta=None,
-            gemm1_clamp_limit=None,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
@@ -310,6 +336,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
         if e_score_correction_bias is not None:
             e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
+
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
@@ -325,12 +353,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
             gemm1_bias=None,
             gemm1_alpha=None,
             gemm1_beta=None,
-            gemm1_clamp_limit=None,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
