@@ -1781,9 +1781,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // Base estimate: one CU per 64-row M-tile per 512-element K-shard.
+  constexpr int wavefront_width = 64;  // MI3XX (CDNA3) wavefront size
+  // Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
   // Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
-  int cus_needed_naive = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
+  int cus_needed_naive = ((M_in + wavefront_width - 1) / wavefront_width) * ((K_in + 512 - 1) / 512);
 
   // How many of the 4 wavefronts per block can share the same 16 output rows
   // simultaneously? Maximize this first — more sharing means fewer output rows

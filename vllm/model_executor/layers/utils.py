@@ -132,10 +132,10 @@ def rocm_unquantized_gemm_impl(
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
-    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-    # Base estimate: one CU per 64-row M-tile per 512-element K-shard.
+    wavefront_width = 64  # MI3XX (CDNA3) wavefront size
+    # Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
     # Scaled up by GrpsShrB below to account for wavefronts sharing M-tiles.
-    cus_needed_naive = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
+    cus_needed_naive = ((m + wavefront_width - 1) // wavefront_width) * ((k + 512 - 1) // 512)
     # How many of 4 waves in a group can work on same 16 Ms at same time?
     # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
     GrpsShrB = min(N_p2 // 16, 4)
