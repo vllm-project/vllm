@@ -935,6 +935,12 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
+            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
+            # free here (outer GEMMs joined) for the inner overlap of
+            # wq_b+fused_indexer_q_rope_quant vs compressor.
+            indexer_aux_stream = (
+                aux_stream_list[2] if aux_stream_list is not None else None
+            )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -945,6 +951,7 @@ class DeepseekV4Attention(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
+                aux_stream=indexer_aux_stream,
             )
 
         mla_modules = DeepseekV4MLAModules(
@@ -1153,7 +1160,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
-    def _forward_rocm(
+    def _forward_native(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1193,8 +1200,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        if current_platform.is_rocm():
-            return self._forward_rocm(
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            return self._forward_native(
                 x, positions, input_ids, post_mix, res_mix, residual
             )
 
@@ -1228,10 +1235,10 @@ class DeepseekV4Model(nn.Module):
         # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
+        # Disable them on ROCm / XPU because of hang issues / no overlap.
         aux_stream_list = (
             None
-            if current_platform.is_rocm()
+            if current_platform.is_rocm() or current_platform.is_xpu()
             else [torch.cuda.Stream() for _ in range(3)]
         )
 
