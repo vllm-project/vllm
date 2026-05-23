@@ -17,7 +17,7 @@ def _quantize_and_setup_dispatch(
     a1: torch.Tensor,
     quant_config: FusedMoEQuantConfig,
     defer_input_quant: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor | None]:
     # Defer input quantization to the MoE kernel.
     if defer_input_quant:
         a1q = a1
@@ -43,7 +43,13 @@ def _quantize_and_setup_dispatch(
             mx_alignment=quant_config.mx_alignment,
         )
 
-    return a1q, a1q_scale
+    # Skip gathering scales if we have static quantization
+    # (the scale is a scalar, replicated on all ranks) or
+    # if quantization is deferred.
+    skip_gather_scales = a1q_scale is None or a1q_scale.ndim == 0
+    scales = None if skip_gather_scales else [a1q_scale]
+
+    return a1q, scales, a1q_scale
 
 
 def _unwrap_scale_and_prepare_for_moe(
@@ -124,12 +130,9 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
-
-        # Skip gathering scales if we have static quantization
-        # (the scale is a scalar, replicated on all ranks) or
-        # if quantization is deferred.
-        skip_gather_scales = scales is None or scales.numel() == 1
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -146,9 +149,8 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
 
         extra_tensors: list[torch.Tensor] | None = None
-        if scales is not None and not skip_gather_scales:
-            extra_tensors = list(list(scales))
-
+        if scales is not None:
+            extra_tensors = list(scales)
         if local_token_lora_mapping is not None:
             if extra_tensors is None:
                 extra_tensors = []
@@ -165,7 +167,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         if extra_tensors is None:
             assert len(res) == 3
             a1q, topk_weights, topk_ids = res
-            a1q_scale = scales
+            a1q_scale = a1q_scale_orig
         else:
             assert len(res) == 4
             a1q, topk_weights, topk_ids, gathered_extras = res
@@ -174,12 +176,12 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
-            if scales is not None and not skip_gather_scales:
+            if scales is not None:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
                 )
             else:
-                a1q_scale = scales
+                a1q_scale = a1q_scale_orig
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -250,7 +252,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
 
-        a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
+        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
 
         res = get_ep_group().dispatch_router_logits(
             a1q,
@@ -262,7 +266,7 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         if scales is None:
             assert len(res) == 2
             a1q, router_logits = res
-            a1q_scale = None
+            a1q_scale = a1q_scale_orig
         else:
             assert len(res) == 3
             a1q, router_logits, scales = res
