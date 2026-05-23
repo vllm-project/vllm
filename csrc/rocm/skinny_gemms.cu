@@ -1493,18 +1493,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             __builtin_amdgcn_global_load_lds(
                 /* src */ (int*)(&A[min__(
                     Kap * actlN - A_CHUNK,
-                    kOffcp + Kap * (n / CHUNKK +
-                                    (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
-                                    (threadIdx.y % sprdN)))]),
-                /* dst */ (int*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))]),
+                    kOffcp +
+                        Kap * (n / CHUNKK +
+                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                               (threadIdx.y % sprdN)))]),
+                /* dst */
+                (int*)(&s[k +
+                          kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))]),
                 16, 0, 0);
   #else
-                /* dst */ *((bigType*)(&s[k + kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))])) =
+            /* dst */ *((bigType*)(&s[k + kFitPdd * ((n / CHUNKK) +
+                                                     (threadIdx.y % sprdN))])) =
                 /* src */ *((bigType*)(&A[min__(
                     Kap * actlN - A_CHUNK,
-                    kOffcp + Kap * (n / CHUNKK +
-                                    (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
-                                    (threadIdx.y % sprdN)))]));
+                    kOffcp +
+                        Kap * (n / CHUNKK +
+                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                               (threadIdx.y % sprdN)))]));
   #endif
           }
 
@@ -1662,8 +1667,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
                 /* src */ (float4*)(&glbl[g_adr + M * N * ks]),
-                /* dst */ &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                                         nt * THRDS * 4 * k_rnd]),
+                /* dst */
+                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                               nt * THRDS * 4 * k_rnd]),
                 16, 0, 0);
   #else
             /* dst */ ((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
@@ -1743,7 +1749,8 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             int* cntr, scalar_t* C,
                             const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__MI3XX__) TODO: Add __HIP__GFX9__ (MI200) and __HIP__GFX1X__ (RDNA) support
+#endif  // defined(__HIP__MI3XX__) TODO: Add __HIP__GFX9__ (MI200) and
+        // __HIP__GFX1X__ (RDNA) support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -1782,18 +1789,20 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const int wavefront_width = Utils::get_warp_size();
-  // Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
-  // Scaled up by wavefronts_sharing_b below to account for wavefronts sharing M-tiles.
-  int cus_needed_naive = ((M_in + wavefront_width - 1) / wavefront_width) * ((K_in + 512 - 1) / 512);
-
+  constexpr int k_shard_size = 512;   // K elements per CU per pass
   constexpr int waves_per_block = 4;  // wavefronts per block
-  constexpr int ntile = 16;           // MFMA output tile height (matches NTILE in kernel)
-  // How many of the waves_per_block wavefronts can cooperatively load the same B tile into LDS?
-  // Maximize this first — more sharing = fewer redundant HBM loads, but more CUs needed.
+  constexpr int ntile =
+      16;  // MFMA output tile height (matches NTILE in kernel)
+
+  int m_tiles = (M_in + wavefront_width - 1) / wavefront_width;
+  int k_shards = (K_in + k_shard_size - 1) / k_shard_size;
+
+  // How many of the waves_per_block wavefronts can cooperatively load the same
+  // B tile into LDS? Maximize this first — more sharing = fewer redundant HBM
+  // loads, but more CUs needed.
   int wavefronts_sharing_b = min(N_p2 / ntile, waves_per_block);
 
-  // Given the above, how many CUs would we need?
-  int cus_needed = cus_needed_naive * wavefronts_sharing_b;
+  int cus_needed = m_tiles * k_shards * wavefronts_sharing_b;
 
   if (cus_needed > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
@@ -1813,25 +1822,26 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto glbl = axl_glbl.data_ptr<float>();
   auto cntr = axl_cntr.data_ptr<int>();
 
-// Template params: <scalar, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N, GrpsShrB, CHUNKK, DTRMNSTC>
+// Template params: <scalar, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N, GrpsShrB,
+// CHUNKK, DTRMNSTC>
 //   THRDS=64        : wavefront width (lanes per wavefront)
-//   YTILE=16        : MFMA tile height (output rows per wavefront, matches 16x16 matrix unit)
-//   WvPrGrp=waves_per_block : wavefronts per block
-//   A_CHUNK=8       : elements of A loaded per lane per LDS transaction (vectorized load width)
+//   YTILE=16        : MFMA tile height (output rows per wavefront, matches
+//   16x16 matrix unit) WvPrGrp=waves_per_block : wavefronts per block A_CHUNK=8
+//   : elements of A loaded per lane per LDS transaction (vectorized load width)
 //   UNRL=1          : unroll factor for the K-load loop
-#define WVSPLITKRC(_N, _GrpsShrB, _CHUNKK)                                     \
-  {                                                                            \
-    dim3 block(64, waves_per_block);                                                 \
-    if (_DTRMNSTC)                                                             \
-      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _GrpsShrB, _CHUNKK, 1> \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
-    else                                                                       \
-      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _GrpsShrB, _CHUNKK, 0> \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
+#define WVSPLITKRC(_N, _GrpsShrB, _CHUNKK)                                \
+  {                                                                       \
+    dim3 block(64, waves_per_block);                                      \
+    if (_DTRMNSTC)                                                        \
+      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _GrpsShrB,   \
+                  _CHUNKK, 1><<<grid, block, 0, stream>>>(                \
+          N_in, K_in, Kap_in, M_in, Bx_in, By_in, af4, bf4, biasf4, glbl, \
+          cntr, c, CuCount);                                              \
+    else                                                                  \
+      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _GrpsShrB,   \
+                  _CHUNKK, 0><<<grid, block, 0, stream>>>(                \
+          N_in, K_in, Kap_in, M_in, Bx_in, By_in, af4, bf4, biasf4, glbl, \
+          cntr, c, CuCount);                                              \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "wvSplitKrc", [&] {

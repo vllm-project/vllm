@@ -8,7 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950, on_mi3xx
+from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.platform_utils import num_compute_units
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -125,24 +125,30 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.skipif(not on_mi3xx(), reason="wvSplitKrc targets MI3XX (gfx942/gfx950): both use 1KPASS path, gfx950 uses global_load_lds intrinsic, gfx942 uses bigType/float4 fallback")
+@pytest.mark.skipif(
+    not on_mi3xx(),
+    reason=(
+        "wvSplitKrc targets MI3XX (gfx942/gfx950): both use 1KPASS path, "
+        "gfx950 uses global_load_lds intrinsic, gfx942 uses bigType/float4 fallback"
+    ),
+)
 def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
-    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-    # and each working on a 512-shard of K, how many CUs would we need?
-    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
-    # How many of 4 waves in a group can work on same 16 Ms at same time?
-    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
-    GrpsShrB = min(N_p2 // 16, 4)
-    # Given the above, how many CUs would we need?
-    CuNeeded = rndup_cus * GrpsShrB
+    wavefront_width = 64
+    k_shard_size = 512
+    waves_per_block = 4
+    ntile = 16
+    m_tiles = (m + wavefront_width - 1) // wavefront_width
+    k_shards = (k + k_shard_size - 1) // k_shard_size
+    wavefronts_sharing_b = min(N_p2 // ntile, waves_per_block)
+    cus_needed = m_tiles * k_shards * wavefronts_sharing_b
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
-    fits_wvsplitkrc &= CuNeeded <= cu_count
+    fits_wvsplitkrc = (N_p2 * m * k_shards) <= 128 * 1024 * 12
+    fits_wvsplitkrc &= cus_needed <= cu_count
 
     if not fits_wvsplitkrc:
         pytest.skip("Too large for wvSplitKrc")

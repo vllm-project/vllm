@@ -133,20 +133,17 @@ def rocm_unquantized_gemm_impl(
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
     wavefront_width = 64  # MI3XX (CDNA3); matches Utils::get_warp_size() on device
-    waves_per_block = 4   # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
-    ntile = 16            # MFMA output tile height; matches NTILE in kernel
-    # Base estimate: one CU per wavefront_width M-rows per 512-element K-shard.
-    # Scaled up by wavefronts_sharing_b below to account for wavefronts sharing M-tiles.
-    cus_needed_naive = ((m + wavefront_width - 1) // wavefront_width) * ((k + 512 - 1) // 512)
-    # How many of waves_per_block wavefronts can cooperatively load the same B tile into LDS?
-    # Maximize this first — more sharing = fewer redundant HBM loads, but more CUs needed.
+    k_shard_size = 512  # K elements per CU per pass; matches CHUNKK in WVSPLITKRC macro
+    waves_per_block = 4  # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
+    ntile = 16  # MFMA output tile height; matches NTILE in kernel
+    m_tiles = (m + wavefront_width - 1) // wavefront_width
+    k_shards = (k + k_shard_size - 1) // k_shard_size
+    # How many wavefronts cooperatively load the same B tile into LDS?
+    # More sharing = fewer redundant HBM loads, but more CUs needed.
     wavefronts_sharing_b = min(N_p2 // ntile, waves_per_block)
-    # Given the above, how many CUs would we need?
-    cus_needed = cus_needed_naive * wavefronts_sharing_b
+    cus_needed = m_tiles * k_shards * wavefronts_sharing_b
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = (
-        N_p2 * m * ((k + 512 - 1) // 512)
-    ) <= 128 * 1024 * 12  # deterministic
+    fits_wvsplitkrc = (N_p2 * m * k_shards) <= 128 * 1024 * 12  # deterministic
     fits_wvsplitkrc &= cus_needed <= cu_count
 
     use_skinny_reduce_counting = (
