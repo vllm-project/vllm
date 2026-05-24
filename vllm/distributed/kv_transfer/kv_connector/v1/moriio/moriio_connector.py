@@ -1276,7 +1276,16 @@ class MoRIIOConnectorWorker:
             # is_finished signal so we don't trip the scheduler's assert on still-held reqs.
             if self.mode == MoRIIOMode.READ:
                 self._read_done_tids.update(done_sending)
-                self._read_finished_seen |= (finished_req_ids or set())
+                # Filter finished_req_ids against siblings we've captured (in
+                # _read_req_tid, before scheduler unmap) or are currently holding
+                # (in _read_sibs). Non-MoRIIO IDs never enter — bounds growth.
+                if finished_req_ids:
+                    _held: set[str] = set()
+                    for _rs in self._read_sibs.values():
+                        _held.update(_rs)
+                    self._read_finished_seen |= (
+                        finished_req_ids & (self._read_req_tid.keys() | _held)
+                    )
                 _m: set[str] = set()
                 for _t in list(self._read_done_tids):
                     if _t not in self._read_sibs:
