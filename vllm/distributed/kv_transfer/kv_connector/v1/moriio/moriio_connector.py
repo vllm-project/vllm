@@ -1277,46 +1277,8 @@ class MoRIIOConnectorWorker:
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
-            # FIX(read-release): release siblings of completed reads, gated on vLLM's
-            # is_finished signal so we don't assert on still-held reqs.
             if self.mode == MoRIIOMode.READ:
-                self._read_done_tids.update(done_sending)
-                # Filter finished_req_ids against siblings we've captured (in
-                # _read_req_tid, before scheduler unmap) or are currently holding
-                # (in _read_sibs). Non-MoRIIO IDs never enter — bounds growth.
-                if finished_req_ids:
-                    _held: set[str] = set()
-                    for _rs in self._read_sibs.values():
-                        _held.update(_rs)
-                    self._read_finished_seen |= finished_req_ids & (
-                        self._read_req_tid.keys() | _held
-                    )
-                _m: set[str] = set()
-                for _t in list(self._read_done_tids):
-                    if _t not in self._read_sibs:
-                        # No siblings tracked. Either still in-flight on the scheduler
-                        # (siblings haven't been delay-freed yet — wait), or phantom
-                        # (siblings were inline-freed via request_finished's
-                        # delay_free=False path and will never arrive). If the scheduler
-                        # has also fully unmapped the tid, it's a phantom — drop now.
-                        if _t not in self.transfer_id_to_request_id:
-                            self._read_done_tids.discard(_t)
-                            self._read_seen_tid_sibcount.pop(_t, None)
-                        continue
-                    _sibs = self._read_sibs[_t]
-                    _ready = _sibs & self._read_finished_seen
-                    _m |= _ready
-                    _sibs -= _ready
-                    self._read_finished_seen -= _ready
-                    if not _sibs:
-                        logger.debug(
-                            "MoRIIO read-release: transfer_id=%s fully drained",
-                            _t,
-                        )
-                        del self._read_sibs[_t]
-                        self._read_done_tids.discard(_t)
-                        self._read_seen_tid_sibcount.pop(_t, None)
-                done_sending = _m
+                done_sending = self._read_release_step(done_sending, finished_req_ids)
 
         else:
             if self.mode == MoRIIOMode.WRITE:
@@ -1338,6 +1300,54 @@ class MoRIIOConnectorWorker:
                 done_recving = set()
 
         return done_sending, done_recving
+
+    def _read_release_step(
+        self, done_sending: set[str], finished_req_ids: set[str] | None
+    ) -> set[str]:
+        """FIX(read-release): release siblings of completed reads, gated on vLLM's
+        is_finished signal so we don't assert on still-held reqs."""
+        self._read_done_tids.update(done_sending)
+        self._track_finished_siblings(finished_req_ids)
+        released: set[str] = set()
+        for tid in list(self._read_done_tids):
+            sibs = self._read_sibs.get(tid)
+            if sibs is None:
+                self._drop_phantom_tid(tid)
+                continue
+            ready = sibs & self._read_finished_seen
+            released |= ready
+            sibs -= ready
+            self._read_finished_seen -= ready
+            if not sibs:
+                self._drain_tid(tid)
+        return released
+
+    def _track_finished_siblings(self, finished_req_ids: set[str] | None) -> None:
+        """Absorb vLLM's finished_req_ids, filtered against siblings we've captured
+        (in _read_req_tid, before scheduler unmap) or are currently holding (in
+        _read_sibs). Non-MoRIIO IDs never enter — bounds growth."""
+        if not finished_req_ids:
+            return
+        held = {r for sibs in self._read_sibs.values() for r in sibs}
+        self._read_finished_seen |= finished_req_ids & (
+            self._read_req_tid.keys() | held
+        )
+
+    def _drop_phantom_tid(self, tid: str) -> None:
+        """A tid in _read_done_tids with no siblings tracked is either still
+        in-flight on the scheduler or a phantom (siblings inline-freed via
+        request_finished's delay_free=False path). If the scheduler has also
+        unmapped the tid, no siblings will arrive — drop the bookkeeping."""
+        if tid not in self.transfer_id_to_request_id:
+            self._read_done_tids.discard(tid)
+            self._read_seen_tid_sibcount.pop(tid, None)
+
+    def _drain_tid(self, tid: str) -> None:
+        """All siblings of this tid released — clear all bookkeeping."""
+        logger.debug("MoRIIO read-release: transfer_id=%s fully drained", tid)
+        del self._read_sibs[tid]
+        self._read_done_tids.discard(tid)
+        self._read_seen_tid_sibcount.pop(tid, None)
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
