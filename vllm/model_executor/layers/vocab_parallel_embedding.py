@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 import vllm.envs as envs
+from vllm.config import CompilationMode, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -26,7 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import maybe_disable_graph_partition, set_weight_attrs
 from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -159,8 +160,7 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def get_masked_input_and_mask(
+def _get_masked_input_and_mask_eager(
     input_: torch.Tensor,
     org_vocab_start_index: int,
     org_vocab_end_index: int,
@@ -185,6 +185,48 @@ def get_masked_input_and_mask(
     vocab_mask = org_vocab_mask | added_vocab_mask
     input_ = vocab_mask * (input_ - valid_offset)
     return input_, ~vocab_mask
+
+
+_get_masked_input_and_mask_compiled = torch.compile(
+    _get_masked_input_and_mask_eager,
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+)
+
+
+def get_masked_input_and_mask(
+    input_: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None:
+        compilation_config = vllm_config.compilation_config
+        if (
+            compilation_config.mode == CompilationMode.NONE
+            or compilation_config.backend == "eager"
+        ):
+            return _get_masked_input_and_mask_eager(
+                input_,
+                org_vocab_start_index,
+                org_vocab_end_index,
+                num_org_vocab_padding,
+                added_vocab_start_index,
+                added_vocab_end_index,
+            )
+
+    return _get_masked_input_and_mask_compiled(
+        input_,
+        org_vocab_start_index,
+        org_vocab_end_index,
+        num_org_vocab_padding,
+        added_vocab_start_index,
+        added_vocab_end_index,
+    )
 
 
 # --8<-- [start:vocab_parallel_embedding]

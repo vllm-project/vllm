@@ -4,12 +4,17 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.config import (
+    CompilationMode,
+    set_current_vllm_config,
+)
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -31,6 +36,9 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.model_executor.layers import (
+    vocab_parallel_embedding as vocab_parallel_embedding_module,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -1130,7 +1138,13 @@ def test_vocab_parallel_embedding_indices(tp_size, seed, default_vllm_config):
         assert torch.all(reindexed_token_ids[vocab_size:] == -1)
 
 
-def test_get_masked_input_and_mask():
+def test_get_masked_input_and_mask(monkeypatch):
+    monkeypatch.setattr(
+        vocab_parallel_embedding_module,
+        "_get_masked_input_and_mask_compiled",
+        vocab_parallel_embedding_module._get_masked_input_and_mask_eager,
+    )
+
     x = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 
     # base tp 1 case, no padding
@@ -1296,6 +1310,65 @@ def test_get_masked_input_and_mask():
     assert torch.equal(
         modified_x_rank_3, torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4])
     )
+
+
+def test_get_masked_input_and_mask_respects_compilation_config(monkeypatch):
+    eager_result = (
+        torch.tensor([11, 12]),
+        torch.tensor([False, True]),
+    )
+    compiled_result = (
+        torch.tensor([21, 22]),
+        torch.tensor([True, False]),
+    )
+
+    monkeypatch.setattr(
+        vocab_parallel_embedding_module,
+        "_get_masked_input_and_mask_eager",
+        lambda *args, **kwargs: eager_result,
+    )
+    monkeypatch.setattr(
+        vocab_parallel_embedding_module,
+        "_get_masked_input_and_mask_compiled",
+        lambda *args, **kwargs: compiled_result,
+    )
+
+    args = dict(
+        input_=torch.tensor([0, 8]),
+        org_vocab_start_index=0,
+        org_vocab_end_index=4,
+        num_org_vocab_padding=0,
+        added_vocab_start_index=8,
+        added_vocab_end_index=10,
+    )
+
+    masked_input, input_mask = get_masked_input_and_mask(**args)
+    assert torch.equal(masked_input, compiled_result[0])
+    assert torch.equal(input_mask, compiled_result[1])
+
+    with set_current_vllm_config(
+        SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                mode=CompilationMode.NONE,
+                backend="inductor",
+            )
+        )
+    ):
+        masked_input, input_mask = get_masked_input_and_mask(**args)
+    assert torch.equal(masked_input, eager_result[0])
+    assert torch.equal(input_mask, eager_result[1])
+
+    with set_current_vllm_config(
+        SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                mode=CompilationMode.VLLM_COMPILE,
+                backend="eager",
+            )
+        )
+    ):
+        masked_input, input_mask = get_masked_input_and_mask(**args)
+    assert torch.equal(masked_input, eager_result[0])
+    assert torch.equal(input_mask, eager_result[1])
 
 
 def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
