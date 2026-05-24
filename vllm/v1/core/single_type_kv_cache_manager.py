@@ -391,30 +391,25 @@ class SingleTypeKVCacheManager(ABC):
 
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
-        ordered_blocks = list(reversed(req_blocks))
-        if not ordered_blocks:
+        if not req_blocks:
             self.num_cached_block.pop(request_id, None)
             return
 
-        # put retained checkpoint blocks later in the free queue than ordinary blocks.
-        retained_checkpoint_blocks = [
-            block
-            for block in ordered_blocks
-            if block.block_hash is not None
-            and self._is_retained_checkpoint_block(request_id, block)
-        ]
-        if retained_checkpoint_blocks:
-            retained_checkpoint_block_ids = {
-                block.block_id for block in retained_checkpoint_blocks
-            }
-            ordered_blocks = [
-                block
-                for block in ordered_blocks
-                if block.block_id not in retained_checkpoint_block_ids
-            ]
+        # Partition into ordinary vs retained-checkpoint blocks so the retained
+        # ones go later in the free queue (best-effort prefix-cache retention).
+        ordinary_blocks: list[KVCacheBlock] = []
+        retained_blocks: list[KVCacheBlock] = []
+        for block in reversed(req_blocks):
+            if block.block_hash is not None and self._is_retained_checkpoint_block(
+                request_id, block
+            ):
+                retained_blocks.append(block)
+            else:
+                ordinary_blocks.append(block)
 
-        self.block_pool.free_blocks(ordered_blocks)
-        self.block_pool.free_blocks(retained_checkpoint_blocks)
+        self.block_pool.free_blocks(ordinary_blocks)
+        if retained_blocks:
+            self.block_pool.free_blocks(retained_blocks)
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -626,6 +621,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
         self._last_interval_retention_boundary: dict[str, int] = {}
+        self._latest_retention_cached: set[str] = set()
         self._retention_block_hashes: dict[str, set[BlockHashWithGroupId]] = {}
 
     @classmethod
@@ -771,15 +767,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             last_boundary = boundary
         self._last_interval_retention_boundary[request_id] = last_boundary
 
-        # optionally cache the latest prompt boundary
-        if latest_boundary_token is not None and latest_boundary_token <= num_tokens:
+        # optionally cache the latest prompt boundary. It is fixed for the
+        # lifetime of the request (derived from num_prompt_tokens), so cache it
+        # at most once to avoid redundant tail-mask work on every decode step.
+        if (
+            latest_boundary_token is not None
+            and latest_boundary_token <= num_tokens
+            and request_id not in self._latest_retention_cached
+        ):
             self._cache_tail_at_boundary(request, latest_boundary_token)
+            self._latest_retention_cached.add(request_id)
 
         # update the num_cached_block cursor
-        self.num_cached_block[request_id] = max(
-            self.num_cached_block.get(request_id, 0),
-            num_tokens // self.block_size,
-        )
+        self.num_cached_block[request_id] = num_tokens // self.block_size
 
     def _retention_boundaries(
         self,
@@ -865,6 +865,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def free(self, request_id: str) -> None:
         super().free(request_id)
         self._last_interval_retention_boundary.pop(request_id, None)
+        self._latest_retention_cached.discard(request_id)
         self._retention_block_hashes.pop(request_id, None)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
