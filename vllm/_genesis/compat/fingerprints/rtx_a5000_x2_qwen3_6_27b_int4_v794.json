@@ -1,0 +1,142 @@
+{
+  "fingerprint_version": "1.0",
+  "name": "rtx_a5000_x2_qwen3_6_27b_int4_v794",
+  "captured_at": "2026-04-30T09:14:00Z",
+  "captured_by": "Sandermage (Sander) Barzov Aleksandr",
+  "model_key": "qwen3_6_27b_int4_autoround",
+  "fingerprint_mode": "experimental_blocked",
+  "fingerprint_mode_note": [
+    "v794 = experimental TQ k8v4 path on 27B Lorbus. NOT a working PROD",
+    "config — boots crash on cudagraph FULL capture (.tolist() error in",
+    "_prefill_attention) AND token-spam under cudagraph PIECEWISE+FULL.",
+    "Root cause: 27B GQA=24/4=6 (non-pow-2) routes through upstream",
+    "_prefill_attention which has graph-incompatible .tolist() calls.",
+    "The 35B-A3B sister config (GQA=8, pow-2) routes through P67",
+    "multi-query kernel, bypassing the broken path → works fine.",
+    "",
+    "FOR PROD, use v771b (fp8_e5m2 KV) — see fingerprint",
+    "rtx_a5000_x2_qwen3_6_27b_int4_v771b.json (96.34 TPS, CV 5.03%,",
+    "tool-call clean). Cudagraph FULL works on fp8_e5m2 path.",
+    "",
+    "Numbers below were captured under --enforce-eager (28.79 TPS) as a",
+    "diagnostic — DO NOT use as PROD reference. Eager numbers proved the",
+    "regression isolation (cudagraph-only), they're not a perf target.",
+    "Until the FULL cudagraph + TQ k8v4 + non-pow-2 GQA path is fixed,",
+    "this fingerprint stays as a known-broken marker. The cudagraph",
+    "numbers (~103 TPS) claimed in the prior fingerprint were never",
+    "reproduced on this stack and are not currently reproducible —",
+    "do NOT cite them as a target."
+  ],
+  "hardware": {
+    "class": "rtx_a5000_x2",
+    "gpu_count": 2,
+    "gpu_name": "NVIDIA RTX A5000",
+    "compute_capability": [8, 6],
+    "vram_gb_per_gpu": 24,
+    "tensor_parallel_size": 2
+  },
+  "software": {
+    "vllm": "0.20.1rc1.dev16+g7a1eb8ac2",
+    "system_fingerprint": "vllm-0.20.1rc1.dev16+g7a1eb8ac2-tp2-4a1dc7f2",
+    "image": "vllm/vllm-openai:nightly",
+    "torch": "2.5.x",
+    "triton": "3.x"
+  },
+  "config": {
+    "max_model_len": 280000,
+    "max_num_seqs": 2,
+    "max_num_batched_tokens": 2048,
+    "gpu_memory_utilization": 0.90,
+    "kv_cache_dtype": "turboquant_k8v4",
+    "speculative_method": "mtp",
+    "num_speculative_tokens": 3,
+    "enable_prefix_caching": false,
+    "dtype": "float16",
+    "enforce_eager": true,
+    "enable_auto_tool_choice": true,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  },
+  "applied_patches": [
+    "P58", "P60", "P60b", "P61", "P61b", "P62", "P64", "P66",
+    "P67", "P67b", "P68", "P69", "P72", "P74",
+    "P83", "P85", "P87", "P91", "P98", "P99", "P100", "P101",
+    "PN8", "PN11", "PN12", "PN13", "PN14"
+  ],
+  "metrics": {
+    "wall_tps": {
+      "mean": 28.79,
+      "stddev": 1.80,
+      "cv": 0.0626,
+      "min": 25.55,
+      "max": 33.11,
+      "n_samples": 50,
+      "median": 28.79
+    },
+    "decode_tpot_ms": {
+      "mean": 34.21,
+      "stddev": 2.29,
+      "cv": 0.0668,
+      "min": 29.62,
+      "max": 38.94,
+      "n_samples": 50
+    },
+    "ttft_ms": {
+      "mean": 235.55,
+      "stddev": 29.19,
+      "cv": 0.1239,
+      "min": 138.5,
+      "max": 270.9,
+      "n_samples": 50
+    },
+    "multi_turn_ttft_ms": [156.3, 151.6, 147.3, 156.2, 145.9],
+    "vram_used_per_rank_mib": 21974,
+    "vram_total_per_rank_mib": 24564,
+    "vram_headroom_mib": 2590,
+    "tool_call": {
+      "positive_pass_rate": 0.857,
+      "n_positive_cases": 7,
+      "summary": "6/7 positive cases passed (1 cutoff at max_tokens=512 in thinking mode)",
+      "verdict": "PASS — eager mode produces clean tool_call payloads. The 1/7 miss",
+      "verdict_2": "is a max_tokens=512 truncation on `tokyo_think` (model emits long",
+      "verdict_3": "reasoning trace before the tool call). Standard mode (max_tokens=1024) clears it."
+    },
+    "output_length": {
+      "max_reached_tokens": 4096,
+      "tested_targets_tokens": [1024, 2048, 4096, 8192, 16384],
+      "verdicts": ["PASS_REACHED", "PASS_REACHED", "PASS_REACHED", "TRUNCATED_natural_stop_5549", "TRUNCATED_natural_stop_6117"],
+      "vram_delta_total_mib": 0
+    },
+    "context_probe": {
+      "max_stable_label": "8K (default for --ctx 8K; full 256K validated separately in v791b ladder)",
+      "tested_targets": ["1K", "2K", "4K", "8K"],
+      "all_passed": true,
+      "long_context_validation": "262 144-token prompt validated in v791b config (different launch script)"
+    }
+  },
+  "regression_thresholds": {
+    "wall_tps_min_pct_of_median": 0.85,
+    "decode_tpot_ms_max_pct_of_median": 1.20,
+    "ttft_ms_max_pct_of_median": 1.30,
+    "tool_call_min_pass_rate": 0.85
+  },
+  "notes": [
+    "v794 = 27B Lorbus AutoRound INT4 + TurboQuant k8v4 + MTP K=3 + 280K context.",
+    "Captured 2026-04-30 via tools/genesis_bench_suite.py --mode quick --runs 10",
+    "--max-tokens 512 --ctx 8K --probe-output-length, with --enforce-eager.",
+    "Tool-call: 6/7 positive (the 1 miss is max_tokens=512 cutoff on thinking",
+    "case, not a regression). Smoke-test direct curl confirms clean Paris weather",
+    "tool-call generation: {name: get_weather, arguments: {city: Paris}}.",
+    "Stack: 27 patches engaged (P58-P101 family + PN8/PN11/PN12/PN13/PN14).",
+    "VRAM 21.97 GB / rank, 2.59 GB headroom — same as cudagraph mode (eager",
+    "doesn't change peak allocation, only graph replay).",
+    "Long-context: 256K verified in the separate v791b ladder probe; this",
+    "fingerprint covers 1K-8K only (the operator-default 8K context bench).",
+    "NOTE — cudagraph regression: the same stack with cudagraph capture ON",
+    "regresses to <tool_call> repetition spam (tool_call 0/7). Root cause under",
+    "investigation; see docs/_internal/ISSUE_27B_CUDAGRAPH_TOOL_CALL_REGRESSION_20260430.md.",
+    "Eager mode pays ~3.6× wall_TPS (29 vs ~103 cudagraph) for correctness.",
+    "Next-session priority: fix the cudagraph kernel cache-key collision so",
+    "this fingerprint can be re-captured at full speed."
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "fingerprint_version": "1.0",
+  "name": "rtx_a5000_x2_qwen3_6_35b_a3b_fp8_v775",
+  "captured_at": "2026-04-30T07:34:00Z",
+  "captured_by": "Sandermage (Sander) Barzov Aleksandr",
+  "model_key": "qwen3_6_35b_a3b_fp8",
+  "hardware": {
+    "class": "rtx_a5000_x2",
+    "gpu_count": 2,
+    "gpu_name": "NVIDIA RTX A5000",
+    "compute_capability": [8, 6],
+    "vram_gb_per_gpu": 24,
+    "tensor_parallel_size": 2
+  },
+  "software": {
+    "vllm": "0.20.1rc1.dev16+g7a1eb8ac2",
+    "system_fingerprint": "vllm-0.20.1rc1.dev16+g7a1eb8ac2-tp2-72c3a384",
+    "image": "vllm/vllm-openai:nightly",
+    "torch": "2.5.x",
+    "triton": "3.x"
+  },
+  "config": {
+    "max_model_len": 320000,
+    "max_num_seqs": 2,
+    "max_num_batched_tokens": 4096,
+    "gpu_memory_utilization": 0.90,
+    "kv_cache_dtype": "turboquant_k8v4",
+    "speculative_method": "mtp",
+    "num_speculative_tokens": 3,
+    "enable_prefix_caching": false,
+    "dtype": "float16",
+    "enable_auto_tool_choice": true,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  },
+  "applied_patches": [
+    "P37", "P58", "P60", "P60b", "P61", "P61b", "P62", "P64",
+    "P66", "P67", "P67b", "P68", "P69", "P70", "P72", "P74",
+    "P79b", "P79c", "P79d", "P81", "P82", "P99", "P101",
+    "PN8", "PN11"
+  ],
+  "metrics": {
+    "wall_tps": {
+      "mean": 189.67,
+      "stddev": 10.54,
+      "cv": 0.0555,
+      "min": 167.76,
+      "max": 210.96,
+      "n_samples": 50,
+      "mode_short_max_tokens_512": true,
+      "earlier_run_max_tokens_1024": {
+        "mean": 171.799,
+        "cv": 0.0589,
+        "n_samples": 125,
+        "note": "Standard mode with 1024 max-tokens — TTFT amortizes more, slightly lower wall_TPS"
+      }
+    },
+    "decode_tpot_ms": {
+      "mean": 4.92,
+      "stddev": 0.32,
+      "cv": 0.0644,
+      "min": 4.28,
+      "max": 5.70,
+      "n_samples": 50
+    },
+    "ttft_ms": {
+      "mean": 113.16,
+      "stddev": 35.09,
+      "cv": 0.3101,
+      "min": 62.5,
+      "max": 153.0,
+      "n_samples": 50
+    },
+    "multi_turn_ttft_ms": [154.4, 149.6, 139.9, 147.0, 138.9],
+    "stress": {
+      "wall_tps_mean": 172.2527,
+      "wall_tps_cv": 0.0572,
+      "iterations": 30,
+      "samples": 150,
+      "failures": 0,
+      "stability_verdict": "PASS",
+      "verdict_notes": [
+        "Stress run reported NAN_DETECTED on 2/150 samples; both were false",
+        "positives — the substring `inf` matched inside the word `information`.",
+        "Bench tool fix landed same day to use word-boundary regex (`re.findall`",
+        "with `\\b` anchors). After that fix the same prompts return PASS.",
+        "True NaN/inf incidence: 0/150."
+      ]
+    },
+    "vram_used_per_rank_mib": 22665,
+    "vram_total_per_rank_mib": 24564,
+    "vram_headroom_mib": 1899,
+    "tool_call": {
+      "positive_pass_rate": 1.0,
+      "n_positive_cases": 7,
+      "summary": "7/7 positive cases passed (Paris/Tokyo/NYC/London/Kyiv/multi/error_recovery)",
+      "negative_case_score": "denial-no-tool: passed (model refused to call as instructed)"
+    },
+    "output_length": {
+      "max_reached_tokens": 4096,
+      "tested_targets_tokens": [1024, 2048, 4096, 8192, 16384],
+      "verdicts": ["PASS_REACHED", "PASS_REACHED", "PASS_REACHED", "TRUNCATED_natural_stop_5169", "TRUNCATED_natural_stop_4702"],
+      "vram_delta_total_mib": 2,
+      "notes": "Model emits EOS naturally between 4K-8K on Quantum-computing prose; not a capacity limit. Long-context up to 256K validated separately in v759 ladder probes."
+    },
+    "context_probe": {
+      "max_stable_label": "8K (default for --ctx 8K)",
+      "tested_targets": ["1K", "2K", "4K", "8K"],
+      "all_passed": true,
+      "notes": "Standard run scoped to 8K; for long-context probe use --ctx 64K or --ctx 256K."
+    }
+  },
+  "regression_thresholds": {
+    "wall_tps_min_pct_of_median": 0.85,
+    "decode_tpot_ms_max_pct_of_median": 1.20,
+    "ttft_ms_max_pct_of_median": 1.30,
+    "tool_call_min_pass_rate": 0.95
+  },
+  "notes": [
+    "v775 = 35B PROD baseline. Validated 2026-04-30 via standard bench at",
+    "max-tokens=1024, 25 runs × 5 prompts, ctx=8K, output-length probe ON.",
+    "Tool-call: 7/7 positive cases pass, all 4 city queries emit clean",
+    "{'name':'get_weather','arguments':{'city':'<X>'}} payloads. Two thinking",
+    "modes (enable_thinking=true/false) both clean. Negative case (denial)",
+    "scores correctly — model refuses tool call when instructed.",
+    "Decode bench: 171.80 TPS mean, CV 5.89% across 125 samples. 5.71 ms",
+    "decode TPOT (mean) — fastest decode latency in the supported lineup.",
+    "Stability stress: 0 HTTP failures across 150 samples (30 iter × 5",
+    "prompts). NAN_DETECTED was a sentinel-scanner false positive (regex",
+    "fix landed in tools/genesis_bench_suite.py same session).",
+    "VRAM: 22.6 GB used per rank, 1.9 GB headroom. Could raise",
+    "--gpu-memory-utilization to 0.93 to free another ~2.1 GB cluster-wide.",
+    "Long-context: this fingerprint covers 1K-8K only; the 320K stable",
+    "ladder is captured separately in docs/reference/V759_320K_CONTEXT_EXPANSION_*.",
+    "Drift threshold: regress alarm at wall_TPS < 146 (15% below median).",
+    "Fingerprint is the canonical reference any deployment of v775 35B-A3B-FP8",
+    "+ TQ k8v4 + MTP K=3 on 2× RTX A5000 should compare against."
+  ]
+}

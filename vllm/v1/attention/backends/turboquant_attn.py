@@ -18,6 +18,7 @@ Per-head per-position slot layout:
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -600,6 +601,136 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: Any = None,
     ) -> torch.Tensor:
         N, Hq, D = query.shape
+
+        # [Genesis P67] Multi-query continuation prefill hook.
+        # If batch is K+1 spec-verify continuation (multi-query AND has prior
+        # cached KV) AND env GENESIS_ENABLE_P67_TQ_MULTI_QUERY_KERNEL=1,
+        # route to our Triton kernel that handles compressed cache directly
+        # under FULL cudagraph (proper fix vs P65 workaround).
+        try:
+            from vllm._genesis.kernels.p67_multi_query_kernel import (
+                is_active as _genesis_p67_is_active,
+                call_p67_attention as _genesis_p67_call,
+            )
+            import logging as _genesis_p67_logging
+            _genesis_p67_log = _genesis_p67_logging.getLogger('genesis.kernels.p67')
+            if not hasattr(self, '_genesis_p67_entry_count'):
+                self._genesis_p67_entry_count = 0
+            self._genesis_p67_entry_count += 1
+            if self._genesis_p67_entry_count <= 3:
+                _genesis_p67_log.info(
+                    'P67 hook ENTRY #%d: N=%d Hq=%d D=%d Hk=%d max_q=%s max_s=%s active=%s',
+                    self._genesis_p67_entry_count, N, Hq, D, key.shape[1],
+                    attn_metadata.max_query_len, attn_metadata.max_seq_len,
+                    _genesis_p67_is_active(),
+                )
+            _genesis_p67_Hk = key.shape[1]
+            _genesis_p67_hpk = Hq // _genesis_p67_Hk if _genesis_p67_Hk else 0
+            _genesis_p67_shape_ok = (
+                Hq >= 8
+                and D in (128, 256)
+                and _genesis_p67_hpk >= 2
+            )
+            _genesis_p67_max_prior = int(os.environ.get("GENESIS_P67_MAX_PRIOR_LEN", "4096"))
+            _genesis_p67_max_kp1 = 16
+            _genesis_p67_prior_len = (
+                attn_metadata.max_seq_len - attn_metadata.max_query_len
+            )
+            _genesis_p67_dispatch = (
+                _genesis_p67_is_active()
+                and _genesis_p67_shape_ok
+                and attn_metadata.max_query_len > 1
+                and attn_metadata.max_query_len <= _genesis_p67_max_kp1
+                and attn_metadata.max_seq_len > attn_metadata.max_query_len
+                and _genesis_p67_prior_len <= _genesis_p67_max_prior
+                and N > 0
+                and (N % attn_metadata.max_query_len) == 0
+            )
+            if not hasattr(self, '_genesis_p67_call_count'):
+                self._genesis_p67_call_count = 0
+                self._genesis_p67_dispatch_count = 0
+            self._genesis_p67_call_count += 1
+            if _genesis_p67_dispatch:
+                self._genesis_p67_dispatch_count += 1
+                _genesis_p67_K_PLUS_1 = attn_metadata.max_query_len
+                _genesis_p67_B = N // _genesis_p67_K_PLUS_1
+                _genesis_p67_qsl = attn_metadata.query_start_loc
+                if (
+                    _genesis_p67_qsl is not None
+                    and _genesis_p67_qsl.shape[0] == _genesis_p67_B + 1
+                ):
+                    Hk_genesis = key.shape[1]
+                    _genesis_p67_q_src = query if query.is_contiguous() else query.contiguous()
+                    _genesis_p67_k_src = key if key.is_contiguous() else key.contiguous()
+                    _genesis_p67_v_src = value if value.is_contiguous() else value.contiguous()
+                    _genesis_p67_q = _genesis_p67_q_src.view(
+                        _genesis_p67_B, _genesis_p67_K_PLUS_1, Hq, D
+                    )
+                    _genesis_p67_k_chunk = _genesis_p67_k_src.view(
+                        _genesis_p67_B, _genesis_p67_K_PLUS_1, Hk_genesis, D
+                    )
+                    _genesis_p67_v_chunk = _genesis_p67_v_src.view(
+                        _genesis_p67_B, _genesis_p67_K_PLUS_1, Hk_genesis, D
+                    )
+                    _genesis_p67_cfg = self.tq_config
+                    _genesis_p67_block_size = kv_cache.shape[1]
+                    _genesis_p67_kps = _genesis_p67_cfg.key_packed_size
+                    _genesis_p67_vdb = _genesis_p67_cfg.value_data_bytes if hasattr(_genesis_p67_cfg, 'value_data_bytes') else (D // 2)
+                    if self._genesis_p67_dispatch_count <= 3:
+                        _genesis_p67_log.warning(
+                            'P67 dispatch #%d: B=%d K_PLUS_1=%d Hq=%d Hk=%d D=%d block_size=%d kps=%d vdb=%d max_seq=%d',
+                            self._genesis_p67_dispatch_count, _genesis_p67_B,
+                            _genesis_p67_K_PLUS_1, Hq, Hk_genesis, D,
+                            _genesis_p67_block_size, _genesis_p67_kps, _genesis_p67_vdb,
+                            attn_metadata.max_seq_len,
+                        )
+                    _genesis_p67_buf_key = (_genesis_p67_B, _genesis_p67_K_PLUS_1, Hq, D)
+                    if not hasattr(self, '_genesis_p67_out_buffers'):
+                        self._genesis_p67_out_buffers = {}
+                    _genesis_p67_out_buf = self._genesis_p67_out_buffers.get(_genesis_p67_buf_key)
+                    if _genesis_p67_out_buf is None or _genesis_p67_out_buf.dtype != query.dtype or _genesis_p67_out_buf.device != query.device:
+                        _genesis_p67_out_buf = torch.empty(
+                            _genesis_p67_buf_key, dtype=query.dtype, device=query.device
+                        )
+                        self._genesis_p67_out_buffers[_genesis_p67_buf_key] = _genesis_p67_out_buf
+                    _genesis_p67_out = _genesis_p67_call(
+                        q=_genesis_p67_q,
+                        kv_cache=kv_cache,
+                        block_table=attn_metadata.block_table,
+                        seq_lens=attn_metadata.seq_lens,
+                        k_chunk=_genesis_p67_k_chunk,
+                        v_chunk=_genesis_p67_v_chunk,
+                        scale=self.scale,
+                        block_size=_genesis_p67_block_size,
+                        kps=_genesis_p67_kps,
+                        val_data_bytes=_genesis_p67_vdb,
+                        output=_genesis_p67_out_buf,
+                    )
+                    _debug_compare = os.environ.get("GENESIS_P67_DEBUG_COMPARE", "0") == "1"
+                    _genesis_p67_capturing = (
+                        torch.cuda.is_available()
+                        and torch.cuda.is_current_stream_capturing()
+                    )
+                    if self._genesis_p67_dispatch_count <= 5 and not _genesis_p67_capturing:
+                        _stats_out = _genesis_p67_out.float().detach()
+                        _amax = float(_stats_out.abs().max().item())
+                        _amean = float(_stats_out.abs().mean().item())
+                        _has_nan = bool(torch.isnan(_stats_out).any().item())
+                        _has_inf = bool(torch.isinf(_stats_out).any().item())
+                        _per_t_amax = _stats_out.abs().amax(dim=-1).amax(dim=-1).flatten().tolist()
+                        _genesis_p67_log.warning(
+                            'P67 dispatch #%d STATS: shape=%s amax=%.4f amean=%.4f nan=%s inf=%s per_t_amax=%s',
+                            self._genesis_p67_dispatch_count, tuple(_genesis_p67_out.shape),
+                            _amax, _amean, _has_nan, _has_inf, _per_t_amax,
+                        )
+                    if not _debug_compare:
+                        return _genesis_p67_out.view(N, Hq, D)
+        except Exception as _genesis_p67_err:
+            import logging as _genesis_p67_logging
+            _genesis_p67_logging.getLogger('genesis.kernels.p67').warning(
+                'P67 dispatch failed (%s), falling through to upstream',
+                _genesis_p67_err, exc_info=True,
+            )
 
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.

@@ -1,0 +1,121 @@
+{
+  "fingerprint_version": "1.0",
+  "name": "rtx_a5000_x2_qwen3_6_27b_int4_v771b",
+  "captured_at": "2026-04-30T11:18:00Z",
+  "captured_by": "Sandermage (Sander) Barzov Aleksandr",
+  "model_key": "qwen3_6_27b_int4_autoround",
+  "fingerprint_mode": "production",
+  "promotion_note": [
+    "v771b is the actual PROD reference for 27B Lorbus (per server-side launch_scripts/test/start_v771b_27b_no_prefix_cache.sh).",
+    "fp8_e5m2 KV cache + 131K context + max_num_seqs=4 + max_num_batched_tokens=8192.",
+    "Captured via tools/genesis_bench_suite.py --mode quick --runs 10 --max-tokens 512 --ctx 8K --probe-output-length.",
+    "Matches GitHub baseline target 89-120 TPS."
+  ],
+  "hardware": {
+    "class": "rtx_a5000_x2",
+    "gpu_count": 2,
+    "gpu_name": "NVIDIA RTX A5000",
+    "compute_capability": [8, 6],
+    "vram_gb_per_gpu": 24,
+    "tensor_parallel_size": 2,
+    "driver": "580.126.09",
+    "bandwidth_gb_s": 768
+  },
+  "software": {
+    "vllm": "0.20.1rc1.dev16+g7a1eb8ac2",
+    "system_fingerprint": "vllm-0.20.1rc1.dev16+g7a1eb8ac2-tp2-51ea8d87",
+    "image": "vllm/vllm-openai:nightly",
+    "torch": "2.5.x",
+    "triton": "3.x"
+  },
+  "config": {
+    "max_model_len": 131072,
+    "max_num_seqs": 4,
+    "max_num_batched_tokens": 8192,
+    "gpu_memory_utilization": 0.95,
+    "kv_cache_dtype": "fp8_e5m2",
+    "speculative_method": "mtp",
+    "num_speculative_tokens": 3,
+    "enable_prefix_caching": false,
+    "dtype": "float16",
+    "enable_auto_tool_choice": true,
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3"
+  },
+  "applied_patches": [
+    "P58", "P60", "P60b", "P61", "P61b", "P62", "P64",
+    "P66", "P67", "P68", "P69", "P72", "P74",
+    "P83", "P85", "P87", "P91", "P99", "P100", "P101"
+  ],
+  "metrics": {
+    "wall_tps": {
+      "mean": 96.34,
+      "stddev": 4.85,
+      "cv": 0.0503,
+      "min": 86.69,
+      "max": 105.63,
+      "n_samples": 50
+    },
+    "decode_tpot_ms": {
+      "mean": 10.09,
+      "stddev": 0.61,
+      "cv": 0.0607,
+      "min": 8.94,
+      "max": 11.13,
+      "n_samples": 50
+    },
+    "ttft_ms": {
+      "mean": 103.52,
+      "stddev": 9.81,
+      "cv": 0.0947,
+      "min": 80.4,
+      "max": 118.9,
+      "n_samples": 50
+    },
+    "multi_turn_ttft_ms": [144.1, 144.8, 120.2, 119.2, 124.4],
+    "vram_used_per_rank_mib": 22618,
+    "vram_total_per_rank_mib": 24564,
+    "vram_headroom_mib": 1946,
+    "tool_call": {
+      "positive_pass_rate": 0.857,
+      "n_positive_cases": 7,
+      "summary": "6/7 positive cases passed (1 max_tokens=512 truncation in thinking-mode case)",
+      "verdict": "PASS — tool-call generation clean across single/multi/refuse cases"
+    },
+    "output_length": {
+      "max_reached_tokens": 8192,
+      "tested_targets_tokens": [1024, 2048, 4096, 8192, 16384],
+      "verdicts": ["PASS_REACHED", "PASS_REACHED", "PASS_REACHED", "PASS_REACHED", "TRUNCATED_natural_stop_7874"],
+      "vram_delta_total_mib": 0,
+      "notes": "8K reached (vs 4K on canonical TQ k8v4) — v771b's higher max_seqs + larger batched tokens gives better long-output capacity."
+    },
+    "context_probe": {
+      "max_stable_label": "8K (default --ctx 8K); full 256K validated separately in v791b ladder",
+      "tested_targets": ["1K", "2K", "4K", "8K"],
+      "all_passed": true
+    }
+  },
+  "regression_thresholds": {
+    "wall_tps_min_pct_of_median": 0.85,
+    "decode_tpot_ms_max_pct_of_median": 1.20,
+    "ttft_ms_max_pct_of_median": 1.30,
+    "tool_call_min_pass_rate": 0.85
+  },
+  "notes": [
+    "v771b = 27B Lorbus AutoRound INT4 + fp8_e5m2 KV + MTP K=3 + 131K context + prefix-caching OFF.",
+    "Matches the README headline-numbers baseline (89.23 TPS, 11.18 ms TPOT, 9.97% CV, 4/4 tool-call) at higher fidelity:",
+    "  this run sees 96.34 TPS, 10.09 ms TPOT, 5.03% CV, 6/7 tool-call — within +8% of baseline mean and tighter spread.",
+    "Config differences vs canonical TQ k8v4 script (which is broken under cudagraph FULL):",
+    "  - kv_cache_dtype: fp8_e5m2 (NOT turboquant_k8v4)",
+    "  - max_model_len: 131072 (NOT 280000)",
+    "  - max_num_seqs: 4 (NOT 2)",
+    "  - max_num_batched_tokens: 8192 (NOT 2048)",
+    "  - gpu_memory_utilization: 0.95 (NOT 0.90)",
+    "Server-side script: launch_scripts/test/start_v771b_27b_no_prefix_cache.sh (rabochaya konfiga PROD).",
+    "Long-context: 256K context validated separately on v791b config (different launch_scripts/test/ entry).",
+    "TQ k8v4 path on 27B is currently BROKEN under cudagraph FULL capture (.tolist() crash + token spam);",
+    "  the broken canonical TQ k8v4 script remains in scripts/launch/ but should be marked experimental",
+    "  until upstream / Genesis fixes the FULL cudagraph + TQ + GQA-non-pow2 path.",
+    "VRAM 22.6 GB / rank, 1.9 GB headroom — same envelope as TQ k8v4 attempt."
+  ]
+}
