@@ -219,28 +219,22 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
             if model_type in _CONFIG_REGISTRY:
-                # Register the config class to AutoConfig to ensure it's used
-                # in future calls to `from_pretrained` (e.g. from
-                # AutoTokenizer or AutoProcessor).
+                # Bypass model_type mismatch in config.json by loading via config_class.
                 config_class = _CONFIG_REGISTRY[model_type]
                 config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
-                # If the on-disk model_type differs from the overridden
-                # one, register under both so AutoConfig.from_pretrained
-                # returns the correct class regardless of what the
-                # checkpoint says
+                # Also register the on-disk model_type for AutoTokenizer/AutoProcessor.
                 if (
                     config_model_type := config_dict.get("model_type")
                 ) and config_model_type != model_type:
-                    config_class.model_type = config_model_type
                     AutoConfig.register(config_model_type, config_class, exist_ok=True)
-                    config_class.model_type = model_type
-                # Now that it is registered, it is not considered remote code anymore
-                trust_remote_code = False
+                loader, trust_remote_code = config_class, False
+            else:
+                loader = AutoConfig
             try:
-                kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
+                config = loader.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
@@ -252,16 +246,14 @@ class HFConfigParser(ConfigParserBase):
                     not trust_remote_code
                     and "requires you to execute the configuration file" in str(e)
                 ):
-                    err_msg = (
+                    raise RuntimeError(
                         "Failed to load the model config. If the model "
                         "is a custom model not yet available in the "
                         "HuggingFace transformers library, consider setting "
                         "`trust_remote_code=True` in LLM or using the "
                         "`--trust-remote-code` flag in the CLI."
-                    )
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
+                    ) from e
+                raise
         config = _maybe_remap_hf_config_attrs(config)
         return config_dict, config
 
@@ -716,7 +708,7 @@ def get_config(
         except Exception as e:
             error_message = (
                 "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
+                f" '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
                 "2. Specify a local directory that contains a recognized "
                 "configuration file.\n"
@@ -724,7 +716,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=model)
+            )
 
             raise ValueError(error_message) from e
 
