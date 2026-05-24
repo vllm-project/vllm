@@ -219,8 +219,26 @@ class RowvLLMParameter(BasevLLMParameter):
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         shard_size = self.data.shape[self.input_dim]
+        # [Genesis P91 vllm#39460 backport]
+        # When the parameter is tagged with row_group_size +
+        # row_input_size_per_partition (set by Marlin create_weights
+        # for `scales` and `qzeros` row-parallel layers), compute
+        # start_idx in source-tensor row units (== scale-rows = input
+        # element units / group_size). The default tp_rank * shard_size
+        # is wrong for partial-group shards and silently corrupts dequant.
+        _genesis_p91_group_size = getattr(self, 'row_group_size', None)
+        _genesis_p91_input_partition = getattr(
+            self, 'row_input_size_per_partition', None
+        )
+        if (_genesis_p91_group_size is not None
+                and _genesis_p91_input_partition is not None):
+            _genesis_p91_start = (
+                self.tp_rank * _genesis_p91_input_partition
+            ) // _genesis_p91_group_size
+        else:
+            _genesis_p91_start = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(
-            self.input_dim, self.tp_rank * shard_size, shard_size
+            self.input_dim, _genesis_p91_start, shard_size
         )
 
         if len(loaded_weight.shape) == 0:

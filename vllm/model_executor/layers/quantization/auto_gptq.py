@@ -366,12 +366,21 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
             scales_and_zp_input_dim = None
-            scales_and_zp_size = input_size // group_size
+            # [Genesis P91 vllm#39460 backport] cdiv not floor-div: when
+            # input_size % group_size != 0, AutoRound stores cdiv() many
+            # scales (trailing partial group covers the remainder); floor
+            # silently drops the partial group's scales.
+            from vllm.utils.math_utils import cdiv as _genesis_p91_cdiv
+            scales_and_zp_size = _genesis_p91_cdiv(input_size, group_size)
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
-            scales_and_zp_size = input_size_per_partition // group_size
+            # [Genesis P91 vllm#39460 backport] cdiv for per-partition too.
+            from vllm.utils.math_utils import cdiv as _genesis_p91_cdiv
+            scales_and_zp_size = _genesis_p91_cdiv(
+                input_size_per_partition, group_size
+            )
 
         # Quantized weights
         qweight = PackedvLLMParameter(
