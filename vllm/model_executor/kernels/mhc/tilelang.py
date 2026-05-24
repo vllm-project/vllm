@@ -17,7 +17,7 @@ def mhc_pre_tilelang(
     sinkhorn_repeat: int,
     n_splits: int = 1,
     norm_weight: torch.Tensor | None = None,
-    norm_eps: float = 0.0,
+    norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Forward pass for mHC pre block.

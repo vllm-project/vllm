@@ -1083,7 +1083,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
         norm_weight: torch.Tensor | None = None,
-        norm_eps: float = 0.0,
+        norm_eps: float = 1e-6,
     ):
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
