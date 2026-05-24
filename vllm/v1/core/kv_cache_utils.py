@@ -697,7 +697,9 @@ def _check_enough_kv_cache_memory(
     if available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when initializing the engine. "
+            "Try increasing `gpu_memory_utilization` when initializing the engine "
+            "(this flag also controls CPU memory reservation on the CPU "
+            "backend, despite its name). "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
@@ -714,11 +716,12 @@ def _check_enough_kv_cache_memory(
             )
 
         raise ValueError(
-            f"To serve at least one request with the models's max seq len "
+            f"To serve at least one request with the model's max seq len "
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
-            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
+            f"Try increasing `gpu_memory_utilization` (which also controls "
+            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
             f"when initializing the engine. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
