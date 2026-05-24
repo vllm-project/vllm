@@ -1818,6 +1818,12 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 continue
 
             for item in tool_calls:
+                # vLLM only normalizes function-type tool calls. Other shapes
+                # (e.g. OpenAI's "custom" tool type) are passed through; the
+                # chat template will surface a 4xx via safe_apply_chat_template
+                # if it cannot render them.
+                if not isinstance(item, dict) or "function" not in item:
+                    continue
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):

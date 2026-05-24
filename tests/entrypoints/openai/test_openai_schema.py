@@ -21,6 +21,23 @@ _ROCM_TIMEOUT_MULTIPLIER = 3 if current_platform.is_rocm() else 1
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
 LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
+# Schemathesis fuzzes request bodies from the OpenAPI schema with no LLM-aware
+# bounds. `SamplingParams.n` has no upper bound and `max_tokens` defaults to
+# (max_model_len - input_len) on `/inference/v1/generate` since #42329, so a
+# single fuzzed body can request hundreds of thousands of tokens and blow the
+# 180s ROCm timeout. Clamp both at send time on generative endpoints.
+_CI_MAX_N: Final[int] = 2
+_CI_MAX_TOKENS: Final[int] = 16
+_GENERATIVE_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "/v1/chat/completions",
+        "/v1/chat/completions/batch",
+        "/v1/completions",
+        "/v1/messages",
+        "/inference/v1/generate",
+    }
+)
+
 
 @pytest.fixture(scope="module")
 def server():
@@ -74,10 +91,18 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                 and isinstance(case.body["messages"], list)
                 and len(case.body["messages"]) > 0
             ):
-                for message in case.body["messages"]:
-                    if not isinstance(message, dict):
-                        continue
+                # /v1/chat/completions sends messages as list[dict]; the batch
+                # endpoint nests them as list[list[dict]] (one row per
+                # conversation). Walk both shapes so this filter applies
+                # uniformly.
+                flat_messages: list[dict] = []
+                for entry in case.body["messages"]:
+                    if isinstance(entry, dict):
+                        flat_messages.append(entry)
+                    elif isinstance(entry, list):
+                        flat_messages.extend(m for m in entry if isinstance(m, dict))
 
+                for message in flat_messages:
                     tool_calls = message.get("tool_calls", [])
                     if isinstance(tool_calls, list):
                         for tool_call in tool_calls:
@@ -105,6 +130,44 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
         return True
 
     return strategy.filter(no_invalid_types)
+
+
+def _clamp_generation_fields(container: dict) -> None:
+    """Clamp `n` and `max_tokens` in a fuzzed request body in place.
+
+    `max_tokens` is always overwritten because #42329 makes the server
+    substitute a max-model-len-sized default for an omitted value.
+    """
+    n = container.get("n")
+    if isinstance(n, int) and n > _CI_MAX_N:
+        container["n"] = _CI_MAX_N
+
+    for key in ("max_tokens", "max_completion_tokens"):
+        existing = container.get(key)
+        if isinstance(existing, int):
+            container[key] = min(existing, _CI_MAX_TOKENS)
+        elif key in container or key == "max_tokens":
+            # Override null/None and inject when absent for `max_tokens`.
+            container[key] = _CI_MAX_TOKENS
+
+
+@schemathesis.hook
+def before_call(context: schemathesis.hooks.HookContext, case: Case) -> None:
+    """Cap generation cost on token-producing endpoints before each HTTP send.
+
+    Runs after hypothesis generation and shrinking, so it does not interact
+    with case minimization or trigger filter health checks.
+    """
+    op = case.operation
+    if op is None or op.path not in _GENERATIVE_PATHS:
+        return
+    body = case.body
+    if not isinstance(body, dict):
+        return
+    _clamp_generation_fields(body)
+    sampling_params = body.get("sampling_params")
+    if isinstance(sampling_params, dict):
+        _clamp_generation_fields(sampling_params)
 
 
 @schema.parametrize()
