@@ -280,7 +280,7 @@ class MoRIIOConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
-        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.transfer_id_to_request_id: dict[TransferId, list[ReqId]] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
     def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
@@ -803,7 +803,7 @@ class MoRIIOConnectorWorker:
             self.cache_config.cache_dtype,
             use_mla=self.use_mla,
         )
-        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.transfer_id_to_request_id: dict[TransferId, list[ReqId]] = {}
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1276,7 +1276,17 @@ class MoRIIOConnectorWorker:
             # is_finished signal so we don't trip the scheduler's assert on still-held reqs.
             if self.mode == MoRIIOMode.READ:
                 self._read_done_tids.update(done_sending)
-                self._read_finished_seen |= (finished_req_ids or set())
+                # Filter finished_req_ids against currently-tracked siblings so non-MoRIIO
+                # req_ids don't accumulate in _read_finished_seen. Union covers both
+                # delay-freed siblings (now in _read_sibs) and in-flight ones (still in
+                # transfer_id_to_request_id).
+                if finished_req_ids:
+                    tracked: set[str] = set()
+                    for _rs in self._read_sibs.values():
+                        tracked.update(_rs)
+                    for _rs in self.transfer_id_to_request_id.values():
+                        tracked.update(_rs)
+                    self._read_finished_seen |= (finished_req_ids & tracked)
                 _m: set[str] = set()
                 for _t in list(self._read_done_tids):
                     if _t not in self._read_sibs:

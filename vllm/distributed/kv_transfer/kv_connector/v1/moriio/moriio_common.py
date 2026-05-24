@@ -335,7 +335,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
-        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.transfer_id_to_request_id: dict[TransferId, list[ReqId]] = {}
 
     def __repr__(self):
         return (
