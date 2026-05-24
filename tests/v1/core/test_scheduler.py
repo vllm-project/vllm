@@ -4330,25 +4330,34 @@ def test_eagle3_mm_encoder_cache_with_shift():
     )
 
 
-def test_connector_negative_matched_tokens_clamped_to_zero():
+@pytest.mark.parametrize(
+    "ext_tokens,description",
+    [
+        (-5, "negative (issue #43031: LMCache reported negative)"),
+        (-1, "negative by one"),
+        (11, "exceeds request.num_tokens (10)"),
+        (100, "wildly exceeds request.num_tokens"),
+    ],
+)
+def test_connector_out_of_contract_matched_tokens_assert(ext_tokens, description):
     """Regression test for vllm-project/vllm#43031.
 
-    Some KV connectors (notably LMCache) have been observed to return a
-    negative value from ``get_num_new_matched_tokens``. The contract is
-    that this returns a non-negative token count, but a misbehaving
-    connector should not crash the scheduler -- previously a negative
-    value would flow downstream into ``prefill_stats``/
-    ``PromptTokenStats.external_kv_transfer`` and ultimately into a
-    Prometheus ``Counter.inc()`` call, which raises ``ValueError`` and
-    kills the in-flight streaming response.
+    The connector contract for ``get_num_new_matched_tokens`` requires
+    a value in ``[0, request.num_tokens - num_new_local_computed_tokens]``.
+    A misbehaving connector violating this contract (notably LMCache
+    has been observed returning negatives) would previously let the bad
+    value flow into ``prefill_stats`` and ultimately into a Prometheus
+    ``Counter.inc()`` call that raises ``ValueError`` and kills the
+    in-flight streaming response -- an obscure failure mode that hides
+    the actual connector bug.
 
-    The scheduler should defensively clamp the value to 0 at the
-    connector boundary and continue scheduling normally.
+    The scheduler enforces the contract at the connector boundary with
+    a clear ``AssertionError`` that names the offending connector and
+    value, matching the existing invariant style in this scheduler.
     """
     scheduler = create_scheduler(max_num_seqs=1, enable_prefix_caching=False)
     scheduler.connector = Mock()
-    # Simulate a buggy connector returning a negative match count.
-    scheduler.connector.get_num_new_matched_tokens.return_value = (-5, False)
+    scheduler.connector.get_num_new_matched_tokens.return_value = (ext_tokens, False)
     scheduler.connector.update_state_after_alloc.return_value = None
     scheduler.connector.build_connector_meta.return_value = Mock()
 
@@ -4356,15 +4365,5 @@ def test_connector_negative_matched_tokens_clamped_to_zero():
     request = requests[0]
     scheduler.add_request(request)
 
-    # The schedule call must not raise; the negative value must be
-    # clamped to 0 before being passed to prefill_stats.set(), which
-    # in turn feeds Prometheus counters.
-    output = scheduler.schedule()
-    assert request.request_id in output.num_scheduled_tokens
-
-    # prefill_stats should reflect 0 externally-cached tokens (clamped),
-    # not -5, so that the downstream Prometheus Counter.inc() never sees
-    # a negative value.
-    assert request.prefill_stats is not None
-    assert request.prefill_stats.num_external_cached_tokens == 0
-    assert request.prefill_stats.num_cached_tokens >= 0
+    with pytest.raises(AssertionError, match="Mock"):
+        scheduler.schedule()

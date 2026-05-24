@@ -610,21 +610,29 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        # Defend against a misbehaving connector returning
-                        # a negative match count (see issue #43031: LMCache
-                        # has been observed to do this). A negative value
-                        # would otherwise flow into PromptTokenStats and
-                        # crash the engine when passed to a Prometheus
-                        # Counter.inc() call, killing in-flight streams.
-                        if ext_tokens < 0:
-                            logger.warning_once(
-                                "KV connector %s returned a negative number "
-                                "of matched tokens (%d); clamping to 0. This "
-                                "indicates a bug in the connector.",
-                                type(self.connector).__name__,
-                                ext_tokens,
-                            )
-                            ext_tokens = 0
+                        # Enforce the connector contract at the boundary:
+                        # ext_tokens must be in [0, request.num_tokens -
+                        # num_new_local_computed_tokens]. Without this an
+                        # out-of-contract value (negative — see #43031, or
+                        # over-large) silently flows into PrefillStats and
+                        # crashes the engine downstream (e.g. Prometheus
+                        # Counter.inc() rejects negatives), making the
+                        # connector bug hard to diagnose. This earlier check
+                        # mirrors the existing combined-sum invariant a few
+                        # lines below (`num_computed_tokens <= request.num_tokens`).
+                        assert (
+                            0
+                            <= ext_tokens
+                            <= request.num_tokens - num_new_local_computed_tokens
+                        ), (
+                            f"KV connector {type(self.connector).__name__} "
+                            f"returned {ext_tokens} matched tokens, which "
+                            f"violates 0 <= ext_tokens <= "
+                            f"{request.num_tokens - num_new_local_computed_tokens} "
+                            f"(request.num_tokens={request.num_tokens}, "
+                            f"num_new_local_computed_tokens="
+                            f"{num_new_local_computed_tokens})"
+                        )
 
                         num_external_computed_tokens = ext_tokens
 
