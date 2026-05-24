@@ -610,6 +610,22 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
+                        # Defend against a misbehaving connector returning
+                        # a negative match count (see issue #43031: LMCache
+                        # has been observed to do this). A negative value
+                        # would otherwise flow into PromptTokenStats and
+                        # crash the engine when passed to a Prometheus
+                        # Counter.inc() call, killing in-flight streams.
+                        if ext_tokens < 0:
+                            logger.warning_once(
+                                "KV connector %s returned a negative number "
+                                "of matched tokens (%d); clamping to 0. This "
+                                "indicates a bug in the connector.",
+                                type(self.connector).__name__,
+                                ext_tokens,
+                            )
+                            ext_tokens = 0
+
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = (
