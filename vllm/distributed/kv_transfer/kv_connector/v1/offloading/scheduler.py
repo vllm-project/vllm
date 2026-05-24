@@ -261,6 +261,8 @@ class OffloadingConnectorScheduler:
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
+        # GPU block IDs allocated in the current engine step
+        self._current_batch_allocated_block_ids: set[int] = set()
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
@@ -564,6 +566,10 @@ class OffloadingConnectorScheduler:
             req_status.group_states,
             blocks.blocks,
         ):
+            self._current_batch_allocated_block_ids.update(
+                block.block_id for block in group_blocks if block.block_id != 0
+            )
+
             gpu_block_size = group_config.gpu_block_size
             offloaded_block_size = group_config.offloaded_block_size
             offload_keys = group_state.offload_keys
@@ -613,17 +619,6 @@ class OffloadingConnectorScheduler:
                 # entire KV cache so a remote decode node can consume it.
                 group_state.next_stored_block_idx = num_blocks
 
-        # Fence dst blocks against finished-request pending stores.
-        if (
-            self._block_id_to_pending_jobs
-            and not self._block_id_to_pending_jobs.keys().isdisjoint(dst_block_ids)
-        ):
-            self._current_batch_jobs_to_flush.update(
-                jid
-                for bid in dst_block_ids
-                for jid in self._block_id_to_pending_jobs.get(bid, ())
-            )
-
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
@@ -647,37 +642,68 @@ class OffloadingConnectorScheduler:
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(keys_to_load)
 
-    def _build_store_jobs(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> dict[int, TransferJob]:
-        block_size_factor = self.config.block_size_factor
-        store_jobs: dict[int, TransferJob] = {}
-        # iterate over both new and cached requests
+    def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
+        """
+        Update request states from the Scheduler's output.
+        """
+
+        # new_block_ids_end[req_id][i] = end of pre-existing block_ids for
+        # the i-th sliding window group (before this step's extend).
+        # Used to detect sliding window blocks that got re-allocated.
+        new_block_ids_end: dict[str, tuple[int, ...]] = {}
+
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
             req_status.update_offload_keys()
-            req = req_status.req
 
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
 
             if new_block_id_groups:
+                if self._sliding_window_groups:
+                    new_block_ids_end[req_id] = tuple(
+                        len(req_status.group_states[grp_idx].block_ids)
+                        for grp_idx in self._sliding_window_groups
+                    )
                 req_status.update_block_id_groups(new_block_id_groups)
-                # Fence new blocks against in-flight stores.
-                if self._block_id_to_pending_jobs:
-                    new_blocks_flat = [
-                        bid for new_blocks in new_block_id_groups for bid in new_blocks
-                    ]
-                    if not self._block_id_to_pending_jobs.keys().isdisjoint(
-                        new_blocks_flat
-                    ):
-                        self._current_batch_jobs_to_flush.update(
-                            jid
-                            for bid in new_blocks_flat
-                            for jid in self._block_id_to_pending_jobs.get(bid, ())
-                        )
+                for new_blocks in new_block_id_groups:
+                    for bid in new_blocks:
+                        if bid != 0:
+                            self._current_batch_allocated_block_ids.add(bid)
+
+        # Zero out stale block_ids in sliding window groups' pending-store
+        # positions. Only sliding window groups can have stale entries (blocks
+        # freed by remove_skipped_blocks then reallocated). Only positions in
+        # [next_stored_block_idx * bsf, end) need checking where end is the
+        # pre-extend length: earlier positions were already offloaded, later
+        # ones are fresh allocations from this step.
+        if self._sliding_window_groups and self._current_batch_allocated_block_ids:
+            block_size_factor = self.config.block_size_factor
+            for req_id, req_status in self._req_status.items():
+                ends = new_block_ids_end.get(req_id)
+                for i, grp_idx in enumerate(self._sliding_window_groups):
+                    group_state = req_status.group_states[grp_idx]
+                    start = group_state.next_stored_block_idx * block_size_factor
+                    end = ends[i] if ends is not None else len(group_state.block_ids)
+                    for j in range(start, end):
+                        if (
+                            group_state.block_ids[j]
+                            in self._current_batch_allocated_block_ids
+                        ):
+                            group_state.block_ids[j] = 0
+
+    def _build_store_jobs(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> dict[int, TransferJob]:
+        block_size_factor = self.config.block_size_factor
+        store_jobs: dict[int, TransferJob] = {}
+        for req_id in scheduler_output.num_scheduled_tokens:
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            req = req_status.req
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -698,11 +724,8 @@ class OffloadingConnectorScheduler:
                 # For each block to offload, take the last corresponding GPU block.
                 # e.g. if block size factor is 3 and GPU block IDs are
                 # 1 5 6 7 2 4 9 3 8 then we'll take blocks 6 4 8.
-                # We will use these GPU blocks to determine if the block needs
-                # offloading, or (if the GPU block ID is 0) this block should
-                # be skipped due to sliding window attention / SSM.
-                # We know that if a block is skipped, then all the previous blocks
-                # are skipped as well. This is why we take the last of each block.
+                # A block_id of 0 means either a sliding window / SSM skip
+                # or a stale entry that was zeroed out — skip it either way.
                 offload_block_ids = group_state.block_ids[
                     start_block_idx * block_size_factor
                     + block_size_factor
@@ -777,10 +800,8 @@ class OffloadingConnectorScheduler:
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
                         if block_id == 0:
-                            # skipped blocks cannot appear after non-skipped blocks
-                            assert start_gpu_block_idx is None
                             continue
-                        elif start_gpu_block_idx is None:
+                        if start_gpu_block_idx is None:
                             start_gpu_block_idx = gpu_block_idx + i
                         src_block_ids.append(block_id)
                         num_group_blocks += 1
@@ -838,6 +859,9 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        self._update_req_states(scheduler_output)
+
+        # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
             if req_status is None or not req_status.transfer_jobs:
@@ -845,6 +869,20 @@ class OffloadingConnectorScheduler:
             any_jid = next(iter(req_status.transfer_jobs))
             assert self._jobs[any_jid].is_store
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
+
+        # Flush jobs that contain re-allocated blocks.
+        if (
+            self._block_id_to_pending_jobs
+            and not self._block_id_to_pending_jobs.keys().isdisjoint(
+                self._current_batch_allocated_block_ids
+            )
+        ):
+            self._current_batch_jobs_to_flush.update(
+                jid
+                for bid in self._current_batch_allocated_block_ids
+                if bid in self._block_id_to_pending_jobs
+                for jid in self._block_id_to_pending_jobs[bid]
+            )
 
         # If all tracked requests are finished, flush all pending jobs
         # (both store and load) - there might not be a future scheduler
@@ -861,6 +899,7 @@ class OffloadingConnectorScheduler:
         )
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
+        self._current_batch_allocated_block_ids = set()
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -970,6 +1009,7 @@ class OffloadingConnectorScheduler:
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
         assert not self._current_batch_jobs_to_flush
+        assert not self._current_batch_allocated_block_ids
 
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())

@@ -1162,3 +1162,79 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
             (1, 7),
         ),
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_stale_sliding_window_block_after_prepare_store_failure(
+    request_runner, async_scheduling: bool
+):
+    """Regression test: when prepare_store fails (returns None), offloading is
+    delayed. Meanwhile, sliding window blocks get freed and reallocated to the
+    same request. On retry, the stale block_id must be detected and skipped.
+
+    Without the fix, the stale block_id would either:
+    - Cause a KeyError in _remove_pending_job (duplicate in
+      _block_id_to_pending_jobs)
+    - Silently offload wrong data under a wrong key
+    """
+    block_size = 4
+    # sliding_window = 8 -> window of 2 blocks
+    sliding_window = 8
+    # Use a tight GPU block budget so freed sliding window blocks are
+    # immediately reused by the same request's new allocations.
+    num_gpu_blocks = 4
+
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+    # Request with 3 blocks of prompt. Window = 2 blocks, so block 0 is
+    # outside the window but won't be freed until the next allocate_slots.
+    runner.new_request(token_ids=[0] * block_size * 3)
+
+    # First step: prepare_store FAILS -> offloading delayed.
+    # next_stored_block_idx stays at 0, block_ids[0] still holds the
+    # original block_id for position 0.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.run(decoded_tokens=[0])
+    runner.manager.prepare_store.assert_called()
+
+    # Second step: decode more tokens -> block 3 allocated.
+    # allocate_slots calls remove_skipped_blocks which frees block 0
+    # (it's now outside the sliding window). With num_gpu_blocks=4,
+    # the freed block is immediately reused for the new allocation.
+    # prepare_store still fails so offloading is still delayed.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.run(decoded_tokens=[0] * block_size)
+
+    # Now prepare_store succeeds.
+    # Without the fix, the request would try to offload the stale block_id
+    # at position 0 (now reused at position 3), causing a duplicate in
+    # sliding_window_block_ids and eventually a KeyError.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    # block_ids=[0, ?, 3, 1]: positions 0 and 1 are zeroed (stale blocks that
+    # were freed by the sliding window and reallocated). Only blocks at
+    # positions 2 and 3 (request offsets 2, 3) are stored.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(2, 3),
+        expected_flushed=(2, 3) if not async_scheduling else (),
+    )
