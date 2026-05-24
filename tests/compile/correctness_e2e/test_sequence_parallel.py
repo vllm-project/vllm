@@ -294,7 +294,13 @@ def _compare_sp(
         "mp",
     ]
 
-    compare_two_settings(model_id, tp_sp_args, tp_args, method=method)
+    compare_two_settings(
+        model_id,
+        tp_sp_args,
+        tp_args,
+        method=method,
+        force_v1_runner=True,
+    )
 
 
 SP_TEXT_GENERATION_MODELS = {
@@ -435,6 +441,7 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         num_gpus_available,
         use_inductor_graph_partition=False,
         fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
         method="generate",
         is_multimodal=False,
         dtype="bfloat16",

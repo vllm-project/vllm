@@ -149,7 +149,7 @@ class WindowQFormerDownsampler(nn.Module):
             qformer_config,
             quant_config=quant_config,
             cache_config=cache_config,
-            prefix=f"{prefix}.qformer",
+            prefix=maybe_prefix(prefix, "qformer"),
         )
 
         self.image_side = (

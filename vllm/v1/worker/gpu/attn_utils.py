@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
@@ -22,7 +23,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    add_kv_sharing_layers_to_kv_cache_groups,
+    bind_kv_cache,
+    prepare_kernel_block_sizes,
+)
 
 
 @dataclass(frozen=True)
@@ -36,10 +42,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            # This layer will use KV cache of the sharing target layer.
+            continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
+
+
+def get_shared_kv_cache_layers(vllm_config: VllmConfig):
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    return {
+        layer_name: kv_tgt_layer
+        for layer_name, attn_module in attn_layers.items()
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+    }
 
 
 def init_attn_backend(
@@ -51,13 +69,18 @@ def init_attn_backend(
     dict[str, type[AttentionBackend]],
     list[list[AttentionGroup]],
     AttentionCGSupportInfo,
+    list[int],
 ]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
-    attn_backend_workspace: torch.Tensor | None = None
-    # Find minimum cudagraph support across all attention backends
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
+
+    # Add KV-sharing layers to their target's kv cache group so they are
+    # discovered alongside the target layer in Phase 1 below.
+    add_kv_sharing_layers_to_kv_cache_groups(
+        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+    )
+
+    # Phase 1: discover attention groups for each kv cache group.
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
@@ -82,21 +105,32 @@ def init_attn_backend(
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
                 group_map[key].layer_names.append(layer_name)
 
-        groups = [group_map[key] for key in group_order]
+        attn_groups.append([group_map[key] for key in group_order])
+
+    # Phase 2: pick a kernel block size per kv cache group that is supported
+    # by all backends within that group.
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    # Phase 3: create metadata builders and determine cudagraph support.
+    attn_backend_workspace: torch.Tensor | None = None
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for kv_cache_group_id, groups in enumerate(attn_groups):
+        kv_cache_group_spec = kv_cache_config.kv_cache_groups[kv_cache_group_id]
+        kernel_block_size = None
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
-                kernel_block_size=None,
+                kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
@@ -113,8 +147,7 @@ def init_attn_backend(
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
-                min_cg_attn_backend = attn_backend.__name__
-        attn_groups.append(groups)
+                min_cg_attn_backend = group.backend.__name__
 
     return (
         attn_backends,
@@ -123,10 +156,13 @@ def init_attn_backend(
             min_cg_support=min_cg_support,
             min_cg_attn_backend=min_cg_attn_backend,
         ),
+        kernel_block_sizes,
     )
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
+def _allocate_kv_cache(
+    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -137,7 +173,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), (
+    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
@@ -148,11 +184,18 @@ def _reshape_kv_cache(
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
+    kernel_block_sizes: list[int],
+    shared_kv_cache_layers: dict[str, str],
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
     has_attn, has_mamba = False, False
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
         for layer_name in kv_cache_group_spec.layer_names:
+            if layer_name in shared_kv_cache_layers:
+                # Shared layer — tensor will be aliased to its target later.
+                continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
@@ -164,9 +207,21 @@ def _reshape_kv_cache(
             if isinstance(kv_cache_spec, AttentionSpec):
                 has_attn = True
                 attn_backend = attn_backends[layer_name]
+
+                if kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+                    num_blocks *= kv_cache_spec.block_size // kernel_block_size
+                else:
+                    kernel_block_size = kv_cache_spec.block_size
+
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     num_blocks,
-                    kv_cache_spec.storage_block_size,
+                    shape_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype_str=cache_dtype,
@@ -238,15 +293,21 @@ def _reshape_kv_cache(
     if has_attn and has_mamba:
         _update_hybrid_attention_layout(kv_caches, kv_cache_config)
 
+    # Map any sharing layers to their target layer's KV cache.
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        kv_caches[layer_name] = kv_caches[target_layer_name]
+
     return kv_caches
 
 
 def _update_hybrid_attention_layout(
-    kv_caches: dict[str, Any],
-    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, Any], kv_cache_config: KVCacheConfig
 ) -> None:
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         for layer_name in kv_cache_group_spec.layer_names:
+            if layer_name not in kv_caches:
+                # Shared layer — will be aliased to its target after this pass.
+                continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
@@ -275,10 +336,20 @@ def init_kv_cache(
     attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
 ) -> dict[str, Any]:
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    kv_cache_raw_tensors = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device
+    )
     kv_caches = _reshape_kv_cache(
-        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+        kv_cache_config,
+        kv_cache_raw_tensors,
+        attn_backends,
+        cache_dtype,
+        kernel_block_sizes,
+        shared_kv_cache_layers,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
