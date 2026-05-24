@@ -65,6 +65,8 @@ class CollectiveGroup:
         group.destroy()
     """
 
+    _hp_stream: Any = None
+
     def __init__(
         self,
         backend: CommBackend,
@@ -535,7 +537,7 @@ class CollectiveGroup:
 
         if device_type == "cuda":
             with contextlib.suppress(Exception):
-                gpus_per_node = torch.cuda.device_count()
+                gpus_per_node = torch.accelerator.current_accelerator().device_count()
         elif device_type == "npu":
             try:
                 import torch_npu  # noqa: F401

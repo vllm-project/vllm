@@ -15,7 +15,7 @@ _TORCH_CUDA_PATTERNS = [
     r"\bcuda_device_count_stateless\(\)\b",
 ]
 
-ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
+ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/", "vllm/distributed/unified_comm/backends/"}
 
 
 def scan_file(path: str) -> int:

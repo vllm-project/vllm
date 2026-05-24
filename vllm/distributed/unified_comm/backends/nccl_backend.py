@@ -499,6 +499,7 @@ class NCCLBackend(CommBackend):
         stream: Any = None,
     ) -> torch.Tensor:
         """Broadcast: 从 src rank 广播 tensor 到所有 rank。"""
+        assert comm_handle.group_info is not None
         if comm_handle.use_direct:
             return self._broadcast_direct(comm_handle, tensor, src, stream)
 
@@ -518,6 +519,7 @@ class NCCLBackend(CommBackend):
         stream: Any,
     ) -> torch.Tensor:
         """直接调用 NCCL C API 的 Broadcast"""
+        assert comm_handle.group_info is not None
         from vllm.distributed.device_communicators.pynccl_wrapper import (
             buffer_type,
             cudaStream_t,
@@ -559,6 +561,7 @@ class NCCLBackend(CommBackend):
         stream: Any = None,
     ) -> torch.Tensor:
         """All-to-All: 每个 rank 向每个 rank 发送不同块。"""
+        assert comm_handle.group_info is not None
         if comm_handle.use_direct:
             return self._all_to_all_direct(
                 comm_handle,
@@ -617,6 +620,7 @@ class NCCLBackend(CommBackend):
         stream: Any,
     ) -> torch.Tensor:
         """使用 ncclGroupStart/End + ncclSend/ncclRecv 实现 all_to_all。"""
+        assert comm_handle.group_info is not None
         from vllm.distributed.device_communicators.pynccl_wrapper import (
             buffer_type,
             cudaStream_t,
@@ -703,6 +707,7 @@ class NCCLBackend(CommBackend):
         stream: Any = None,
     ) -> None:
         """点对点发送。dst: 组内 rank (0-based)"""
+        assert comm_handle.group_info is not None
         if comm_handle.use_direct:
             self._send_direct(comm_handle, tensor, dst, stream)
             return
@@ -752,6 +757,7 @@ class NCCLBackend(CommBackend):
         stream: Any = None,
     ) -> torch.Tensor:
         """点对点接收。src: 组内 rank (0-based)"""
+        assert comm_handle.group_info is not None
         if comm_handle.use_direct:
             self._recv_direct(comm_handle, tensor, src, stream)
             return tensor

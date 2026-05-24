@@ -556,6 +556,7 @@ class GroupCoordinator:
             from vllm.distributed.unified_comm.initialize import (
                 initialize_unified_comm,
             )
+
             # Normalize self.device — some subclasses (e.g.
             # vllm-ascend-hust's GroupCoordinatorPatch) store it as an
             # int from torch.npu.current_device() instead of a
@@ -564,6 +565,7 @@ class GroupCoordinator:
             if not isinstance(dev, torch.device):
                 if isinstance(dev, int):
                     from vllm.platforms import current_platform
+
                     dev_type = current_platform.device_name
                     dev = torch.device(f"{dev_type}:{dev}")
                 else:
@@ -581,14 +583,16 @@ class GroupCoordinator:
                 logger.info(
                     "[unified_comm] adapter attached to group '%s' "
                     "(rank=%d/%d, device=%s)",
-                    self.unique_name, self.rank_in_group,
-                    self.world_size, dev,
+                    self.unique_name,
+                    self.rank_in_group,
+                    self.world_size,
+                    dev,
                 )
             self._unified_adapter = adapter
         except Exception as e:
             logger.warning(
-                "[unified_comm] failed to attach adapter, "
-                "fallback to default path: %s", e,
+                "[unified_comm] failed to attach adapter, fallback to default path: %s",
+                e,
             )
             self._unified_adapter = None
         return self._unified_adapter
@@ -1170,10 +1174,8 @@ class GroupCoordinator:
         # [unified_comm] release adapter (does NOT destroy our PG since
         # we passed existing_*_group, owns_groups=False)
         if self._unified_adapter is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._unified_adapter.destroy()
-            except Exception:
-                pass
             self._unified_adapter = None
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):

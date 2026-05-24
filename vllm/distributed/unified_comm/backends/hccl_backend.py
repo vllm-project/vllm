@@ -532,7 +532,7 @@ class HCCLBackend(CommBackend):
             hcclDataTypeEnum = _pyhccl_mod.hcclDataTypeEnum
         except ImportError:
             # Fallback to torch.distributed
-            return self.all_gather.__wrapped__(
+            return self.all_gather.__wrapped__(  # type: ignore[attr-defined]
                 self, comm_handle, input_tensor, world_size, None
             )
 
@@ -693,6 +693,7 @@ class HCCLBackend(CommBackend):
         - Mode B (direct): 调用 libhccl.so hcclBroadcast (in-place)
         - Mode A (torch.distributed): 调用 dist.broadcast
         """
+        assert comm_handle.group_info is not None
         if comm_handle.use_direct:
             return self._broadcast_direct(comm_handle, tensor, src, stream)
 
@@ -751,6 +752,7 @@ class HCCLBackend(CommBackend):
         注：HCCL 目前仅通过 torch.distributed 支持 all_to_all，
         无直接 C API 路径。对齐 NPUCommunicator.all_to_all() 的逻辑。
         """
+        assert comm_handle.group_info is not None
         world_size = comm_handle.group_info.world_size
 
         # 处理负维度
@@ -808,6 +810,7 @@ class HCCLBackend(CommBackend):
         注：目前 HCCL 的 P2P 统一通过 torch.distributed 完成。
         HCCL C API 层面的 send/recv 在 CANN 版本 >= 7.0 中支持。
         """
+        assert comm_handle.group_info is not None
         global_dst = comm_handle.group_info.ranks[dst]
         dist.send(tensor, dst=global_dst, group=comm_handle.device_group)
 
@@ -824,6 +827,7 @@ class HCCLBackend(CommBackend):
         src: 组内 rank (0-based)
         tensor: 预分配的接收 buffer
         """
+        assert comm_handle.group_info is not None
         global_src = comm_handle.group_info.ranks[src]
         dist.recv(tensor, src=global_src, group=comm_handle.device_group)
         return tensor

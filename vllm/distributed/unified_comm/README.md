@@ -111,7 +111,7 @@ Optional knobs:
 When enabled successfully, the worker logs three confirmation lines
 during `GroupCoordinator` construction::
 
-```
+```text
 [hccl_backend.py] HCCL comm group initialized: rank=0, world_size=2, mode=torch.distributed
 [adapter.py]      [UnifiedCommAdapter] Created for ranks=[0,1], device=npu:0, backend=hccl
 [parallel_state.py] [unified_comm] adapter attached to group 'tp:0' (rank=0/2, device=npu:0)
