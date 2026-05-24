@@ -1276,20 +1276,18 @@ class MoRIIOConnectorWorker:
             # is_finished signal so we don't trip the scheduler's assert on still-held reqs.
             if self.mode == MoRIIOMode.READ:
                 self._read_done_tids.update(done_sending)
-                # Filter finished_req_ids against currently-tracked siblings so non-MoRIIO
-                # req_ids don't accumulate in _read_finished_seen. Union covers both
-                # delay-freed siblings (now in _read_sibs) and in-flight ones (still in
-                # transfer_id_to_request_id).
-                if finished_req_ids:
-                    tracked: set[str] = set()
-                    for _rs in self._read_sibs.values():
-                        tracked.update(_rs)
-                    for _rs in self.transfer_id_to_request_id.values():
-                        tracked.update(_rs)
-                    self._read_finished_seen |= (finished_req_ids & tracked)
+                self._read_finished_seen |= (finished_req_ids or set())
                 _m: set[str] = set()
                 for _t in list(self._read_done_tids):
                     if _t not in self._read_sibs:
+                        # No siblings tracked. Either still in-flight on the scheduler
+                        # (siblings haven't been delay-freed yet — wait), or phantom
+                        # (siblings were inline-freed via request_finished's
+                        # delay_free=False path and will never arrive). If the scheduler
+                        # has also fully unmapped the tid, it's a phantom — drop now.
+                        if _t not in self.transfer_id_to_request_id:
+                            self._read_done_tids.discard(_t)
+                            self._read_seen_tid_sibcount.pop(_t, None)
                         continue
                     _sibs = self._read_sibs[_t]
                     _ready = _sibs & self._read_finished_seen
