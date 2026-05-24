@@ -909,7 +909,9 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     - The ``n`` parameter must be 1 (or omitted).
     """
 
-    messages: list[list[ChatCompletionMessageParam]] = Field(..., min_length=1)
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
