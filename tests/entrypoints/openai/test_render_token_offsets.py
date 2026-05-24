@@ -2,18 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for token offsets surfacing via render endpoints."""
 
+import dataclasses
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+import pytest_asyncio
 
-from vllm.config import ModelConfig
+from vllm import envs
+from vllm.config import ModelConfig, VllmConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.renderers import renderer_from_config
 from vllm.sampling_params import SamplingParams
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class TestCompletionRequestField:
@@ -334,3 +342,130 @@ class TestRenderChatSurfacesOffsets:
         result = await render_handler.render_chat_request(req)
 
         assert result.token_offsets is None
+
+
+# Trivial chat template (gpt2 has none baked in).
+_CHAT_TPL = "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}"
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def real_render_handler():
+    """Bootstrap an OpenAIServingRender with the real gpt2 Fast tokenizer.
+
+    Module-scoped (with a module-scoped event loop) because model loading
+    is slow and the renderer's AsyncMicrobatchTokenizer pins the loop on
+    first use; pytest-asyncio's default function-scoped loop would be
+    torn down between tests and cause "Event loop is closed".
+    """
+    parser = FlexibleArgumentParser()
+    make_arg_parser(parser)
+    args = parser.parse_args(["--model", "openai-community/gpt2"])
+    envs.VLLM_CPU_KVCACHE_SPACE = 0
+
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    model_config = engine_args.create_model_config()
+    model_config.quantization = None
+    vllm_config = VllmConfig(model_config=model_config)
+
+    renderer = renderer_from_config(vllm_config)
+    model_registry = OpenAIModelRegistry(
+        model_config=model_config,
+        base_model_paths=[
+            BaseModelPath(
+                name="openai-community/gpt2",
+                model_path="openai-community/gpt2",
+            ),
+        ],
+    )
+    # OpenAIServingModels-compat attributes used by OpenAIServingRender.
+    for attr in ("lora_requests", "prompt_adapter_requests"):
+        if not hasattr(model_registry, attr):
+            setattr(model_registry, attr, {})
+
+    handler = OpenAIServingRender(
+        model_config=model_config,
+        renderer=renderer,
+        model_registry=model_registry,
+        request_logger=None,
+        chat_template=_CHAT_TPL,
+        chat_template_content_format="auto",
+        trust_request_chat_template=False,
+        enable_auto_tools=False,
+        exclude_tools_when_tool_choice_none=False,
+        tool_parser=None,
+        reasoning_parser=None,
+        default_chat_template_kwargs=None,
+        log_error_stack=False,
+    )
+    return handler
+
+
+def _force_offsets_flag(req):
+    """Monkey-patch build_tok_params to set return_token_offsets=True.
+
+    We do this so we can exercise the integration test path through
+    a real OpenAIServingRender even if request-level wiring (Tasks 1, 2)
+    is bypassed. `dataclasses.replace` produces a new frozen instance
+    preserving every other field of TokenizeParams without us having
+    to enumerate them.
+    """
+    original = req.build_tok_params
+
+    def patched(model_config):
+        return dataclasses.replace(original(model_config), return_token_offsets=True)
+
+    req.build_tok_params = patched
+
+
+@pytest.mark.skipif(
+    not Path("/mnt/models/hub/models--openai-community--gpt2").exists(),
+    reason="gpt2 not in local HF cache",
+)
+class TestRenderIntegration:
+    @pytest.mark.asyncio(loop_scope="module")
+    async def test_completion_end_to_end_emits_offsets(self, real_render_handler):
+        req = CompletionRequest(
+            model="openai-community/gpt2",
+            prompt="Hello, world.",
+        )
+        _force_offsets_flag(req)
+        result = await real_render_handler.render_completion_request(req)
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].token_offsets is not None
+        assert len(result[0].token_offsets) == len(result[0].token_ids)
+        text_len = len("Hello, world.")
+        for s, e in result[0].token_offsets:
+            assert isinstance(s, int) and isinstance(e, int)
+            assert 0 <= s <= e <= text_len
+
+    @pytest.mark.asyncio(loop_scope="module")
+    async def test_completion_end_to_end_default_no_offsets(self, real_render_handler):
+        """Without the monkey-patch, build_tok_params returns
+        return_token_offsets=False; renderer skips offsets; response is None."""
+        req = CompletionRequest(
+            model="openai-community/gpt2",
+            prompt="Hello, world.",
+        )
+        result = await real_render_handler.render_completion_request(req)
+        assert result[0].token_offsets is None
+
+    @pytest.mark.asyncio(loop_scope="module")
+    async def test_chat_end_to_end_emits_offsets(self, real_render_handler):
+        req = ChatCompletionRequest(
+            model="openai-community/gpt2",
+            messages=[{"role": "user", "content": "Hello, world."}],
+            max_tokens=1,
+        )
+        _force_offsets_flag(req)
+        result = await real_render_handler.render_chat_request(req)
+
+        # render_chat_request returns a single GenerateRequest (not a list)
+        assert hasattr(result, "token_offsets")
+        assert result.token_offsets is not None
+        assert len(result.token_offsets) == len(result.token_ids)
+        # Sanity: offsets cover spans within the templated string
+        for s, e in result.token_offsets:
+            assert isinstance(s, int) and isinstance(e, int)
+            assert 0 <= s <= e
