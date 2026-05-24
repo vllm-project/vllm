@@ -6,8 +6,15 @@ from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
+from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
     get_numel_loaded,
@@ -19,6 +26,38 @@ from vllm.model_executor.model_loader.reload.meta import (
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
+
+
+class _AliasedBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        self.weight = torch.nn.Parameter(weight)
+        self.register_buffer(
+            "weight_view", self.weight.detach().view(-1), persistent=False
+        )
+
+
+class _ParentAliasedChildBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones(1))
+        self.conv1d = torch.nn.Linear(3, 2, bias=False)
+        self.conv1d.weight.data.copy_(
+            torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        )
+        self.register_buffer(
+            "conv_weights", self.conv1d.weight.detach().view(-1), persistent=False
+        )
+
+
+class _AliasedBufferWithUninitializedChildLayer(_AliasedBufferLayer):
+    def __init__(self):
+        super().__init__()
+        self.child = torch.nn.Module()
+        self.child.register_parameter(
+            "lazy_weight", UninitializedParameter(requires_grad=False)
+        )
 
 
 def test_move_metatensors():
@@ -59,6 +98,34 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+def test_materialize_layer_preserves_non_meta_tensors():
+    """Ensure that materialize_layer does not overwrite non meta tensors."""
+    layer = torch.nn.Linear(2, 3, bias=True)
+
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
+    bias_values = torch.ones(3)
+    layer.bias.data.copy_(bias_values)
+    layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
+
+    assert layer.weight.is_meta
+    assert not layer.bias.is_meta
+
+    # materialize the layer weights after the bias is initialized
+    info = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=torch.device("cpu"),
+    )
+    materialize_layer(layer, info)
+
+    # Ensure the weight materialized off meta
+    assert not layer.weight.is_meta
+    assert layer.weight.device.type == "cpu"
+
+    # Ensure that the bias is (still) not meta and values are unchanged
+    assert not layer.bias.is_meta
+    assert torch.equal(layer.bias.data, bias_values)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
@@ -93,6 +160,81 @@ def test_get_numel_loaded():
     num_loaded, ret = get_numel_loaded(complex_weight_loader, args)
     assert num_loaded == 6
     assert ret == "value"
+
+
+def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
+    layer = _AliasedBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.weight_view.untyped_storage().data_ptr() == (
+        layer.weight.untyped_storage().data_ptr()
+    )
+
+
+def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
+    layer = _AliasedBufferWithUninitializedChildLayer()
+
+    _, buffers = capture_layer_to_meta(layer)
+
+    assert "weight_view" not in buffers
+
+
+def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
+    layer = _ParentAliasedChildBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_conv = torch.full_like(layer.conv1d.weight, 7.0)
+    loaded_scale = torch.full_like(layer.scale, 3.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
+    layer.scale.weight_loader(layer.scale, loaded_scale)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.conv1d.weight, loaded_conv)
+    assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
+    assert layer.conv_weights.untyped_storage().data_ptr() == (
+        layer.conv1d.weight.untyped_storage().data_ptr()
+    )
 
 
 @pytest.mark.parametrize(
@@ -162,6 +304,34 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
 
 
 @pytest.mark.parametrize(

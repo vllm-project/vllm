@@ -19,6 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
@@ -31,6 +32,7 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
 
 prompts = [
@@ -287,6 +289,22 @@ def test_async_tp_pass_replace(
     run_torch_spawn(async_tp_pass_on_test_model, num_processes)
 
 
+def test_async_tp_pass_requires_full_graph_compilation():
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.use_inductor_graph_partition = False
+    vllm_config.compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output"
+    ]
+
+    async_tp_pass = object.__new__(AsyncTPPass)
+    async_tp_pass.compilation_config = vllm_config.compilation_config
+
+    with pytest.raises(
+        AssertionError, match="AsyncTPPass requires full-graph compilation"
+    ):
+        async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
+
+
 def async_tp_pass_on_test_model(
     local_rank: int,
     world_size: int,
@@ -299,7 +317,7 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -324,7 +342,7 @@ def async_tp_pass_on_test_model(
             fuse_gemm_comms=True,
         ),
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.

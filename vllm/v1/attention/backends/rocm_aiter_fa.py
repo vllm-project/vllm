@@ -112,10 +112,12 @@ if current_platform.is_rocm():
             if DEQUANT:
                 k_scale = tl.load(k_scale_ptr)
                 v_scale = tl.load(v_scale_ptr)
-                k_dtype = k_reg.dtype
-                v_dtype = v_reg.dtype
-                k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
-                v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
+                k_reg = (k_reg.to(tl.float32) * k_scale).to(
+                    key_ptr_offset.dtype.element_ty
+                )
+                v_reg = (v_reg.to(tl.float32) * v_scale).to(
+                    value_ptr_offset.dtype.element_ty
+                )
             tl.store(key_ptr_offset + col_offsets, k_reg)
             tl.store(value_ptr_offset + col_offsets, v_reg)
 
@@ -228,7 +230,6 @@ if current_platform.is_rocm():
         num_kv_heads,
         BLOCK_SIZE: tl.constexpr,
         QUANT: tl.constexpr,
-        IS_FNUZ: tl.constexpr,
     ):
         tid = tl.program_id(0)
         head_id = tl.program_id(1)
@@ -314,7 +315,6 @@ if current_platform.is_rocm():
             num_kv_heads,
             BLOCK_SIZE=head_size,
             QUANT=QUANT,
-            IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         )
 
 
@@ -324,22 +324,17 @@ logger = init_logger(__name__)
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
-    min_query_len: int
-    max_seq_len: int
-    query_start_loc: torch.Tensor
 
 
 @dataclass
 class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
-    min_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
 
 
 @dataclass
 class AiterChunkSlidingWindowMetadata:
-    swa_seqlens: torch.Tensor
     swa_cu_seqlens: torch.Tensor
     swa_seq_starts: torch.Tensor
     swa_token_to_batch: torch.Tensor
@@ -354,9 +349,7 @@ class AiterChunkContextMetadata:
     cu_seq_lens_chunk: torch.Tensor
     chunk_starts: torch.Tensor
     token_to_batch: torch.Tensor
-    seq_tot: list[int]
     max_seq_lens: list[int]
-    seq_lens: torch.Tensor
     num_chunks: int
     total_token_per_batch: list[int]
     swa_metadata: AiterChunkSlidingWindowMetadata | None
@@ -365,7 +358,6 @@ class AiterChunkContextMetadata:
 @dataclass
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
-    min_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
     chunk_context_metadata: AiterChunkContextMetadata
@@ -382,19 +374,17 @@ class AiterFlashAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
-    num_actual_kv_tokens: int
-    max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
+    causal: bool
 
     # prefill and decode split
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
-    num_prefill_tokens: int
     num_extends: int
     num_extend_tokens: int
 
@@ -404,8 +394,6 @@ class AiterFlashAttentionMetadata:
 
     # For cascade attention.
     use_cascade: bool
-    common_prefix_len: int
-    total_tokens: int
 
     # Only for fp8 shuffle layout kv cache, we allocate kv_scale for each layer
     # since we might integrate per token quant for kv cache in the future.
@@ -440,7 +428,6 @@ class AiterFlashAttentionMetadataBuilder(
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
-        self.total_tokens: int = 0
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
@@ -472,13 +459,9 @@ class AiterFlashAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
-        self.total_tokens = (
-            self.model_config.max_model_len
-            * self.vllm_config.scheduler_config.max_num_partial_prefills
+        return self.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
-        res = self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata)
-        self.total_tokens = 0
-        return res
 
     def build(
         self,
@@ -514,12 +497,18 @@ class AiterFlashAttentionMetadataBuilder(
             num_prefills,
             num_decode_tokens,
             num_extend_tokens,
-            num_prefill_tokens,
+            _,
         ) = split_ret
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        seq_lens = common_attn_metadata.seq_lens.cpu()
+        # Only copy seq_lens to CPU when prefill or extend is present to avoid a
+        # blocking device→host transfer.
+        seq_lens = (
+            common_attn_metadata.seq_lens.cpu()
+            if num_prefills > 0 or num_extends > 0
+            else None
+        )
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -527,26 +516,24 @@ class AiterFlashAttentionMetadataBuilder(
         if num_decodes > 0:
             decode_metadata = AiterFlashAttentionDecodeMetadata(
                 max_query_len=query_lens_cpu[:num_decodes].max().item(),
-                min_query_len=query_lens_cpu[:num_decodes].min().item(),
-                max_seq_len=seq_lens[:num_decodes].max().item(),
-                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
         prefill_metadata = None
         if num_prefills > 0:
+            assert seq_lens is not None
             query_lens_for_prefill = query_lens_cpu[num_decodes + num_extends :]
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes + num_extends :
             ]
             prefill_metadata = AiterFlashAttentionPrefillMetadata(
                 max_query_len=query_lens_for_prefill.max().item(),
-                min_query_len=query_lens_for_prefill.min().item(),
                 max_seq_len=seq_lens[num_decodes + num_extends :].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
             )
 
         extend_metadata = None
         if num_extends > 0:
+            assert seq_lens is not None
             num_extends_slice = slice(num_decodes, num_decodes + num_extends)
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
             seq_lens_for_extend = seq_lens[num_extends_slice]
@@ -590,9 +577,6 @@ class AiterFlashAttentionMetadataBuilder(
                 total_tokens = cu_seq_lens[-1].item()
 
                 swa_metadata = AiterChunkSlidingWindowMetadata(
-                    swa_seqlens=swa_seqlen_for_extend.to(
-                        self.device, non_blocking=True
-                    ),
                     swa_cu_seqlens=cu_seq_lens.to(self.device, non_blocking=True),
                     swa_seq_starts=seq_starts.to(self.device, non_blocking=True),
                     swa_token_to_batch=token_to_seq.to(self.device, non_blocking=True),
@@ -637,10 +621,8 @@ class AiterFlashAttentionMetadataBuilder(
                 workspace=self.extend_workspace,
                 cu_seq_lens_chunk=cu_seq_lens_cpu.to(self.device, non_blocking=True),
                 chunk_starts=chunk_starts.to(self.device, non_blocking=True),
-                seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-                seq_lens=chunk_seq_lens,
                 token_to_batch=token_to_batch_tensor.to(self.device, non_blocking=True),
+                max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                 num_chunks=num_chunks,
                 total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
                 swa_metadata=swa_metadata,
@@ -658,37 +640,30 @@ class AiterFlashAttentionMetadataBuilder(
             )
             extend_metadata = AiterFlashAttentionChunkPrefillMetadata(
                 max_query_len=query_lens_for_extend.max().item(),
-                min_query_len=query_lens_for_extend.min().item(),
                 max_seq_len=seq_lens[num_extends_slice].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
                 chunk_context_metadata=chunk_context_metadata,
             )
 
-        num_actual_kv_tokens = torch.sum(seq_lens).item()
-
         use_cascade = common_prefix_len > 0
 
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
-            num_actual_kv_tokens=num_actual_kv_tokens,
-            max_query_len=common_attn_metadata.max_query_len,
             query_start_loc=common_attn_metadata.query_start_loc,
             max_seq_len=common_attn_metadata.max_seq_len,
             seq_lens=common_attn_metadata.seq_lens,
             block_table=common_attn_metadata.block_table_tensor,
+            causal=common_attn_metadata.causal,
             slot_mapping=common_attn_metadata.slot_mapping,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,
             num_extends=num_extends,
             num_extend_tokens=num_extend_tokens,
             decode_metadata=decode_metadata,
             prefill_metadata=prefill_metadata,
             extend_metadata=extend_metadata,
             use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            total_tokens=self.total_tokens,
             k_scale=self.scale,
             v_scale=self.scale,
         )
@@ -711,32 +686,25 @@ class AiterFlashAttentionMetadataBuilder(
 
         decode_metadata = AiterFlashAttentionDecodeMetadata(
             max_query_len=common_attn_metadata.max_query_len,
-            min_query_len=common_attn_metadata.max_query_len,  # uniform batch
-            max_seq_len=common_attn_metadata.max_seq_len,
-            query_start_loc=common_attn_metadata.query_start_loc,
         )
 
         return AiterFlashAttentionMetadata(
             num_actual_tokens=num_tokens,
-            num_actual_kv_tokens=0,  # not used in unified_attention path
-            max_query_len=common_attn_metadata.max_query_len,
             query_start_loc=common_attn_metadata.query_start_loc,
             max_seq_len=common_attn_metadata.max_seq_len,
             seq_lens=common_attn_metadata.seq_lens,
             block_table=common_attn_metadata.block_table_tensor,
+            causal=common_attn_metadata.causal,
             slot_mapping=common_attn_metadata.slot_mapping,
             num_decodes=num_reqs,
             num_decode_tokens=num_tokens,
             num_prefills=0,
-            num_prefill_tokens=0,
             num_extends=0,
             num_extend_tokens=0,
             decode_metadata=decode_metadata,
             prefill_metadata=None,
             extend_metadata=None,
             use_cascade=False,
-            common_prefix_len=0,
-            total_tokens=self.total_tokens,
             k_scale=self.scale,
             v_scale=self.scale,
         )
@@ -746,7 +714,6 @@ class AiterFlashAttentionMetadataBuilder(
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -809,6 +776,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
         # more reliable.
         return on_mi3xx()
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
 
 class AiterFlashAttentionImpl(AttentionImpl):
     def __init__(
@@ -845,9 +816,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
+        if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for AiterFlashAttentionImpl"
+                "Only decoder self-attention is supported for "
+                "AiterFlashAttentionImpl. ENCODER_DECODER is not supported "
+                "because the prefill path uses cu_seqlens_k set to decoder "
+                "query_start_loc with causal=True, which is incorrect for "
+                "cross-attention."
             )
 
     def extend_for_sliding_window(
@@ -922,8 +897,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
         max_seqlen_q: int,
-        max_seqlen_k: int,
         min_seqlen_q: int,
+        max_seqlen_k: int,
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
         k_scale: torch.Tensor,
@@ -1039,7 +1014,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AiterFlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1058,8 +1033,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
-
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported "
@@ -1121,7 +1094,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     min_seqlen_q=1,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
-                    causal=True,
+                    causal=attn_metadata.causal,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
@@ -1152,8 +1125,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     output=extend_outputs,
                     cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                    max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                     min_seqlen_q=1,
+                    max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                     block_table=attn_metadata.block_table[
                         num_decodes : num_decodes + num_extends
                     ],
@@ -1169,39 +1142,78 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
 
-                # Use unified_attention for speculative decoding (multi-token)
+                # Multi-token speculative decode path.
                 if decode_max_query_len > 1:
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Shuffle KV cache layout is not supported with "
                         "speculative decoding (multi-token decode)."
                     )
-                    from aiter.ops.triton.unified_attention import (
-                        unified_attention,
-                    )
+                    if not attn_metadata.causal:
+                        from aiter.ops.triton.attention.mha_v3 import (
+                            flash_attn_with_kvcache,
+                        )
 
-                    descale_shape = (
-                        attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
-                        key_cache.shape[2],
-                    )
-                    unified_attention(
-                        q=query[:num_decode_tokens],
-                        k=key_cache,
-                        v=value_cache,
-                        out=output[:num_decode_tokens],
-                        cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
-                        max_seqlen_q=decode_max_query_len,
-                        seqused_k=attn_metadata.seq_lens[:num_decodes],
-                        max_seqlen_k=attn_metadata.max_seq_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        alibi_slopes=self.alibi_slopes,
-                        window_size=self.sliding_window,
-                        block_table=attn_metadata.block_table[:num_decodes],
-                        softcap=self.logits_soft_cap,
-                        q_descale=None,
-                        k_descale=layer._k_scale.expand(descale_shape),
-                        v_descale=layer._v_scale.expand(descale_shape),
-                    )
+                        descale_shape = (num_decodes, key_cache.shape[2])
+                        decode_query = query[:num_decode_tokens].reshape(
+                            num_decodes,
+                            decode_max_query_len,
+                            query.shape[1],
+                            query.shape[2],
+                        )
+                        decode_out = flash_attn_with_kvcache(
+                            q=decode_query,
+                            k_cache=key_cache,
+                            v_cache=value_cache,
+                            cache_seqlens=attn_metadata.seq_lens[:num_decodes],
+                            softmax_scale=self.scale,
+                            causal=attn_metadata.causal,
+                            window_size=self.sliding_window,
+                            softcap=self.logits_soft_cap,
+                            q_descale=None,
+                            k_descale=layer._k_scale.expand(descale_shape),
+                            v_descale=layer._v_scale.expand(descale_shape),
+                            page_table=attn_metadata.block_table[:num_decodes],
+                        )
+                        output[:num_decode_tokens].copy_(
+                            decode_out.reshape(
+                                num_decode_tokens,
+                                query.shape[1],
+                                query.shape[2],
+                            )
+                        )
+                    else:
+                        # Non-uniform query lengths can appear in real serving
+                        # traffic (e.g. mixed datasets). Fall back to varlen
+                        # unified_attention instead of asserting.
+                        from aiter.ops.triton.unified_attention import (
+                            unified_attention,
+                        )
+
+                        descale_shape = (
+                            num_decodes,
+                            key_cache.shape[2],
+                        )
+                        unified_attention(
+                            q=query[:num_decode_tokens],
+                            k=key_cache,
+                            v=value_cache,
+                            out=output[:num_decode_tokens],
+                            cu_seqlens_q=attn_metadata.query_start_loc[
+                                : num_decodes + 1
+                            ],
+                            max_seqlen_q=decode_max_query_len,
+                            seqused_k=attn_metadata.seq_lens[:num_decodes],
+                            max_seqlen_k=attn_metadata.max_seq_len,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            alibi_slopes=self.alibi_slopes,
+                            window_size=self.sliding_window,
+                            block_table=attn_metadata.block_table[:num_decodes],
+                            softcap=self.logits_soft_cap,
+                            q_descale=None,
+                            k_descale=layer._k_scale.expand(descale_shape),
+                            v_descale=layer._v_scale.expand(descale_shape),
+                        )
                     return
 
                 # The ll4mi kernel in paged_attention_v1 requires

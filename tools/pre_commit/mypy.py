@@ -29,15 +29,12 @@ SEPARATE_GROUPS = [
     "tests",
     # v0 related
     "vllm/lora",
-    "vllm/model_executor/layers",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
-    # Ignore triton kernels in ops.
-    "vllm/v1/attention/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
 ]
@@ -101,7 +98,6 @@ def mypy(
 
 
 def main():
-    ci = sys.argv[1] == "1"
     python_version = sys.argv[2]
     file_groups = group_files(sys.argv[3:])
 
@@ -110,7 +106,7 @@ def main():
 
     returncode = 0
     for file_group, changed_files in file_groups.items():
-        follow_imports = None if ci and file_group == "" else "skip"
+        follow_imports = None if file_group == "" else "skip"
         if changed_files:
             returncode |= mypy(
                 changed_files, python_version, follow_imports, file_group

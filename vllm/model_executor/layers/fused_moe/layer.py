@@ -3,14 +3,13 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import Literal, cast, get_args, overload
+from typing import Literal, cast, overload
 
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
@@ -19,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -27,20 +26,26 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    ExpertMapManager,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    init_aiter_topK_meta_data,
-)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
-    DefaultMoERunner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
+)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -63,156 +68,9 @@ class FusedMoeWeightScaleSupported(Enum):
     BLOCK = "block"
 
 
-def determine_expert_map(
-    ep_size: int,
-    ep_rank: int,
-    global_num_experts: int,
-    expert_placement_strategy: ExpertPlacementStrategy = "linear",
-    num_fused_shared_experts: int = 0,
-    return_expert_mask: bool = False,
-) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
-    """
-    Calculates how many experts should be assigned to each rank for EP and
-    creates a mapping from global to local expert index. Experts are
-    distributed evenly across ranks. Any remaining are assigned to the
-    last rank.
-
-    Args:
-        ep_size: The size of the expert parallel group
-        ep_rank: The rank of the current process in the expert parallel
-            group
-        global_num_experts: The total number of experts in the model.
-        expert_placement_strategy: The expert placement strategy.
-
-    Returns:
-        tuple[int, Optional[torch.Tensor]]: A tuple containing:
-            - local_num_experts (int): The number of experts assigned
-                to the current rank.
-            - expert_map (Optional[torch.Tensor]): A tensor of shape
-                (global_num_experts,) mapping from global to local index.
-                Contains -1 for experts not assigned to the current rank.
-                Returns None if ep_size is 1.
-            - expert_mask (Optional[torch.Tensor]): A tensor of shape
-                (global_num_experts + num_fused_shared_experts + 1,)
-                containing 1 for experts assigned to the current rank
-                and 0 for sentinel.
-                Returns None if ep_size is 1.
-                Used only when AITER MOE is enabled.
-    """
-    assert ep_size > 0
-    if ep_size == 1:
-        return (global_num_experts, None, None)
-
-    # Distribute experts as evenly as possible to each rank.
-    base_experts = global_num_experts // ep_size
-    remainder = global_num_experts % ep_size
-    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
-
-    # Create a tensor of size num_experts filled with -1
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
-    # Create an expert map for the local experts
-    if expert_placement_strategy == "linear":
-        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-        expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-    elif expert_placement_strategy == "round_robin":
-        local_log_experts = torch.arange(
-            ep_rank, global_num_experts, ep_size, dtype=torch.int32
-        )
-
-        expert_map[local_log_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-    else:
-        raise ValueError(
-            "Unsupported expert placement strategy "
-            f"'{expert_placement_strategy}', expected one of "
-            f"{get_args(ExpertPlacementStrategy)}"
-        )
-
-    expert_mask = None
-    if return_expert_mask:
-        expert_mask = torch.ones(
-            (global_num_experts + num_fused_shared_experts + 1,), dtype=torch.int32
-        )
-        expert_mask[-1] = 0
-        expert_mask[:global_num_experts] = expert_map > -1
-        expert_map = torch.cat(
-            (
-                expert_map,
-                torch.tensor(
-                    [local_num_experts + i for i in range(num_fused_shared_experts)],
-                    dtype=torch.int32,
-                ),
-            ),
-            dim=0,
-        )
-
-    return (local_num_experts, expert_map, expert_mask)
-
-
-def determine_expert_placement_strategy(
-    expert_placement_strategy: ExpertPlacementStrategy,
-    moe_parallel_config: FusedMoEParallelConfig,
-    num_expert_group: int | None,
-    num_redundant_experts: int,
-    enable_eplb: bool,
-) -> ExpertPlacementStrategy:
-    if expert_placement_strategy == "round_robin":
-        round_robin_supported = (
-            (num_expert_group is not None and num_expert_group > 1)
-            and num_redundant_experts == 0
-            and not enable_eplb
-        )
-
-        if not round_robin_supported:
-            logger.warning(
-                "Round-robin expert placement is only supported for "
-                "models with multiple expert groups and no redundant "
-                "experts. Falling back to linear expert placement."
-            )
-            return "linear"
-        if (
-            moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.use_deepep_ll_kernels
-            and not moe_parallel_config.use_nixl_ep_kernels
-        ):
-            logger.warning(
-                "Round-robin expert placement currently only supports "
-                "the DeepEP low-latency or NIXL EP backend, but '%s' was configured. "
-                "Falling back to linear expert placement.",
-                moe_parallel_config.all2all_backend,
-            )
-            return "linear"
-
-    return expert_placement_strategy
-
-
-def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
-    """
-    Compresses the expert map by removing any -1 entries.
-
-    Args:
-        expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
-            mapping from global to local index. Contains -1 for experts not
-            assigned to the current rank.
-
-    Returns:
-        str: A string mapping from local to global index.
-            Using str to support hashing for logging once only.
-    """
-    global_indices = torch.where(expert_map != -1)[0]
-    local_indices = expert_map[global_indices]
-    return ", ".join(
-        f"{local_index.item()}->{global_index.item()}"
-        for local_index, global_index in zip(local_indices, global_indices)
-    )
-
-
 # --8<-- [start:fused_moe]
-@CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+@PluggableLayer.register("fused_moe")
+class FusedMoE(PluggableLayer):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -228,11 +86,18 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
+        routed_scaling_factor: A scaling factor that is applied to the topk_weights
+                               by the router or the output of the layer depending
+                               on the value of `apply_routed_scale_to_output`
+        apply_routed_scale_to_output: Determine whether or not `routed_scaling_factor`
+                                      is applied to the topk_weights or to the experts
+                                      output. It is applied to the experts output
+                                      instead of the topk_weights when this feature is
+                                      not supported by the router (or the experts).
     """
 
     # --8<-- [end:fused_moe]
@@ -244,7 +109,6 @@ class FusedMoE(CustomOp):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
-        reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
@@ -258,6 +122,7 @@ class FusedMoE(CustomOp):
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
+        swiglu_limit: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -271,13 +136,14 @@ class FusedMoE(CustomOp):
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
+        shared_expert_gate: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        routed_output_transform: torch.nn.Module | None = None,
+        apply_routed_scale_to_output: bool = False,
+        zero_expert_type: str | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
-
-        self._gate = gate
-        self._shared_experts = shared_experts
-        self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -285,6 +151,7 @@ class FusedMoE(CustomOp):
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
+        self.swiglu_limit = swiglu_limit
 
         # FIXME (varun): We should have a better way of inferring the activation
         # datatype. This works for now as the tensor datatype entering the MoE
@@ -329,12 +196,23 @@ class FusedMoE(CustomOp):
         compilation_config.static_all_moe_layers.append(prefix)
         self.layer_name = prefix
 
-        self.enable_eplb = enable_eplb
-        # TODO(bnell): should this be owned by router?
-        self.eplb_state = EplbLayerState()
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
         )
+
+        self.eplb_state: EplbLayerState | None = None
+        if enable_eplb:
+            if self.use_ep and self.global_num_experts % self.ep_size != 0:
+                raise ValueError(
+                    f"EPLB currently only supports even distribution of "
+                    f"experts across ranks. Got {self.global_num_experts} experts "
+                    f"and {self.ep_size} EP ranks."
+                )
+            self.eplb_state = EplbLayerState()
+        else:
+            assert not self.use_ep or num_redundant_experts == 0, (
+                "Redundant experts are only supported with EPLB."
+            )
 
         # ROCm aiter shared experts fusion
         # AITER only supports gated activations (silu/gelu), so disable it
@@ -351,6 +229,8 @@ class FusedMoE(CustomOp):
             if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
+        self.shared_expert_gate = shared_expert_gate
+
         if (
             not self.aiter_fmoe_shared_expert_enabled
             and self.num_fused_shared_experts != 0
@@ -361,70 +241,30 @@ class FusedMoE(CustomOp):
             )
 
         # Determine expert maps
-        if self.use_ep:
-            if self.enable_eplb:
-                assert self.global_num_experts % self.ep_size == 0, (
-                    "EPLB currently only supports even distribution of "
-                    "experts across ranks."
-                )
-            else:
-                assert num_redundant_experts == 0, (
-                    "Redundant experts are only supported with EPLB."
-                )
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-            self.expert_placement_strategy = determine_expert_placement_strategy(
-                expert_placement_strategy=self.expert_placement_strategy,
-                moe_parallel_config=self.moe_parallel_config,
-                num_expert_group=num_expert_group,
-                num_redundant_experts=num_redundant_experts,
-                enable_eplb=self.enable_eplb,
-            )
+        # Create ExpertMapManager to handle expert mapping and placement for EP.
+        # See ExpertMapManager for a detailed description of what it does and when
+        # it is required.
+        self.expert_map_manager = ExpertMapManager(
+            max_num_batched_tokens=max_num_batched_tokens,
+            top_k=top_k,
+            global_num_experts=self.global_num_experts,
+            num_redundant_experts=num_redundant_experts,
+            num_expert_group=num_expert_group,
+            moe_parallel_config=self.moe_parallel_config,
+            placement_strategy=self.expert_placement_strategy,
+            enable_eplb=enable_eplb,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            rocm_aiter_enabled=self.rocm_aiter_fmoe_enabled,
+        )
 
-            self._expert_map: torch.Tensor | None
-            local_num_experts, expert_map, expert_mask = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts,
-                expert_placement_strategy=self.expert_placement_strategy,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                return_expert_mask=self.rocm_aiter_fmoe_enabled,
-            )
-            self.local_num_experts = local_num_experts
-            self.register_buffer("_expert_map", expert_map)
-            self.register_buffer("expert_mask", expert_mask)
-            self._maybe_init_expert_routing_tables()
-            logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
-                "placement strategy: %s. Local/global"
-                " number of experts: %s/%s. Experts local to global index map:"
-                " %s.",
-                self.ep_rank,
-                self.ep_size,
-                self.expert_placement_strategy,
-                self.local_num_experts,
-                self.global_num_experts,
-                get_compressed_expert_map(self._expert_map),
-            )
-        else:
-            self.local_num_experts, self._expert_map, self.expert_mask = (
-                self.global_num_experts,
-                None,
-                None,
-            )
+        self.update_expert_map_info()
 
         self.top_k = top_k
 
-        self._init_aiter_shared_experts_topK_buffer(
-            vllm_config=vllm_config, dp_size=dp_size_
-        )
-        if self.use_ep and self.rocm_aiter_fmoe_enabled:
-            assert self.expert_mask is None or torch.all(
-                (expert_mask == 0) | (expert_mask == 1)
-            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
-
         assert intermediate_size % self.tp_size == 0
         intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
         self.renormalize = renormalize
 
         # TODO(bnell): these attributes are only used by monolithic kernels.
@@ -436,10 +276,18 @@ class FusedMoE(CustomOp):
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
-        self.routed_scaling_factor = routed_scaling_factor
+        # When apply_routed_scale_to_output is True, we set the scaling factor
+        # to 1.0 so it ends up being a nop. Applying the scale will be handled
+        # by the runner in this case.
+        # The member variable must be set in the same way as the router since
+        # some quantization methods can access it.
+        self.routed_scaling_factor = (
+            routed_scaling_factor if not apply_routed_scale_to_output else 1.0
+        )
         self.e_score_correction_bias = e_score_correction_bias
         # TODO(bnell): end attributes
 
+        self.hash_indices_table = hash_indices_table
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
@@ -455,13 +303,15 @@ class FusedMoE(CustomOp):
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=self.logical_num_experts,
+            hash_indices_table=self.hash_indices_table,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
@@ -478,15 +328,16 @@ class FusedMoE(CustomOp):
             in_dtype=moe_in_dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            max_num_tokens=max_num_batched_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or self._shared_experts is not None,
+            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -516,12 +367,14 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.moe_config.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
-        if self.enable_eplb and not self.quant_method.supports_eplb:
+        if enable_eplb and not self.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API
@@ -557,44 +410,37 @@ class FusedMoE(CustomOp):
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if self.quant_method.__class__.__name__ in (
-            "GPTQMarlinMoEMethod",
+            "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        # TODO(bnell): this is un-needed and removed in a follow up PR.
         self.base_quant_method = self.quant_method
 
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        backend = self.moe_parallel_config.all2all_backend
-        self.use_overlapped = (
-            not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
-            )
-            and self._shared_experts is not None
-        )
-
-        self.runner = self._init_runner()
-
-    def _init_runner(self):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        return DefaultMoERunner(
-            layer=self,
+        self.runner: MoERunnerInterface = MoERunner(
+            layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
-            routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
+            gate=gate,
+            shared_experts=shared_experts,
+            shared_expert_gate=self.shared_expert_gate,
             quant_method=self.quant_method,
-            reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            # When apply_routed_scale_to_output is True, we allow
+            # the scaling factor to be passed to the runner, otherwise
+            # we pass 1.0 so it ends up being a nop.
+            routed_scaling_factor=routed_scaling_factor
+            if apply_routed_scale_to_output
+            else 1.0,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -602,10 +448,7 @@ class FusedMoE(CustomOp):
     # intrusive way to do this.
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self.quant_method = mk
-        # We need to force reconstruction of runner because we're swapping out
-        # the quant_method with a FusedMoEModularMethod. This logic can go
-        # away once the FusedMoEModularMethod is eliminated.
-        self.runner = self._init_runner()
+        self.runner._replace_quant_method(mk)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -618,11 +461,8 @@ class FusedMoE(CustomOp):
             return None
 
         self.ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
-        routing_tables = self._maybe_init_expert_routing_tables()
         prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
+            routing_tables=self._expert_routing_tables()
         )
         if prepare_finalize is not None:
             logger.debug(
@@ -633,14 +473,13 @@ class FusedMoE(CustomOp):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    self.shared_experts,
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
 
     @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
+    def shared_experts(self) -> SharedExperts | None:
+        return self.runner.shared_experts
 
     @property
     def layer_id(self):
@@ -648,10 +487,6 @@ class FusedMoE(CustomOp):
         from vllm.model_executor.models.utils import extract_layer_index
 
         return extract_layer_index(self.layer_name)
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -676,19 +511,28 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self.gate is not None
+        return self.runner.is_internal_router()
 
-    def _maybe_init_expert_routing_tables(
+    def update_expert_map_info(self):
+        # Update local attributes from ExpertMapManager
+        self.local_num_experts = self.expert_map_manager.local_num_experts
+        self.expert_placement_strategy = self.expert_map_manager.placement_strategy
+        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
+        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
+
+        # Get routing tables from ExpertMapManager
+        routing_tables = self.expert_map_manager.routing_tables
+        if routing_tables is not None:
+            # Register routing tables as buffers for this layer
+            global_to_physical, physical_to_global, local_global = routing_tables
+            self.register_buffer("expert_global_to_physical", global_to_physical)
+            self.register_buffer("expert_physical_to_global", physical_to_global)
+            self.register_buffer("expert_local_to_global", local_global)
+
+    def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        # Currently routing_tables only needed for round-robin expert placement
-        # with DeepEP-ll or NIXL EP all2all backends.
-        if self.expert_placement_strategy != "round_robin" or (
-            not self.moe_parallel_config.use_deepep_ll_kernels
-            and not self.moe_parallel_config.use_nixl_ep_kernels
-        ):
-            return None
-
+        # Return cached routing tables if already registered as buffers
         if hasattr(self, "expert_global_to_physical"):
             return cast(
                 tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -698,85 +542,21 @@ class FusedMoE(CustomOp):
                     self.expert_local_to_global,
                 ),
             )
-
-        if self._expert_map is None:
-            return None
-
-        routing_tables = self.ensure_round_robin_expert_routing_tables(
-            global_num_experts=self.global_num_experts,
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            local_num_experts=self.local_num_experts,
-            device=self._expert_map.device,
-        )
-
-        global_to_physical, physical_to_global, local_global = routing_tables
-        self.register_buffer("expert_global_to_physical", global_to_physical)
-        self.register_buffer("expert_physical_to_global", physical_to_global)
-        self.register_buffer("expert_local_to_global", local_global)
-
-        return routing_tables
-
-    @staticmethod
-    def ensure_round_robin_expert_routing_tables(
-        global_num_experts: int,
-        ep_size: int,
-        ep_rank: int,
-        local_num_experts: int,
-        device: torch.device | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        device_kwargs = {"device": device} if device is not None else {}
-        global_indices = torch.arange(
-            global_num_experts, dtype=torch.long, **device_kwargs
-        )
-        owner = torch.remainder(global_indices, ep_size)
-        local_index = torch.div(global_indices, ep_size, rounding_mode="floor")
-        base = global_num_experts // ep_size
-        remainder = global_num_experts % ep_size
-        physical_offset = owner * base
-        if remainder > 0:
-            remainder_tensor = torch.tensor(
-                remainder, dtype=torch.long, **device_kwargs
-            )
-            physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
-
-        global_to_physical = physical_offset + local_index
-        physical_to_global = torch.empty_like(global_to_physical)
-        physical_to_global[global_to_physical] = global_indices
-
-        local_global = torch.arange(
-            ep_rank,
-            global_num_experts,
-            ep_size,
-            dtype=torch.long,
-            **device_kwargs,
-        )
-        if local_global.numel() != local_num_experts:
-            local_global = local_global[:local_num_experts]
-
-        return (global_to_physical, physical_to_global, local_global)
+        return None
 
     def update_expert_map(self):
-        # ep_size and ep_rank should already be updated
-        assert self._expert_map is not None
-        with self._expert_map.device:
-            local_num_experts, expert_map, expert_mask = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts,
-                expert_placement_strategy=self.expert_placement_strategy,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                return_expert_mask=self.rocm_aiter_fmoe_enabled,
-            )
-            self.local_num_experts = local_num_experts
-            self.register_buffer("_expert_map", expert_map)
-            self.register_buffer("expert_mask", expert_mask)
-            self._maybe_init_expert_routing_tables()
-            if self.aiter_fmoe_shared_expert_enabled:
-                self._init_aiter_shared_experts_topK_buffer(
-                    vllm_config=get_current_vllm_config(),
-                    dp_size=get_dp_group().world_size,
-                )
+        # Update ExpertMapManager with new EP configuration
+        # The moe_parallel_config (including ep_size and ep_rank)
+        # should already be updated.
+        # Note: ExpertMapManager.update() recalculates expert maps and
+        # reinitializes routing tables internally.
+        self.expert_map_manager.update(
+            self.moe_parallel_config,
+            global_num_experts=self.global_num_experts,
+        )
+
+        # Update local attributes from ExpertMapManager
+        self.update_expert_map_info()
 
     def _load_per_tensor_weight_scale(
         self,
@@ -862,7 +642,10 @@ class FusedMoE(CustomOp):
         if shard_id == "w2":
             hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
             expert_data = self._narrow_expert_data_for_padding(
-                expert_data, loaded_weight, hidden_dim=hidden_dim
+                expert_data,
+                loaded_weight,
+                hidden_dim=hidden_dim,
+                shard_dim=shard_dim,
             )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -902,29 +685,33 @@ class FusedMoE(CustomOp):
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         hidden_dim: int,
+        shard_dim: int | None = None,
     ) -> torch.Tensor:
-        """Narrow expert_data hidden dim to match loaded_weight for padded
-        hidden_size.
+        """Narrow expert_data to match loaded_weight for padded dimensions.
 
         When backends (e.g., DeepEP) round up hidden_size, weight parameters
         are larger than checkpoint weights. Narrow the padded hidden dimension
-        before copying.
+        before copying. Similarly, when padding occurs on the shard
+        (intermediate) dimension (e.g. for MXFP4 GEMM), narrow that dimension
+        as well.
 
         Args:
             expert_data: The (possibly padded) parameter tensor to narrow.
             loaded_weight: The checkpoint weight tensor with original size.
             hidden_dim: The dimension index corresponding to hidden_size.
                 Must be non-negative.
+            shard_dim: The dimension index corresponding to the shard
+                (intermediate) dimension. Defaults to `None`.
         """
-        if (
-            loaded_weight.ndim > 0
-            and 0 <= hidden_dim < expert_data.ndim
-            and hidden_dim < loaded_weight.ndim
-            and expert_data.shape[hidden_dim] > loaded_weight.shape[hidden_dim]
-        ):
-            expert_data = expert_data.narrow(
-                hidden_dim, 0, loaded_weight.shape[hidden_dim]
-            )
+        dims = (hidden_dim,) if shard_dim is None else (hidden_dim, shard_dim)
+        if loaded_weight.ndim > 0:
+            for dim in dims:
+                if (
+                    0 <= dim < expert_data.ndim
+                    and dim < loaded_weight.ndim
+                    and expert_data.shape[dim] > loaded_weight.shape[dim]
+                ):
+                    expert_data = expert_data.narrow(dim, 0, loaded_weight.shape[dim])
         return expert_data
 
     def _load_w13(
@@ -966,7 +753,10 @@ class FusedMoE(CustomOp):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            shard_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
@@ -999,7 +789,10 @@ class FusedMoE(CustomOp):
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            shard_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
@@ -1031,26 +824,7 @@ class FusedMoE(CustomOp):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
-        if self._expert_map is None:
-            return expert_id
-        return self._expert_map[expert_id].item()
-
-    def _init_aiter_shared_experts_topK_buffer(
-        self, vllm_config: VllmConfig, dp_size: int
-    ):
-        if self.num_fused_shared_experts > 0:
-            init_aiter_topK_meta_data(
-                n_routed_experts=self.global_num_experts,
-                n_shared_experts=self.num_fused_shared_experts,
-                top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
-                shared_experts_score=1.0,
-                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
-                * dp_size,
-                is_EP=self.use_ep,
-            )
-        self.local_num_experts += self.num_fused_shared_experts
+        return self.expert_map_manager.map_global_to_local(expert_id)
 
     @overload
     def weight_loader(
@@ -1083,7 +857,8 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+        quant_config_name = self.quant_config and self.quant_config.get_name()
+        if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
@@ -1464,10 +1239,19 @@ class FusedMoE(CustomOp):
             "w2_input_scale",
         }
 
+        # Parameters of non-expert submodules that live inside runner (MoERunner).
+        # These must be excluded from EPLB weight rearrangement.
+        NON_EXPERT_PREFIXES = (
+            "runner._shared_experts.",
+            "runner.gate.",
+            "runner.routed_input_transform.",
+            "runner.routed_output_transform.",
+        )
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            if not name.startswith(NON_EXPERT_PREFIXES)
             and name not in NON_EXPERT_WEIGHTS
         )
 
@@ -1476,9 +1260,7 @@ class FusedMoE(CustomOp):
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
-            and not name.startswith("_shared_experts.")
-            # exclude parameters from non-expert submodules (e.g. gate/shared)
-            and not name.startswith("_gate.")
+            and not name.startswith(NON_EXPERT_PREFIXES)
         ]
 
     def set_eplb_state(
@@ -1493,10 +1275,20 @@ class FusedMoE(CustomOp):
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
+
+        Args:
+            moe_layer_idx: Index of this MoE layer
+            expert_load_view: View into global expert load tracking tensor
+            logical_to_physical_map: Mapping from logical to physical expert IDs
+            logical_replica_count: Number of replicas for each logical expert
         """
-        self.eplb_state.expert_load_view = expert_load_view[moe_layer_idx]
-        self.eplb_state.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
-        self.eplb_state.logical_replica_count = logical_replica_count[moe_layer_idx]
+        if self.eplb_state is not None:
+            self.eplb_state.set_layer_state(
+                moe_layer_idx,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
@@ -1511,35 +1303,16 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return self.runner.must_reduce_shared_expert_outputs()
-
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
-        """
-        Some combine kernels reduce across GPU ranks by default.
-        """
-        return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         return self.runner.forward(
             hidden_states,
             router_logits,
+            input_ids,
         )
 
     @property
@@ -1547,13 +1320,6 @@ class FusedMoE(CustomOp):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(hidden_states, router_logits)
 
     @classmethod
     def make_expert_params_mapping(
@@ -1617,10 +1383,28 @@ class FusedMoE(CustomOp):
             f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
             f"tp_size={self.tp_size},\n"
             f"ep_size={self.ep_size}, "
-            f"reduce_results={self.reduce_results}, "
         )
 
         return s
+
+
+# This is a temporary forwarding method which will be removed/modified layer.
+def fused_moe_make_expert_params_mapping(
+    model: torch.nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return FusedMoE.make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name,
+        ckpt_down_proj_name,
+        ckpt_up_proj_name,
+        num_experts,
+        num_redundant_experts,
+    )
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

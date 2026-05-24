@@ -448,8 +448,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                 "FP8 only support Ada Lovelace or newer GPUs.");
     TORCH_CHECK(
         major_capability * 10 + minor_capability == 89 ||
-            major_capability * 10 + minor_capability == 120,
-        "Marlin W4A8-FP8 only support SM89 or SM120 device (It is slower than "
+            major_capability == 12,
+        "Marlin W4A8-FP8 only support SM89 or SM12x device (It is slower than "
         "Marlin W4A16 on other devices).");
   }
 
@@ -599,6 +599,9 @@ torch::Tensor moe_wna16_marlin_gemm(
                   "When b_type = float4_e2m1f, b_scale scalar type must be",
                   "float8_e4m3fn (for NVFP4) or float8_e8m0fnu (for MXFP4).");
     }
+  } else if (b_type_id == vllm::kFE4M3fn.id() &&
+             b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
+    s_type_id = vllm::kFE8M0fnu.id();
   }
 
   vllm::ScalarType a_type = vllm::ScalarType::from_id(a_type_id);

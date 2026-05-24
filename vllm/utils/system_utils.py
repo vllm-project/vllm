@@ -140,6 +140,11 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
+    # Force spawn if NUMA binding is enabled via --numa-bind.
+    # NUMA binding uses executable hijacking which requires spawn
+    if "--numa-bind" in sys.argv:
+        reasons.append("NUMA binding requires spawn method")
+
     if cuda_is_initialized():
         reasons.append("CUDA is initialized")
     elif xpu_is_initialized():
@@ -229,10 +234,15 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: str | None = None) -> None:
+def decorate_logs(
+    process_name: str | None = None, *, skip_if_decorated: bool = False
+) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
     # Respect VLLM_CONFIGURE_LOGGING environment variable
     if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
+    if skip_if_decorated and hasattr(sys.stdout, "_original_write"):
         return
 
     if process_name is None:

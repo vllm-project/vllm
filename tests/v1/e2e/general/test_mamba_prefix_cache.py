@@ -16,6 +16,7 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -48,6 +49,7 @@ num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 BLOCK_SIZE = 560
+DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
 cur_step_action: StepAction | None = None
@@ -71,7 +73,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
                     [[prompt_token_ids[first_token_id_index]]],
-                    device="cuda",
+                    device=DEVICE_TYPE,
                     dtype=torch.int32,
                 ),
                 logprobs_tensors=None,
@@ -83,7 +85,9 @@ def get_fake_sample_fn() -> SamplerOutput:
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
-                [sampled_token_ids], device="cuda", dtype=torch.int32
+                [sampled_token_ids],
+                device=DEVICE_TYPE,
+                dtype=torch.int32,
             ),
             logprobs_tensors=None,
         )
@@ -128,17 +132,23 @@ def get_fake_propose_draft_token_ids_fn():
                 - 1
                 + num_accepted_tokens
             ],
-            device="cuda",
+            device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
         valid_sampled_tokens_count = torch.tensor(
-            [num_accepted_tokens], device="cuda", dtype=torch.int32
+            [num_accepted_tokens],
+            device=DEVICE_TYPE,
+            dtype=torch.int32,
         )
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
-        return torch.tensor(proposed_draft_token_ids, device="cuda", dtype=torch.int32)
+        return torch.tensor(
+            proposed_draft_token_ids,
+            device=DEVICE_TYPE,
+            dtype=torch.int32,
+        )
 
     return fake_propose_draft_token_ids_fn
 
@@ -169,6 +179,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
+        full_sequence_must_fit: bool = False,
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -180,6 +191,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             num_external_computed_tokens,
             delay_cache_blocks,
             num_encoder_tokens,
+            full_sequence_must_fit,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
@@ -281,7 +293,6 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
 
 def get_fake_process_mamba_fn(
     original_preprocess_mamba_fn: Callable,
-    original_post_process_mamba_fn: Callable,
     original_copy_fn: Callable,
 ):
     copy_info: tuple[list[int], list[int], list[int]] | None = None
@@ -349,37 +360,6 @@ def get_fake_process_mamba_fn(
             )
         return ret
 
-    def fake_post_process_mamba_fn(
-        scheduler_output: SchedulerOutput,
-        kv_cache_config: KVCacheConfig,
-        input_batch: GPUInputBatch,
-        requests: dict[str, CachedRequestState],
-        mamba_state_idx: dict[str, int],
-        forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-        copy_bufs: mamba_utils.MambaCopyBuffers,
-    ):
-        nonlocal copy_info
-        copy_info = None
-        ret = original_post_process_mamba_fn(
-            scheduler_output,
-            kv_cache_config,
-            input_batch,
-            requests,
-            mamba_state_idx,
-            forward_context,
-            mamba_state_copy_funcs,
-            copy_bufs,
-        )
-        if cur_step_action is not None:
-            check_copy_info(
-                cur_step_action.postprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
-            )
-        return ret
-
     def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
         nonlocal copy_info
         assert copy_info is None
@@ -390,7 +370,7 @@ def get_fake_process_mamba_fn(
         copy_info = (src_state_list, dest_state_list, num_elements_list)
         return original_copy_fn(copy_bufs)
 
-    return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
+    return fake_preprocess_mamba_fn, fake_copy_fn
 
 
 def run_ref_mamba_state_in_subprocess() -> None:
@@ -502,15 +482,11 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     fake_allocate_slots_fn = get_fake_allocate_slots_fn(KVCacheManager.allocate_slots)
     monkeypatch.setattr(KVCacheManager, "allocate_slots", fake_allocate_slots_fn)
 
-    fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn = (
-        get_fake_process_mamba_fn(
-            mamba_utils.preprocess_mamba,
-            mamba_utils.postprocess_mamba,
-            mamba_utils.do_mamba_copy_block,
-        )
+    fake_preprocess_mamba_fn, fake_copy_fn = get_fake_process_mamba_fn(
+        mamba_utils.preprocess_mamba,
+        mamba_utils.do_mamba_copy_block,
     )
     monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
-    monkeypatch.setattr(mamba_utils, "postprocess_mamba", fake_post_process_mamba_fn)
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 

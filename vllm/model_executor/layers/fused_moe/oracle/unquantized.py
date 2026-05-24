@@ -92,33 +92,35 @@ def backend_to_kernel_cls(
         return TrtLlmBf16Experts
 
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
         return FlashInferExperts
 
     elif backend == UnquantizedMoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
         return AiterExperts
 
     elif backend == UnquantizedMoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonExperts,
+        )
 
         return TritonExperts
 
     elif backend == UnquantizedMoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
         return BatchedTritonExperts
 
     elif backend == UnquantizedMoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExperts
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
 
         return XPUExperts
 
@@ -159,6 +161,11 @@ def select_unquantized_moe_backend(
 
     if current_platform.is_out_of_tree():
         return UnquantizedMoeBackend.OOT, None
+
+    if moe_config.is_lora_enabled:
+        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
+            UnquantizedMoeBackend.TRITON
+        )
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
@@ -202,7 +209,7 @@ def select_unquantized_moe_backend(
             k_cls, config, None, None, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
+            logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -250,12 +257,10 @@ def select_unquantized_moe_backend(
                     k_cls, moe_config, None, None, activation_format
                 )
                 if supported:
-                    logger.info_once(_make_log_backend(backend), scope="local")
+                    logger.info_once(_make_log_backend(backend))
                     return backend, k_cls
                 else:
-                    logger.debug_once(
-                        _make_log_unsupported(backend, reason), scope="local"
-                    )
+                    logger.debug_once(_make_log_unsupported(backend, reason))
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
@@ -277,10 +282,10 @@ def select_unquantized_moe_backend(
             k_cls, moe_config, None, None, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
+            logger.info_once(_make_log_backend(backend))
             return backend, k_cls
 
-        logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."
@@ -321,7 +326,6 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
@@ -334,7 +338,7 @@ def make_unquantized_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -355,12 +359,6 @@ def make_unquantized_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
-            else None
-        ),
-        moe_parallel_config=moe_config.moe_parallel_config,
         inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 
