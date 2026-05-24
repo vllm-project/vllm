@@ -1876,6 +1876,9 @@ class NixlConnectorWorker:
                     del self.consumer_notification_counts_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
+                    # FIX(early-notif race): drop any staged orphan entry so it
+                    # doesn't linger until FIFO eviction drops an unrelated id.
+                    self._notif_n_consumers.pop(req_id, None)
                     # FIX(best_of fan-out): release un-pulled siblings of this parent.
                     parent = self._best_of_parent(req_id)
                     if parent is not None and parent not in self._pulled_bases:
@@ -1890,6 +1893,7 @@ class NixlConnectorWorker:
                         for _sib in _siblings:
                             notified_req_ids.add(_sib)
                             self.consumer_notification_counts_by_req.pop(_sib, None)
+                            self._notif_n_consumers.pop(_sib, None)
                             self._reqs_to_process.discard(_sib)
                             self._reqs_to_send.pop(_sib, None)
                         if _siblings:
@@ -2052,6 +2056,7 @@ class NixlConnectorWorker:
             if _parent is not None and _parent in self._pulled_bases:
                 self._fanout_released.add(req_id)
                 self.consumer_notification_counts_by_req.pop(req_id, None)
+                self._notif_n_consumers.pop(req_id, None)
                 self._reqs_to_process.discard(req_id)
                 self._reqs_to_send.pop(req_id, None)
 
