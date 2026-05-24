@@ -181,7 +181,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        return self.connector_worker.get_finished(finished_req_ids)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -284,15 +284,28 @@ class MoRIIOConnectorScheduler:
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
     def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
-        self.transfer_id_to_request_id[transfer_id] = request_id
+        # FIX(best_of-1many): n best_of siblings share one transfer_id; accumulate so
+        # the single completion can release all of them.
+        siblings = self.transfer_id_to_request_id.setdefault(transfer_id, [])
+        if request_id not in siblings:
+            siblings.append(request_id)
+            if len(siblings) > 1:
+                logger.debug(
+                    "MoRIIO best_of fan-in: transfer_id=%s now has %d siblings",
+                    transfer_id, len(siblings),
+                )
         self.request_id_to_transfer_id[request_id] = transfer_id
 
     def unmap_request_id(self, request_id: ReqId):
         if request_id in self.request_id_to_transfer_id:
             transfer_id = self.request_id_to_transfer_id[request_id]
             del self.request_id_to_transfer_id[request_id]
-            if transfer_id in self.transfer_id_to_request_id:
-                del self.transfer_id_to_request_id[transfer_id]
+            siblings = self.transfer_id_to_request_id.get(transfer_id)
+            if siblings is not None:
+                if request_id in siblings:
+                    siblings.remove(request_id)
+                if not siblings:
+                    del self.transfer_id_to_request_id[transfer_id]
             else:
                 logger.warning(
                     "transfer id not in transfer_id_to_request_id lookup"
@@ -750,6 +763,15 @@ class MoRIIOConnectorWorker:
         # In progress transfers.
         self._recving_transfers: defaultdict[ReqId, list] = defaultdict(list)
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str]] = {}
+        # FIX(read-release) state: consumer captures the shared tid at read setup so it
+        # can notify the producer with it on read-complete; producer accumulates held
+        # siblings and only frees them once vLLM marks them finished.
+        self._recving_transfer_id: dict[ReqId, str] = {}     # consumer: req -> shared tid
+        self._read_sibs: dict[str, set[str]] = {}            # producer: tid -> held siblings
+        self._read_done_tids: set[str] = set()               # producer: tids done reading
+        self._read_finished_seen: set[str] = set()           # producer: vLLM finished_req_ids
+        self._read_req_tid: dict[str, str] = {}              # producer: sibling -> tid (pre-unmap)
+        self._read_seen_tid_sibcount: dict[str, int] = {}    # producer: per-tid sibcount diff-track
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -1239,7 +1261,7 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1250,6 +1272,29 @@ class MoRIIOConnectorWorker:
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
+            # FIX(read-release): release siblings of completed reads, gated on vLLM's
+            # is_finished signal so we don't trip the scheduler's assert on still-held reqs.
+            if self.mode == MoRIIOMode.READ:
+                self._read_done_tids.update(done_sending)
+                self._read_finished_seen |= (finished_req_ids or set())
+                _m: set[str] = set()
+                for _t in list(self._read_done_tids):
+                    if _t not in self._read_sibs:
+                        continue
+                    _sibs = self._read_sibs[_t]
+                    _ready = _sibs & self._read_finished_seen
+                    _m |= _ready
+                    _sibs -= _ready
+                    self._read_finished_seen -= _ready
+                    if not _sibs:
+                        logger.debug(
+                            "MoRIIO read-release: transfer_id=%s fully drained",
+                            _t,
+                        )
+                        del self._read_sibs[_t]
+                        self._read_done_tids.discard(_t)
+                        self._read_seen_tid_sibcount.pop(_t, None)
+                done_sending = _m
 
         else:
             if self.mode == MoRIIOMode.WRITE:
@@ -1257,12 +1302,18 @@ class MoRIIOConnectorWorker:
             else:
                 done_recving = self._pop_done_transfers()
 
-        done_recving = {
-            self.transfer_id_to_request_id[id]
-            for id in filter(
-                lambda id: id in self.transfer_id_to_request_id, done_recving
-            )
-        }
+        # FIX(best_of-1many): WRITE -> one shared tid releases ALL its best_of siblings.
+        # READ -> consumer is synchronous (load_kv_async=False); the scheduler doesn't
+        # expect finished_recving here, and _pop_done_transfers's return was consumed
+        # internally above (triggered send_notify to the producer).
+        if not self.is_producer:
+            if self.mode == MoRIIOMode.WRITE:
+                _released: set[str] = set()
+                for _tid in done_recving:
+                    _released.update(self.transfer_id_to_request_id.get(_tid, []))
+                done_recving = _released
+            else:
+                done_recving = set()
 
         return done_sending, done_recving
 
@@ -1274,8 +1325,15 @@ class MoRIIOConnectorWorker:
                 if status_list[-1].Succeeded():
                     done_req_ids.add(req_id)
 
+                    # FIX(read-release): notify with the shared transfer_id; the producer
+                    # may already have unmapped the local req_id by now.
+                    _tid_for_notify = self._recving_transfer_id.get(req_id, req_id)
+                    logger.debug(
+                        "MoRIIO read-release notify: req=%s -> shared tid=%s",
+                        req_id, _tid_for_notify,
+                    )
                     self.moriio_wrapper.send_notify(
-                        req_id,
+                        _tid_for_notify,
                         self._recving_transfers_callback_addr[req_id][0],
                         self._recving_transfers_callback_addr[req_id][1],
                     )
@@ -1283,6 +1341,7 @@ class MoRIIOConnectorWorker:
             for req_id in to_remove:
                 del self._recving_transfers[req_id]
                 del self._recving_transfers_callback_addr[req_id]
+                self._recving_transfer_id.pop(req_id, None)
 
             return done_req_ids
 
@@ -1346,6 +1405,17 @@ class MoRIIOConnectorWorker:
         """
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
+            for _t, _rs in metadata.transfer_id_to_request_id.items():
+                _n = len(_rs)
+                if self._read_seen_tid_sibcount.get(_t) == _n:
+                    continue  # tid unchanged since last step -> nothing new to capture
+                for _r in _rs:
+                    self._read_req_tid[_r] = _t
+                self._read_seen_tid_sibcount[_t] = _n
+            for _r in metadata.reqs_to_send:
+                _t = self._read_req_tid.pop(_r, None)
+                if _t is not None:
+                    self._read_sibs.setdefault(_t, set()).add(_r)
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
@@ -1401,6 +1471,7 @@ class MoRIIOConnectorWorker:
         )
         self._read_blocks(
             request_id=req_id,
+            transfer_id=meta.transfer_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
@@ -1560,6 +1631,7 @@ class MoRIIOConnectorWorker:
         request_id: str,
         remote_host: str,
         remote_notify_port: int,
+        transfer_id: str = "",
     ) -> None:
         if self.mode == MoRIIOMode.WRITE:
             return
@@ -1582,6 +1654,7 @@ class MoRIIOConnectorWorker:
             )
             with self.moriio_wrapper.lock:
                 self._recving_transfers[request_id].append(transfer_status)
+                self._recving_transfer_id[request_id] = transfer_id  # FIX(read-release)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(remote_notify_port + self.tp_rank),
