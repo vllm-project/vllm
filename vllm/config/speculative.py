@@ -58,6 +58,7 @@ EagleModelTypes = Literal[
 ]
 SpeculativeMethod = Literal[
     "ngram",
+    "gumiho",
     "medusa",
     "mlp_speculator",
     "draft_model",
@@ -685,7 +686,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "gumiho"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -701,6 +702,8 @@ class SpeculativeConfig:
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
+                elif self.draft_model_config.hf_config.model_type == "gumiho":
+                    self.method = "gumiho"
                 elif self.draft_model_config.hf_config.model_type in get_args(
                     MTPModelTypes
                 ):
@@ -747,6 +750,20 @@ class SpeculativeConfig:
                             model_type="eagle",
                         )
                         self.draft_model_config.hf_config = eagle_config
+                        self.update_arch_()
+
+                # Replace hf_config for Gumiho draft_model. Gumiho reuses the
+                # EAGLE V1 proposer path with an extra parallel-MLP step, so we
+                # wrap the underlying Llama config the same way EAGLE does.
+                if self.method == "gumiho":
+                    from vllm.transformers_utils.configs.gumiho import GumihoConfig
+
+                    if not isinstance(self.draft_model_config.hf_config, GumihoConfig):
+                        gumiho_config = GumihoConfig(
+                            self.draft_model_config.hf_config,
+                            model_type="gumiho",
+                        )
+                        self.draft_model_config.hf_config = gumiho_config
                         self.update_arch_()
 
                 if self.method == "dflash":
@@ -899,7 +916,7 @@ class SpeculativeConfig:
         # If speculative_draft_tensor_parallel_size is unset then set it
         # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type == "mlp_speculator":
+            if draft_hf_config.model_type in ("mlp_speculator", "gumiho"):
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
@@ -1057,7 +1074,7 @@ class SpeculativeConfig:
         )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "gumiho")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

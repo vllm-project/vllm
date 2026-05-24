@@ -48,7 +48,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
+        choices=["ngram", "eagle", "eagle3", "gumiho", "mtp", "draft_model"],
     )
     parser.add_argument("--backend", type=str, default="openai")
     parser.add_argument("--num-spec-tokens", type=int, default=2)
@@ -66,6 +66,13 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--draft-model", type=str, default=None)
+    parser.add_argument(
+        "--gumiho-dir",
+        type=str,
+        default=None,
+        help="Path or HF repo of a Gumiho drafter checkpoint. "
+        "Defaults to amd/Gumiho-llama3-8b when --method gumiho.",
+    )
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--disable-padded-drafter-batch", action="store_true")
@@ -140,6 +147,14 @@ def main(args):
         speculative_config = {
             "method": "mtp",
             "num_speculative_tokens": args.num_spec_tokens,
+        }
+    elif args.method == "gumiho":
+        gumiho_dir = args.gumiho_dir or "amd/Gumiho-llama3-8b"
+        speculative_config = {
+            "method": "gumiho",
+            "model": gumiho_dir,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "draft_tensor_parallel_size": 1,
         }
     else:
         raise ValueError(f"unknown method: {args.method}")

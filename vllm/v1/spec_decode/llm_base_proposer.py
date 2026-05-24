@@ -346,6 +346,37 @@ class SpecDecodeBaseProposer:
             return self.xdrope_positions[:, :num_tokens]
         return self.positions[:num_tokens]
 
+    def _init_draft_hidden_states_list(
+        self,
+        sample_hidden_states: torch.Tensor,
+    ) -> list[torch.Tensor] | None:
+        """Hook that lets subclasses opt in to collecting per-step draft
+        hidden states during the sequential drafting loop.
+
+        Returning a non-None list activates the collection (which has a small
+        memory cost). The base implementation returns ``None`` so the default
+        EAGLE path is unaffected. Used today by :class:`GumihoProposer` to
+        feed its parallel MLP heads.
+        """
+        return None
+
+    def _maybe_get_mlp_draft_token_ids(
+        self,
+        draft_token_ids_list: list[torch.Tensor],
+        draft_hidden_states_list: list[torch.Tensor] | None,
+    ) -> torch.Tensor | None:
+        """Hook that lets subclasses short-circuit the rest of the sequential
+        drafting loop by returning the remaining tokens at once.
+
+        Return ``None`` to keep running the transformer draft head normally
+        (the default behaviour). Returning a ``[batch_size, remaining]`` int
+        tensor causes the loop to extend ``draft_token_ids_list`` with the
+        returned tokens (unbound along ``dim=1``) and then ``break``.
+        Used by Gumiho to switch from the transformer draft head to its
+        parallel MLP heads after the first two tokens.
+        """
+        return None
+
     def _set_positions(self, num_tokens: int, positions: torch.Tensor):
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
@@ -502,6 +533,11 @@ class SpecDecodeBaseProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+        # Optional per-step hidden-state buffer for subclasses that need it
+        # (e.g. GumihoProposer feeding its parallel MLP heads).
+        draft_hidden_states_list = self._init_draft_hidden_states_list(
+            sample_hidden_states
+        )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -636,6 +672,21 @@ class SpecDecodeBaseProposer:
                 assert draft_probs_list is not None
                 draft_probs_list.append(draft_probs)
             draft_token_ids_list.append(draft_token_ids)
+            if draft_hidden_states_list is not None:
+                # Stash the hidden state used to produce this draft token, then
+                # let the subclass decide if it wants to finish the remaining
+                # speculative tokens in a single shot (Gumiho's MLP heads).
+                # NOTE: the MLP path is greedy-only, so we only enter it when
+                # no draft probs are being collected (i.e. greedy sampling).
+                draft_hidden_states_list.append(last_hidden_states[:batch_size])
+                if draft_probs_list is None:
+                    mlp_draft_token_ids = self._maybe_get_mlp_draft_token_ids(
+                        draft_token_ids_list,
+                        draft_hidden_states_list,
+                    )
+                    if mlp_draft_token_ids is not None:
+                        draft_token_ids_list.extend(mlp_draft_token_ids.unbind(dim=1))
+                        break
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
