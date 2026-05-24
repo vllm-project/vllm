@@ -196,7 +196,35 @@ class TurboQuantMetadata(AttentionMetadata):
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
+    # [Genesis P65 v2] Context-aware downgrade. Keep UNIFORM_BATCH as the
+    # ClassVar default (full caps for non-spec-decode setups), and override
+    # `get_cudagraph_support` classmethod to downgrade to
+    # UNIFORM_SINGLE_TOKEN_DECODE only when speculative_config is active.
+    # Why: under spec-decode, K+1 batches hit _prefill_attention's
+    # structurally-wrong cudagraph capture bypass (cu_seqlens_k =
+    # cu_seqlens_q assumes first-chunk prefill, missing prior cached KV in
+    # TurboQuant compressed format). Captured kernel attends without context
+    # → drafter outputs collapse to high-bias tokens (e.g. `<tool_call>`
+    # cascade). The downgrade forces spec-verify K+1 batches to eager (the
+    # per-request continuation branch decompresses cache correctly).
+    # NOTE: vLLM compilation.py:1356 globally flips cudagraph_mode to
+    # PIECEWISE when our backend declares < UNIFORM_BATCH AND uniform_decode
+    # _query_len > 1. So even 1-token decode loses FULL cudagraph under
+    # spec-decode. A finer-grained per-batch dispatch would require
+    # upstream architecture change OR the proper P67 multi-query kernel.
+    # Reference: noonghunna #40880 + Genesis investigation 2026-04-25.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
+    ) -> AttentionCGSupport:
+        """[Genesis P65 v2] Context-aware downgrade for spec-decode only."""
+        if vllm_config.speculative_config is not None:
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        return cls._cudagraph_support
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
