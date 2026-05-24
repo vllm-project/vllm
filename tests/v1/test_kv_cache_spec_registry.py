@@ -53,7 +53,6 @@ def make_vllm_config() -> VllmConfig:
     )
 
 
-# register all kvcache specs in enginecore process.
 vllm_config = make_vllm_config()
 register_all_kvcache_specs(vllm_config)
 

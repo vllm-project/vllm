@@ -40,6 +40,26 @@ class KVCacheSpecRegistry:
     """Global registry for KVCacheSpec types and their associated managers."""
 
     @classmethod
+    def _ensure_registered(cls, vllm_config=None) -> None:
+        """
+        Run full KVCacheSpec registration if the registration is not done.
+        """
+        if _REGISTRY_KVCACHESPEC_LIST:
+            return
+
+        if vllm_config is None:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+
+        # lazy import to avoid circular dependency
+        from vllm.v1.core.single_type_kv_cache_manager import (
+            register_all_kvcache_specs,
+        )
+
+        register_all_kvcache_specs(vllm_config)
+
+    @classmethod
     def create(
         cls, kvcache_spec_cls: type["KVCacheSpec"], *args, **kwargs
     ) -> "KVCacheSpec":
@@ -53,6 +73,11 @@ class KVCacheSpecRegistry:
         Returns:
             KVCacheSpec: the KVCacheSpec created
         """
+        cls._ensure_registered()
+        assert kvcache_spec_cls in _REGISTRY_KVCACHESPEC_LIST, (
+            f"KV cache spec type not registered: {kvcache_spec_cls}. "
+            "Please register it using @register_kv_cache_spec decorator."
+        )
         cur_spec_cls = _REGISTRY_KVCACHESPEC_LIST[kvcache_spec_cls].kvcache_spec_cls
         return cur_spec_cls(*args, **kwargs)
 
@@ -79,6 +104,16 @@ class KVCacheSpecRegistry:
         )
         if uniform_type_base_spec is None:
             uniform_type_base_spec = kvcache_spec_cls
+        if kvcache_spec_cls in _REGISTRY_KVCACHESPEC_LIST:
+            registered_spec = _REGISTRY_KVCACHESPEC_LIST[kvcache_spec_cls]
+            is_same_registration = (
+                manager_class == registered_spec.manager_class
+                and uniform_type_base_spec == registered_spec.uniform_type_base_spec
+            )
+            assert is_same_registration, (
+                f"Conflicting registration for KVCacheSpec "
+                f": {kvcache_spec_cls.__name__}"
+            )
 
         _REGISTRY_KVCACHESPEC_LIST[kvcache_spec_cls] = KVCacheSpecMetadata(
             kvcache_spec_cls=kvcache_spec_cls,

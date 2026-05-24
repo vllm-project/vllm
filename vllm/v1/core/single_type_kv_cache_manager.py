@@ -1278,8 +1278,6 @@ def register_all_kvcache_specs(vllm_config):
     )
 
     # FullAttentionSpec subclasses — grouped with FullAttentionSpec
-    # TODO(Mengqing): make sure the uniform_type_base_spec
-    # of TQFullAttentionSpec is FullAttentionSpec
     KVCacheSpecRegistry.register(
         TQFullAttentionSpec,
         FullAttentionManager,
