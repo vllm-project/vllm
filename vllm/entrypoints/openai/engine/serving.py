@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
-import msgspec
 from fastapi import Request
 from openai.types.responses import ToolChoiceFunction
 from pydantic import ConfigDict, TypeAdapter, ValidationError
@@ -427,15 +426,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
         """Wrap a `create_*` coroutine so that, if it raises or returns an
         ErrorResponse (i.e. the request never reached the engine), the KV
         connector is notified to free any pinned remote-prefill blocks."""
-        if request.kv_transfer_params is not None:
-            try:
-                msgspec.msgpack.encode(request.kv_transfer_params)
-            except (OverflowError, TypeError, ValueError) as e:
-                close = getattr(awaitable, "close", None)
-                if close is not None:
-                    close()
-                return self.create_error_response(e)  # type: ignore[return-value]
-
         kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
         if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
             return await awaitable
