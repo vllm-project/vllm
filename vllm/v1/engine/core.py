@@ -604,6 +604,9 @@ class EngineCore:
         # visible to the garbage collector again. Without this, deleting
         # the engine in-process (e.g. unit tests) leaks GPU memory.
         gc.unfreeze()
+        # Tear down distributed state initialized in this EngineCore process
+        # before it exits and release cached memory.
+        cleanup_dist_env_and_memory()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
@@ -1236,11 +1239,10 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
-        # If no model execution happened but there are waiting requests
-        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
-        # background threads (like NIXL handshake) to make progress.
-        # Without this, the tight polling loop can starve background threads.
-        if not model_executed and self.scheduler.has_unfinished_requests():
+        # If no model execution happened but there is still scheduler work
+        # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
+        # the GIL briefly to allow background transfer threads to make progress.
+        if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
 
         return model_executed
@@ -1437,6 +1439,7 @@ class EngineCoreProc(EngineCore):
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
                 dp_stats_address=self.frontend_stats_publish_address,
+                dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
