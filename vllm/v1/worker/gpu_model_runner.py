@@ -1263,7 +1263,7 @@ class GPUModelRunner(
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            self.dynamic_truncated_spec_tokens = update_scheduler_for_invalid_drafts(
+            self._dynamic_truncated_spec_tokens = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
@@ -4531,7 +4531,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
-                dynamic_truncated_spec_tokens = self.dynamic_truncated_spec_tokens
+                dynamic_truncated_spec_tokens = self._dynamic_truncated_spec_tokens
                 if spec_config is not None
                 and spec_config.dynamic_verifying else None,
             )
