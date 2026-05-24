@@ -146,6 +146,12 @@ class MooncakeStoreCoordinator:
         spec would populate chunk ``i`` locally at length ``token_len``
         (e.g. SWA / Mamba tail-only).
         """
+        # ``apply_eagle=False`` because ``token_len`` is already the
+        # eagle-pruned hit length returned by ``client.lookup``. Re-applying
+        # the pop here would shorten the mask by one extra block; the recv
+        # thread would then silently skip the trailing chunk yielded by
+        # ``db.process_tokens`` and leave that block uninitialized in the
+        # local KV pool.
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
