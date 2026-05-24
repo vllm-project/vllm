@@ -1630,10 +1630,16 @@ class OpenAIServingChat(OpenAIServing):
         shape need to expose equivalent state here, or provide a generic flush
         hook, so requested-stop handling can preserve their buffered text.
         """
+        current_tool_id = getattr(tool_parser, "current_tool_id", None)
+        has_current_tool = (
+            isinstance(current_tool_id, int)
+            and not isinstance(current_tool_id, bool)
+            and current_tool_id >= 0
+        ) or (isinstance(current_tool_id, str) and bool(current_tool_id))
         return bool(
             getattr(tool_parser, "prev_tool_call_arr", None)
             or getattr(tool_parser, "streamed_args_for_tool", None)
-            or getattr(tool_parser, "current_tool_id", -1) >= 0
+            or has_current_tool
         )
 
     @staticmethod

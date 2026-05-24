@@ -2329,6 +2329,44 @@ async def test_streaming_tool_parser_stop_flush_skips_streamed_content():
     assert final_choice["stop_reason"] == "a"
 
 
+def test_has_unstreamed_tool_parser_state_handles_non_integer_tool_ids():
+    """Handle parser states with missing, None, string, and integer tool IDs."""
+    qwen3coder_initial_state = SimpleNamespace(
+        prev_tool_call_arr=[],
+        streamed_args_for_tool=[],
+        current_tool_id=None,
+    )
+    qwen3coder_active_state = SimpleNamespace(
+        prev_tool_call_arr=[],
+        streamed_args_for_tool=[],
+        current_tool_id="call_abc",
+    )
+    inactive_index_state = SimpleNamespace(
+        prev_tool_call_arr=[],
+        streamed_args_for_tool=[],
+        current_tool_id=-1,
+    )
+    active_index_state = SimpleNamespace(
+        prev_tool_call_arr=[],
+        streamed_args_for_tool=[],
+        current_tool_id=0,
+    )
+    missing_tool_id_state = SimpleNamespace(
+        prev_tool_call_arr=[],
+        streamed_args_for_tool=[],
+    )
+
+    assert not OpenAIServingChat._has_unstreamed_tool_parser_state(
+        missing_tool_id_state
+    )
+    assert not OpenAIServingChat._has_unstreamed_tool_parser_state(
+        qwen3coder_initial_state
+    )
+    assert OpenAIServingChat._has_unstreamed_tool_parser_state(qwen3coder_active_state)
+    assert not OpenAIServingChat._has_unstreamed_tool_parser_state(inactive_index_state)
+    assert OpenAIServingChat._has_unstreamed_tool_parser_state(active_index_state)
+
+
 class TestCreateRemainingArgsDelta:
     """Tests for _create_remaining_args_delta helper function.
 
