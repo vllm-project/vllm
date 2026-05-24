@@ -610,28 +610,10 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        # Enforce the connector contract at the boundary:
-                        # ext_tokens must be in [0, request.num_tokens -
-                        # num_new_local_computed_tokens]. Without this an
-                        # out-of-contract value (negative — see #43031, or
-                        # over-large) silently flows into PrefillStats and
-                        # crashes the engine downstream (e.g. Prometheus
-                        # Counter.inc() rejects negatives), making the
-                        # connector bug hard to diagnose. This earlier check
-                        # mirrors the existing combined-sum invariant a few
-                        # lines below (`num_computed_tokens <= request.num_tokens`).
                         assert (
                             0
                             <= ext_tokens
                             <= request.num_tokens - num_new_local_computed_tokens
-                        ), (
-                            f"KV connector {type(self.connector).__name__} "
-                            f"returned {ext_tokens} matched tokens, which "
-                            f"violates 0 <= ext_tokens <= "
-                            f"{request.num_tokens - num_new_local_computed_tokens} "
-                            f"(request.num_tokens={request.num_tokens}, "
-                            f"num_new_local_computed_tokens="
-                            f"{num_new_local_computed_tokens})"
                         )
 
                         num_external_computed_tokens = ext_tokens
