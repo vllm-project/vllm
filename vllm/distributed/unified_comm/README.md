@@ -15,7 +15,7 @@ inference (Qwen2.5-7B-Instruct, random-online, 200 prompts, 0 failures).
 
 ## Architecture
 
-```
+```text
                 +-----------------------------------+
                 |  GroupCoordinator (vllm/upstream) |
                 |  _all_reduce_out_place(...)       |
@@ -47,7 +47,7 @@ inference (Qwen2.5-7B-Instruct, random-online, 200 prompts, 0 failures).
 ```
 
 | Layer | Responsibility | Key types |
-|---|---|---|
+| --- | --- | --- |
 | 1 - `CommBackend` | hide library-level differences | `CommBackend`, `NCCLBackend`, `HCCLBackend`, `CommBackendRegistry` |
 | 2 - `CollectiveOps` | device-agnostic collectives, lifecycle | `CollectiveGroup`, `CollectiveOps`, `ReduceOp` |
 | 3 - `TransferPlane` | unified transfers (KV / EC / weight) | `TransferPlane`, `TransferPlaneRegistry`, `TransferType` |
@@ -103,7 +103,7 @@ export UNIFIED_COMM_ENABLED=1
 Optional knobs:
 
 | Variable | Default | Effect |
-|---|---|---|
+| --- | --- | --- |
 | `UNIFIED_COMM_ENABLED` | `0` | master switch; everything else has no effect when this is off |
 | `UNIFIED_COMM_USE_DIRECT_HCCL` | `0` | (HCCL only) bypass `torch.distributed` and call `libhccl.so` directly via `pyhccl_wrapper` |
 | `UNIFIED_COMM_USE_DIRECT_NCCL` | `0` | (NCCL only) bypass `torch.distributed` and call `libnccl.so` directly |
@@ -125,7 +125,7 @@ emitted; the default code path resumes silently.
 ## End-to-end validation
 
 | metric | value |
-|---|---|
+| --- | --- |
 | HW | Ascend 910B2 x 2 |
 | Model | Qwen2.5-7B-Instruct, FP16, TP=2 |
 | Workload | random-online, input=1024, output=256, num_prompts=200, rate=1.0 |
