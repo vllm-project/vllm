@@ -172,21 +172,26 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+
+    if not current_platform.is_cuda():
+        return backend, "triton"
+
     head_k_dim = getattr(
         vllm_config.model_config.hf_config, "linear_key_head_dim", None
     )
-    is_cuda = current_platform.is_cuda()
 
     supports_flashinfer = False
-    if is_cuda and current_platform.is_device_capability(90):
+    supports_cutedsl = False
+
+    if current_platform.is_device_capability(90):
         supports_flashinfer = True
     elif (
-        is_cuda
-        and current_platform.is_device_capability_family(100)
+        current_platform.is_device_capability_family(100)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
         supports_flashinfer = _is_libs_cu13_install_intact()
+        supports_cutedsl = True
         if not supports_flashinfer:
             logger.warning_once(
                 "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
@@ -198,13 +203,6 @@ def _resolve_gdn_prefill_backend(
                 "to Triton/FLA. Repair with: pip install --force-reinstall "
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
-
-    supports_cutedsl = (
-        is_cuda
-        and current_platform.is_device_capability_family(100)
-        and head_k_dim == 128
-        and current_platform.get_cuda_runtime_major() >= 13
-    )
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
