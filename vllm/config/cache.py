@@ -230,6 +230,10 @@ class CacheConfig:
         if self.block_size is None:
             object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
         else:
+            if self.block_size <= 0:
+                raise ValueError(
+                    f"block_size must be a positive integer, got {self.block_size}."
+                )
             object.__setattr__(self, "user_specified_block_size", True)
         if self.mamba_block_size is not None:
             object.__setattr__(self, "user_specified_mamba_block_size", True)
