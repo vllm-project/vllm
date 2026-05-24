@@ -769,7 +769,7 @@ class ParallelConfig:
 
         return get_hash_factors(self, ignored_factors)
 
-    def compute_hash(self):
+    def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
