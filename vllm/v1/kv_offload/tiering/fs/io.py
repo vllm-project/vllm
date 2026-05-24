@@ -17,9 +17,11 @@ _thread_local = threading.local()
 
 def _get_tmp_suffix() -> str:
     """Generate a thread-local unique suffix for temporary files."""
-    if not hasattr(_thread_local, "tmp_suffix"):
+    try:
+        return _thread_local.tmp_suffix
+    except AttributeError:
         _thread_local.tmp_suffix = f"_{random.randint(0, 2**63 - 1)}.tmp"
-    return _thread_local.tmp_suffix
+        return _thread_local.tmp_suffix
 
 
 def _ensure_dirs(path: str) -> None:

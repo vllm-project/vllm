@@ -139,3 +139,12 @@ class FileSystemTierManager(SecondaryTierManager):
             JobResult(job_id=job_id, success=success)
             for job_id, success in self._pool.get_finished()
         )
+
+    def shutdown(self) -> None:
+        """
+        Release resources held by this tier.
+
+        Shuts down the thread pool, clearing pending tasks and waiting for
+        active threads to complete.
+        """
+        self._pool.shutdown(wait=True)

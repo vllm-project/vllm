@@ -99,7 +99,7 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
 def fs_tier(tmp_path):
     tensor = torch.zeros((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
     mock_view = memoryview(tensor.numpy())
-    return FileSystemTierManager(
+    tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_view,
         tier_type="fs_python",
@@ -107,6 +107,8 @@ def fs_tier(tmp_path):
         n_read_threads=4,
         n_write_threads=4,
     )
+    yield tier
+    tier.shutdown()
 
 
 # ---------------------------------------------------------------------------
