@@ -21,7 +21,6 @@ Two quantization modes:
 
 from typing import Any
 
-import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -35,6 +34,7 @@ if not has_helion():
 
 import helion.language as hl
 
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.register import register_kernel
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -49,7 +49,7 @@ _, _FP8_MAX = get_fp8_min_max()
 # ── Static per-tensor FP8 quantization ──────────────────────────────────────
 
 
-def generate_bmm_fp8_quant_inputs() -> dict[str, tuple[Any, ...]]:
+def generate_bmm_fp8_quant_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     """Generate inputs for autotuning across DeepSeek-V3/R1 MLA dimensions."""
     # DeepSeek-V3/R1 constants
     kv_lora_rank = 512
@@ -58,7 +58,7 @@ def generate_bmm_fp8_quant_inputs() -> dict[str, tuple[Any, ...]]:
     # Typical decode batch sizes
     batch_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 513, 16))
 
-    inputs = {}
+    inputs: dict[CaseKey, tuple[Any, ...]] = {}
     for N in head_counts:
         for B in batch_sizes:
             input_tensor = torch.randn(
@@ -69,15 +69,15 @@ def generate_bmm_fp8_quant_inputs() -> dict[str, tuple[Any, ...]]:
             )
             scale_tensor = torch.tensor([100.0], device="cuda", dtype=torch.float32)
 
-            config_key = f"heads_{N}_batch_{B}"
-            inputs[config_key] = (input_tensor, weight_tensor, scale_tensor)
+            key = CaseKey({"heads": N, "batch": B})
+            inputs[key] = (input_tensor, weight_tensor, scale_tensor)
 
     return inputs
 
 
 def pick_bmm_fp8_quant_config(
-    args: tuple[Any, ...], config_keys: list[str]
-) -> str | None:
+    args: tuple[Any, ...], config_keys: list[CaseKey]
+) -> CaseKey | None:
     """Pick the best pre-tuned config for given input shapes.
 
     Selection strategy:
@@ -88,25 +88,18 @@ def pick_bmm_fp8_quant_config(
     if not config_keys:
         return None
 
-    input_tensor, _weight, _scale = args
+    input_tensor = args[0]
     N = input_tensor.shape[0]  # num_heads
     B = input_tensor.shape[1]  # batch_size
 
     configs: dict[int, list[int]] = {}
     for key in config_keys:
-        if key == "default":
+        if key.is_default():
             continue
-        match = re.fullmatch(r"heads_(\d+)_batch_(\d+)", key)
-        if not match:
-            raise ValueError(
-                f"Malformed config key '{key}', "
-                f"expected format 'heads_{{int}}_batch_{{int}}'"
-            )
-        heads, batch = int(match.group(1)), int(match.group(2))
-        configs.setdefault(heads, []).append(batch)
+        configs.setdefault(key["heads"], []).append(key["batch"])
 
     if not configs:
-        return "default" if "default" in config_keys else None
+        return None
 
     # Find closest head count
     best_heads = min(configs, key=lambda h: abs(h - N))
@@ -114,7 +107,7 @@ def pick_bmm_fp8_quant_config(
     # Pick smallest batch >= B, or fall back to largest
     best_batch = next((b for b in available_batches if b >= B), available_batches[-1])
 
-    return f"heads_{best_heads}_batch_{best_batch}"
+    return CaseKey({"heads": best_heads, "batch": best_batch})
 
 
 @register_kernel(
@@ -168,14 +161,14 @@ def bmm_fp8_quant_helion(
 # ── Per-group (dynamic) FP8 quantization ────────────────────────────────────
 
 
-def generate_bmm_fp8_group_quant_inputs() -> dict[str, tuple[Any, ...]]:
+def generate_bmm_fp8_group_quant_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     """Generate inputs for autotuning across DeepSeek-V3/R1 MLA dimensions."""
     kv_lora_rank = 512
     v_head_dim = 128
     head_counts = [16, 64, 128]
     batch_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 513, 16))
 
-    inputs = {}
+    inputs: dict[CaseKey, tuple[Any, ...]] = {}
     for N in head_counts:
         for B in batch_sizes:
             input_tensor = torch.randn(
@@ -185,15 +178,15 @@ def generate_bmm_fp8_group_quant_inputs() -> dict[str, tuple[Any, ...]]:
                 N, kv_lora_rank, v_head_dim, device="cuda", dtype=torch.bfloat16
             )
 
-            config_key = f"heads_{N}_batch_{B}"
-            inputs[config_key] = (input_tensor, weight_tensor)
+            key = CaseKey({"heads": N, "batch": B})
+            inputs[key] = (input_tensor, weight_tensor)
 
     return inputs
 
 
 def pick_bmm_fp8_group_quant_config(
-    args: tuple[Any, ...], config_keys: list[str]
-) -> str | None:
+    args: tuple[Any, ...], config_keys: list[CaseKey]
+) -> CaseKey | None:
     """Pick the best pre-tuned config for given input shapes."""
     if not config_keys:
         return None
@@ -205,25 +198,18 @@ def pick_bmm_fp8_group_quant_config(
 
     configs: dict[int, list[int]] = {}
     for key in config_keys:
-        if key == "default":
+        if key.is_default():
             continue
-        match = re.fullmatch(r"heads_(\d+)_batch_(\d+)", key)
-        if not match:
-            raise ValueError(
-                f"Malformed config key '{key}', "
-                f"expected format 'heads_{{int}}_batch_{{int}}'"
-            )
-        heads, batch = int(match.group(1)), int(match.group(2))
-        configs.setdefault(heads, []).append(batch)
+        configs.setdefault(key["heads"], []).append(key["batch"])
 
     if not configs:
-        return "default" if "default" in config_keys else None
+        return None
 
     best_heads = min(configs, key=lambda h: abs(h - N))
     available_batches = sorted(configs[best_heads])
     best_batch = next((b for b in available_batches if b >= B), available_batches[-1])
 
-    return f"heads_{best_heads}_batch_{best_batch}"
+    return CaseKey({"heads": best_heads, "batch": best_batch})
 
 
 @register_kernel(
