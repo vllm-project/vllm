@@ -8,6 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -66,17 +67,22 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
-    # Three aux streams: one per non-default input GEMM in
-    # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
-    # (compressor kv_score, indexer.weights_proj, indexer.compressor
-    # kv_score). fused_wqa_wkv stays on the default stream.
-    #
-    # ROCm uses the same attention-side stream choreography as CUDA:
-    # c4a layers overlap indexer, main KV compression, and SWA insertion;
-    # c128a layers overlap main KV compression and SWA insertion.
-    # XPU keeps the serial fallback.
     if current_platform.is_rocm():
-        return [torch.cuda.Stream() for _ in range(3)]
+        if (
+            not envs.VLLM_ROCM_DSV4_CSA_MULTISTREAM
+            or envs.VLLM_ROCM_DSV4_CSA_MS_STRATEGY.lower() == "off"
+        ):
+            return None
+        # SGLang creates five streams for DeepSeek-V4: three top-level
+        # preparation branches and two C4-indexer sub-branches. vLLM keeps
+        # SWA insertion fused with q preparation, but uses the same hierarchy:
+        # [0] main compressor, [1] C4 indexer, [2:4] indexer sub-branches.
+        return [
+            torch.cuda.Stream(
+                priority=envs.VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY
+            )
+            for _ in range(5)
+        ]
     if current_platform.is_xpu():
         return None
     return [torch.cuda.Stream() for _ in range(3)]
@@ -797,11 +803,21 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
-            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
-            # free here (outer GEMMs joined) for the inner overlap of
-            # wq_b+fused_indexer_q_rope_quant vs compressor.
+            # NVIDIA uses aux_stream_list[2] for the legacy inner overlap. ROCm
+            # SGLang-style decode uses aux_stream_list[2:4] for the C4 indexer
+            # q/weights sub-branches while the outer indexer branch runs on
+            # aux_stream_list[1].
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
+            )
+            indexer_aux_streams = (
+                aux_stream_list[2:4]
+                if (
+                    current_platform.is_rocm()
+                    and aux_stream_list is not None
+                    and len(aux_stream_list) >= 5
+                )
+                else None
             )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
@@ -814,6 +830,7 @@ class DeepseekV4Attention(nn.Module):
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
                 aux_stream=indexer_aux_stream,
+                aux_streams=indexer_aux_streams,
             )
 
         mla_modules = DeepseekV4MLAModules(

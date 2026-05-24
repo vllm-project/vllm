@@ -31,7 +31,9 @@ Repro commands used on ROCm:
 
 Finding from the repro:
   - graph mode preserves separate ROCm queues for the representative AITER and
-    BF16 GEMM branches;
+    BF16 GEMM branches, but the tested decode-sized kernels did not produce
+    useful timestamp overlap, which points to kernel resource contention rather
+    than Python stream ownership as the first bottleneck;
   - compile_pair_graph collapses the same representative kernels onto ROCm
     stream 0 / queue 1 during graph replay, exposing the non-overlap failure
     mode seen in vLLM-like compiled scheduling.
@@ -269,6 +271,7 @@ def _compile_pair_runner(
     fn0: KernelFn,
     fn1: KernelFn,
     concurrent: bool,
+    disable_scheduler_compile: bool = False,
 ) -> KernelFn:
     stream0 = torch.cuda.Stream()
     stream1 = torch.cuda.Stream()
@@ -276,6 +279,8 @@ def _compile_pair_runner(
     def pair_run() -> tuple[Any, Any]:
         return _run_pair(fn0, fn1, concurrent, stream0, stream1)
 
+    if disable_scheduler_compile:
+        pair_run = torch.compiler.disable(pair_run)
     return _compile_kernel(pair_run)
 
 
@@ -505,6 +510,7 @@ def main() -> None:
             "compile_graph",
             "compile_pair",
             "compile_pair_graph",
+            "disabled_compile_pair_graph",
             "both",
             "all",
         ],
@@ -512,8 +518,9 @@ def main() -> None:
         help=(
             "Measure eager forced streams, graph replay, torch.compile branch "
             "functions, compiled branches under graph replay, a compiled whole "
-            "pair scheduler, the compiled scheduler under graph replay, or all "
-            "modes."
+            "pair scheduler, the compiled scheduler under graph replay, a "
+            "torch.compiler.disable-protected scheduler under graph replay, or "
+            "all modes."
         ),
     )
     parser.add_argument(
@@ -835,6 +842,72 @@ def main() -> None:
                 results["compile_pair_graph"] = compile_pair_graph_result
             except Exception as exc:
                 results["compile_pair_graph"] = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        if _mode_enabled(args.mode, "disabled_compile_pair_graph"):
+            try:
+                disabled_seq_pair = _compile_pair_runner(
+                    fn0,
+                    fn1,
+                    concurrent=False,
+                    disable_scheduler_compile=True,
+                )
+                disabled_conc_pair = _compile_pair_runner(
+                    fn0,
+                    fn1,
+                    concurrent=True,
+                    disable_scheduler_compile=True,
+                )
+                disabled_pair_graph_seq_ms = _graph_runner_time_ms(
+                    disabled_seq_pair, iterations=args.repeats
+                )
+                disabled_pair_graph_conc_ms = _graph_runner_time_ms(
+                    disabled_conc_pair, iterations=args.repeats
+                )
+                disabled_pair_graph_overlap_pct = (
+                    100.0
+                    * (
+                        1.0
+                        - disabled_pair_graph_conc_ms / disabled_pair_graph_seq_ms
+                    )
+                    if disabled_pair_graph_seq_ms
+                    else 0.0
+                )
+                disabled_pair_graph_result = {
+                    "sequential_ms": disabled_pair_graph_seq_ms,
+                    "concurrent_ms": disabled_pair_graph_conc_ms,
+                    "overlap_pct": disabled_pair_graph_overlap_pct,
+                }
+                if args.profile_repeats > 0 and (
+                    args.mode == "disabled_compile_pair_graph"
+                    or args.profile_aggregate
+                ):
+                    disabled_profile_pair = _compile_pair_runner(
+                        profile_fn0,
+                        profile_fn1,
+                        concurrent=True,
+                        disable_scheduler_compile=True,
+                    )
+                    disabled_pair_graph_trace = _profile_runner_graph_trace(
+                        disabled_profile_pair,
+                        args.profile_dir,
+                        name,
+                        "disabled_compile_pair_graph",
+                        iterations=args.profile_repeats,
+                    )
+                    disabled_pair_graph_result.update({
+                        "trace": str(disabled_pair_graph_trace),
+                        **_summarize_trace(disabled_pair_graph_trace),
+                    })
+                elif args.profile_repeats > 0:
+                    disabled_pair_graph_result["profile_note"] = (
+                        "disabled_compile_pair_graph trace skipped in aggregate "
+                        "mode; use --mode disabled_compile_pair_graph or pass "
+                        "--profile-aggregate"
+                    )
+                results["disabled_compile_pair_graph"] = disabled_pair_graph_result
+            except Exception as exc:
+                results["disabled_compile_pair_graph"] = {
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 

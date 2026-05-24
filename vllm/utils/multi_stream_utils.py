@@ -88,9 +88,11 @@ def execute_in_parallel(
 
     start_event fans out from the current stream to every launched aux stream;
     done_events[i] is recorded after aux_fns[i] so the current stream joins
-    before returning. Falls back to sequential execution on the current stream
-    when aux_streams is None or enable is False; in that case default_fn runs
-    first, then aux_fns in order.
+    before returning. The default-stream function is enqueued before the aux
+    functions so the critical path is not delayed by CPU launch overhead from
+    side-stream branches. Falls back to sequential execution on the current
+    stream when aux_streams is None or enable is False; in that case default_fn
+    runs first, then aux_fns in order.
 
     Args:
         default_fn: Callable for the default (current) stream.
@@ -125,6 +127,8 @@ def execute_in_parallel(
     pending: list[tuple[torch.cuda.Event, Any]] = []
 
     start_event.record(current_stream)
+    default_result = default_fn()
+
     for i, fn in enumerate(aux_fns):
         if fn is None:
             continue
@@ -134,8 +138,6 @@ def execute_in_parallel(
             aux_results[i] = fn()
             done_events[i].record(aux_stream)
         pending.append((done_events[i], aux_results[i]))
-
-    default_result = default_fn()
 
     for ev, result in pending:
         current_stream.wait_event(ev)

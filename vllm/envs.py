@@ -257,6 +257,21 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_ROCM_DSV4_CSA_MULTISTREAM: bool = False
+    VLLM_ROCM_DSV4_CSA_MS_STRATEGY: Literal["off", "indexer_only", "sglang"] = (
+        "sglang"
+    )
+    VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE: int = 1
+    VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE: int = 32
+    VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES: set[Literal["none", "piecewise", "full"]] = {
+        "none",
+        "piecewise",
+    }
+    VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR: bool = True
+    VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS: bool = False
+    VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER: bool = True
+    VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS: bool = True
+    VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY: int = 0
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1877,6 +1892,48 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # ROCm-only opt-in for DeepSeek-V4 CSA decode multi-stream overlap.
+    # The "sglang" strategy overlaps C4 indexer and compressor preparation
+    # branches with fine-grained event joins. The deferred projection and
+    # sub-branch knobs are separate A/B controls because ROCm graph capture and
+    # hipBLASLt ordering differ by PyTorch/ROCm release. "indexer_only" keeps
+    # the conservative single indexer branch path for A/B testing.
+    "VLLM_ROCM_DSV4_CSA_MULTISTREAM": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "0"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_STRATEGY": env_with_choices(
+        "VLLM_ROCM_DSV4_CSA_MS_STRATEGY",
+        "sglang",
+        ["off", "indexer_only", "sglang"],
+        case_sensitive=False,
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE": lambda: int(
+        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE", "1")
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE": lambda: int(
+        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE", "32")
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES": env_set_with_choices(
+        "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES",
+        ["none", "piecewise"],
+        ["none", "piecewise", "full"],
+        case_sensitive=False,
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR", "1"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS", "0"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER", "1"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS", "1"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY": lambda: int(
+        os.getenv("VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY", "0")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
