@@ -2833,3 +2833,33 @@ def test_sibling_registering_after_parent_pulled_is_freed_at_registration(
     # Then the late sibling is freed via get_finished, not stranded.
     assert late_sibling in done_sending
     assert late_sibling not in worker._reqs_to_process
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    _QueueingFakeNixlWrapper,
+)
+def test_notification_arriving_before_registration_settles_on_registration(
+    default_vllm_config, dist_init
+):
+    """The pull-complete notif can race start_load_kv; before the fix it was
+    dropped and the request stranded until the 480s expiry."""
+    # Given the consumer's pull-complete notif arrives before the producer
+    # has registered the request in _reqs_to_process.
+    worker = _build_producer_worker()
+    req_id = "7_cmpl-35dba481-9b73-4fce-8636-7a5d40f3167a-0-b48d1be7"
+    worker.nixl_wrapper.queue_notif(req_id, n_consumers=1)
+    worker.get_finished()
+    assert req_id in worker._notif_n_consumers
+    assert worker.consumer_notification_counts_by_req[req_id] == 1
+
+    # When the producer registers the request via start_load_kv.
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {req_id}
+    worker.start_load_kv(metadata)
+    done_sending, _ = worker.get_finished()
+
+    # Then the req is released instead of stranding until the 480s expiry.
+    assert req_id in done_sending
+    assert req_id not in worker._notif_n_consumers
+    assert req_id not in worker._reqs_to_process
