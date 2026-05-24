@@ -324,24 +324,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             and state.dtype
             in (torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn)
         )
-        import os as _os
-        if _os.environ.get("SSU_DBG", "0") == "1":
-            _ckpt_none = [a is None for a in checkpointing_args]
-            _sbi_ok = self._checkpointing_state_indices(state_batch_indices) is not None
-            _sbi_shape = (
-                tuple(state_batch_indices.shape) if state_batch_indices is not None else None
-            )
-            print(
-                f"[SSU_DBG] can_checkpoint={can_checkpoint} "
-                f"num_accepted_tokens_None={num_accepted_tokens is None} "
-                f"ckpt_args_None={_ckpt_none} "
-                f"sbi_ok={_sbi_ok} sbi_shape={_sbi_shape} "
-                f"state.dtype={state.dtype} state.shape={tuple(state.shape)} "
-                f"state_scales_None={state_scales is None} "
-                f"state_scales_shape={(tuple(state_scales.shape) if state_scales is not None else None)} "
-                f"state_scales_dtype={(state_scales.dtype if state_scales is not None else None)}",
-                flush=True,
-            )
         if can_checkpoint:
             assert old_x is not None
             assert old_B is not None
