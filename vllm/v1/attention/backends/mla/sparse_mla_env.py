@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Environment controls for the portable Triton sparse MLA path."""
 
+import os
+
 import torch
 
 import vllm.envs as envs
@@ -40,6 +42,32 @@ def is_triton_sparse_mla_enabled(device: torch.device) -> bool:
 
 def triton_sparse_mla_topk_chunk_size() -> int:
     return envs.VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE
+
+
+def triton_sparse_mla_prefill_topk_chunk_size(
+    *,
+    combined_topk_size: int,
+    compress_ratio: int,
+    request_count: int,
+) -> int:
+    """Choose the Triton sparse MLA prefill topk chunk size.
+
+    Keep explicit user overrides authoritative. The auto path keeps the
+    previous 512-token chunk except for the SM12x C128A multi-request shape
+    that is unstable near 128K context.
+    """
+
+    configured_topk = triton_sparse_mla_topk_chunk_size()
+    if os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE") is not None:
+        return min(combined_topk_size, configured_topk)
+    if (
+        current_platform.is_device_capability_family(120)
+        and compress_ratio == 128
+        and request_count > 1
+        and combined_topk_size > 1024
+    ):
+        configured_topk = min(configured_topk, 256)
+    return min(combined_topk_size, configured_topk)
 
 
 def triton_sparse_mla_query_chunk_size() -> int:
