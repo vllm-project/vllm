@@ -24,7 +24,6 @@ import torch.nn.functional as F
 from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.gemma4 import (
     Gemma4Config,
     Gemma4Processor,
@@ -1334,22 +1333,12 @@ class Gemma4VisionEncoder(nn.Module):
             ]
         )
 
-    def _make_attention_mask(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        seq_len = attention_mask.shape[1]
-        return attention_mask[:, None, None, :].expand(
-            attention_mask.shape[0], 1, seq_len, seq_len
-        )
-
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         pixel_position_ids: torch.Tensor,
-    ) -> BaseModelOutputWithPast:
+    ) -> torch.Tensor:
         seq_len = attention_mask.shape[1]
         attention_mask = attention_mask[:, None, None, :].expand(
             attention_mask.shape[0], 1, seq_len, seq_len
@@ -1365,7 +1354,7 @@ class Gemma4VisionEncoder(nn.Module):
                 position_ids=pixel_position_ids,
             )
 
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
+        return hidden_states
 
 
 class Gemma4VisionModel(nn.Module):
@@ -1399,7 +1388,7 @@ class Gemma4VisionModel(nn.Module):
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
         output_length: int | None = None,
-    ) -> BaseModelOutputWithPast:
+    ) -> torch.Tensor:
         pooling_kernel_size = self.config.pooling_kernel_size
         if output_length is None:
             output_length = pixel_values.shape[-2] // (
@@ -1410,14 +1399,14 @@ class Gemma4VisionModel(nn.Module):
         inputs_embeds = self.patch_embedder(
             pixel_values, pixel_position_ids, padding_positions
         )
-        output = self.encoder(
+        hidden_states = self.encoder(
             inputs_embeds=inputs_embeds,
             attention_mask=~padding_positions,
             pixel_position_ids=pixel_position_ids,
         )
 
         hidden_states, pooler_mask = self.pooler(
-            hidden_states=output.last_hidden_state,
+            hidden_states=hidden_states,
             pixel_position_ids=pixel_position_ids,
             padding_positions=padding_positions,
             output_length=output_length,
@@ -1427,7 +1416,7 @@ class Gemma4VisionModel(nn.Module):
         if self.config.standardize:
             hidden_states = (hidden_states - self.std_bias) * self.std_scale
 
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
+        return hidden_states
 
 
 # ---------------------------------------------------------------------------
@@ -1786,12 +1775,11 @@ class Gemma4ForConditionalGeneration(
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
                 inputs_embeds = vt.patch_embedder(pv_tensor, pp_tensor, pad_tensor)
-                encoder_outputs = vt.encoder(
+                hidden_states = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
                     pixel_position_ids=pp_tensor,
                 )
-                hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
                     last_hidden_states_map[orig_idx] = hidden_states[i]
@@ -1894,12 +1882,12 @@ class Gemma4ForConditionalGeneration(
             pad_chunk = padding_positions[i : i + max_batch_size]
 
             inputs_embeds = vt.patch_embedder(pv_chunk, pp_chunk, pad_chunk)
-            encoder_outputs = vt.encoder(
+            hidden_states = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
                 pixel_position_ids=pp_chunk,
             )
-            last_hidden_states_list.append(encoder_outputs.last_hidden_state)
+            last_hidden_states_list.append(hidden_states)
 
         last_hidden_states = torch.cat(last_hidden_states_list, dim=0)
 
