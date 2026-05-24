@@ -66,6 +66,7 @@ def _minimax_qk_norm_fusion(
         workspace is not None
         and tp_world > 1
         and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
+        and _MINIMAX_FUSED_AR_RMS_QK is not None
     ):
         return _MINIMAX_FUSED_AR_RMS_QK(
             qkv,
