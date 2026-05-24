@@ -72,6 +72,66 @@ def _reset_checkpointing_trackers_kernel(
 
 
 @triton.jit
+def _make_old_cumAdt_cumulative_kernel(
+    old_cumAdt,        # (cache, 2, nheads, max_window) f32, indexed by cache_slot
+    state_batch_indices,    # (n_slots,) int32; batch_slot -> cache_slot
+    cache_buf_idx,          # (cache_size,) int32; pre-kernel value, indexed by cache_slot
+    prev_num_accepted_tokens,  # (cache_size,) int32; pre-kernel value, indexed by cache_slot
+    cumAdt_stride_seq,
+    cumAdt_stride_dbuf,
+    cumAdt_stride_head,
+    seq_len: tl.constexpr,
+    max_window: tl.constexpr,
+    nheads: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+    n_slots: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+) -> None:
+    """Convert the per-step `smem.cumAdt[0]` the kernel just wrote at
+    slot `prev_k_pre` into the running cumulative cumAdt-up-to-slot.
+
+    The FlashInfer kernel writes `smem.cumAdt[lane]` which is the inclusive
+    prefix sum across the NPREDICTED tokens *in the current call only*. For
+    non-spec single-token decode (NPREDICTED == 1) that means each call
+    stores a per-step value at its new slot, but the commit step reads
+    `total_old_cumAdt = old_cumAdt[prev_k - 1]` and treats it as cumulative
+    over the whole accumulated window. Without this update the commit math
+    inverts the sign of cross-slot exponent differences for some heads and
+    produces +/-inf/NaN. We patch the just-written slot here so the running
+    cumulative is correct for the next commit.
+
+    Skips slots where:
+      - the cache slot is padded,
+      - the kernel committed this step (`prev_k + seq_len > max_window`):
+        the kernel wrote to slot 0 of the OTHER buffer, which is already
+        cumulative for that 1-token new window,
+      - `prev_k == 0`: slot 0 of the current buffer is already cumulative
+        for the first token of the window.
+    """
+    slot = tl.program_id(0)
+    if slot >= n_slots:
+        return
+    cache_slot = tl.load(state_batch_indices + slot)
+    if cache_slot == pad_slot_id:
+        return
+    prev_k = tl.load(prev_num_accepted_tokens + cache_slot)
+    committed = (prev_k + seq_len) > max_window
+    if committed or prev_k < 1:
+        return
+    buf = tl.load(cache_buf_idx + cache_slot)
+    h_offsets = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask = h_offsets < nheads
+    base = (
+        cache_slot * cumAdt_stride_seq
+        + buf * cumAdt_stride_dbuf
+        + h_offsets * cumAdt_stride_head
+    )
+    cur = tl.load(old_cumAdt + base + prev_k, mask=mask)
+    prev = tl.load(old_cumAdt + base + (prev_k - 1), mask=mask)
+    tl.store(old_cumAdt + base + prev_k, cur + prev, mask=mask)
+
+
+@triton.jit
 def _copy_checkpointing_slots_kernel(
     tensor,
     src_indices,
@@ -368,6 +428,17 @@ class FlashInferSSUBackend(MambaSSUBackend):
                         max_seqlen=None,
                         state_scale=state_scales,
                     )
+                    # Fold the per-step value the kernel just wrote into the
+                    # running cumulative cumAdt for the next commit.
+                    self._make_old_cumAdt_cumulative(
+                        old_cumAdt,
+                        cache_buf_idx,
+                        prev_num_accepted_tokens,
+                        chunk_indices,
+                        ckpt_max_seqlen,
+                        old_x.size(1),
+                        null_block_id,
+                    )
                     self._update_checkpointing_trackers(
                         cache_buf_idx,
                         prev_num_accepted_tokens,
@@ -404,6 +475,17 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 cu_seqlens=ckpt_cu_seqlens,
                 max_seqlen=kernel_max_seqlen,
                 state_scale=state_scales,
+            )
+            # Fold the per-step value the kernel just wrote into the running
+            # cumulative cumAdt for the next commit.
+            self._make_old_cumAdt_cumulative(
+                old_cumAdt,
+                cache_buf_idx,
+                prev_num_accepted_tokens,
+                kernel_state_indices,
+                ckpt_max_seqlen,
+                old_x.size(1),
+                null_block_id,
             )
             self._update_checkpointing_trackers(
                 cache_buf_idx,
@@ -568,6 +650,46 @@ class FlashInferSSUBackend(MambaSSUBackend):
             n_slots,
             cu_seqlens is not None,
             BLOCK=block,
+        )
+
+    @staticmethod
+    def _make_old_cumAdt_cumulative(
+        old_cumAdt: torch.Tensor,
+        cache_buf_idx: torch.Tensor,
+        prev_num_accepted_tokens: torch.Tensor,
+        state_batch_indices: torch.Tensor,
+        seq_len: int,
+        max_window: int,
+        pad_slot_id: int,
+    ) -> None:
+        """Run after `_checkpointing_kernel` (and before
+        `_update_checkpointing_trackers`) to fold the new per-step
+        `smem.cumAdt[0]` into a running cumulative cumAdt. See the kernel
+        docstring for why this is needed.
+
+        Reads `prev_num_accepted_tokens` and `cache_buf_idx` (which still
+        hold their pre-kernel values at this point) to locate the slot that
+        was just written.
+        """
+        if state_batch_indices is None or state_batch_indices.numel() == 0:
+            return
+        n_slots = state_batch_indices.numel()
+        nheads = old_cumAdt.size(-2)
+        block_h = max(16, min(nheads, 128))
+        _make_old_cumAdt_cumulative_kernel[(n_slots, triton.cdiv(nheads, block_h))](
+            old_cumAdt,
+            state_batch_indices,
+            cache_buf_idx,
+            prev_num_accepted_tokens,
+            old_cumAdt.stride(0),
+            old_cumAdt.stride(1),
+            old_cumAdt.stride(2),
+            seq_len,
+            max_window,
+            nheads,
+            pad_slot_id,
+            n_slots,
+            block_h,
         )
 
     @staticmethod
