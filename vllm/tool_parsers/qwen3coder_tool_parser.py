@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 import uuid
 from collections.abc import Sequence
@@ -30,7 +29,11 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_enable_structured_outputs_in_reasoning,
     get_model_structural_tag,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+)
 
 logger = init_logger(__name__)
 
@@ -121,113 +124,11 @@ class Qwen3CoderToolParser(ToolParser):
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
-        if param_value.lower() == "null":
-            return None
-
-        if param_name not in param_config:
-            if param_config != {}:
-                logger.debug(
-                    "Parsed parameter '%s' is not defined in the tool "
-                    "parameters for tool '%s', directly returning the "
-                    "string value.",
-                    param_name,
-                    func_name,
-                )
+        if not isinstance(param_value, str):
             return param_value
-
-        if (
-            isinstance(param_config[param_name], dict)
-            and "type" in param_config[param_name]
-        ):
-            param_type = str(param_config[param_name]["type"]).strip().lower()
-        elif (
-            isinstance(param_config[param_name], dict)
-            and "anyOf" in param_config[param_name]
-        ):
-            # anyOf has no top-level "type"; treat as object to trigger json.loads.
-            param_type = "object"
-        else:
-            param_type = "string"
-        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
-            return param_value
-        elif (
-            param_type.startswith("int")
-            or param_type.startswith("uint")
-            or param_type.startswith("long")
-            or param_type.startswith("short")
-            or param_type.startswith("unsigned")
-        ):
-            try:
-                return int(param_value)
-            except (ValueError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not an "
-                    "integer in tool '%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-                return param_value
-        elif param_type.startswith("num") or param_type.startswith("float"):
-            try:
-                float_param_value = float(param_value)
-                return (
-                    float_param_value
-                    if float_param_value - int(float_param_value) != 0
-                    else int(float_param_value)
-                )
-            except (ValueError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not a float "
-                    "in tool '%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-                return param_value
-        elif param_type in ["boolean", "bool", "binary"]:
-            param_value = param_value.lower()
-            if param_value not in ["true", "false"]:
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' is not a boolean "
-                    "(`true` or `false`) in tool '%s', degenerating to "
-                    "false.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-            return param_value == "true"
-        else:
-            if (
-                param_type in ["object", "array", "arr"]
-                or param_type.startswith("dict")
-                or param_type.startswith("list")
-            ):
-                try:
-                    param_value = json.loads(param_value)
-                    return param_value
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    logger.debug(
-                        "Parsed value '%s' of parameter '%s' cannot be "
-                        "parsed with json.loads in tool '%s', will try "
-                        "other methods to parse it.",
-                        param_value,
-                        param_name,
-                        func_name,
-                    )
-            try:
-                param_value = ast.literal_eval(param_value)  # safer
-            except (ValueError, SyntaxError, TypeError):
-                logger.debug(
-                    "Parsed value '%s' of parameter '%s' cannot be "
-                    "converted via Python `ast.literal_eval()` in tool "
-                    "'%s', degenerating to string.",
-                    param_value,
-                    param_name,
-                    func_name,
-                )
-            return param_value
+        param_schema = param_config.get(param_name, {})
+        param_types = extract_types_from_schema(param_schema)
+        return coerce_to_schema_type(param_value, param_types)
 
     def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
         # Extract function name
