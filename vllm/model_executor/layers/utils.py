@@ -132,11 +132,10 @@ def rocm_unquantized_gemm_impl(
 
     # Next power of 2 >= n; kernel is templated on N as a power of 2.
     n_next_pow2 = 1 << (n - 1).bit_length()
-    wavefront_width = 64  # MI3XX (CDNA3); matches Utils::get_warp_size() on device
     k_shard_size = 512  # K elements per CU per pass; matches CHUNKK in WVSPLITKRC macro
     waves_per_block = 4  # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
     ntile = 16  # MFMA output tile height; matches NTILE in kernel
-    m_tiles = (m + wavefront_width - 1) // wavefront_width
+    m_tiles = (m + 64 - 1) // 64  # 64 = MI3XX wavefront width (WARP_SIZE)
     k_shards = (k + k_shard_size - 1) // k_shard_size
     # As high as possible — but capped by waves_per_block (LDS is per-block)
     # and n_tiles (more sharers than N-tiles means unused compute).

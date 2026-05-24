@@ -1786,13 +1786,12 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  const int wavefront_width = Utils::get_warp_size();
   constexpr int k_shard_size = 512;   // K elements per CU per pass
   constexpr int waves_per_block = 4;  // wavefronts per block
   constexpr int ntile =
       16;  // MFMA output tile height (matches NTILE in kernel)
 
-  int m_tiles = (M_in + wavefront_width - 1) / wavefront_width;
+  int m_tiles = (M_in + WARP_SIZE - 1) / WARP_SIZE;
   int k_shards = (K_in + k_shard_size - 1) / k_shard_size;
 
   // Next power of 2 >= N_in; kernel is templated on N as a power of 2.
