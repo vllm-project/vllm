@@ -247,6 +247,11 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: validate-perf-benchmark-json
+    name: Validate performance benchmark JSON configs
+    entry: python tools/pre_commit/validate_perf_benchmark_json.py
+    language: python
+    files: ^\.buildkite/performance-benchmarks/tests/.*\.json$
   - id: attention-backend-docs
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
