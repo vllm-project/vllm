@@ -304,7 +304,7 @@ class Qwen3NextAttention(nn.Module):
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if not self.attn_output_gate and ops.can_use_fused_qk_norm_rope(
+        if not self.attn_output_gate and not self.dual_chunk_attention_config and ops.can_use_fused_qk_norm_rope(
             qkv,
             self.head_dim,
             getattr(self.rotary_emb, "cos_sin_cache", None),
