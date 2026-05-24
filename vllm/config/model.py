@@ -771,6 +771,15 @@ class ModelConfig:
             return value
         return handler(value)
 
+    @field_validator("max_model_len", mode="after")
+    @classmethod
+    def _check_max_model_len_positive_or_sentinel(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError(
+                "max_model_len must be a positive integer or -1 (auto), got 0."
+            )
+        return v
+
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
         return tokenizer_mode.lower()
