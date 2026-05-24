@@ -416,8 +416,8 @@ class Gemma3nAttention(nn.Module):
             getattr(self.rotary_emb, "is_neox_style", None),
         ):
             position_ids = positions.reshape(-1)
-            q_weight = self.q_norm.weight.data
-            k_weight = self.k_norm.weight.data
+            q_weight = self.q_norm.weight.data.to(qkv.dtype)
+            k_weight = self.k_norm.weight.data.to(qkv.dtype)
             ops.fused_qk_norm_rope(
                 qkv,
                 self.num_heads,
