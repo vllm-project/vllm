@@ -6,7 +6,6 @@ from typing import Any, Literal
 from pydantic import field_validator
 
 from vllm.config.utils import CompileFactors, config, get_compile_factors
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

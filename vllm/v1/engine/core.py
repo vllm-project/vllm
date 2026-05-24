@@ -23,7 +23,10 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.utils import hash_factors
-from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    stateless_destroy_torch_distributed_process_group,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
