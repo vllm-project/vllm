@@ -57,7 +57,12 @@ class GGUFModelLoader(BaseModelLoader):
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            return hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                revision=model_config.revision,
+                cache_dir=self.load_config.download_dir,
+            )
         # repo_id:quant_type
         elif "/" in model_name_or_path and ":" in model_name_or_path:
             repo_id, quant_type = model_name_or_path.rsplit(":", 1)

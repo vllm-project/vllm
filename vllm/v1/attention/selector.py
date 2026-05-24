@@ -12,7 +12,6 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
-    MAMBA_TYPE_TO_BACKEND_MAP,
     MambaAttentionBackendEnum,
 )
 
@@ -81,11 +80,6 @@ def get_attn_backend(
     else:
         block_size = None
 
-    speculative_config = vllm_config.speculative_config
-    use_non_causal = (
-        speculative_config is not None and speculative_config.method == "dflash"
-    )
-
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
@@ -97,7 +91,7 @@ def get_attn_backend(
         use_mm_prefix=use_mm_prefix,
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
-        use_non_causal=use_non_causal,
+        use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
     )
 
@@ -143,7 +137,7 @@ def _cached_get_attn_backend(
 
 
 def get_mamba_attn_backend(
-    mamba_type: str,
+    mamba_type: MambaAttentionBackendEnum,
 ) -> type[AttentionBackend]:
     """Select which mamba attention backend to use and lazily import it."""
     return _cached_get_mamba_attn_backend(mamba_type)
@@ -151,21 +145,11 @@ def get_mamba_attn_backend(
 
 @cache
 def _cached_get_mamba_attn_backend(
-    mamba_type: str,
+    mamba_type: MambaAttentionBackendEnum,
 ) -> type[AttentionBackend]:
-    assert mamba_type and isinstance(mamba_type, str)
+    assert mamba_type and isinstance(mamba_type, MambaAttentionBackendEnum)
 
-    selected_backend = None
-    try:
-        backend_name = MAMBA_TYPE_TO_BACKEND_MAP[mamba_type]
-        selected_backend = MambaAttentionBackendEnum[backend_name]
-    except KeyError as e:
-        raise ValueError(
-            f"Invalid mamba attention backend type: '{mamba_type}'. Valid "
-            f"types are: {list(MAMBA_TYPE_TO_BACKEND_MAP.keys())}"
-        ) from e
-
-    mamba_attn_backend = selected_backend.get_class()
+    mamba_attn_backend = mamba_type.get_class()
     if envs.VLLM_BATCH_INVARIANT and not mamba_attn_backend.supports_batch_invariance():
         raise RuntimeError(
             "VLLM batch_invariant mode is not supported for "

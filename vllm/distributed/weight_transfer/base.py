@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import torch
@@ -28,11 +28,7 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Base class for backend-specific weight update info."""
 
-    _: KW_ONLY
-    is_checkpoint_format: bool = True
-    """Set to True if weights are in checkpoint/original model format and need
-    layerwise processing. Set to False if weights have already been processed
-    into kernel format (repacking, renaming, etc.)."""
+    pass
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
@@ -69,7 +65,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the weight transfer engine.
@@ -77,9 +76,11 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
+            model: The local model instance which will receive the weights
         """
         self.config = config
         self.parallel_config = parallel_config
+        self.model = model
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """
