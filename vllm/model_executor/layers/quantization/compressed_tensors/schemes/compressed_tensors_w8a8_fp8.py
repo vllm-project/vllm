@@ -142,6 +142,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight_shape=(output_size_per_partition, input_size_per_partition),
             module_name=self.__class__.__name__,
         )
+        if (
+            self.is_static_input_scheme
+            and self.activation_quant_key == kFp8StaticTensorSym
+        ):
+            layer.input_quant_key = kFp8StaticTensorSym
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:

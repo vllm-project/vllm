@@ -22,7 +22,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -393,6 +396,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         compilation_config = vllm_config.compilation_config
+        self.use_fused_attn_quant = bool(compilation_config.pass_config.fuse_attn_quant)
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -443,6 +447,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -458,6 +463,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, key, value, _encode_layer_name(self.layer_name)
             )
         output_dtype = query.dtype
+        if output_scale is not None:
+            if not self.impl.fused_output_quant_supported(kFp8StaticTensorSym):
+                raise ValueError(
+                    f"{self.impl.__class__.__name__} does not support "
+                    "static FP8 attention output quantization."
+                )
+            output_dtype = current_platform.fp8_dtype()
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -504,6 +516,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 value,
                 output,
                 self.layer_name,
+                output_scale=output_scale,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
@@ -524,6 +537,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 value,
                 output,
                 encoded,
+                output_scale=output_scale,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         return output.view(-1, hidden_size)
