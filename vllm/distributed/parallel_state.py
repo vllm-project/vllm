@@ -315,6 +315,20 @@ class GroupCoordinator:
     # device communicator (if use_device_communicator=True)
     device_communicator: DeviceCommunicatorBase | None
     mq_broadcaster: Any | None  # shared memory broadcaster
+    # ============================================================
+    # [unified_comm] Optional adapter that may delegate collective
+    # ops (all_reduce / all_gather / broadcast / reduce_scatter)
+    # to the unified communication layer.
+    #
+    # - Activated only when env UNIFIED_COMM_ENABLED=1.
+    # - Returns None on any failure, callers MUST fallback safely.
+    # - Class-level defaults (None / not-built) so that subclasses
+    #   such as vllm-ascend-hust's GroupCoordinatorPatch that override
+    #   __init__ without super().__init__() still get safe defaults.
+    # - Lazy-built on first access in get_unified_adapter().
+    # ============================================================
+    _unified_adapter: Any | None = None
+    _unified_adapter_built: bool = False
 
     def __init__(
         self,
@@ -523,7 +537,73 @@ class GroupCoordinator:
         else:
             return self._all_reduce_out_place(input_)
 
+    def _get_unified_adapter(self):
+        """[unified_comm] Lazily build the adapter on first access.
+
+        Built lazily (not in __init__) so that subclasses overriding
+        __init__ without calling super() still get the adapter.
+        Subsequent calls are O(1).
+        """
+        if self._unified_adapter_built:
+            return self._unified_adapter
+        # Mark as built first so we never retry on failure within the
+        # same group instance.
+        self._unified_adapter_built = True
+        if self.world_size <= 1:
+            return None
+        try:
+            from vllm.distributed.unified_comm import UnifiedCommAdapter
+            from vllm.distributed.unified_comm.initialize import (
+                initialize_unified_comm,
+            )
+
+            # Normalize self.device — some subclasses (e.g.
+            # vllm-ascend-hust's GroupCoordinatorPatch) store it as an
+            # int from torch.npu.current_device() instead of a
+            # torch.device object.
+            dev = self.device
+            if not isinstance(dev, torch.device):
+                if isinstance(dev, int):
+                    from vllm.platforms import current_platform
+
+                    dev_type = current_platform.device_name
+                    dev = torch.device(f"{dev_type}:{dev}")
+                else:
+                    dev = torch.device(dev)
+            # Make sure the unified_comm registry is populated. Idempotent.
+            initialize_unified_comm(device_type=dev.type)
+            adapter = UnifiedCommAdapter.try_create(
+                ranks=self.ranks,
+                local_rank=self.rank,
+                device=dev,
+                existing_device_group=self.device_group,
+                existing_cpu_group=self.cpu_group,
+            )
+            if adapter is not None:
+                logger.info(
+                    "[unified_comm] adapter attached to group '%s' "
+                    "(rank=%d/%d, device=%s)",
+                    self.unique_name,
+                    self.rank_in_group,
+                    self.world_size,
+                    dev,
+                )
+            self._unified_adapter = adapter
+        except Exception as e:
+            logger.warning(
+                "[unified_comm] failed to attach adapter, fallback to default path: %s",
+                e,
+            )
+            self._unified_adapter = None
+        return self._unified_adapter
+
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        # [unified_comm] try delegated path first
+        adapter = self._get_unified_adapter()
+        if adapter is not None:
+            out = adapter.all_reduce(input_)
+            if out is not None:
+                return out
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
@@ -545,6 +625,12 @@ class GroupCoordinator:
             return self._all_gather_out_place(input_, dim)
 
     def _all_gather_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
+        # [unified_comm] try delegated path first
+        adapter = self._get_unified_adapter()
+        if adapter is not None:
+            out = adapter.all_gather(input_, dim=dim)
+            if out is not None:
+                return out
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gather(input_, dim)
@@ -583,6 +669,12 @@ class GroupCoordinator:
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
+        # [unified_comm] try delegated path first
+        adapter = self._get_unified_adapter()
+        if adapter is not None:
+            out = adapter.reduce_scatter(input_, dim=dim)
+            if out is not None:
+                return out
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatter(input_, dim)
@@ -612,6 +704,12 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return input_
+        # [unified_comm] try delegated path first
+        adapter = self._get_unified_adapter()
+        if adapter is not None:
+            out = adapter.broadcast(input_, src=src)
+            if out is not None:
+                return out
         # Broadcast.
         torch.distributed.broadcast(
             input_, src=self.ranks[src], group=self.device_group
@@ -1073,6 +1171,12 @@ class GroupCoordinator:
             self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
+        # [unified_comm] release adapter (does NOT destroy our PG since
+        # we passed existing_*_group, owns_groups=False)
+        if self._unified_adapter is not None:
+            with contextlib.suppress(Exception):
+                self._unified_adapter.destroy()
+            self._unified_adapter = None
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
         if self.device_communicator is not None:
