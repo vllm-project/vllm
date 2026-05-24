@@ -157,7 +157,7 @@ vllm serve <target-model> \
     "num_speculative_tokens": 15,
     "dynamic_verifying": "auto"
   }'
-
+```
 
 ### Notes
 
