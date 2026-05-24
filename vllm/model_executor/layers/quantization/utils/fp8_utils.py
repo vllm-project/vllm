@@ -1036,6 +1036,10 @@ def deepgemm_post_process_fp8_weight_block(
             f"bmm_batch_size must be > 0, got {g}. "
             f"This indicates TP size exceeds n_groups."
         )
+        # NOTE: This is a sanity check to catch cases where the weight output
+        # dimension is not evenly divisible by the batch size. The primary
+        # guard for n_groups % tp_size is in model.py's __init__ where
+        # is_deep_gemm_supported() is checked.
         assert wq.size(0) % g == 0, (
             f"Weight output dimension {wq.size(0)} is not evenly divisible by "
             f"bmm_batch_size {g}. This indicates n_groups is not evenly "

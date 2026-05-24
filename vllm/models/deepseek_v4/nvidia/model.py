@@ -55,6 +55,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.nvidia.ops.attention import (
     DeepseekV4Indexer,
@@ -849,6 +850,17 @@ class DeepseekV4Attention(nn.Module):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
+        # Only check when using deepgemm BMM path.
+        # If n_groups is not evenly divisible by tp_size, some groups would be
+        # lost. Guard here to avoid silent correctness issues during weight
+        # loading.
+        if self.n_groups % tp_size != 0 and is_deep_gemm_supported():
+            raise ValueError(
+                f"n_groups ({self.n_groups}) is not evenly divisible by "
+                f"tp_size ({tp_size}). This would cause groups to be lost "
+                f"in the deepgemm BMM path. Please use a TP size that "
+                f"evenly divides n_groups."
+            )
         self.window_size = config.sliding_window
         # NOTE(zyongye) Compress ratio can't be 0
         # we do this for because MTP layer is not included
