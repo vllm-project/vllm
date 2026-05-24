@@ -1117,6 +1117,7 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -1130,6 +1131,9 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
 
     compare_all_settings(
@@ -1139,6 +1143,7 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
+        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1150,6 +1155,7 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -1160,7 +1166,15 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
+
+    if force_v1_runner:
+        all_envs = [
+            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
+        ]
 
     trust_remote_code = False
     for args in all_args:
