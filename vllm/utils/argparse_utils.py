@@ -295,6 +295,21 @@ class FlexibleArgumentParser(ArgumentParser):
                     "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
                 )
 
+        # Normalize --config=value to --config value so YAML config expansion works
+        # with both spaced and equals syntax
+        normalized_args: list[str] = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg.startswith("--config="):
+                # Split --config=value into --config and value
+                normalized_args.append("--config")
+                normalized_args.append(arg[len("--config="):])
+            else:
+                normalized_args.append(arg)
+            i += 1
+        args = normalized_args
+
         if "--config" in args:
             args = self._pull_args_from_config(args)
 
