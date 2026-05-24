@@ -87,6 +87,7 @@ flag enables/disables the whole layer.
 
 The hook is intentionally **lazy** rather than constructor-based so
 that subclasses such as `vllm-ascend-hust`'s `GroupCoordinatorPatch`
+
 - which overrides `__init__` without calling `super().__init__()` -
 still pick up the adapter and the safe fallback defaults.
 
@@ -152,6 +153,7 @@ pytest tests/distributed/test_unified_comm.py -v
 ```
 
 The tests cover:
+
 - feature-flag plumbing (default off, multiple truthy/falsy spellings)
 - adapter construction returning `None` when disabled
 - numerical parity for `all_reduce`, `all_gather`, `broadcast` against
