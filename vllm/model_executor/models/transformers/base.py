@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-import sys
 from collections.abc import Callable, Iterable
 from itertools import chain
 from operator import attrgetter
@@ -268,21 +267,11 @@ class Base(
             dynamic_arg_dims,
         )
 
-        @support_torch_compile(
+        support_torch_compile(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
             is_encoder=is_encoder,
-        )
-        class SupportTorchCompileWrapper(cls): ...
-
-        # Preserve __module__ so transformers v5's source-file checks
-        # (e.g. _can_set_experts_implementation) read the original
-        # model's module instead of this file.
-        SupportTorchCompileWrapper.__module__ = cls.__module__
-
-        # Patch the class in its module
-        module = sys.modules[cls.__module__]
-        setattr(module, cls.__name__, SupportTorchCompileWrapper)
+        )(cls)
 
     def _decorate_for_torch_compile(self, **kwargs: dict):
         """
@@ -352,14 +341,6 @@ class Base(
         ccm = getattr(self.model, "_checkpoint_conversion_mapping", {})
         for source, target in ccm.items():
             orig_to_new_regex[re.compile(source)] = target
-
-        # Gemma3 checkpoints saved with older Transformers versions include an
-        # extra `vision_model` level that the current AutoModel no longer has.
-        vision_tower = getattr(self.model, "vision_tower", None)
-        if vision_tower is not None and not hasattr(vision_tower, "vision_model"):
-            orig_to_new_regex[
-                re.compile(r"^(?:model\.)?vision_tower\.vision_model\.(.+)")
-            ] = r"model.vision_tower.\1"
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
