@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -569,8 +570,8 @@ def update_ngram_gpu_tensors_incremental(
             reorder_dst.append(curr_idx)
 
     if reorder_src:
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+        src_tensor = async_tensor_h2d(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = async_tensor_h2d(reorder_dst, dtype=torch.long, device=device)
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()

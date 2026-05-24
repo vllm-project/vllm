@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -130,7 +127,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
@@ -158,7 +155,7 @@ def backend_to_kernel_cls(
         return [TritonExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
@@ -172,7 +169,7 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
             TritonOrCutlassExperts,
         )
 
@@ -188,9 +185,10 @@ def backend_to_kernel_cls(
     elif backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
+            XPUExpertsMxfp8,
         )
 
-        return [XPUExpertsFp8]
+        return [XPUExpertsFp8, XPUExpertsMxfp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -513,6 +511,7 @@ def make_fp8_moe_quant_config(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -556,6 +555,7 @@ def make_fp8_moe_quant_config(
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
+            gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
     # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
@@ -570,6 +570,7 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             block_shape=block_shape,
             is_scale_swizzled=False,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # All other backends use normal config.
@@ -581,6 +582,7 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 
@@ -590,7 +592,6 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -620,13 +621,9 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
         )
 
-    # NOTE(rob): we only want the mk to control the shared_expert
-    # if using all2all (for SBO). bnell is making this explicit in
-    # the new MoE runner class.
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=(
             not moe_config.disable_inplace
             and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
