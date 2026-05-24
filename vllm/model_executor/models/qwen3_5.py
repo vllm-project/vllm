@@ -42,6 +42,7 @@ from vllm.model_executor.layers.layernorm import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
+    qwen_should_fuse_in_proj,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -107,6 +108,34 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _install_fused_in_proj_mapping(quant_config, target) -> dict[str, list[str]]:
+    """Swap the GDN ``in_proj_qkvz`` + ``in_proj_ba`` entries for the fused
+    6-way ``in_proj`` mapping so ``is_layer_skipped`` expands the fused module
+    to its four shards (in_proj_qkv/z/b/a) when the GDN layers are built.
+
+    Merges into the mapping already on ``quant_config`` (snapshotted from the
+    model class by ``configure_quant_config``) so unrelated entries — e.g. the
+    Qwen3VL visual-tower packed mappings on the multimodal model — are
+    preserved. ``configure_quant_config`` only runs once at startup, so the
+    updated dict is pushed back into the quant config here. Idempotent, so it is
+    safe for the multimodal model whose inner language model installs it too.
+    """
+    if quant_config is not None and getattr(
+        quant_config, "packed_modules_mapping", None
+    ):
+        base = quant_config.packed_modules_mapping
+    else:
+        base = getattr(type(target), "packed_modules_mapping", {})
+    new_mapping: dict[str, list[str]] = {k: list(v) for k, v in base.items()}
+    new_mapping.pop("in_proj_qkvz", None)
+    new_mapping.pop("in_proj_ba", None)
+    new_mapping["in_proj"] = ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"]
+    target.packed_modules_mapping = new_mapping
+    if quant_config is not None:
+        quant_config.packed_modules_mapping = new_mapping
+    return new_mapping
+
+
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3_5Config)
@@ -140,6 +169,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
+                fuse_in_proj_ba=qwen_should_fuse_in_proj(vllm_config),
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -274,11 +304,34 @@ class Qwen3_5Model(Qwen3NextModel):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Source of truth for the GDN in_proj layout is the actual module tree,
+        # not the should-fuse predicate: QwenGatedDeltaNetAttention.__init__ may
+        # have fallen back to the unfused layout via its try/except guard.
+        gdn_fused_in_proj = any(
+            getattr(m, "_fuse_in_proj", False)
+            for m in self.modules()
+            if isinstance(m, QwenGatedDeltaNetAttention)
+        )
+        if gdn_fused_in_proj:
+            # Fused 6-way in_proj: route in_proj_qkv/z/b/a checkpoint tensors
+            # into the single merged in_proj at shard ids (0,1,2)/3/4/5.
+            gdn_mapping = [
+                ("in_proj", "in_proj_qkv", (0, 1, 2)),
+                ("in_proj", "in_proj_z", 3),
+                ("in_proj", "in_proj_b", 4),
+                ("in_proj", "in_proj_a", 5),
+            ]
+        else:
+            gdn_mapping = [
+                ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
+                ("in_proj_qkvz", "in_proj_z", 3),
+                ("in_proj_ba", "in_proj_b", 0),
+                ("in_proj_ba", "in_proj_a", 1),
+            ]
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
+            *gdn_mapping,
             # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -286,8 +339,6 @@ class Qwen3_5Model(Qwen3NextModel):
             # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -466,6 +517,12 @@ class Qwen3_5ForCausalLMBase(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
+        # When GDN fuses its input projections into a single 6-way in_proj, the
+        # packed_modules_mapping must expose that to is_layer_skipped before the
+        # GDN layers are built below. The class-level mapping is the unfused
+        # qkvz + ba layout; install the fused mapping only when fusing.
+        if qwen_should_fuse_in_proj(vllm_config):
+            _install_fused_in_proj_mapping(self.quant_config, self)
         self.model = Qwen3_5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
