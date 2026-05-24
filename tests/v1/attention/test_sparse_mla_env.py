@@ -23,7 +23,7 @@ def test_prefill_topk_uses_sm12x_multi_request_guard(monkeypatch):
     )
 
 
-def test_prefill_topk_keeps_default_for_lower_risk_shapes(monkeypatch):
+def test_prefill_topk_relaxes_sm12x_single_request_c128a(monkeypatch):
     monkeypatch.delenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", raising=False)
     monkeypatch.setattr(
         sparse_mla_env.current_platform,
@@ -37,8 +37,18 @@ def test_prefill_topk_keeps_default_for_lower_risk_shapes(monkeypatch):
             compress_ratio=128,
             request_count=1,
         )
-        == 512
+        == 1024
     )
+
+
+def test_prefill_topk_keeps_default_for_other_lower_risk_shapes(monkeypatch):
+    monkeypatch.delenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", raising=False)
+    monkeypatch.setattr(
+        sparse_mla_env.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+
     assert (
         sparse_mla_env.triton_sparse_mla_prefill_topk_chunk_size(
             combined_topk_size=640,

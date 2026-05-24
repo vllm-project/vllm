@@ -52,21 +52,20 @@ def triton_sparse_mla_prefill_topk_chunk_size(
 ) -> int:
     """Choose the Triton sparse MLA prefill topk chunk size.
 
-    Keep explicit user overrides authoritative. The auto path keeps the
-    previous 512-token chunk except for the SM12x C128A multi-request shape
-    that is unstable near 128K context.
+    Keep explicit user overrides authoritative. The auto path uses a larger
+    chunk for SM12x C128A single-request prefill to reduce per-request loop
+    overhead, but keeps a smaller chunk for the multi-request shape that is
+    unstable near 128K context.
     """
 
     configured_topk = triton_sparse_mla_topk_chunk_size()
     if os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE") is not None:
         return min(combined_topk_size, configured_topk)
-    if (
-        current_platform.is_device_capability_family(120)
-        and compress_ratio == 128
-        and request_count > 1
-        and combined_topk_size > 1024
-    ):
-        configured_topk = min(configured_topk, 256)
+    if current_platform.is_device_capability_family(120) and compress_ratio == 128:
+        if request_count > 1 and combined_topk_size > 1024:
+            configured_topk = min(configured_topk, 256)
+        elif request_count == 1 and combined_topk_size > 1024:
+            configured_topk = max(configured_topk, 1024)
     return min(combined_topk_size, configured_topk)
 
 
