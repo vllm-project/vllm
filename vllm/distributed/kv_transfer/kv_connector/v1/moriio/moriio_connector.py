@@ -292,7 +292,8 @@ class MoRIIOConnectorScheduler:
             if len(siblings) > 1:
                 logger.debug(
                     "MoRIIO best_of fan-in: transfer_id=%s now has %d siblings",
-                    transfer_id, len(siblings),
+                    transfer_id,
+                    len(siblings),
                 )
         self.request_id_to_transfer_id[request_id] = transfer_id
 
@@ -766,12 +767,14 @@ class MoRIIOConnectorWorker:
         # FIX(read-release) state: consumer captures the shared tid at read setup so it
         # can notify the producer with it on read-complete; producer accumulates held
         # siblings and only frees them once vLLM marks them finished.
-        self._recving_transfer_id: dict[ReqId, str] = {}     # consumer: req -> shared tid
-        self._read_sibs: dict[str, set[str]] = {}            # producer: tid -> held siblings
-        self._read_done_tids: set[str] = set()               # producer: tids done reading
-        self._read_finished_seen: set[str] = set()           # producer: vLLM finished_req_ids
-        self._read_req_tid: dict[str, str] = {}              # producer: sibling -> tid (pre-unmap)
-        self._read_seen_tid_sibcount: dict[str, int] = {}    # producer: per-tid sibcount diff-track
+        self._recving_transfer_id: dict[ReqId, str] = {}  # consumer: req -> shared tid
+        self._read_sibs: dict[str, set[str]] = {}  # producer: tid -> held siblings
+        self._read_done_tids: set[str] = set()  # producer: tids done reading
+        self._read_finished_seen: set[str] = set()  # producer: vLLM finished_req_ids
+        self._read_req_tid: dict[str, str] = {}  # producer: sibling -> tid (pre-unmap)
+        self._read_seen_tid_sibcount: dict[
+            str, int
+        ] = {}  # producer: per-tid sibcount diff-track
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -1261,7 +1264,9 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
 
-    def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self, finished_req_ids: set[str] | None = None
+    ) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1273,7 +1278,7 @@ class MoRIIOConnectorWorker:
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
             # FIX(read-release): release siblings of completed reads, gated on vLLM's
-            # is_finished signal so we don't trip the scheduler's assert on still-held reqs.
+            # is_finished signal so we don't assert on still-held reqs.
             if self.mode == MoRIIOMode.READ:
                 self._read_done_tids.update(done_sending)
                 # Filter finished_req_ids against siblings we've captured (in
@@ -1283,8 +1288,8 @@ class MoRIIOConnectorWorker:
                     _held: set[str] = set()
                     for _rs in self._read_sibs.values():
                         _held.update(_rs)
-                    self._read_finished_seen |= (
-                        finished_req_ids & (self._read_req_tid.keys() | _held)
+                    self._read_finished_seen |= finished_req_ids & (
+                        self._read_req_tid.keys() | _held
                     )
                 _m: set[str] = set()
                 for _t in list(self._read_done_tids):
@@ -1342,12 +1347,13 @@ class MoRIIOConnectorWorker:
                 if status_list[-1].Succeeded():
                     done_req_ids.add(req_id)
 
-                    # FIX(read-release): notify with the shared transfer_id; the producer
-                    # may already have unmapped the local req_id by now.
+                    # FIX(read-release): notify with the shared transfer_id; the
+                    # producer may already have unmapped the local req_id by now.
                     _tid_for_notify = self._recving_transfer_id.get(req_id, req_id)
                     logger.debug(
                         "MoRIIO read-release notify: req=%s -> shared tid=%s",
-                        req_id, _tid_for_notify,
+                        req_id,
+                        _tid_for_notify,
                     )
                     self.moriio_wrapper.send_notify(
                         _tid_for_notify,
@@ -1430,8 +1436,8 @@ class MoRIIOConnectorWorker:
                     self._read_req_tid[_r] = _t
                 self._read_seen_tid_sibcount[_t] = _n
             for _r in metadata.reqs_to_send:
-                _t = self._read_req_tid.pop(_r, None)
-                if _t is not None:
+                if _r in self._read_req_tid:
+                    _t = self._read_req_tid.pop(_r)
                     self._read_sibs.setdefault(_t, set()).add(_r)
             self.moriio_wrapper.async_wait_reqid()
             return

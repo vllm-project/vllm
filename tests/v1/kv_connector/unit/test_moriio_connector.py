@@ -595,7 +595,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
 
 def _make_scheduler(role: str = "kv_producer") -> "MoRIIOConnectorScheduler":
-    """Construct a scheduler with the minimal kv_connector_extra_config required by __init__."""
+    """Scheduler with the minimal kv_connector_extra_config required by __init__."""
     vllm_config = create_vllm_config(role=role)
     vllm_config.kv_transfer_config.kv_connector_extra_config.update(
         {
@@ -610,7 +610,7 @@ def _make_scheduler(role: str = "kv_producer") -> "MoRIIOConnectorScheduler":
 
 
 def _make_worker() -> MoRIIOConnectorWorker:
-    """Build a worker via __new__ so we can set just the attributes get_finished touches."""
+    """Worker via __new__ so we set only the attributes get_finished touches."""
     w = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     w.transfer_id_to_request_id = {}
     w._read_sibs = {}
@@ -625,8 +625,9 @@ def _make_worker() -> MoRIIOConnectorWorker:
 
 
 def test_best_of_n_map_accumulates_siblings():
-    """FIX(best_of-1many) scheduler-side: map_request_id accumulates sibling req_ids under
-    a shared transfer_id (was a 1:1 dict that clobbered all but the last)."""
+    """FIX(best_of-1many) scheduler-side: map_request_id accumulates sibling
+    req_ids under a shared transfer_id (was 1:1 dict that clobbered all but the
+    last)."""
     sched = _make_scheduler(role="kv_producer")
     siblings = [f"{i}_cmpl-shared" for i in range(8)]
     tid = "tx-shared"
@@ -688,9 +689,10 @@ def test_consumer_read_mode_discards_done_recving():
 
 
 def test_producer_read_mode_finished_gated_release():
-    """FIX(read-release): producer READ-mode get_finished releases siblings only after vLLM
-    marks them finished. Step 1: notify arrives, no finished -> no release. Step 2/3: each
-    finished sibling is released individually; tid is pruned only when the last is gone."""
+    """FIX(read-release): producer READ-mode get_finished releases siblings only
+    after vLLM marks them finished. Step 1: notify arrives, no finished ->
+    no release. Step 2/3: each finished sibling is released individually; tid
+    is pruned only when the last is gone."""
     worker = _make_worker()
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
@@ -723,9 +725,9 @@ def test_producer_read_mode_finished_gated_release():
 
 
 def test_pop_done_transfers_sends_shared_transfer_id():
-    """FIX(read-release) decode-side: notify the prefill with the SHARED transfer_id
-    (captured at read setup), not the local sibling req_id with a -N-XXXX suffix the prefill
-    doesn't own. Bookkeeping cleaned up after."""
+    """FIX(read-release) decode-side: notify the prefill with the SHARED
+    transfer_id (captured at read setup), not the local sibling req_id with a
+    -N-XXXX suffix the prefill doesn't own. Bookkeeping cleaned up after."""
     worker = _make_worker()
     fake_wrapper = MagicMock()
     fake_wrapper.lock = threading.Lock()
