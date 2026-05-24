@@ -629,8 +629,17 @@ def test_best_of_n_map_accumulates_siblings():
     req_ids under a shared transfer_id (was 1:1 dict that clobbered all but the
     last)."""
     sched = _make_scheduler(role="kv_producer")
-    siblings = [f"{i}_cmpl-shared" for i in range(8)]
-    tid = "tx-shared"
+    tid = "tx-d1f3abc456789012"
+    siblings = [
+        "0_cmpl-fb4bc0e0a1234567",
+        "1_cmpl-fb4bc0e0a1234567",
+        "2_cmpl-fb4bc0e0a1234567",
+        "3_cmpl-fb4bc0e0a1234567",
+        "4_cmpl-fb4bc0e0a1234567",
+        "5_cmpl-fb4bc0e0a1234567",
+        "6_cmpl-fb4bc0e0a1234567",
+        "7_cmpl-fb4bc0e0a1234567",
+    ]
 
     for s in siblings:
         sched.map_request_id(s, tid)
@@ -659,15 +668,21 @@ def test_consumer_write_mode_fans_out_completion():
     worker = _make_worker()
     worker.is_producer = False
     worker.mode = MoRIIOMode.WRITE
-    worker.transfer_id_to_request_id = {"tx-shared": ["0_cmpl", "1_cmpl", "2_cmpl"]}
+    tid = "tx-35dba48109876543"
+    siblings = [
+        "0_cmpl-35dba481b9876543",
+        "1_cmpl-35dba481b9876543",
+        "2_cmpl-35dba481b9876543",
+    ]
+    worker.transfer_id_to_request_id = {tid: siblings}
 
     fake_wrapper = MagicMock()
-    fake_wrapper.pop_finished_write_req_ids.return_value = {"tx-shared"}
+    fake_wrapper.pop_finished_write_req_ids.return_value = {tid}
     worker.moriio_wrapper = fake_wrapper
 
     done_sending, done_recving = worker.get_finished()
     assert done_sending == set()
-    assert done_recving == {"0_cmpl", "1_cmpl", "2_cmpl"}, (
+    assert done_recving == set(siblings), (
         "one shared transfer_id must release ALL its best_of siblings"
     )
 
@@ -681,7 +696,7 @@ def test_consumer_read_mode_discards_done_recving():
     worker.mode = MoRIIOMode.READ
     worker.moriio_wrapper = MagicMock()
     # Pretend the internal pull-complete path returned a non-empty set.
-    worker._pop_done_transfers = MagicMock(return_value={"0_cmpl-running"})
+    worker._pop_done_transfers = MagicMock(return_value={"0_cmpl-a1b2c3d4e5f60718"})
 
     done_sending, done_recving = worker.get_finished()
     assert done_sending == set()
@@ -696,45 +711,48 @@ def test_producer_read_mode_finished_gated_release():
     worker = _make_worker()
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
-    worker._read_sibs = {"tx-shared": {"a", "b"}}
-    worker._read_seen_tid_sibcount = {"tx-shared": 2}
+    tid = "tx-7d3e9a2b54c1f680"
+    sib0 = "0_cmpl-7d3e9a2bc1f68054"
+    sib1 = "1_cmpl-7d3e9a2bc1f68054"
+    worker._read_sibs = {tid: {sib0, sib1}}
+    worker._read_seen_tid_sibcount = {tid: 2}
 
     fake_wrapper = MagicMock()
     worker.moriio_wrapper = fake_wrapper
 
     # Step 1: decode read-complete notify arrives (shared tid), no finished yet.
-    fake_wrapper.pop_finished_req_ids.return_value = {"tx-shared"}
+    fake_wrapper.pop_finished_req_ids.return_value = {tid}
     done_sending, _ = worker.get_finished(finished_req_ids=set())
     assert done_sending == set(), "release must be gated on finished_req_ids"
-    assert worker._read_sibs == {"tx-shared": {"a", "b"}}, "no sibling freed yet"
-    assert "tx-shared" in worker._read_done_tids, "tid persisted for later release"
+    assert worker._read_sibs == {tid: {sib0, sib1}}, "no sibling freed yet"
+    assert tid in worker._read_done_tids, "tid persisted for later release"
 
-    # Step 2: vLLM marks 'a' finished -> only 'a' is freed; 'b' still held.
+    # Step 2: vLLM marks sib0 finished -> only sib0 is freed; sib1 still held.
     fake_wrapper.pop_finished_req_ids.return_value = set()
-    done_sending, _ = worker.get_finished(finished_req_ids={"a"})
-    assert done_sending == {"a"}
-    assert worker._read_sibs == {"tx-shared": {"b"}}
-    assert "tx-shared" in worker._read_done_tids
+    done_sending, _ = worker.get_finished(finished_req_ids={sib0})
+    assert done_sending == {sib0}
+    assert worker._read_sibs == {tid: {sib1}}
+    assert tid in worker._read_done_tids
 
-    # Step 3: vLLM marks 'b' finished -> released; tid fully drained from all state.
-    done_sending, _ = worker.get_finished(finished_req_ids={"b"})
-    assert done_sending == {"b"}
-    assert "tx-shared" not in worker._read_sibs
-    assert "tx-shared" not in worker._read_done_tids
-    assert "tx-shared" not in worker._read_seen_tid_sibcount
+    # Step 3: vLLM marks sib1 finished -> released; tid fully drained from all state.
+    done_sending, _ = worker.get_finished(finished_req_ids={sib1})
+    assert done_sending == {sib1}
+    assert tid not in worker._read_sibs
+    assert tid not in worker._read_done_tids
+    assert tid not in worker._read_seen_tid_sibcount
 
 
 def test_pop_done_transfers_sends_shared_transfer_id():
     """FIX(read-release) decode-side: notify the prefill with the SHARED
-    transfer_id (captured at read setup), not the local sibling req_id with a
-    -N-XXXX suffix the prefill doesn't own. Bookkeeping cleaned up after."""
+    transfer_id (captured at read setup), not the local sibling req_id (which has
+    the per-sibling prefix the prefill doesn't own). Bookkeeping cleaned up after."""
     worker = _make_worker()
     fake_wrapper = MagicMock()
     fake_wrapper.lock = threading.Lock()
     worker.moriio_wrapper = fake_wrapper
 
-    req_id = "0_cmpl-local-suffix-N-XXXX"
-    shared_tid = "tx-shared"
+    shared_tid = "tx-aabbccdd11223344"
+    req_id = "0_cmpl-aabbccdd11223344"
     succeeded = MagicMock()
     succeeded.Succeeded.return_value = True
     worker._recving_transfers = defaultdict(list, {req_id: [succeeded]})
