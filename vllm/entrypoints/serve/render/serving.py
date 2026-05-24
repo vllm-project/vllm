@@ -318,6 +318,7 @@ class OpenAIServingRender:
                     stream_options=(request.stream_options if request.stream else None),
                     cache_salt=request.cache_salt,
                     priority=request.priority,
+                    token_offsets=engine_input.get("prompt_token_offsets"),
                 )
             )
 
