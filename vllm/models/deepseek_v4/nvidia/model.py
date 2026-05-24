@@ -849,13 +849,6 @@ class DeepseekV4Attention(nn.Module):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
-        if self.n_local_groups <= 0 or self.n_groups % tp_size != 0:
-            raise ValueError(
-                f"TP size {tp_size} is not compatible with n_groups {self.n_groups}. "
-                f"n_local_groups = {self.n_local_groups}. "
-                f"Please use a TP size that evenly divides {self.n_groups} "
-                f"and results in n_local_groups >= 1."
-            )
         self.window_size = config.sliding_window
         # NOTE(zyongye) Compress ratio can't be 0
         # we do this for because MTP layer is not included

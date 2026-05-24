@@ -1036,6 +1036,11 @@ def deepgemm_post_process_fp8_weight_block(
             f"bmm_batch_size must be > 0, got {g}. "
             f"This indicates TP size exceeds n_groups."
         )
+        assert wq.size(0) % g == 0, (
+            f"Weight output dimension {wq.size(0)} is not evenly divisible by "
+            f"bmm_batch_size {g}. This indicates n_groups is not evenly "
+            f"divisible by TP size, which would cause groups to be lost."
+        )
 
         d = wq.size(1)
         r = wq.size(0) // g
