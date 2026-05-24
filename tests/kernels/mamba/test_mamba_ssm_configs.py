@@ -14,6 +14,7 @@ Tests cover:
 import json
 
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    _get_default_ssm_launch_config,
     _try_get_optimal_ssm_config_cached,
     get_ssm_config_file_name,
     get_ssm_configs,
@@ -96,29 +97,18 @@ def test_fallback_when_no_config(monkeypatch, tmp_path):
     )
     _clear_caches()
 
-    # dstate=64 heuristic: BLOCK_SIZE_M=8, num_warps=4
-    block_m, warps = try_get_optimal_ssm_config(
-        headdim=_HEADDIM,
-        dstate=64,
-        batch=1,
-        nheads=1,
-        cache_dtype=_CACHE_DTYPE,
-        is_blackwell=False,
-    )
-    assert block_m == 8
-    assert warps == 4
-
-    # dstate=16 heuristic: BLOCK_SIZE_M=32, num_warps=4
-    block_m, warps = try_get_optimal_ssm_config(
-        headdim=_HEADDIM,
-        dstate=16,
-        batch=1,
-        nheads=1,
-        cache_dtype=_CACHE_DTYPE,
-        is_blackwell=False,
-    )
-    assert block_m == 32
-    assert warps == 4
+    for dstate in (64, 16):
+        block_m, warps = try_get_optimal_ssm_config(
+            headdim=_HEADDIM,
+            dstate=dstate,
+            batch=1,
+            nheads=1,
+            cache_dtype=_CACHE_DTYPE,
+            is_blackwell=False,
+        )
+        assert (block_m, warps) == _get_default_ssm_launch_config(
+            dstate, is_blackwell=False
+        )
 
     _clear_caches()
 
@@ -203,16 +193,17 @@ def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
     _clear_caches()
 
-    # dstate=64 heuristic: BLOCK_SIZE_M=8, num_warps=4
+    dstate = 64
     block_m, warps = try_get_optimal_ssm_config(
         headdim=_HEADDIM,
-        dstate=64,
+        dstate=dstate,
         batch=1,
         nheads=64,
         cache_dtype=_CACHE_DTYPE,
         is_blackwell=False,
     )
-    assert block_m == 8
-    assert warps == 4
+    assert (block_m, warps) == _get_default_ssm_launch_config(
+        dstate=dstate, is_blackwell=False
+    )
 
     _clear_caches()
