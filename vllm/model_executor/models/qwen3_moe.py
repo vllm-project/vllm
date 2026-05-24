@@ -347,7 +347,7 @@ class Qwen3MoeAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        if ops.can_use_fused_qk_norm_rope(
+        if not self.dual_chunk_attention_config and ops.can_use_fused_qk_norm_rope(
             qkv,
             self.head_dim,
             getattr(self.rotary_emb, "cos_sin_cache", None),
