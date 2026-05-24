@@ -4,11 +4,16 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+import json
+import os
+
 import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -316,6 +321,36 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
+@functools.lru_cache
+def get_mamba_ssm_config(dstate: int, headdim: int) -> dict | None:
+    """
+    Return tuned kernel config (BLOCK_SIZE_M, num_warps) for the
+    selective_state_update kernel, loaded from a per-device JSON file.
+
+    Config files live at:
+      vllm/model_executor/layers/mamba/configs/
+        dstate={dstate},headdim={headdim},device_name={device_name}.json
+
+    Returns None if no config file is found for the current device.
+    """
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    filename = f"dstate={dstate},headdim={headdim},device_name={device_name}.json"
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "configs",
+        filename,
+    )
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            if "BLOCK_SIZE_M" in config and "num_warps" in config:
+                return config
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
 def selective_state_update(
     state,
     x,
@@ -440,12 +475,17 @@ def selective_state_update(
         else (0, 0)
     )
     # We don't want autotune since it will overwrite the state.
-    # We instead tune by hand based on dstate.
+    # We instead load tuned configs from JSON files (see get_mamba_ssm_config)
+    # and fall back to hand-tuned heuristics when no config file is found.
 
     # Default
     BLOCK_SIZE_M, num_warps = 4, 8
 
-    if dstate <= 16:
+    _config = get_mamba_ssm_config(dstate, dim)
+    if _config is not None:
+        BLOCK_SIZE_M = _config["BLOCK_SIZE_M"]
+        num_warps = _config["num_warps"]
+    elif dstate <= 16:
         BLOCK_SIZE_M, num_warps = 32, 4
     elif dstate <= 32:
         BLOCK_SIZE_M, num_warps = 16, 4
