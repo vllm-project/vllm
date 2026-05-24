@@ -384,6 +384,49 @@ def parse_mla_prefill_priorities() -> dict[str, list[str]]:
     return priorities
 
 
+def parse_mla_dimensions_call(node: ast.AST) -> str | None:
+    """Parse an MLADimensions(...) call into a compact display string."""
+    if not isinstance(node, ast.Call):
+        return None
+
+    func = node.func
+    if not isinstance(func, ast.Name) or func.id != "MLADimensions":
+        return None
+
+    dimensions: dict[str, int] = {}
+    for keyword in node.keywords:
+        if (
+            keyword.arg is not None
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, int)
+        ):
+            dimensions[keyword.arg] = keyword.value.value
+
+    qk_nope_head_dim = dimensions.get("qk_nope_head_dim")
+    qk_rope_head_dim = dimensions.get("qk_rope_head_dim")
+    v_head_dim = dimensions.get("v_head_dim")
+    if qk_nope_head_dim is None or qk_rope_head_dim is None or v_head_dim is None:
+        return None
+
+    return (
+        f"(qk_nope_head_dim={qk_nope_head_dim}, "
+        f"qk_rope_head_dim={qk_rope_head_dim}, v_head_dim={v_head_dim})"
+    )
+
+
+def parse_supported_mla_dimensions(node: ast.AST | None) -> list[str]:
+    """Parse a supported_mla_dimensions class variable."""
+    if not isinstance(node, ast.List):
+        return []
+
+    supported_dimensions = []
+    for element in node.elts:
+        dimensions = parse_mla_dimensions_call(element)
+        if dimensions is not None:
+            supported_dimensions.append(dimensions)
+    return supported_dimensions
+
+
 def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     """Parse a single MLA prefill backend file to extract its properties.
 
@@ -409,7 +452,7 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     info: dict[str, Any] = {
         "compute_capability": "Any",
-        "requires_r1_dims": False,
+        "supported_mla_dimensions": [],
         "dtypes": "fp16, bf16",  # Default from base class
     }
 
@@ -417,12 +460,21 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     for item in class_node.body:
         if isinstance(item, ast.Assign):
             for target in item.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id == "requires_r1_mla_dimensions"
-                    and isinstance(item.value, ast.Constant)
+                if isinstance(target, ast.Name) and (
+                    target.id == "supported_mla_dimensions"
                 ):
-                    info["requires_r1_dims"] = item.value.value
+                    info["supported_mla_dimensions"] = parse_supported_mla_dimensions(
+                        item.value
+                    )
+
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == "supported_mla_dimensions"
+        ):
+            info["supported_mla_dimensions"] = parse_supported_mla_dimensions(
+                item.value
+            )
 
         # Parse supported_dtypes class variable
         if (
@@ -515,8 +567,9 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
             marker = "‡"
 
         notes = ""
-        if backend_info.get("requires_r1_dims"):
-            notes = "DeepSeek R1 dims only"
+        supported_mla_dimensions = backend_info.get("supported_mla_dimensions", [])
+        if supported_mla_dimensions:
+            notes = " or ".join(supported_mla_dimensions) + " only"
         elif backend_name == "FLASH_ATTN":
             notes = "FA4 on SM100+, FA3 on SM90, FA2 otherwise"
 
