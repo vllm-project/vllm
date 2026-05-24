@@ -107,7 +107,7 @@ def fs_tier(tmp_path):
         n_read_threads=4,
         n_write_threads=4,
     )
-    yield tier
+    yield tier, tensor
     tier.shutdown()
 
 
@@ -117,37 +117,40 @@ def fs_tier(tmp_path):
 
 
 def test_lookup_empty_tier(fs_tier):
-    assert fs_tier.lookup(key(1), _CTX) is False
-    assert fs_tier.lookup(key(2), _CTX) is False
+    tier, _ = fs_tier
+    assert tier.lookup(key(1), _CTX) is False
+    assert tier.lookup(key(2), _CTX) is False
 
 
 def test_store_creates_file_and_lookup_succeeds(fs_tier):
+    tier, _ = fs_tier
     job = make_job(1, [key(1)], [0])
-    fs_tier.submit_store(job)
-    results = drain(fs_tier)
+    tier.submit_store(job)
+    results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert fs_tier.lookup(key(1), _CTX) is True
-    dest = fs_tier.file_mapper.get_file_name(key(1))
+    assert tier.lookup(key(1), _CTX) is True
+    dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
 
 
 def test_store_then_load_roundtrip(fs_tier):
+    tier, _ = fs_tier
     job_s = make_job(1, [key(1), key(2)], [0, 1])
-    fs_tier.submit_store(job_s)
-    store_results = drain(fs_tier)
+    tier.submit_store(job_s)
+    store_results = drain(tier)
     assert all(r.success for r in store_results)
 
-    assert fs_tier.lookup(key(1), _CTX) is True
-    assert fs_tier.lookup(key(2), _CTX) is True
+    assert tier.lookup(key(1), _CTX) is True
+    assert tier.lookup(key(2), _CTX) is True
 
     job_l = make_job(2, [key(1), key(2)], [2, 3], is_promotion=True)
-    fs_tier.submit_load(job_l)
-    load_results = drain(fs_tier)
+    tier.submit_load(job_l)
+    load_results = drain(tier)
     assert all(r.success for r in load_results)
     # Blocks stay on disk after load
-    assert fs_tier.lookup(key(1), _CTX) is True
-    assert fs_tier.lookup(key(2), _CTX) is True
+    assert tier.lookup(key(1), _CTX) is True
+    assert tier.lookup(key(2), _CTX) is True
 
 
 def test_invalid_path_raises_at_construction():
@@ -166,95 +169,83 @@ def test_invalid_path_raises_at_construction():
 
 def test_failed_load_missing_file(fs_tier):
     """Test that loading a block whose file does not exist results in a failed job."""
+    tier, _ = fs_tier
     job = make_job(1, [key(99)], [0], is_promotion=True)
-    fs_tier.submit_load(job)
-    results = drain(fs_tier)
+    tier.submit_load(job)
+    results = drain(tier)
     assert len(results) == 1
     assert not results[0].success
 
 
 def test_multiple_jobs_tracked_independently(fs_tier):
+    tier, _ = fs_tier
     job1 = make_job(1, [key(1)], [0])
     job2 = make_job(2, [key(2)], [1])
-    fs_tier.submit_store(job1)
-    fs_tier.submit_store(job2)
-    results = drain(fs_tier)
+    tier.submit_store(job1)
+    tier.submit_store(job2)
+    results = drain(tier)
     job_ids = {r.job_id for r in results}
     assert job_ids == {1, 2}
-    assert fs_tier.lookup(key(1), _CTX) is True
-    assert fs_tier.lookup(key(2), _CTX) is True
+    assert tier.lookup(key(1), _CTX) is True
+    assert tier.lookup(key(2), _CTX) is True
 
 
 def test_multi_block_job_partial_failure(fs_tier):
     """A load job where one block file is missing yields a single failed JobResult."""
+    tier, _ = fs_tier
     # Store two of three keys
-    fs_tier.submit_store(make_job(1, [key(10), key(11)], [0, 1]))
-    assert all(r.success for r in drain(fs_tier))
+    tier.submit_store(make_job(1, [key(10), key(11)], [0, 1]))
+    assert all(r.success for r in drain(tier))
 
     # Load all three — key(99) was never stored
-    fs_tier.submit_load(
+    tier.submit_load(
         make_job(2, [key(10), key(11), key(99)], [0, 1, 2], is_promotion=True)
     )
-    results = drain(fs_tier)
+    results = drain(tier)
 
     assert len(results) == 1
     assert results[0].job_id == 2
     assert not results[0].success
 
 
-def test_shutdown_discards_pending_tasks(tmp_path):
+def test_shutdown_discards_pending_tasks(fs_tier):
     """Shutdown clears both queues and stops all worker threads without draining."""
-    tensor = torch.zeros((10, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    mock_view = memoryview(tensor.numpy())
-
-    tier = FileSystemTierManager(
-        offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_view,
-        tier_type="fs_python",
-        root_dir=str(tmp_path),
-        n_read_threads=2,
-        n_write_threads=2,
-    )
-
+    tier, _ = fs_tier
+    # Submit many tasks to ensure some remain pending
     for i in range(10):
-        tier.submit_store(make_job(i, [key(i)], [i % 10]))
+        tier.submit_store(make_job(i, [key(i)], [i % 4]))
 
-    tier._pool.shutdown()
+    # Shutdown immediately without draining
+    tier.shutdown()
 
+    # Verify queues are cleared and threads stopped
     assert len(tier._pool._load_q) == 0
     assert len(tier._pool._store_q) == 0
     assert all(not t.is_alive() for t in tier._pool._threads)
 
 
-def test_store_load_data_integrity(tmp_path):
+def test_store_load_data_integrity(fs_tier):
     """Data written by store must be exactly recovered by load."""
-    num_blocks = 4
-    num_total = num_blocks * 2
-    tensor = torch.rand((num_total, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    mock_view = memoryview(tensor.numpy())
+    tier, tensor = fs_tier
+    # Populate tensor with random data
+    tensor[:] = torch.rand((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
 
-    tier = FileSystemTierManager(
-        offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_view,
-        tier_type="fs_python",
-        root_dir=str(tmp_path),
-        n_read_threads=4,
-        n_write_threads=4,
-    )
+    # Store first 2 blocks
+    num_store = 2
+    expected = tensor[:num_store].clone()
 
-    expected = tensor[:num_blocks].clone()
+    store_ids = list(range(num_store))
+    keys = [key(i) for i in range(num_store)]
 
-    block_ids = list(range(num_blocks))
-    keys = [key(i) for i in range(num_blocks)]
-
-    tier.submit_store(make_job(1, keys, block_ids))
+    tier.submit_store(make_job(1, keys, store_ids))
     results = drain(tier)
     assert all(r.success for r in results)
 
     # Overwrite source blocks to prove data is read from disk
-    tensor[:num_blocks] = 0.0
+    tensor[:num_store] = 0.0
 
-    load_ids = list(range(num_blocks, num_total))
+    # Load into last 2 blocks
+    load_ids = [2, 3]
     tier.submit_load(make_job(2, keys, load_ids, is_promotion=True))
     results = drain(tier)
     assert all(r.success for r in results)
