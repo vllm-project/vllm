@@ -498,7 +498,6 @@ def mhc_post_tilelang(
     d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     with T.Kernel(n, threads=n_thr) as i_n:
-        x_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         d_shared = T.alloc_shared(h_blk, T.bfloat16)
 
@@ -512,7 +511,7 @@ def mhc_post_tilelang(
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
-        for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+        for i0_h in T.Serial(T.ceildiv(h, h_blk)):
             T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
             T.copy(d[i_n, i0_h * h_blk], d_shared)
 
@@ -520,11 +519,10 @@ def mhc_post_tilelang(
             T.copy(d_shared, d_local)
             for i_hco, i1_h in T.Parallel(hc, h_blk):
                 x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
-                for i_hci in T.serial(hc):
+                for i_hci in T.vectorized(hc):
                     x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
-            T.copy(x_local, x_shared)
 
-            T.copy(x_shared, x[i_n, 0, i0_h * h_blk])
+            T.copy(x_local, x[i_n, 0, i0_h * h_blk])
         T.pdl_trigger()
 
 

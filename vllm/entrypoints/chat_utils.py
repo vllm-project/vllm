@@ -1517,7 +1517,7 @@ def _parse_chat_message_content_mm_part(
                 audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
         if part.get("input_audio") is not None:
-            input_audio_params = cast(dict[str, str], part)
+            input_audio_params = _InputAudioParser(part).get("input_audio", None)
             return "input_audio", input_audio_params
         if "video_url" in part:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam, part)
@@ -1818,12 +1818,28 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 continue
 
             for item in tool_calls:
+                if not isinstance(item, dict):
+                    raise VLLMValidationError(
+                        "assistant tool_calls entries must be objects.",
+                        parameter="tool_calls",
+                    )
+
+                function = item.get("function")
+                if item.get("type", "function") != "function" or not isinstance(
+                    function, dict
+                ):
+                    raise VLLMValidationError(
+                        "chat completions only support assistant tool_calls "
+                        "of type 'function'.",
+                        parameter="tool_calls",
+                    )
+
                 # if arguments is None or empty string, set to {}
-                if content := item["function"].get("arguments"):
+                if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        item["function"]["arguments"] = json.loads(content)
+                        function["arguments"] = json.loads(content)
                 else:
-                    item["function"]["arguments"] = {}
+                    function["arguments"] = {}
 
 
 def parse_chat_messages(
