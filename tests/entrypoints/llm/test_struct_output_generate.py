@@ -727,6 +727,14 @@ Make the response as short as possible.
         ),
         ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, False),
         ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, True),
+        (
+            "Qwen/Qwen3-1.7B",
+            "xgrammar",
+            "auto",
+            "qwen3",
+            NGRAM_SPEC_CONFIG,
+            True,
+        ),
     ],
 )
 def test_structured_output_with_reasoning_matrices(

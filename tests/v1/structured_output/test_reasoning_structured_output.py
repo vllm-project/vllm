@@ -258,3 +258,161 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_should_advance_with_new_token_ids_detects_reasoning_end(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When new_token_ids is passed containing the end token,
+        reasoning_ended should be set regardless of placeholder arithmetic."""
+        END_TOKEN = 999
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda all_ids, delta: END_TOKEN in delta
+        )
+        structured_req.reasoner = reasoner
+
+        # Simulate async + spec decode where placeholder math would produce
+        # an empty delta window: num_computed_tokens == len(all_token_ids)
+        mock_request_with_structured_output.all_token_ids = [
+            1,
+            2,
+            3,
+            END_TOKEN,
+            10,
+        ]
+        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        new_token_ids = [9, 198, END_TOKEN, 271]
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=new_token_ids
+        )
+
+        assert structured_req.reasoning_ended is True
+        # JSON type defers FSM advance to next step
+        assert result is False
+        # Verify we used new_token_ids, not the placeholder-derived delta
+        reasoner.is_reasoning_end_streaming.assert_called_once()
+
+    def test_should_advance_async_spec_decode_empty_delta_misses_end_token(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Reproduce the bug: without new_token_ids, async + spec decode
+        placeholder arithmetic produces start == len(all_token_ids), yielding
+        an empty delta that misses the reasoning end token.
+
+        This test documents the known limitation of the fallback path."""
+        END_TOKEN = 999
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        actual_deltas_seen = []
+
+        def capture_delta(all_ids, delta):
+            delta_list = list(delta)
+            actual_deltas_seen.append(delta_list)
+            return END_TOKEN in delta_list
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming = Mock(side_effect=capture_delta)
+        structured_req.reasoner = reasoner
+
+        # After async scheduling + spec decode token append:
+        # 4 new tokens appended, num_computed_tokens adjusted to match
+        mock_request_with_structured_output.all_token_ids = [
+            1,
+            2,
+            3,
+            4,
+            5,
+            9,
+            198,
+            END_TOKEN,
+            271,
+        ]
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        # Fallback path (no new_token_ids) computes start = 9 - 0 = 9,
+        # but len(all_token_ids) = 9, so islice yields nothing.
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        assert result is False
+        # The delta was empty, so the end token was missed
+        assert actual_deltas_seen == [[]]
+        assert structured_req.reasoning_ended is False
+
+        # Now try with new_token_ids -- this should find the end token
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[9, 198, END_TOKEN, 271],
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is False  # JSON defers
+
+    def test_should_advance_new_token_ids_structural_tag_spec_decode(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Structural tags with spec decode should return True on the same
+        step, even when detected via new_token_ids."""
+        END_TOKEN = 999
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            "{}",
+        )
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda all_ids, delta: END_TOKEN in delta
+        )
+        structured_req.reasoner = reasoner
+
+        manager_with_reasoner.vllm_config.speculative_config = Mock()
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[END_TOKEN, 42],
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is True
+
+    def test_should_advance_new_token_ids_no_end_token(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When new_token_ids does not contain the end token,
+        reasoning_ended should stay False."""
+        END_TOKEN = 999
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda all_ids, delta: END_TOKEN in delta
+        )
+        structured_req.reasoner = reasoner
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[10, 20, 30],
+        )
+
+        assert structured_req.reasoning_ended is False
+        assert result is False
