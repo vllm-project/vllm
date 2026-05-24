@@ -234,7 +234,7 @@ class ECCPUScheduler:
 
         # ----- Consumer-only --------------------------------------------
         if self._is_consumer:
-            self._remote_encodings: dict[str, list[int]] = {}
+            self._remote_encodings: dict[str, list[int] | None] = {}
             self._ready: set[str] = set()
             # Completed transfers whose mmap blocks are still held as a local
             # cache. Subsequent requests for the same mm_hash are re-served
@@ -595,6 +595,14 @@ class ECCPUScheduler:
                     self._pending_reload.add(mm_hash)
                 continue
             if mm_hash in self._remote_encodings:
+                if self._remote_encodings[mm_hash] is None:
+                    # NACK tombstone: drop it, fall through to local
+                    # encode. One-shot consumption is safe — the v1
+                    # scheduler does not revisit a request after we
+                    # return True, so `_alloc_and_start_xfer` cannot
+                    # re-fire within this request.
+                    del self._remote_encodings[mm_hash]
+                    continue
                 pending = True
                 continue
             info = params.get(mm_hash)
@@ -691,11 +699,20 @@ class ECCPUScheduler:
                     continue
                 if ack.mm_hash not in self._remote_encodings:
                     continue
+                indices = self._remote_encodings[ack.mm_hash]
+                if indices is None:
+                    # Already tombstoned by a prior NACK; ignore duplicate.
+                    continue
                 if ack.ok:
                     self._ready.add(ack.mm_hash)
                 else:
-                    indices = self._remote_encodings.pop(ack.mm_hash)
+                    # NACK: free the consumer-side blocks and leave a
+                    # tombstone for `ensure_cache_available` to consume on
+                    # its next call. Consuming the tombstone there flips
+                    # the request from deferred to runnable so vLLM's local
+                    # encode path covers this feature (§5.5).
                     self._region.free(indices)
+                    self._remote_encodings[ack.mm_hash] = None
 
     def _get_or_add_peer(self, info: dict[str, Any]) -> ConsumerPeer:
         # Remote NIXL agents are added here on first contact and removed
