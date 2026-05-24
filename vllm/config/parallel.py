@@ -13,7 +13,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -714,8 +714,11 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compile_factors(self) -> dict[str, object]:
         """
+        Returns the factors used to identify this parallel configuration
+        for ``torch.compile`` cache keying.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -764,10 +767,20 @@ class ParallelConfig:
             "numa_bind_cpus",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
+        return get_hash_factors(self, ignored_factors)
 
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+    def compute_hash(self):
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+
+        This hash is also used for DP worker configuration validation
+        to prevent hangs from mismatched collective communication patterns.
+        """
+        return hash_factors(self.compile_factors())
 
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization

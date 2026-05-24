@@ -213,14 +213,23 @@ class PassConfig:
             return {}
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
+    def compile_factors(self) -> dict[str, object]:
+        """
+        Returns the factors used to identify this pass configuration
+        for ``torch.compile`` cache keying.
+
+        Any new fields that affect compilation should be added here.
+        Any future fields that don't affect compilation should be excluded.
+        """
+        return get_hash_factors(self, set())
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-
-        return hash_factors(get_hash_factors(self, set()))
+        return hash_factors(self.compile_factors())
 
     @field_validator(
         "fuse_norm_quant",
@@ -375,15 +384,18 @@ class DynamicShapesConfig:
     `True` requires PyTorch 2.10+
     """
 
+    def compile_factors(self) -> dict[str, object]:
+        """
+        Returns the factors used to identify this dynamic-shapes configuration
+        for ``torch.compile`` cache keying.
+        """
+        return get_hash_factors(self, set())
+
     def compute_hash(self) -> str:
         """
         Provide a hash for DynamicShapesConfig
         """
-
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+        return hash_factors(self.compile_factors())
 
 
 @config
@@ -770,20 +782,17 @@ class CompilationConfig:
         "vllm::deepseek_v4_attention",
     ]
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> dict[str, object]:
         """
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # Opt-out: default-include declared fields; keep a tiny exclude set;
-        # normalize types; keep SHA-256. For nested opaque configs, include a
-        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
+        Returns the factors used to identify this compilation configuration
+        for ``torch.compile`` cache keying.
 
+        Includes all declared fields except runtime/path metadata that don't
+        affect the compiled graph. Nested configs are represented by their own
+        ``compile_factors()`` dictionaries.
+        """
         ignored_factors = {
-            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            # Paths/dirs and runtime/metrics that don't affect compiled graph
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
@@ -795,13 +804,20 @@ class CompilationConfig:
             "dynamic_shapes_config",  # handled separately below
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
         factors = get_hash_factors(self, ignored_factors)
+        factors["pass_config"] = self.pass_config.compile_factors()
+        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compile_factors()
+        return factors
 
-        factors["pass_config"] = self.pass_config.compute_hash()
-        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
-        return hash_factors(factors)
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        return hash_factors(self.compile_factors())
 
     def __repr__(self) -> str:
         exclude: dict[str, bool | dict[str, bool]] = {
