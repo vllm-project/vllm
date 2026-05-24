@@ -14,7 +14,7 @@
 #   * $HOME may be unset or resolve to "/" (unwritable).
 #   * getpass.getuser() falls back to pwd.getpwuid() -> KeyError.
 #
-# The wrapper re-points $HOME to /home/vllm when writable, /tmp/vllm-home
+# The wrapper re-points $HOME to /home/vllm when writable, /tmp/vllm-home.XXXXXX
 # otherwise, and defaults $USER to "vllm" so the pwd-lookup path is never
 # taken. Everything else is forwarded to `vllm serve`.
 #
@@ -29,8 +29,13 @@ if [ -z "${HOME:-}" ] || [ ! -w "${HOME}" ]; then
     if [ -w /home/vllm ]; then
         export HOME=/home/vllm
     else
-        export HOME=/tmp/vllm-home
-        mkdir -p "$HOME" 2>/dev/null || true
+        if _h="$(mktemp -d /tmp/vllm-home.XXXXXX 2>/dev/null)"; then
+            export HOME="$_h"
+            chmod 0700 "$HOME" 2>/dev/null || true
+        else
+            export HOME=/tmp
+        fi
+        unset _h
     fi
 fi
 

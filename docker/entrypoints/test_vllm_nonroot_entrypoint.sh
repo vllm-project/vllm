@@ -48,6 +48,20 @@ run_wrapper() {
 
 fail() { echo "FAIL: $*" >&2; echo "--- stdout ---" >&2; cat "$1" >&2; exit 1; }
 
+expect_default_home() {
+    _out="$1"
+    _case="$2"
+    if [ -w /home/vllm ]; then
+        expected_home="/home/vllm"
+        grep -q "^HOME=$expected_home\$" "$_out" \
+            || fail "$_out" "$_case: HOME not set to $expected_home"
+    else
+        expected_home="/tmp/vllm-home.XXXXXX"
+        grep -Eq '^HOME=/tmp/vllm-home\.[^/]+$' "$_out" \
+            || fail "$_out" "$_case: HOME not set to $expected_home"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Case 1: writable HOME and USER both set -> wrapper must leave them alone.
 # -----------------------------------------------------------------------------
@@ -62,22 +76,15 @@ grep -q "^ARGV=serve --model foo\$" "$out" || fail "$out" "case1: ARGV wrong"
 echo "PASS: case1 (writable HOME + USER preserved)"
 
 # -----------------------------------------------------------------------------
-# Case 2: HOME unset -> falls back to /home/vllm if writable, else /tmp/vllm-home.
+# Case 2: HOME unset -> falls back to /home/vllm if writable, else
+# /tmp/vllm-home.XXXXXX.
 # -----------------------------------------------------------------------------
-fake_vllm_home="$WORKDIR/fake-home-vllm"
-mkdir -p "$fake_vllm_home"
-# Temporarily shadow /home/vllm in the wrapper by setting the working dir so
-# "[ -w /home/vllm ]" resolves based on whether a real /home/vllm exists and
-# is writable. On dev machines /home/vllm typically does NOT exist, so the
-# wrapper should fall to /tmp/vllm-home.
+# The wrapper checks whether the real /home/vllm exists and is writable. On
+# dev machines /home/vllm typically does NOT exist, so the
+# wrapper should fall to /tmp/vllm-home.XXXXXX.
 out="$WORKDIR/case2.out"
 run_wrapper "$out" -- --model bar
-if [ -w /home/vllm ]; then
-    expected_home="/home/vllm"
-else
-    expected_home="/tmp/vllm-home"
-fi
-grep -q "^HOME=$expected_home\$" "$out" || fail "$out" "case2: HOME not set to $expected_home"
+expect_default_home "$out" "case2"
 grep -q "^USER=vllm\$" "$out" || fail "$out" "case2: USER not defaulted to vllm"
 grep -q "^LOGNAME=vllm\$" "$out" || fail "$out" "case2: LOGNAME not defaulted to vllm"
 grep -q "^ARGV=serve --model bar\$" "$out" || fail "$out" "case2: ARGV wrong"
@@ -91,7 +98,7 @@ mkdir -p "$ro_home"
 chmod 0500 "$ro_home"
 out="$WORKDIR/case3.out"
 run_wrapper "$out" "HOME=$ro_home" -- --model baz
-grep -q "^HOME=$expected_home\$" "$out" || fail "$out" "case3: HOME not overridden from unwritable"
+expect_default_home "$out" "case3"
 grep -q "^USER=vllm\$" "$out" || fail "$out" "case3: USER not defaulted"
 chmod 0700 "$ro_home"
 echo "PASS: case3 (unwritable HOME overridden)"
@@ -228,6 +235,31 @@ else
     grep -q "^PWD=$case10_home\$" "$out" \
         || fail "$out" "case10: inaccessible cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
     echo "PASS: case10 (inaccessible cwd falls back to \$HOME)"
+fi
+
+# -----------------------------------------------------------------------------
+# Case 11: if /tmp cannot create a private fallback dir, wrapper uses /tmp as
+# the last-resort HOME instead of leaving HOME empty under set -eu.
+# -----------------------------------------------------------------------------
+if [ -w /home/vllm ]; then
+    echo "SKIP: case11 (/home/vllm is writable; mktemp fallback path is not used)"
+else
+    cat > "$WORKDIR/bin/mktemp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$WORKDIR/bin/mktemp"
+
+    out="$WORKDIR/case11.out"
+    run_wrapper "$out" -- --model no-mktemp
+    rm -f "$WORKDIR/bin/mktemp"
+
+    grep -q "^HOME=/tmp\$" "$out" \
+        || fail "$out" "case11: mktemp failure did not fall back to /tmp"
+    grep -q "^USER=vllm\$" "$out" || fail "$out" "case11: USER not defaulted"
+    grep -q "^LOGNAME=vllm\$" "$out" || fail "$out" "case11: LOGNAME not defaulted"
+    grep -q "^ARGV=serve --model no-mktemp\$" "$out" || fail "$out" "case11: ARGV wrong"
+    echo "PASS: case11 (mktemp failure falls back to /tmp)"
 fi
 
 echo ""
