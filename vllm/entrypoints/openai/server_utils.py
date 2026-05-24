@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import URL, Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
@@ -141,10 +141,10 @@ class VaultAuthenticationMiddleware:
         self.secret_path = secret_path
         self.key = vault_key
         self.mount_point = mount_point
-        self.cache: TTLCache[str, str] = TTLCache(maxsize=1, ttl=cache_ttl)
+        self.cache: TTLCache[str, bytes] = TTLCache(maxsize=1, ttl=cache_ttl)
         self._lock = asyncio.Lock()
 
-    def _get_vault_secret_sync(self) -> str | None:
+    def _get_vault_secret_sync(self) -> bytes | None:
         """
         Synchronous process to check with Vault
         Uses a cache and the short TTL
@@ -160,8 +160,10 @@ class VaultAuthenticationMiddleware:
             expected_token = read_response["data"]["data"].get(self.key)
 
             if expected_token:
-                self.cache["vault_token"] = expected_token
-                return expected_token
+                self.cache["vault_token"] = hashlib.sha256(
+                    expected_token.encode("utf-8")
+                ).digest()
+                return self.cache["vault_token"]
 
             logger.error(
                 "Key '%s' not found in Vault path '%s'", self.key, self.secret_path
@@ -198,7 +200,8 @@ class VaultAuthenticationMiddleware:
         if not expected_token:
             return False
 
-        return secrets.compare_digest(param, expected_token)
+        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+        return secrets.compare_digest(param_hash, expected_token)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
@@ -213,7 +216,7 @@ class VaultAuthenticationMiddleware:
         url_path = URL(scope=scope).path.removeprefix(root_path)
 
         # authenticate /v1 requests
-        if url_path.startswith("/v1"):
+        if url_path.startswith(GUARDED_PREFIX):
             headers = Headers(scope=scope)
             authenticated = await self.verify_token(headers)
 
