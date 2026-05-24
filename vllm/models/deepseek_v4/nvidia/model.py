@@ -55,8 +55,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.logger import init_logger
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 from vllm.models.deepseek_v4.nvidia.ops.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
@@ -850,16 +853,20 @@ class DeepseekV4Attention(nn.Module):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
-        # Only check when using deepgemm BMM path.
-        # If n_groups is not evenly divisible by tp_size, some groups would be
-        # lost. Guard here to avoid silent correctness issues during weight
-        # loading.
+        # Warn when n_groups is not evenly divisible by tp_size.
+        # This only affects the DeepGEMM BMM path which requires even
+        # distribution of groups across TP ranks. If you're using a different
+        # kernel (e.g., FlashInfer, Cutlass), this warning can be ignored.
         if self.n_groups % tp_size != 0 and is_deep_gemm_supported():
-            raise ValueError(
-                f"n_groups ({self.n_groups}) is not evenly divisible by "
-                f"tp_size ({tp_size}). This would cause groups to be lost "
-                f"in the deepgemm BMM path. Please use a TP size that "
-                f"evenly divides n_groups."
+            logger.warning_once(
+                "n_groups (%d) is not evenly divisible by tp_size (%d). "
+                "This will cause issues with the DeepGEMM BMM kernel as "
+                "groups would be lost. If you're not using DeepGEMM "
+                "(e.g., using FlashInfer or Cutlass kernel instead), this "
+                "warning can be ignored. To avoid this, use a tp_size that "
+                "evenly divides n_groups.",
+                self.n_groups,
+                tp_size,
             )
         self.window_size = config.sliding_window
         # NOTE(zyongye) Compress ratio can't be 0
