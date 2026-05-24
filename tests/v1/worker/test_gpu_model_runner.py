@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -998,6 +999,58 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     assert len(kv_cache_config_after_init.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+def test_init_kv_cache_with_kv_sharing_uniform_type_spec(default_vllm_config):
+    torch.set_default_dtype(torch.float16)
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    vllm_config = get_vllm_config()
+    with set_current_vllm_config(vllm_config):
+        fwd_context = {
+            layer_0: Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1: Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                kv_sharing_target_layer_name=layer_0,
+            ),
+        }
+        assert fwd_context is not None
+
+    runner = GPUModelRunner(vllm_config, DEVICE_TYPE)
+    kv_cache_spec = runner.get_kv_cache_spec()
+    assert runner.shared_kv_cache_layers[layer_1] == layer_0
+
+    available_memory = 20 * GiB_bytes
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_spec], [available_memory]
+    )[0]
+
+    group = kv_cache_config.kv_cache_groups[0]
+    producer_spec = kv_cache_spec[layer_0]
+    kv_cache_config.kv_cache_groups[0] = KVCacheGroupSpec(
+        layer_names=group.layer_names,
+        kv_cache_spec=UniformTypeKVCacheSpecs(
+            block_size=producer_spec.block_size,
+            kv_cache_specs={layer_0: producer_spec},
+        ),
+    )
+
+    kv_cache_config.num_blocks = 1
+    kv_cache_config.kv_cache_tensors[0].size = producer_spec.page_size_bytes
+
+    runner.initialize_kv_cache(kv_cache_config)
+
+    assert len(runner.attn_groups) == 1
+    assert len(runner.attn_groups[0]) == 1
+    assert runner.attn_groups[0][0].layer_names == [layer_0, layer_1]
 
 
 @pytest.mark.skipif(
