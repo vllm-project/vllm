@@ -196,7 +196,7 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
-        temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim, 1)
+        temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim)
         nheads = divide(num_heads, tp_world_size)
         ngroups = max(1, divide(n_groups, tp_world_size))
         old_x_shape = (checkpoint_interval, nheads, head_dim)

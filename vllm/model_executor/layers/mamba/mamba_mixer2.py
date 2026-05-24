@@ -2,8 +2,51 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
 import torch
 from torch import nn
+
+_MAMBA_DBG_ENABLED = os.environ.get("MAMBA_DEBUG_PRINT", "0") == "1"
+_MAMBA_DBG_PREFIX = os.environ.get("MAMBA_DEBUG_PREFIX", "")
+_MAMBA_DBG_MAX_CALLS = int(os.environ.get("MAMBA_DEBUG_MAX_CALLS", "8"))
+_MAMBA_DBG_CALLS: dict[str, int] = {}
+
+
+def _t_stat(t, name):
+    if t is None:
+        return f"{name}=None"
+    if not isinstance(t, torch.Tensor):
+        return f"{name}={t!r}"
+    if t.numel() == 0:
+        return f"{name}=empty shape={tuple(t.shape)} dtype={t.dtype}"
+    tf = t.detach().to(torch.float32)
+    head = tf.flatten()[:6].tolist()
+    return (
+        f"{name} shape={tuple(t.shape)} dtype={t.dtype} "
+        f"sum={tf.sum().item():.4e} abs_sum={tf.abs().sum().item():.4e} "
+        f"min={tf.min().item():.3e} max={tf.max().item():.3e} "
+        f"first6={[round(v, 6) for v in head]}"
+    )
+
+
+def _mamba_dbg_should_print(prefix: str) -> bool:
+    if not _MAMBA_DBG_ENABLED:
+        return False
+    if _MAMBA_DBG_PREFIX and _MAMBA_DBG_PREFIX not in prefix:
+        return False
+    # Limit per-layer call count
+    n = _MAMBA_DBG_CALLS.get(prefix, 0)
+    if n >= _MAMBA_DBG_MAX_CALLS:
+        return False
+    # Only rank 0 to keep volume manageable under TP
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    except Exception:
+        rank = 0
+    if rank != 0:
+        return False
+    _MAMBA_DBG_CALLS[prefix] = n + 1
+    return True
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -621,6 +664,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
         ssm_state_dtype = self.get_state_dtype()[1]
+        ssm_state_dtype = (
+            torch.float32
+            if ssm_state_dtype in QUANTIZED_SSM_STATE_DTYPES
+            else ssm_state_dtype
+        )
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -731,7 +779,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
-            ssm_state_scales = self.kv_cache[2]
+            ssm_state_scales = self.kv_cache[2] if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES else None
             old_x = self.kv_cache[3]
             old_B = self.kv_cache[4]
             old_dt = self.kv_cache[5]
@@ -769,7 +817,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     copy_source=True,
                 )
 
-            def reset_checkpointing_cache(block_indices: torch.Tensor) -> None:
+            def reset_checkpointing_cache(block_indices: torch.Tensor, _site: str = "?") -> None:
+                if _mamba_dbg_should_print(self.prefix + ":reset:" + _site):
+                    try:
+                        pre_idx = cache_buf_idx[block_indices].detach().cpu().tolist()
+                        pre_cnt = prev_num_accepted_tokens[block_indices].detach().cpu().tolist()
+                        blk = block_indices.detach().cpu().tolist()
+                    except Exception as e:
+                        pre_idx = pre_cnt = blk = f"<err:{e}>"
+                    print(
+                        f"[MAMBA_DBG] {self.prefix} RESET site={_site} "
+                        f"blocks={blk} pre_cache_buf_idx={pre_idx} "
+                        f"pre_prev_num_accepted_tokens={pre_cnt}",
+                        flush=True,
+                    )
                 old_x[block_indices] = 0
                 old_B[block_indices] = 0
                 old_dt[block_indices] = 0
@@ -919,9 +980,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 )
 
                 if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES:
-                    decode_scale = ssm_state_scales[kernel_ssm_indices]
-                    # TODO: check if torch.float32 is the correct dtype here
-                    # Change state_dtype=ssm_state.dtype, depending on the result
+                    # ssm_state_scales is (num_blocks, nheads, head_dim);
+                    # unsqueeze trailing 1 to broadcast over state_size.
+                    decode_scale = ssm_state_scales[kernel_ssm_indices].unsqueeze(-1)
                     initial_states = initial_states.to(torch.float32) * decode_scale
 
             # NOTE: final output is an in-place update of out tensor
@@ -1030,7 +1091,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         ssm_state_scales[cache_blocks_to_fill] = decode_scale
 
                     ssm_state[cache_blocks_to_fill] = from_where
-                    reset_checkpointing_cache(cache_blocks_to_fill)
+                    reset_checkpointing_cache(cache_blocks_to_fill, "prefill_chunk_fill")
 
                 # For all seqs, store the last state (note: might be partial):
                 assert state_indices_tensor_p is not None
@@ -1046,7 +1107,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state_scales[last_state_indices] = decode_scale
 
                 ssm_state[last_state_indices] = last_varlen_states
-                reset_checkpointing_cache(last_state_indices)
+                reset_checkpointing_cache(last_state_indices, "prefill_last")
 
             else:
                 # update ssm states
@@ -1060,7 +1121,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state_scales[state_indices_tensor_p] = decode_scale
 
                 ssm_state[state_indices_tensor_p] = varlen_states
-                reset_checkpointing_cache(state_indices_tensor_p)
+                reset_checkpointing_cache(state_indices_tensor_p, "prefill_var")
 
         # Process decode requests
         if has_decode:
@@ -1130,6 +1191,48 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
 
             assert preallocated_ssm_out_d is not None
+
+            _dbg_emit = _mamba_dbg_should_print(self.prefix)
+            if _dbg_emit:
+                ci = getattr(self, "mamba_checkpoint_interval", "?")
+                idx_in = state_indices_tensor_d_input
+                idx_out = state_indices_tensor_d_output
+                print(
+                    f"[MAMBA_DBG] {self.prefix} ci={ci} num_decode={num_decodes} "
+                    f"num_decode_tokens={num_decode_tokens} "
+                    f"idx_in_first={idx_in.flatten()[:8].tolist() if idx_in is not None else None} "
+                    f"idx_out_first={idx_out.flatten()[:8].tolist() if idx_out is not None else None} "
+                    f"num_accepted_first={num_accepted_tokens.flatten()[:8].tolist() if num_accepted_tokens is not None else None}",
+                    flush=True,
+                )
+                # Restrict to the cache slot(s) that this batch will read.
+                if idx_in is not None and idx_in.numel() > 0:
+                    sel_in = idx_in.flatten()[:1]
+                else:
+                    sel_in = None
+
+                def _slice(t):
+                    if t is None or t.numel() == 0 or sel_in is None:
+                        return t
+                    try:
+                        return t[sel_in]
+                    except Exception:
+                        return t
+
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(ssm_state), "ssm_state[sel]"), flush=True)
+                if ssm_state_scales is not None:
+                    print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(ssm_state_scales), "ssm_state_scales[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(old_x), "old_x[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(old_B), "old_B[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(old_dt), "old_dt[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(old_cumAdt), "old_cumAdt[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(cache_buf_idx), "cache_buf_idx[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(_slice(prev_num_accepted_tokens), "prev_num_accepted_tokens[sel]"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(hidden_states_d, "hidden_states_d"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(B_d, "B_d"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(C_d, "C_d"), flush=True)
+                print("[MAMBA_DBG]  PRE  " + _t_stat(dt_d, "dt_d"), flush=True)
+
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
@@ -1159,6 +1262,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prev_num_accepted_tokens=prev_num_accepted_tokens,
                 state_scales=ssm_state_scales,
             )
+
+            if _dbg_emit:
+                if idx_out is not None and idx_out.numel() > 0:
+                    sel_out = idx_out.flatten()[:1]
+                else:
+                    sel_out = sel_in
+
+                def _slice_o(t):
+                    if t is None or t.numel() == 0 or sel_out is None:
+                        return t
+                    try:
+                        return t[sel_out]
+                    except Exception:
+                        return t
+
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(ssm_state), "ssm_state[sel_out]"), flush=True)
+                if ssm_state_scales is not None:
+                    print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(ssm_state_scales), "ssm_state_scales[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(old_x), "old_x[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(old_B), "old_B[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(old_dt), "old_dt[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(old_cumAdt), "old_cumAdt[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(cache_buf_idx), "cache_buf_idx[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(_slice_o(prev_num_accepted_tokens), "prev_num_accepted_tokens[sel_out]"), flush=True)
+                print("[MAMBA_DBG]  POST " + _t_stat(preallocated_ssm_out_d, "ssm_out_d"), flush=True)
         if cache_buf_idx is not cache_buf_idx_src:
             cache_buf_idx_src.copy_(cache_buf_idx)
         if prev_num_accepted_tokens is not prev_num_accepted_tokens_src:
