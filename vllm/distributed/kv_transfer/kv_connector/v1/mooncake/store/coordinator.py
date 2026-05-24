@@ -115,12 +115,21 @@ class MooncakeStoreCoordinator:
         block_hashes: list[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
+        *,
+        apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
         """Returns ``(load_mask_per_group, hit_length)``. ``mask[g][i]`` is True iff
         group ``g`` populates chunk ``i`` locally (e.g. SWA and Mamba tail-only);
-        recv-side callers skip False slots."""
+        recv-side callers skip False slots.
+
+        ``apply_eagle`` controls whether the per-spec ``use_eagle`` last-block
+        pop is applied. Lookup callers want it (the drafter requires recomputing
+        the last block); per-chunk mask callers must not, because ``token_len``
+        already reflects the eagle-pruned hit length and a second pop would
+        leave the trailing block unloaded.
+        """
         blocks_per_group, hit_length = self._find_hit_blocks(
-            block_hashes, max_length, cached_block_pool
+            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
         )
         masks = tuple(
             [blk is not cached_block_pool.null_block for blk in blocks]
@@ -138,7 +147,10 @@ class MooncakeStoreCoordinator:
         (e.g. SWA / Mamba tail-only).
         """
         masks, _ = self.find_longest_cache_hit(
-            block_hashes, token_len, ExternalCachedBlockPool()
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(),
+            apply_eagle=False,
         )
         return masks
 
@@ -195,10 +207,17 @@ class MooncakeStoreCoordinator:
         block_hashes: list[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
+        *,
+        apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Mirrors HybridKVCacheCoordinator.find_longest_cache_hit but
         dispatches via spec_manager_map (we don't allocate managers).
+
+        When ``apply_eagle`` is False, ignore ``eagle_attn_group_indices`` —
+        used by ``load_mask`` to avoid popping a second block on top of the
+        one already removed by the lookup.
         """
+        eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
@@ -208,7 +227,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
-                use_eagle=(0 in self.eagle_attn_group_indices),
+                use_eagle=(0 in eagle_indices),
                 alignment_tokens=spec.block_size,
             )
             num_groups = len(self.kv_cache_groups)
@@ -237,9 +256,7 @@ class MooncakeStoreCoordinator:
                     )
                     continue
 
-                use_eagle = (
-                    idx in self.eagle_attn_group_indices and idx not in eagle_verified
-                )
+                use_eagle = idx in eagle_indices and idx not in eagle_verified
                 _max_length = curr_hit_length
                 if use_eagle:
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
