@@ -24,7 +24,7 @@ from typing import Any
 
 import torch
 
-from tests.kernels.mamba.test_mamba_ssm import selective_state_update_ref
+from tests.kernels.mamba.utils import selective_state_update_ref
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     _CONFIGS_DIR,
     _canonical_cache_dtype,
