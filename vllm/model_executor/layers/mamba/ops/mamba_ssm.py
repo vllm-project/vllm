@@ -40,7 +40,8 @@ def get_ssm_config_file_name(
 ) -> str:
     """Return the JSON filename for the given kernel shape.
 
-    Layout: ``configs/headdim=<H>,dstate=<D>,device_name=<dev>,cache_dtype=<dt>.json``.
+    Layout: ``configs/selective_state_update/
+    headdim=<H>,dstate=<D>,device_name=<dev>,cache_dtype=<dt>.json``.
     """
     return (
         f"headdim={headdim},dstate={dstate},"
