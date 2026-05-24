@@ -189,7 +189,12 @@ def _tq_fused_store_fp8(
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
     k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0)
-    k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
+    # [Genesis P3] BF16->FP8 cast crashes on SM<89 (convert_custom_float8_sm80
+    # only accepts fp16/fp32). Cast to fp16 first on FP8_E4B15 path. PR #39908.
+    if FP8_E4B15:
+        k_fp8 = k_vals.to(tl.float16).to(tl.float8e4b15)
+    else:
+        k_fp8 = k_vals.to(tl.float8e4nv)
     k_bytes = k_fp8.to(tl.uint8, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + d_offs, k_bytes, mask=d_mask)
 

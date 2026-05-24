@@ -102,13 +102,14 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         if result:
             return result
         # Fall back: content starts at <tool_call> (implicit reasoning end).
+        # [Genesis P61] Use FIRST occurrence of <tool_call> instead of last,
+        # so all tool calls in multi-tool requests are preserved
+        # (backport of vllm PR #40783).
         if (
             self._tool_call_token_id is not None
             and self._tool_call_token_id in input_ids
         ):
-            tool_call_index = (
-                len(input_ids) - 1 - input_ids[::-1].index(self._tool_call_token_id)
-            )
+            tool_call_index = input_ids.index(self._tool_call_token_id)
             return input_ids[tool_call_index:]
         return []
 
@@ -134,13 +135,22 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """
 
         # Strip <think> if present in the generated output.
+        # [Genesis P27] Capture BEFORE-THINK text so it can be prepended
+        # to content instead of being silently dropped (issue #40699-class).
         model_output_parts = model_output.partition(self.start_token)
+        _genesis_before_think = (
+            model_output_parts[0] if model_output_parts[1] else ""
+        )
         model_output = (
             model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
         )
 
         if self.end_token in model_output:
             reasoning, _, content = model_output.partition(self.end_token)
+            # [Genesis P27] Prepend BEFORE-THINK text to content so it
+            # is surfaced to the user instead of silently dropped.
+            if _genesis_before_think:
+                content = _genesis_before_think + (content or "")
             return reasoning, content or None
 
         if not self.thinking_enabled:
@@ -180,10 +190,19 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """
         # Strip <think> from delta if present (old template / edge case
         # where the model generates <think> itself).
+        # [Genesis P27] Preserve BEFORE-THINK text as a content delta
+        # (quality fix for #40699-class regressions).
+        _genesis_pre_think_content = ""
         if self.start_token_id in delta_token_ids:
             start_idx = delta_text.find(self.start_token)
+            if start_idx > 0:
+                _genesis_pre_think_content = delta_text[:start_idx]
             if start_idx >= 0:
                 delta_text = delta_text[start_idx + len(self.start_token) :]
+        if _genesis_pre_think_content:
+            # Emit the BEFORE-THINK slice as content before reasoning begins.
+            # Downstream still receives remaining delta_text on the next call.
+            return DeltaMessage(content=_genesis_pre_think_content)
 
         if self.end_token_id in delta_token_ids:
             # End token in this delta: split reasoning from content.
