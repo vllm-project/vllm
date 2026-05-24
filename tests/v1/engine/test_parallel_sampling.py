@@ -82,6 +82,7 @@ def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
         data_parallel_rank=None,
     )
 
+
 def test_observe_finished_request_single() -> None:
     """Non-parallel request (n=1) should record metrics correctly."""
     from vllm.v1.metrics.stats import IterationStats
