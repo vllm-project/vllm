@@ -137,8 +137,7 @@ class PassConfig:
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Deprecated. The MiniMax QK norm fusion is now applied automatically at
     runtime (see `MiniMaxText01RMSNormTP.forward_qkv`). This flag is kept for
-    backward compatibility and has no effect; it will be removed in a future
-    release."""
+    backward compatibility and has no effect; it will be removed in v0.23."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -302,7 +301,7 @@ class PassConfig:
                 "`fuse_minimax_qk_norm` is deprecated and has no effect; "
                 "the MiniMax QK norm fusion is now applied automatically at "
                 "runtime when its conditions are met. This flag will be "
-                "removed in a future release."
+                "removed in v0.23."
             )
 
     def log_enabled_passes(self) -> None:

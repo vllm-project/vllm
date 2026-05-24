@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 # Max number of tokens supported by the Lamport fused allreduce+RMSNorm kernel.
@@ -22,7 +23,8 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
 
-def _minimax_qk_norm_fusion(
+@torch.compile(backend=current_platform.simple_compile_backend)
+def _minimax_qk_norm_fallback(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
@@ -32,34 +34,6 @@ def _minimax_qk_norm_fusion(
     tp_world: int,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    num_tokens = qkv.shape[0]
-    if (
-        _MINIMAX_FUSED_AR_RMS_QK is not None
-        and tp_world > 1
-        and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
-    ):
-        from .lamport_workspace import (
-            get_allreduce_workspace,
-        )
-
-        workspace = get_allreduce_workspace(
-            rank=tp_rank,
-            world_size=tp_world,
-            max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
-            process_group=get_tp_group().cpu_group,
-        )
-        return _MINIMAX_FUSED_AR_RMS_QK(
-            qkv,
-            q_weight,
-            k_weight,
-            workspace,
-            q_size,
-            kv_size,
-            tp_rank,
-            tp_world,
-            eps,
-        )
-
     q, k, _ = qkv.split([q_size, kv_size, kv_size], dim=-1)
     orig_dtype = q.dtype
     q = q.to(torch.float32)
@@ -75,6 +49,40 @@ def _minimax_qk_norm_fusion(
     return q.to(orig_dtype), k.to(orig_dtype)
 
 
+def _minimax_qk_norm_fusion(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_size: int,
+    kv_size: int,
+    tp_rank: int,
+    tp_world: int,
+    eps: float,
+    workspace: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert qkv.ndim == 2
+    num_tokens = qkv.shape[0]
+    if (
+        workspace is not None
+        and tp_world > 1
+        and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
+    ):
+        return _MINIMAX_FUSED_AR_RMS_QK(
+            qkv,
+            q_weight,
+            k_weight,
+            workspace,
+            q_size,
+            kv_size,
+            tp_rank,
+            tp_world,
+            eps,
+        )
+    return _minimax_qk_norm_fallback(
+        qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
+    )
+
+
 def _minimax_qk_norm_fusion_fake(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
@@ -84,7 +92,9 @@ def _minimax_qk_norm_fusion_fake(
     tp_rank: int,
     tp_world: int,
     eps: float,
+    workspace: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert qkv.ndim == 2
     num_tokens = qkv.shape[0]
     return (
         torch.empty([num_tokens, q_size], dtype=qkv.dtype, device=qkv.device),
@@ -125,6 +135,19 @@ class MiniMaxText01RMSNormTP(CustomOp):
             shard_rank=self.weight_shard_rank,
         )
         self.variance_epsilon = eps
+
+        self.workspace = None
+        if _MINIMAX_FUSED_AR_RMS_QK is not None and self.tp_world > 1:
+            from .lamport_workspace import (
+                get_allreduce_workspace,
+            )
+
+            self.workspace = get_allreduce_workspace(
+                rank=self.tp_rank,
+                world_size=self.tp_world,
+                max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
+                process_group=get_tp_group().cpu_group,
+            )
 
     @staticmethod
     def weight_loader(
@@ -193,6 +216,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
         q_size: int,
         kv_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert qkv.ndim == 2
+        assert q_norm.variance_epsilon == k_norm.variance_epsilon
         q, k = torch.ops.vllm.minimax_qk_norm_fusion(
             qkv,
             q_norm.weight,
@@ -202,6 +227,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             q_norm.tp_rank,
             q_norm.tp_world,
             q_norm.variance_epsilon,
+            q_norm.workspace,
         )
         _, _, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
         return q, k, v
