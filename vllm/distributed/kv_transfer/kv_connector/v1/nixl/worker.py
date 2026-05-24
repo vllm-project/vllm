@@ -2031,6 +2031,22 @@ class NixlConnectorWorker:
         # expiration for requests that have not been read from D yet.
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
+            # FIX(early-notif race): settle if a notif arrived before registration.
+            if req_id in self._notif_n_consumers:
+                assert self.transfer_topo is not None
+                _n = self._notif_n_consumers[req_id]
+                _cpp = -self.transfer_topo.tp_ratio(_n) if _n > self.world_size else 1
+                if self.consumer_notification_counts_by_req[req_id] >= _cpp:
+                    self._late_released.add(req_id)
+                    self.consumer_notification_counts_by_req.pop(req_id, None)
+                    self._notif_n_consumers.pop(req_id, None)
+                    self._reqs_to_process.discard(req_id)
+                    self._reqs_to_send.pop(req_id, None)
+                    logger.debug(
+                        "Settled early notif for req %s after registration.",
+                        req_id,
+                    )
+                    continue
             # FIX(best_of fan-out): late sibling of an already-pulled parent.
             _parent = self._best_of_parent(req_id)
             if _parent is not None and _parent in self._pulled_bases:
@@ -2038,25 +2054,6 @@ class NixlConnectorWorker:
                 self.consumer_notification_counts_by_req.pop(req_id, None)
                 self._reqs_to_process.discard(req_id)
                 self._reqs_to_send.pop(req_id, None)
-
-        # FIX(early-notif race): settle reqs whose notif arrived before registration.
-        if self._notif_n_consumers:
-            assert self.transfer_topo is not None
-            for _req_id in list(self._notif_n_consumers):
-                if _req_id not in self._reqs_to_process:
-                    continue
-                _n = self._notif_n_consumers[_req_id]
-                _cpp = -self.transfer_topo.tp_ratio(_n) if _n > self.world_size else 1
-                if self.consumer_notification_counts_by_req[_req_id] >= _cpp:
-                    self._late_released.add(_req_id)
-                    self.consumer_notification_counts_by_req.pop(_req_id, None)
-                    self._notif_n_consumers.pop(_req_id, None)
-                    self._reqs_to_process.discard(_req_id)
-                    self._reqs_to_send.pop(_req_id, None)
-                    logger.debug(
-                        "Settled early notif for req %s after registration.",
-                        _req_id,
-                    )
 
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
