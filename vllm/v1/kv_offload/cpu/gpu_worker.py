@@ -281,9 +281,13 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         ):
             num_copy_ops += group_size * len(group_data_refs)
 
-        all_src = np.empty(num_copy_ops, dtype=np.int64)
-        all_dst = np.empty(num_copy_ops, dtype=np.int64)
-        all_sizes = np.empty(num_copy_ops, dtype=np.int64)
+        _pin = is_pin_memory_available()
+        batch_src = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
+        batch_dst = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
+        batch_sizes = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
+        all_src = batch_src.numpy()
+        all_dst = batch_dst.numpy()
+        all_sizes = batch_sizes.numpy()
 
         src_offset = 0
         dst_offset = 0
@@ -346,10 +350,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        batch_src = torch.from_numpy(all_src)
-        batch_dst = torch.from_numpy(all_dst)
-        batch_sizes = torch.from_numpy(all_sizes)
-
+        # batch_src/dst/sizes are the pinned tensors backing all_src/dst/sizes.
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
         start_event = (
             self._event_pool.pop()
