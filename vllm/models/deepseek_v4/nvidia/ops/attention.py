@@ -828,7 +828,7 @@ class DeepseekV4Indexer(nn.Module):
             hidden_size,
             self.n_head,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.weights_proj",
         )
         self.softmax_scale = self.head_dim**-0.5
