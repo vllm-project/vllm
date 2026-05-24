@@ -373,6 +373,7 @@ class IquestMoeDecoderLayer(nn.Module):
             vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
+        self.use_sandwich_norm = self.layer_idx == 0
 
         mlp_only_layers = getattr(config, "mlp_only_layers", []) or []
         if self.layer_idx not in mlp_only_layers:
@@ -402,10 +403,18 @@ class IquestMoeDecoderLayer(nn.Module):
         self.feed_forward_norm = IquestMoeRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        if self.layer_idx == 0:
+        if self.use_sandwich_norm:
             self.ffn_out_norm = IquestMoeRMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
+
+        # NOTE(yxing): add scale config
+        if self.layer_idx == 0:
+            self.attn_out_scale = getattr(config, "first_layer_attn_out_scale", 1.0)
+            self.ffn_out_scale = getattr(config, "first_layer_ffn_out_scale", 1.0)
+        else:
+            self.attn_out_scale = getattr(config, "attn_out_scale", 1.0)
+            self.ffn_out_scale = getattr(config, "ffn_out_scale", 1.0)
 
     def forward(
         self,
@@ -414,25 +423,25 @@ class IquestMoeDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         # NOTE(yxing): post-norm is different for first layer and non-first layers
-        if self.layer_idx == 0:
+        if self.use_sandwich_norm:
             norm_hidden_states = self.attention_norm(hidden_states)
             attn_output = self.self_attn(
                 positions=positions, hidden_states=norm_hidden_states
             )
-            h = hidden_states + self.attn_out_norm(attn_output)
+            h = hidden_states + self.attn_out_norm(attn_output) * self.attn_out_scale
 
             # fully connected
             hidden_states = self.mlp(self.feed_forward_norm(h))
-            output = h + self.ffn_out_norm(hidden_states)
+            output = h + self.ffn_out_norm(hidden_states) * self.ffn_out_scale
             return output
         else:
             x = self.attention_norm(hidden_states)
             attn_output = self.self_attn(positions=positions, hidden_states=x)
-            h = x + self.attn_out_norm(attn_output)
+            h = x + self.attn_out_norm(attn_output) * self.attn_out_scale
 
             # fully connected
             ffn_out = self.mlp(self.feed_forward_norm(h))
-            output = h + ffn_out
+            output = h + ffn_out * self.ffn_out_scale
             return output
 
 
