@@ -7,6 +7,8 @@ from unittest.mock import Mock
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.sampling_params import SamplingParams
 
 
 class TestCompletionRequestField:
@@ -88,3 +90,42 @@ class TestChatCompletionRequestField:
         model_config.max_model_len = 128
         params = req.build_tok_params(model_config)
         assert params.return_token_offsets is False
+
+
+class TestGenerateRequestField:
+    def test_default_is_none(self):
+        """token_offsets must default to None so existing /v1/.../render
+        responses are byte-identical (modulo new key emission)."""
+        req = GenerateRequest(
+            token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(),
+        )
+        assert req.token_offsets is None
+
+    def test_accepts_offsets_list(self):
+        req = GenerateRequest(
+            token_ids=[10, 20],
+            sampling_params=SamplingParams(),
+            token_offsets=[(0, 1), (1, 3)],
+        )
+        assert req.token_offsets == [(0, 1), (1, 3)]
+
+    def test_offsets_serialize_to_json(self):
+        """Pydantic v2 round-trip: tuple[int, int] elements survive
+        model_dump and re-validate."""
+        req = GenerateRequest(
+            token_ids=[10, 20],
+            sampling_params=SamplingParams(),
+            token_offsets=[(0, 1), (1, 3)],
+        )
+        dumped = req.model_dump()
+        assert dumped["token_offsets"] == [(0, 1), (1, 3)]
+        # Re-validate from the dumped dict (excluding sampling_params
+        # which doesn't round-trip cleanly via dump).
+        again = GenerateRequest.model_validate(
+            {
+                **dumped,
+                "sampling_params": SamplingParams(),
+            }
+        )
+        assert again.token_offsets == [(0, 1), (1, 3)]
