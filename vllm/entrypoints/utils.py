@@ -273,9 +273,17 @@ def jsonify_non_default_args(
     return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
 
 
+# sensitive arguments that should not be logged
+SENSITIVE_ARGS = {"vault_token", "api_key"}
+
+
 def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", non_default_args)
+    redacted_args = {
+        key: "**REDACTED**" if key in SENSITIVE_ARGS else value
+        for key, value in non_default_args.items()
+    }
+    logger.info("non-default args: %s", redacted_args)
 
 
 def should_include_usage(

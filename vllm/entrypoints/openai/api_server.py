@@ -297,6 +297,24 @@ def build_app(
                 secret_path=vault_path,
                 vault_key=vault_key,
             )
+        elif any(vault_params):
+            missing = [
+                name
+                for name, val in [
+                    ("vault_url", vault_url),
+                    ("vault_token", vault_token),
+                    ("vault_secret_path", vault_path),
+                    ("vault_key", vault_key),
+                ]
+                if not val
+            ]
+            logger.warning(
+                "Vault authentication is NOT enabled because the "
+                "following required parameter(s) are missing: %s. "
+                "All 4 vault parameters must be set to activate "
+                "Vault authentication.",
+                ", ".join(missing),
+            )
 
     if args.enable_request_id_headers:
         from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware
