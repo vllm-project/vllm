@@ -88,27 +88,30 @@ def test_env_override_loads_custom_config(monkeypatch, tmp_path):
 
 
 def test_fallback_when_no_config(monkeypatch, tmp_path):
-    """try_get_optimal_ssm_config must fall back to the hard-coded heuristic
-    when no JSON file is found for the current device."""
+    """try_get_optimal_ssm_config must fall back to _get_default_ssm_launch_config
+    when no JSON file is found for the current
+    (device, headdim, dstate, cache_dtype) combination.
+    """
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
         str(tmp_path),
     )
-    _clear_caches()
 
-    for dstate in (64, 16):
-        block_m, warps = try_get_optimal_ssm_config(
-            headdim=_HEADDIM,
-            dstate=dstate,
-            batch=1,
-            nheads=1,
-            cache_dtype=_CACHE_DTYPE,
-            is_blackwell=False,
-        )
-        assert (block_m, warps) == _get_default_ssm_launch_config(
-            dstate, is_blackwell=False
-        )
+    for dstate in (8, 16, 32, 64, 128, 256):
+        for is_blackwell in (False, True):
+            _clear_caches()
+            block_m, warps = try_get_optimal_ssm_config(
+                headdim=_HEADDIM,
+                dstate=dstate,
+                batch=1,
+                nheads=1,
+                cache_dtype=_CACHE_DTYPE,
+                is_blackwell=is_blackwell,
+            )
+            assert (block_m, warps) == _get_default_ssm_launch_config(
+                dstate, is_blackwell=is_blackwell
+            )
 
     _clear_caches()
 
