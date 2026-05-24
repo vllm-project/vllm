@@ -82,7 +82,6 @@ def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
         data_parallel_rank=None,
     )
 
-
 def test_observe_finished_request_single() -> None:
     """Non-parallel request (n=1) should record metrics correctly."""
     from vllm.v1.metrics.stats import IterationStats
@@ -105,13 +104,10 @@ def test_observe_finished_request_parallel() -> None:
     iteration_stats = IterationStats()
 
     parent_request = ParentRequest(make_request(SamplingParams(n=3)))
-    # Simulate 3 child requests
-    for i in range(3):
-        child_id, _ = parent_request.get_child_info(i)
+    child_ids = [parent_request.get_child_info(i)[0] for i in range(3)]
 
     # Child 0 finishes with 10 tokens — not all done yet, no metrics recorded
-    child_0_id = "0_parent_id"
-    parent_request.child_requests.discard(child_0_id)
+    parent_request.child_requests.remove(child_ids[0])
     ParentRequest.observe_finished_request(
         parent_req=parent_request,
         iteration_stats=iteration_stats,
@@ -121,8 +117,7 @@ def test_observe_finished_request_parallel() -> None:
     assert iteration_stats.max_num_generation_tokens_iter == []
 
     # Child 1 finishes with 20 tokens — still not all done
-    child_1_id = "1_parent_id"
-    parent_request.child_requests.discard(child_1_id)
+    parent_request.child_requests.remove(child_ids[1])
     ParentRequest.observe_finished_request(
         parent_req=parent_request,
         iteration_stats=iteration_stats,
@@ -132,8 +127,7 @@ def test_observe_finished_request_parallel() -> None:
     assert iteration_stats.max_num_generation_tokens_iter == []
 
     # Child 2 finishes with 15 tokens — all done, metrics should be recorded
-    child_2_id = "2_parent_id"
-    parent_request.child_requests.discard(child_2_id)
+    parent_request.child_requests.remove(child_ids[2])
     ParentRequest.observe_finished_request(
         parent_req=parent_request,
         iteration_stats=iteration_stats,
@@ -150,11 +144,10 @@ def test_observe_finished_request_max_tokens_tracked() -> None:
     iteration_stats = IterationStats()
 
     parent_request = ParentRequest(make_request(SamplingParams(n=2)))
-    for i in range(2):
-        parent_request.get_child_info(i)
+    child_ids = [parent_request.get_child_info(i)[0] for i in range(2)]
 
     # Child 0 finishes with 100 tokens
-    parent_request.child_requests.discard("0_parent_id")
+    parent_request.child_requests.remove(child_ids[0])
     ParentRequest.observe_finished_request(
         parent_req=parent_request,
         iteration_stats=iteration_stats,
@@ -162,7 +155,7 @@ def test_observe_finished_request_max_tokens_tracked() -> None:
     )
 
     # Child 1 finishes with 5 tokens — max should still be 100
-    parent_request.child_requests.discard("1_parent_id")
+    parent_request.child_requests.remove(child_ids[1])
     ParentRequest.observe_finished_request(
         parent_req=parent_request,
         iteration_stats=iteration_stats,
