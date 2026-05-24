@@ -22,3 +22,12 @@ def test_block_size_positive_is_accepted():
 def test_block_size_non_positive_raises(invalid_block_size):
     with pytest.raises(ValueError, match="block_size"):
         CacheConfig(block_size=invalid_block_size)
+
+
+@pytest.mark.parametrize("invalid_block_size", [0.5, 1.0, -0.5, True, False])
+def test_block_size_non_int_raises(invalid_block_size):
+    # `block_size` is annotated `SkipValidation[int]`, so Pydantic does not
+    # coerce/reject non-int values; the model validator must catch them.
+    # `bool` is a subclass of `int` but is never a meaningful block size.
+    with pytest.raises(ValueError, match="block_size"):
+        CacheConfig(block_size=invalid_block_size)
