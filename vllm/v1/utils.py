@@ -43,6 +43,15 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 
+# Floor on the wall-clock budget shutdown() waits for child procs to exit
+# before falling back to SIGKILL. MultiprocExecutor's inner
+# _ensure_worker_termination takes up to 4s graceful + 4s post-SIGTERM = 8s
+# (with NCCL destroy_process_group running inside that window), followed
+# by MQ / zmq / asyncio teardown in BackgroundResources. 20s leaves headroom
+# for variance under load; below that we SIGKILL the engine mid-cleanup
+# and leak the NCCL workspace.
+_PROC_SHUTDOWN_GRACE_S = 20.0
+
 
 class ConstantList(Generic[T], Sequence):
     def __init__(self, x: list[T]) -> None:
@@ -475,9 +484,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     """
     if timeout is None:
         timeout = 0.0
-
-    # Allow at least 5 seconds for remaining procs to terminate.
-    timeout = max(timeout, 5.0)
+    timeout = max(timeout, _PROC_SHUTDOWN_GRACE_S)
 
     # Shutdown the process.
     for proc in procs:
