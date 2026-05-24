@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::trace;
@@ -7,8 +7,9 @@ use tracing::trace;
 use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
+use crate::protocol::EngineCoreOutput;
 use crate::protocol::stats::SchedulerStats;
-use crate::protocol::{EngineCoreOutput, UtilityOutput};
+use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
@@ -266,15 +267,15 @@ impl RequestRegistry {
 #[derive(Debug)]
 pub struct UtilityRegistry {
     closed: bool,
-    next_call_id: AtomicI64,
-    utility_calls: BTreeMap<i64, UtilitySender>,
+    next_call_id: AtomicU64,
+    utility_calls: BTreeMap<u64, UtilitySender>,
 }
 
 impl Default for UtilityRegistry {
     fn default() -> Self {
         Self {
             closed: false,
-            next_call_id: AtomicI64::new(1),
+            next_call_id: AtomicU64::new(1),
             utility_calls: BTreeMap::default(),
         }
     }
@@ -283,7 +284,7 @@ impl Default for UtilityRegistry {
 impl UtilityRegistry {
     /// Allocate the next utility `call_id` and register a newly added utility
     /// call.
-    pub fn allocate_and_register(&mut self) -> (i64, UtilityReceiver) {
+    pub fn allocate_and_register(&mut self) -> (u64, UtilityReceiver) {
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.utility_calls.insert(call_id, tx);
@@ -291,14 +292,14 @@ impl UtilityRegistry {
     }
 
     /// Resolve a utility output to its waiting receiver.
-    pub fn resolve(&mut self, call_id: &i64) -> Option<UtilitySender> {
+    pub fn resolve(&mut self, call_id: &u64) -> Option<UtilitySender> {
         self.utility_calls.remove(call_id)
     }
 
     /// Drop a batch of registered utility calls without delivering a result.
     /// Used to roll back allocations when the dispatch fan-out fails before
     /// every engine could accept the request.
-    pub fn unregister_many(&mut self, call_ids: impl IntoIterator<Item = i64>) {
+    pub fn unregister_many(&mut self, call_ids: impl IntoIterator<Item = u64>) {
         for call_id in call_ids {
             self.utility_calls.remove(&call_id);
         }
@@ -315,7 +316,7 @@ impl UtilityRegistry {
     }
 
     #[cfg(test)]
-    pub fn contains(&self, call_id: i64) -> bool {
+    pub fn contains(&self, call_id: u64) -> bool {
         self.utility_calls.contains_key(&call_id)
     }
 
