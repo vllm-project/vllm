@@ -271,3 +271,66 @@ class TestRenderCompletionSurfacesOffsets:
         assert len(result) == 2
         assert result[0].token_offsets == [(0, 5), (5, 6)]
         assert result[1].token_offsets == [(0, 4), (4, 5)]
+
+
+class TestRenderChatSurfacesOffsets:
+    @pytest.mark.asyncio
+    async def test_flag_with_offsets_surfaces_in_response(
+        self, render_handler, mock_model_config
+    ):
+        # Chat path: render_chat returns (conversation, engine_inputs)
+        offsets = [(0, 4), (4, 5), (5, 11), (11, 12), (12, 18), (18, 19), (19, 20)]
+        engine_input = _make_engine_input(
+            [7220, 25, 18435, 11, 995, 13, 198], offsets=offsets
+        )
+        render_handler.render_chat = AsyncMock(return_value=([], [engine_input]))
+
+        req = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello, world."}],
+            return_token_offsets=True,
+        )
+        result = await render_handler.render_chat_request(req)
+
+        assert hasattr(result, "token_offsets")
+        assert result.token_offsets == offsets
+        assert len(result.token_offsets) == len(result.token_ids)
+
+    @pytest.mark.asyncio
+    async def test_chat_default_flag_yields_null_offsets(
+        self, render_handler, mock_model_config
+    ):
+        engine_input = _make_engine_input([7220, 25, 18435], include_offsets_key=False)
+        render_handler.render_chat = AsyncMock(return_value=([], [engine_input]))
+
+        req = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        result = await render_handler.render_chat_request(req)
+
+        assert result.token_offsets is None
+
+    @pytest.mark.asyncio
+    async def test_chat_multimodal_yields_null(self, render_handler, mock_model_config):
+        """A multimodal engine_input has type='multimodal' and no
+        prompt_token_offsets; surfacing must yield None."""
+        engine_input = {
+            "type": "multimodal",
+            "prompt_token_ids": [7220, 25, 18435],
+            "prompt": "user: <image>",
+            # No prompt_token_offsets key — renderer skipped offsets.
+        }
+        render_handler.render_chat = AsyncMock(return_value=([], [engine_input]))
+        # _extract_mm_features requires mm_hashes/mm_placeholders; mock it
+        # so we can test only the token_offsets surfacing logic.
+        render_handler._extract_mm_features = Mock(return_value=None)
+
+        req = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "describe"}],
+            return_token_offsets=True,
+        )
+        result = await render_handler.render_chat_request(req)
+
+        assert result.token_offsets is None
