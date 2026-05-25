@@ -148,27 +148,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    SinkDSAAttentionSpec,
-    SinkFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
-)
-
-
-# KV cache specs whose corresponding single-type manager reserves a
-# dedicated set of sink blocks from the global block pool during
-# `KVCacheCoordinator.__init__`. The order in which these managers are
-# constructed (i.e. the order of `kv_cache_config.kv_cache_groups`)
-# determines which global block ids each one pops, so the matching
-# attention layer / metadata builder needs the same group rank to
-# compute its `sink_kv_block_offset`.
-_SINK_AWARE_SPEC_TYPES: tuple[type, ...] = (
-    SinkFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
-    SinkDSAAttentionSpec,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -6630,7 +6611,6 @@ class GPUModelRunner(
                     if not self.parallel_config.use_ubatching
                     else self.parallel_config.num_ubatches,
                 )
-        self._bind_sink_kv_block_offsets(kv_cache_config)
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
         # because some of them change the threshold at init time.
@@ -6646,59 +6626,6 @@ class GPUModelRunner(
                 EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
-
-    def _bind_sink_kv_block_offsets(self, kv_cache_config: KVCacheConfig) -> None:
-        """Assign per-group `sink_kv_block_offset` to every sink-aware
-        metadata builder and attention layer.
-
-        Sink-aware single-type managers (e.g. `SinkSlidingWindowManager`,
-        `SinkFullAttentionManager`) each pop `num_sink_block` blocks from
-        the global free queue in `KVCacheCoordinator.__init__`, in the
-        same order as `kv_cache_config.kv_cache_groups`. The null block
-        occupies global block id 0, so the k-th sink-aware group owns
-        block ids `[1 + k * num_sink_block, 1 + (k+1) * num_sink_block)`
-        and must use `sink_kv_block_offset = 1 + k * num_sink_block` both
-        when prepending sink block ids to the per-request block table
-        (`StaticSinkAttentionBuilder.block_table_with_sink`) and when
-        writing sink KV via `populate_sink_kv`. Non-sink groups do not
-        contribute to the rank.
-
-        Without this binding, every sink-aware group falls back to the
-        builder/layer default `1`, so different sink-aware groups (e.g.
-        DSA + SWA0 + SWA1) all prepend `{1, 2}` to their block tables
-        even though their managers actually reserved different global
-        block ids, which becomes a real problem the moment any layer or
-        sub-system inspects sink block ids globally (prefix caching, KV
-        connectors, debug assertions, future cross-group sink reads).
-        """
-        sink_group_rank = 0
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-            kv_cache_config.kv_cache_groups
-        ):
-            spec = kv_cache_group_spec.kv_cache_spec
-            if not isinstance(spec, _SINK_AWARE_SPEC_TYPES):
-                continue
-            sink_len = getattr(spec, "sink_len", 0) or 0
-            num_sink_block = sink_len // spec.block_size
-            sink_kv_block_offset = 1 + sink_group_rank * num_sink_block
-
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(
-                self.vllm_config,
-                layer_type,
-                kv_cache_group_spec.layer_names,
-            )
-            for layer_name in kv_cache_group_spec.layer_names:
-                layer = attn_layers.get(layer_name)
-                if layer is not None and hasattr(layer, "set_sink_kv_block_offset"):
-                    layer.set_sink_kv_block_offset(sink_kv_block_offset)
-
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                for builder in attn_group.metadata_builders:
-                    if hasattr(builder, "set_sink_kv_block_offset"):
-                        builder.set_sink_kv_block_offset(sink_kv_block_offset)
-
-            sink_group_rank += 1
 
     def _check_and_update_cudagraph_mode(
         self,
@@ -6979,9 +6906,7 @@ class GPUModelRunner(
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    reshape_kv_cache = getattr(
-                        attn_backend, "reshape_kv_cache", None
-                    )
+                    reshape_kv_cache = getattr(attn_backend, "reshape_kv_cache", None)
                     if reshape_kv_cache is not None:
                         kv_cache = reshape_kv_cache(
                             raw_tensor=raw_tensor,

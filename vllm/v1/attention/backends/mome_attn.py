@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
 
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mamba_attn import (
-    BaseMambaAttentionMetadata, BaseMambaAttentionMetadataBuilder)
+    BaseMambaAttentionMetadata,
+    BaseMambaAttentionMetadataBuilder,
+)
 
 
 class MomeAttentionMetadata(BaseMambaAttentionMetadata):

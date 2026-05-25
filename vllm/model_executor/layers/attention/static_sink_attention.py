@@ -5,153 +5,59 @@ from typing import cast
 
 import torch
 from torch import nn
-from vllm import _custom_ops as ops
+
 from vllm.config import CacheConfig, VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    LayerNameType,
-    _encode_layer_name,
-    _resolve_layer_name,
-    direct_register_custom_op,
-    kv_cache_dtype_str_to_dtype,
     get_dtype_size,
+    kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionType,
-    CommonAttentionMetadata,
     MLAAttentionImpl,
-    subclass_attention_backend_with_overrides
+    subclass_attention_backend_with_overrides,
 )
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
+from vllm.v1.attention.backends.mla.flashattn_mla import (
+    FlashAttnMLAImpl,
+    FlashAttnStaticSinkMLAImpl,
+)
+from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    FlashMLASparseImpl,
+    FlashMLASparseStaticSinkImpl,
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     DSAAttentionSpec,
     KVCacheSpec,
-    SinkFullAttentionSpec,
-    get_kv_quant_mode,
     MLAAttentionSpec,
+    SinkDSAAttentionSpec,
+    SinkFullAttentionSpec,
     SinkMLAAttentionSpec,
     SinkMLASlidingWindowSpec,
-    SinkDSAAttentionSpec
 )
-from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnStaticSinkMLAImpl
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
 
 logger = init_logger(__name__)
+
+# Maps underlying attention impl classes to static-sink variants.
+_STATIC_SINK_ATTN_IMPL_OVERRIDE: dict[type, type] = {
+    FlashAttnMLAImpl: FlashAttnStaticSinkMLAImpl,
+    FlashMLASparseImpl: FlashMLASparseStaticSinkImpl,
+}
 
 
 @functools.lru_cache
 def create_static_sink_attention_backend(
     underlying_attn_backend: type[AttentionBackend],
-    sink_len: int = 0,
 ) -> type[AttentionBackend]:
     prefix = "StaticSink_"
-    underlying_builder = underlying_attn_backend.get_builder_cls()
-
-    class StaticSinkAttentionBuilder(underlying_builder):  # type: ignore
-        def __init__(
-            self,
-            kv_cache_spec: AttentionSpec,
-            layer_names: list[str],
-            vllm_config: VllmConfig,
-            device: torch.device,
-        ):
-            super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-            model_config = vllm_config.model_config
-            scheduler_config = vllm_config.scheduler_config
-            self.sink_len = sink_len
-            self.block_size = vllm_config.cache_config.block_size
-            self.num_sink_blocks = self.sink_len // vllm_config.cache_config.block_size
-            self.max_num_blocks = cdiv(
-                model_config.max_model_len, vllm_config.cache_config.block_size
-            )
-            self.block_table_with_sink = torch.zeros(
-                (
-                    scheduler_config.max_num_seqs,
-                    self.max_num_blocks + self.num_sink_blocks,
-                ),
-                device=device,
-                dtype=torch.int32,
-            )
-            # self.block_table_with_sink[:, : self.num_sink_blocks] = torch.arange(
-            #     sink_kv_block_offset,
-            #     self.num_sink_blocks + sink_kv_block_offset,
-            #     device=device,
-            #     dtype=torch.int32,
-            # )
-            # self.sink_kv_block_offset = sink_kv_block_offset
-            self.seq_lens_with_sink = torch.zeros(
-                scheduler_config.max_num_seqs,
-                device=device,
-                dtype=torch.int32,
-            )
-            self.set_sink_kv_block_offset(1) 
-
-        def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
-            """Re-bind the sink block offset and rewrite the prepended
-            sink block ids in `block_table_with_sink` accordingly."""
-            self.sink_kv_block_offset = sink_kv_block_offset
-            if self.num_sink_blocks > 0:
-                self.block_table_with_sink[:, : self.num_sink_blocks] = (
-                    torch.arange(
-                        sink_kv_block_offset,
-                        self.num_sink_blocks + sink_kv_block_offset,
-                        device=self.block_table_with_sink.device,
-                        dtype=torch.int32,
-                    )
-                )
-
-        def build(
-            self,
-            common_prefix_len: int,
-            common_attn_metadata: CommonAttentionMetadata,
-            fast_build: bool = False,
-        ) -> AttentionMetadata:
-            num_reqs = common_attn_metadata.num_reqs
-            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
-
-            # Refresh the per-request portion of `block_table_with_sink`.
-            # The sink columns are already set by `set_sink_kv_block_offset`
-            # and never change after init. Zero the rest first to avoid
-            # leaving stale block ids from previous (potentially longer)
-            # forward passes in positions that the current request does
-            # not own.
-            self.block_table_with_sink[:, self.num_sink_blocks :] = 0
-            self.block_table_with_sink[
-                :num_reqs,
-                self.num_sink_blocks : self.num_sink_blocks + max_num_blocks,
-            ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]
-            common_attn_metadata.block_table_tensor = (
-                self.block_table_with_sink[:num_reqs]
-            )
-            common_attn_metadata.block_table_tensor.masked_fill_(
-                common_attn_metadata.block_table_tensor == -1, 0
-            )
-
-            # Write `seq_lens + sink_len` into the per-builder persistent
-            # buffer instead of mutating the shared `seq_lens` tensor.
-            # Padding positions (seq_lens == 0) must stay 0 so attention
-            # backends can identify unused slots.
-            src_seq_lens = common_attn_metadata.seq_lens
-            zero_mask = src_seq_lens.eq(0)
-            dst_seq_lens = self.seq_lens_with_sink[:num_reqs]
-            torch.add(src_seq_lens, self.sink_len, out=dst_seq_lens)
-            dst_seq_lens.masked_fill_(zero_mask, 0)
-            common_attn_metadata.seq_lens = dst_seq_lens
-            common_attn_metadata.max_seq_len += self.sink_len
-
-            return super().build(common_prefix_len, common_attn_metadata, fast_build)
+    underlying_impl = underlying_attn_backend.get_impl_cls()
+    sink_impl = _STATIC_SINK_ATTN_IMPL_OVERRIDE.get(underlying_impl)
 
     def reshape_kv_cache(
         raw_tensor: torch.Tensor,
@@ -164,8 +70,7 @@ def create_static_sink_attention_backend(
     ):
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
         assert kv_cache_spec.page_size_bytes % dtype_size == 0, (
-            "Static sink KV cache page size must be aligned to the cache "
-            "dtype size."
+            "Static sink KV cache page size must be aligned to the cache dtype size."
         )
         raw_cache = raw_tensor.view(kv_cache_spec.dtype)
         page_size = kv_cache_spec.page_size_bytes // dtype_size
@@ -227,16 +132,14 @@ def create_static_sink_attention_backend(
             return None
 
         assert num_blocks_per_kv_block == 1, (
-            "Padded static sink KV cache pages require "
-            "num_blocks_per_kv_block == 1."
+            "Padded static sink KV cache pages require num_blocks_per_kv_block == 1."
         )
         inner_stride = [1]
         for size in reversed(physical_shape[1:]):
             inner_stride.insert(0, inner_stride[0] * size)
         inner_stride = inner_stride[1:]
         inv_order = [
-            kv_cache_stride_order.index(i)
-            for i in range(len(kv_cache_stride_order))
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
         return torch.as_strided(
             raw_cache,
@@ -244,16 +147,17 @@ def create_static_sink_attention_backend(
             stride=(page_size, *inner_stride),
         ).permute(*inv_order)
 
-    attn_backend = subclass_attention_backend_with_overrides(
+    overrides: dict[str, object] = {
+        "reshape_kv_cache": staticmethod(reshape_kv_cache),
+    }
+    if sink_impl is not None:
+        overrides["get_impl_cls"] = lambda: sink_impl
+
+    return subclass_attention_backend_with_overrides(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
-        overrides={
-            "get_builder_cls": lambda: StaticSinkAttentionBuilder,
-            "reshape_kv_cache": staticmethod(reshape_kv_cache),
-        },
+        overrides=overrides,
     )
-
-    return attn_backend
 
 
 @CustomOp.register("static_sink_attention")
@@ -272,6 +176,7 @@ class StaticSinkAttention(Attention, CustomOp):
         cache_config: CacheConfig | None = None,
         **kwargs,
     ):
+        CustomOp.__init__(self)
         dtype = torch.get_default_dtype()
 
         if cache_config is not None:
@@ -285,7 +190,6 @@ class StaticSinkAttention(Attention, CustomOp):
             underlying_attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype)
         attn_backend = create_static_sink_attention_backend(
             underlying_attn_backend,  # type: ignore[arg-type]
-            sink_len=sink_len,
         )
         Attention.__init__(
             self=self,
@@ -296,72 +200,13 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
-
         self.sink_len = sink_len
-        self.block_size = block_size
-        self.sink_kv_block_offset = 1
-        self.sink_populated = False
-        self.sink_key = None
-        self.sink_value = None
 
     def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
         self.sink_kv_block_offset = sink_kv_block_offset
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
-        self.sink_key = sink_key
-        self.sink_value = sink_value
-
-    def forward_native(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        assert self.sink_key is not None and self.sink_value is not None, (
-            "sink_key and sink_value have not been prepared"
-        )
-        if not self.sink_populated:
-            self_kv_cache = self.kv_cache
-            torch.ops.vllm.maybe_populate_sink(
-                self_kv_cache, _encode_layer_name(self.layer_name)
-            )
-
-        return super().forward(query, key, value, output_shape)
-
-    def forward_cuda(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        return self.forward_native(query, key, value, output_shape)
-
-    def forward(self, *args, **kwargs):
-        return self._forward_method(*args, **kwargs)
-
-    def populate_sink_kv(self, self_kv_cache):
-        sink_kv_slot_mapping = torch.arange(
-            # self.block_size,
-            # self.sink_len + self.block_size,
-            self.block_size * self.sink_kv_block_offset,
-            self.sink_len + self.block_size * self.sink_kv_block_offset,
-            device=torch.accelerator.current_device_index(),
-            dtype=torch.long,
-        )
-        triton_reshape_and_cache_flash_diffkv(
-            self.sink_key,
-            self.sink_value,
-            self_kv_cache,
-            sink_kv_slot_mapping,
-            self.kv_cache_dtype,
-            self._k_scale,
-            self._v_scale,
-        )
-        # We only populate the sink_key and sink_value once
-        self.sink_populated = True
+        self.impl.update_sink_kv(sink_key, sink_value)  # type: ignore[attr-defined]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
@@ -376,35 +221,7 @@ class StaticSinkAttention(Attention, CustomOp):
             head_size_v=self.head_size_v,
             sink_len=self.sink_len,
             dtype=self.kv_cache_torch_dtype,
-            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
-
-
-def maybe_populate_sink(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    layer_name = _resolve_layer_name(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    if self.sink_populated or self_kv_cache.numel() == 0:
-        return
-    self.populate_sink_kv(self_kv_cache)
-
-
-def maybe_populate_sink_fake(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="maybe_populate_sink",
-    op_func=maybe_populate_sink,
-    mutates_args=["self_kv_cache"],
-    fake_impl=maybe_populate_sink_fake,
-)
 
 
 class StaticSinkMLAAttention(MLAAttention):
@@ -430,6 +247,23 @@ class StaticSinkMLAAttention(MLAAttention):
         # is_hybrid_kv: bool = False,
         **extra_impl_args,
     ):
+        head_size = kv_lora_rank + qk_rope_head_dim
+        if cache_config is not None:
+            kv_cache_dtype = cache_config.cache_dtype
+        else:
+            kv_cache_dtype = "auto"
+        dtype = torch.get_default_dtype()
+        underlying_attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            use_mla=True,
+            use_sparse=use_sparse,
+            num_heads=num_heads,
+        )
+        sink_attn_backend = create_static_sink_attention_backend(
+            underlying_attn_backend,
+        )
         super().__init__(
             num_heads=num_heads,
             scale=scale,
@@ -442,6 +276,7 @@ class StaticSinkMLAAttention(MLAAttention):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            attn_backend=sink_attn_backend,
             use_sparse=use_sparse,
             indexer=indexer,
             **extra_impl_args,
@@ -450,21 +285,9 @@ class StaticSinkMLAAttention(MLAAttention):
         self.use_sparse = use_sparse
         self.sink_len = sink_len
         self.sliding_window = sliding_window
-        self.sink_kv_block_offset = 1
         self.block_size = cache_config.block_size if cache_config is not None else 16
-        self.sink_populated = False
-        self.sink_k_pe = None
-        self.sink_compressed_kv = None
-        # if is_hybrid_kv and self.sliding_window is None:
-        #     self.sink_kv_block_offset += self.sink_len // self.block_size
-        self.attn_backend = create_static_sink_attention_backend(
-            self.attn_backend,
-            sink_len=self.sink_len,
-            # sink_kv_block_offset=self.sink_kv_block_offset
-        )
-        impl_cls = FlashMLASparseImpl if use_sparse else FlashAttnStaticSinkMLAImpl
-        impl_cls = cast(type[MLAAttentionImpl], impl_cls)
-        self.impl = impl_cls(
+        impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
+        self.impl = impl_cls(  # type: ignore[assignment]
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -486,122 +309,23 @@ class StaticSinkMLAAttention(MLAAttention):
             **extra_impl_args,
         )
 
-    def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
-        self.sink_kv_block_offset = sink_kv_block_offset
-
     def update_sink_kv(self, sink_k_pe, sink_compressed_kv) -> None:
-        self.sink_k_pe = sink_k_pe
-        self.sink_compressed_kv = sink_compressed_kv
-        if not self.use_sparse:
-            self.impl.update_sink_kv(sink_k_pe, sink_compressed_kv)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        assert self.sink_k_pe is not None and self.sink_compressed_kv is not None, (
-            "sink_k_pe and sink_compressed_kv have not been prepared"
-        )
-        forward_context: ForwardContext = get_forward_context()
-        self_kv_cache = self.kv_cache
-        impl_kv_cache = (
-            self_kv_cache[0]
-            if isinstance(self_kv_cache, (list, tuple))
-            else self_kv_cache
-        )
-
-        if not self.sink_populated:
-            torch.ops.vllm.maybe_populate_sink(impl_kv_cache, self.layer_name)
-
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
-
-        if self.use_direct_call:
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata[self.layer_name]
-            slot_mapping = forward_context.slot_mapping
-
-            assert isinstance(slot_mapping, dict), (
-                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-            )
-
-            self.impl.do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
-
-            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            self.forward_impl(
-                q,
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                attn_metadata,
-                output=output,
-            )
-            return output
-        else:
-            if isinstance(self_kv_cache, (list, tuple)):
-                raise NotImplementedError(
-                    "Composite DSA MLA KV cache requires direct attention calls."
-                )
-            encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self.layer_name,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
-            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            torch.ops.vllm.unified_mla_attention_with_output(
-                q,
-                kv_c_normed,
-                k_pe,
-                output,
-                encoded,
-                kv_cache_dummy_dep=kv_cache_dummy_dep,
-            )
-            return output
-
-    def populate_sink_kv(self, self_kv_cache: torch.Tensor):
-        sink_kv_slot_mapping = torch.arange(
-            self.block_size * self.sink_kv_block_offset,
-            self.sink_len + self.block_size * self.sink_kv_block_offset,
-            device=torch.accelerator.current_device_index(),
-            dtype=torch.long,
-        )
-        ops.concat_and_cache_mla(
-            self.sink_compressed_kv,
-            self.sink_k_pe,
-            self_kv_cache,
-            sink_kv_slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
-            scale=self._k_scale
-        )
-        self.sink_populated = True
+        self.impl.update_sink_kv(sink_k_pe, sink_compressed_kv)  # type: ignore[attr-defined]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        use_composite_kv_cache = (
-            self.use_sparse
-            and self.indexer is not None
-        )
+        use_composite_kv_cache = self.use_sparse and self.indexer is not None
         # Use max_sliding_window for KV management grouping
-        max_sliding_window = getattr(vllm_config.model_config.hf_config, "max_sliding_window", self.sliding_window)
+        max_sliding_window = getattr(
+            vllm_config.model_config.hf_config,
+            "max_sliding_window",
+            self.sliding_window,
+        )
         if use_composite_kv_cache:
-            if self.sink_len > 0:
+            if self.sink_len is not None and self.sink_len > 0:
                 return SinkDSAAttentionSpec(
                     block_size=vllm_config.cache_config.block_size,
                     num_kv_heads=1,
@@ -610,7 +334,11 @@ class StaticSinkMLAAttention(MLAAttention):
                     page_size_padded=page_size_padded,
                     cache_dtype_str=vllm_config.cache_config.cache_dtype,
                     sink_len=self.sink_len,
-                    indexer_head_size=getattr(self.indexer, "composite_kv_cache_head_size", getattr(self.indexer, "head_dim", None)),
+                    indexer_head_size=getattr(
+                        self.indexer,
+                        "composite_kv_cache_head_size",
+                        getattr(self.indexer, "head_dim", None),
+                    ),
                 )
             else:
                 return DSAAttentionSpec(
@@ -620,10 +348,18 @@ class StaticSinkMLAAttention(MLAAttention):
                     dtype=kv_cache_dtype,
                     page_size_padded=page_size_padded,
                     cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                    indexer_head_size=getattr(self.indexer, "composite_kv_cache_head_size", getattr(self.indexer, "head_dim", None)),
+                    indexer_head_size=getattr(
+                        self.indexer,
+                        "composite_kv_cache_head_size",
+                        getattr(self.indexer, "head_dim", None),
+                    ),
                 )
 
-        if self.sink_len > 0 and self.sliding_window is not None:
+        if (
+            self.sink_len is not None
+            and self.sink_len > 0
+            and self.sliding_window is not None
+        ):
             return SinkMLASlidingWindowSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
@@ -632,9 +368,9 @@ class StaticSinkMLAAttention(MLAAttention):
                 page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
                 sink_len=self.sink_len,
-                sliding_window=max_sliding_window,
+                sliding_window=max_sliding_window,  # type: ignore[arg-type]
             )
-        if self.sink_len > 0:
+        if self.sink_len is not None and self.sink_len > 0:
             return SinkMLAAttentionSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
@@ -645,10 +381,10 @@ class StaticSinkMLAAttention(MLAAttention):
                 sink_len=self.sink_len,
             )
         return MLAAttentionSpec(
-                block_size=vllm_config.cache_config.block_size,
-                num_kv_heads=1,
-                head_size=self.head_size,
-                dtype=kv_cache_dtype,
-                page_size_padded=page_size_padded,
-                cache_dtype_str=vllm_config.cache_config.cache_dtype,
-            )
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            page_size_padded=page_size_padded,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        )
