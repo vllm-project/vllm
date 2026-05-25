@@ -1,7 +1,8 @@
 from abc import ABC
 from vllm.utils.counter import Counter
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any
+from typing_extensions import TypeVar
 
 from tqdm import tqdm
 
