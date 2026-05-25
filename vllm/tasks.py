@@ -11,7 +11,6 @@ PoolingTask = Literal[
     "token_embed",
     "token_classify",
     "plugin",
-    "embed&token_classify",
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 

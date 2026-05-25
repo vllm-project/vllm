@@ -1540,7 +1540,6 @@ class ModelConfig:
                     return "token_classify"
 
         priority: list[PoolingTask] = [
-            "embed&token_classify",
             "embed",
             "classify",
             "token_embed",
