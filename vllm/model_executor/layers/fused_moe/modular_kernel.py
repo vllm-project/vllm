@@ -497,16 +497,6 @@ class FusedMoEExperts(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
-    def max_num_tokens_per_call(self) -> int | None:
-        """
-        Optional cap on the M dimension passed to one expert kernel invocation.
-
-        Returning None keeps the historical single-call behavior. Standard-format
-        routed expert kernels can override this to have the modular kernel split
-        expert compute after dispatch and before finalize/combine.
-        """
-        return None
-
     @staticmethod
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")
@@ -1091,25 +1081,16 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        if M_chunk < M_full:
-            workspace13, workspace2, fused_out = (
-                current_workspace_manager().get_simultaneous(
-                    (workspace13_shape, workspace_dtype),
-                    (workspace2_shape, workspace_dtype),
-                    (fused_out_shape, out_dtype),
-                )
-            )
-        else:
-            # We can reuse the memory between cache1 and cache3 because by the
-            # time we need cache3, we're done with cache1.
-            # Reuse workspace13 for the output since there is only one chunk.
-            max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
-            common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
-                ((max_shape_size,), workspace_dtype),
-                (workspace2_shape, workspace_dtype),
-            )
-            workspace13 = _resize_cache(common_workspace, workspace13_shape)
-            fused_out = _resize_cache(common_workspace, fused_out_shape)
+        # We can reuse the memory between cache1 and cache3 because by the
+        # time we need cache3, we're done with cache1.
+        # Reuse workspace13 for the output since there is only one chunk.
+        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
+            ((max_shape_size,), workspace_dtype),
+            (workspace2_shape, workspace_dtype),
+        )
+        workspace13 = _resize_cache(common_workspace, workspace13_shape)
+        fused_out = _resize_cache(common_workspace, fused_out_shape)
 
         return workspace13, workspace2, fused_out
 
@@ -1243,17 +1224,10 @@ class FusedMoEKernelModularImpl:
         if M_full == 0:
             return torch.empty_like(a1q, dtype=in_dtype)
 
-        max_num_tokens_per_call = self.fused_experts.max_num_tokens_per_call()
-        M_chunk = (
-            M_full
-            if max_num_tokens_per_call is None or max_num_tokens_per_call <= 0
-            else min(M_full, max_num_tokens_per_call)
-        )
-
         workspace13, workspace2, fused_out = self._allocate_buffers(
             in_dtype,
             a1q.device,
-            M_chunk,
+            M_full,
             M_full,
             N,
             K,
@@ -1263,58 +1237,6 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
-
-        if M_chunk < M_full:
-            if (
-                self.fused_experts.activation_format()
-                != FusedMoEActivationFormat.Standard
-            ):
-                raise NotImplementedError(
-                    "Expert-call chunking is only implemented for Standard "
-                    "activation format."
-                )
-
-            logger.info_once(
-                "Chunking %s expert calls with M_full=%d and M_chunk=%d",
-                self.fused_experts.__class__.__name__,
-                M_full,
-                M_chunk,
-            )
-
-            for start in range(0, M_full, M_chunk):
-                end = min(start + M_chunk, M_full)
-                M_cur = end - start
-                workspace13_shape, workspace2_shape, _ = (
-                    self.fused_experts.workspace_shapes(
-                        M_cur,
-                        N,
-                        K,
-                        top_k,
-                        global_num_experts,
-                        local_num_experts,
-                        expert_tokens_meta,
-                        activation,
-                    )
-                )
-                self.fused_experts.apply(
-                    output=fused_out[start:end],
-                    hidden_states=a1q[start:end],
-                    w1=w1,
-                    w2=w2,
-                    topk_weights=topk_weights[start:end],
-                    topk_ids=topk_ids[start:end],
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    a1q_scale=(None if a1q_scale is None else a1q_scale[start:end]),
-                    a2_scale=self.fused_experts.a2_scale,
-                    workspace13=_resize_cache(workspace13, workspace13_shape),
-                    workspace2=_resize_cache(workspace2, workspace2_shape),
-                    expert_tokens_meta=expert_tokens_meta,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
-
-            return fused_out
 
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
