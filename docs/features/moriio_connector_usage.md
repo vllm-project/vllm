@@ -47,8 +47,7 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
       "proxy_ping_port": "36367",
       "http_port": "20005",
       "handshake_port": "6301",
-      "notify_port": "6105",
-      "read_mode": true
+      "notify_port": "6105"
     }
   }'
 ```
@@ -77,19 +76,18 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
       "http_port": "40005",
       "proxy_ping_port": "36367",
       "handshake_port": "7301",
-      "notify_port": "7501",
-      "read_mode": true
+      "notify_port": "7501"
     }
   }'
 ```
 
 ### Proxy Server
 
-`vllm-router` is the recommended proxy:
+The proxy fronts the producer and consumer instances and routes incoming requests to them. `vllm-router` is the recommended proxy; it can be installed manually or run as a Docker container. Note that the port `36367` below is the `proxy_ping_port` configured on each vLLM instance.
+
+**Manual install:**
 
 ```bash
-# 1. Manual install
-# port 36367 here is proxy_ping_port
 pip install vllm-router
 vllm-router \
   --vllm-pd-disaggregation \
@@ -98,8 +96,11 @@ vllm-router \
   --policy consistent_hash \
   --prefill-policy consistent_hash \
   --decode-policy consistent_hash
+```
 
-# 2. Or run with docker
+**Docker:**
+
+```bash
 docker run \
   --name vllm-router \
   --network host \
@@ -114,12 +115,12 @@ docker run \
   --decode-policy consistent_hash
 ```
 
-You can also use the reference implementation proxy
+Alternatively, you can use the reference implementation proxy shipped with vLLM:
 
 ```bash
 cd <path_to>/vllm
 pip install quart aiohttp msgpack
-python examples/online_serving/disaggregated_serving/moriio_toy_proxy_server.py
+python examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
 ```
 
 ## Configuration
@@ -179,7 +180,7 @@ Currently only configured using MoRI-specific environment variables. See the MoR
 
 ## Multi-node deployments (different hosts)
 
-Below example shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.
+The example below shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.
 
 ### Manual deployment
 
@@ -247,7 +248,6 @@ docker run \
         "notify_port": "61005"
       }
     }'
-
 ```
 
 **On node 2:**
@@ -293,7 +293,7 @@ docker run \
 
 ## Troubleshooting
 
-### `Assertion`availDevices.size() > 0' failed` - Incompatible NIC userspace libraries
+### `availDevices.size() > 0` assertion failure — incompatible NIC userspace libraries
 
 **Problem:** I see this log when launching vLLM:
 
@@ -310,14 +310,19 @@ libraries](#appendix-installing-nic-userspace-libraries) for more information.
 
 To run MoRI with RDMA, your environment must have the necessary RDMA userspace libraries installed that match the associated kernel module and firmware version.
 
-The official image `vllm/vllm-openai-rocm:v0.21.0` and later versions comes pre-installed with userspace libraries for the following NICs and kernel module
-versions:
+The official image `vllm/vllm-openai-rocm:v0.21.0` (and later) comes pre-installed with userspace libraries for the following NICs and kernel module versions:
 
 - AINIC (AMD Pensando Pollara): version `1.117.3-hydra`, tested with `ioinic-dkms=25.11.1.001`
 - Thor2 (Broadcom): version `235.2.86.0`, tested with `bnxt-en-dkms=1.10.3.235.2.86.0`, `bnxt-re-dkms=235.2.86.0`
 
-Refer to [Dockerfile.rocm](docker/Dockerfile.rocm) for more details. For users with NICs, kernel modules, and/or FW other than those stated above we refer to
+Refer to [Dockerfile.rocm](../../docker/Dockerfile.rocm) for more details. For users with NICs, kernel modules, and/or FW other than those stated above we refer to
 the vendors' own installation instructions.
+
+## Example Scripts
+
+Reference scripts in the vLLM repository:
+
+- [moriio_toy_proxy_server.py](../../examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py) — reference implementation of the disaggregation proxy.
 
 ## Further reading
 

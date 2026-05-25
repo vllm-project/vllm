@@ -31,7 +31,7 @@ Now supports 7 types of connectors:
 
 - **P2pNcclConnector**: refer to [examples/disaggregated/p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh](../../examples/disaggregated/p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh) for the example usage of P2pNcclConnector disaggregated prefilling.
 - **MooncakeConnector**: refer to [examples/disaggregated/mooncake_connector/run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh) for the example usage of MooncakeConnector disaggregated prefilling. For detailed usage guide, see [MooncakeConnector Usage Guide](mooncake_connector_usage.md).
-- **MoRIIOConnector** (ROCm only): For example usage, refer to [examples/disaggregated/moriio_connector/example_1p1d.sh](../../examples/disaggregated/moriio_connector/example_1p1d.sh). For detailed usage guide, see [MoRI-IO Usage Guide](moriio_connector_usage.md).
+- **MoRIIOConnector** (ROCm only): see [MoRI-IO Usage Guide](moriio_connector_usage.md) for example usage and detailed documentation.
 - **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
 
   ```bash
