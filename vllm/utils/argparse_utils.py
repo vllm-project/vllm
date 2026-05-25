@@ -295,6 +295,19 @@ class FlexibleArgumentParser(ArgumentParser):
                     "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
                 )
 
+        # Normalize `--config=<path>` to `--config <path>` so that config file
+        # expansion works with both the spaced and the `=` syntax. argparse
+        # treats the two forms as equivalent, but the config pre-processing
+        # below (and `_pull_args_from_config`) recognizes `--config` only as a
+        # standalone token.
+        normalized_args = list[str]()
+        for arg in args:
+            if arg.startswith("--config="):
+                normalized_args.extend(arg.split("=", 1))
+            else:
+                normalized_args.append(arg)
+        args = normalized_args
+
         if "--config" in args:
             args = self._pull_args_from_config(args)
 
