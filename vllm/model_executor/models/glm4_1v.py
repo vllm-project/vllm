@@ -123,11 +123,8 @@ logger = init_logger(__name__)
 _MAX_FRAMES_PER_VIDEO = 600
 
 
-def _is_glmga_processor(processor: object) -> bool:
-    if type(processor).__name__ == "GlmgaProcessor":
-        return True
-    # GlmgaProcessor was removed; Glm46VProcessor is reused with
-    # GlmgaImageProcessor / GlmgaVideoProcessor as sub-processors.
+def _is_glmga_model(processor: object) -> bool:
+    """Detect GLMGA variant via its Glmga sub-processors."""
     for attr in ("image_processor", "video_processor"):
         sub = getattr(processor, attr, None)
         if sub and "Glmga" in type(sub).__name__:
@@ -1167,7 +1164,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return placeholder
 
-    def _construct_video_placeholder_glmga(
+    def _construct_video_placeholder_glm46v(
         self,
         metadata: VideoMetadata,
         grid_thw: torch.Tensor,
@@ -1219,7 +1216,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
 
-        if _is_glmga_processor(hf_processor):
+        if _is_glmga_model(hf_processor):
             image_token_ids = [
                 hf_config.image_start_token_id,
                 hf_processor.image_token_id,
@@ -1311,16 +1308,16 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
 class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     @staticmethod
-    def _get_glmga_processor_inputs(
+    def _get_direct_path_inputs(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        glmga_mm_data = dict(mm_data)
-        glmga_mm_kwargs = dict(mm_kwargs)
+        prepared_data = dict(mm_data)
+        prepared_kwargs = dict(mm_kwargs)
 
-        videos = glmga_mm_data.get("videos")
+        videos = prepared_data.get("videos")
         if not (isinstance(videos, list) and len(videos) > 0):
-            return glmga_mm_data, glmga_mm_kwargs
+            return prepared_data, prepared_kwargs
 
         hf_videos = []
         hf_video_metadata = []
@@ -1333,23 +1330,23 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 elif isinstance(metadata, Mapping):
                     hf_video_metadata.append(_to_video_metadata(metadata))
                     if "do_sample_frames" in metadata:
-                        glmga_mm_kwargs["do_sample_frames"] = metadata[
+                        prepared_kwargs["do_sample_frames"] = metadata[
                             "do_sample_frames"
                         ]
                 elif metadata is not None:
                     raise TypeError(
-                        "GLMGA video metadata must be a mapping or VideoMetadata, "
+                        "Video metadata must be a mapping or VideoMetadata, "
                         f"got {type(metadata)}"
                     )
             else:
                 hf_videos.append(item)
 
-        glmga_mm_data["videos"] = hf_videos
+        prepared_data["videos"] = hf_videos
         if hf_video_metadata:
-            glmga_mm_data["video_metadata"] = hf_video_metadata
-            glmga_mm_kwargs["return_metadata"] = True
+            prepared_data["video_metadata"] = hf_video_metadata
+            prepared_kwargs["return_metadata"] = True
 
-        return glmga_mm_data, glmga_mm_kwargs
+        return prepared_data, prepared_kwargs
 
     def _call_hf_processor(
         self,
@@ -1364,8 +1361,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         # Glm46VProcessor and GLMGA handle image/video placeholders
         # together; only Glm4vProcessor (GLM-4.1V) needs the split-video
         # path because it uses image_token_id as the video placeholder.
-        if type(processor).__name__ != "Glm4vProcessor":
-            prepared_data, prepared_kwargs = self._get_glmga_processor_inputs(
+        if not isinstance(processor, Glm4vProcessor):
+            prepared_data, prepared_kwargs = self._get_direct_path_inputs(
                 mm_data, mm_kwargs
             )
             return super()._call_hf_processor(
@@ -1394,14 +1391,14 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
 
-                unuse_metadata = ["do_sample_frames"]
+                excluded_keys = ["do_sample_frames"]
                 video_mm_data["video_metadata"] = [
                     [
                         VideoMetadata(
                             **{
                                 k: metadata[k]
                                 for k in metadata
-                                if k not in unuse_metadata
+                                if k not in excluded_keys
                             }
                         )
                     ]
@@ -1450,8 +1447,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         prompt_text: str,
         tokenization_kwargs: Mapping[str, object],
     ) -> list[int]:
-        # Both Glm46VProcessor and GlmgaProcessor use generic replacement
-        # code that requires matching media inputs; bypass them for text-only
+        # Glm46VProcessor (including GLMGA variant) uses generic replacement
+        # code that requires matching media inputs; bypass for text-only
         # (cache path / dummy inputs) and tokenize directly.
         tokenizer = self.info.get_tokenizer()
         tokenizer_output = tokenizer(prompt_text, **tokenization_kwargs)
@@ -1477,14 +1474,14 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         )
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if _is_glmga_processor(hf_processor) and hf_inputs.get("video_metadata"):
+        if _is_glmga_model(hf_processor) and hf_inputs.get("video_metadata"):
             config["video_metadata"] = MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             )
 
         return config
 
-    def _get_prompt_updates_glmga(
+    def _get_prompt_updates_glm46v(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
@@ -1495,7 +1492,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         merge_length = image_processor.merge_size**2
 
-        def get_image_replacement_glmga(item_idx: int):
+        def get_image_replacement_glm46v(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -1511,7 +1508,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 embed_token_id=hf_processor.image_token_id,
             )
 
-        def get_video_replacement_glmga(item_idx: int):
+        def get_video_replacement_glm46v(item_idx: int):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
@@ -1527,7 +1524,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 assert isinstance(raw_metadata, Mapping)
                 metadata = _to_video_metadata(raw_metadata)
 
-            placeholder = self.info._construct_video_placeholder_glmga(
+            placeholder = self.info._construct_video_placeholder_glm46v(
                 metadata, grid_thw
             )
             return PromptUpdateDetails.select_token_id(
@@ -1539,12 +1536,12 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target="<|begin_of_image|><|image|><|end_of_image|>",
-                replacement=get_image_replacement_glmga,
+                replacement=get_image_replacement_glm46v,
             ),
             PromptReplacement(
                 modality="video",
                 target="<|begin_of_video|><|video|><|end_of_video|>",
-                replacement=get_video_replacement_glmga,
+                replacement=get_video_replacement_glm46v,
             ),
         ]
 
@@ -1555,8 +1552,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if _is_glmga_processor(hf_processor):
-            return self._get_prompt_updates_glmga(
+        if _is_glmga_model(hf_processor):
+            return self._get_prompt_updates_glm46v(
                 mm_items, hf_processor_mm_kwargs, out_mm_kwargs
             )
 
