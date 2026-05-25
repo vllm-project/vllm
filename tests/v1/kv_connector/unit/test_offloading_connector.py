@@ -347,12 +347,12 @@ def test_tiering_offloading() -> None:
 
 def test_fs_tiering_offloading(tmp_path) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec
-    + fs_python secondary tier."""
+    + fs secondary tier."""
     extra_config: dict = {
         "cpu_bytes_to_use": 1 << 30,
         "block_size": 48,
         "spec_name": "TieringOffloadingSpec",
-        "secondary_tiers": [{"type": "fs_python", "root_dir": str(tmp_path)}],
+        "secondary_tiers": [{"type": "fs", "root_dir": str(tmp_path)}],
     }
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
