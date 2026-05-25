@@ -56,7 +56,10 @@ set(SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
     list(APPEND SUPPORT_ARCHS "9.0a")
 endif()
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    # CUDA 13+ uses sm_120 (12.0) family numbering for Blackwell
+    list(APPEND SUPPORT_ARCHS "10.0f" "11.0f" "12.0f")
+elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
     # CUDA 12.9 has introduced "Family-Specific Architecture Features"
     # this supports all compute_10x family
     list(APPEND SUPPORT_ARCHS "10.0f")
