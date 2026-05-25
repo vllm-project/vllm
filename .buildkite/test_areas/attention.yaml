@@ -17,7 +17,7 @@ steps:
 - label: V1 attention (B200)
   key: v1-attention-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   source_file_dependencies:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention

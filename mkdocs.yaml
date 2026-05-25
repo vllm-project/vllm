@@ -105,12 +105,12 @@ plugins:
           - https://docs.aiohttp.org/en/stable/objects.inv
           - https://pillow.readthedocs.io/en/stable/objects.inv
           - https://numpy.org/doc/stable/objects.inv
-          # TODO revert to stable once https://github.com/pytorch/pytorch/issues/182007 is fixed
-          - https://pytorch.org/docs/2.11/objects.inv
+          - https://pytorch.org/docs/stable/objects.inv
   - redirects:
       redirect_maps:
         features/spec_decode/README.md: features/speculative_decoding/README.md
         features/spec_decode/speculators.md: features/speculative_decoding/speculators.md
+        serving/openai_compatible_server.md: serving/online_serving/README.md
 
 markdown_extensions:
   - attr_list
@@ -119,7 +119,11 @@ markdown_extensions:
   - admonition
   - pymdownx.details
   # For content tabs
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:

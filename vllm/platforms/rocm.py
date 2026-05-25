@@ -45,6 +45,11 @@ except ImportError as e:
 
 # import custom ops, trigger op registration
 try:
+    import vllm._C_stable_libtorch  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C_stable_libtorch with %r", e)
+
+try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
@@ -407,8 +412,10 @@ class RocmPlatform(Platform):
         "awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
-        "gptq_marlin",  # will be overwritten with gptq
+        "gptq_marlin",
+        "auto_gptq",
         "fp8",
+        "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
         "gguf",

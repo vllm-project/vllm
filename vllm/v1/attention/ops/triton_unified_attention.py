@@ -18,7 +18,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
-    cast_kv_tile,
     cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
@@ -37,15 +36,151 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 @triton.jit
+def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+    """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
+
+    Modes handled inside the core kernel:
+
+    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
+      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+      their scales separately on S/P inside the loop.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+      tensor-wide scale, unless Q is also FP8 and the caller folds the scales
+      into the attention score and output accumulator.
+    """
+    if KV_QUANT_MODE == 1:
+        if Q.dtype.is_fp8():
+            return data.to(Q.dtype)
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    return data.to(Q.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Tensor-descriptor (TD) helpers
+#
+# Used when the caller enables ``USE_TD`` (Intel Xe2/Xe3 HW 2D block reads).
+# When ``USE_TD`` is False the helpers are dead-code-eliminated at Triton
+# compile time, leaving the pointer-arithmetic load/store path untouched.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _load_q_td(
+    query_ptr,
+    q_block_local_len,
+    query_stride_0: tl.int64,
+    query_stride_1: tl.int64,
+    cur_batch_in_all_start_index,
+    q_block_local_idx,
+    kv_head_idx,
+    num_queries_per_kv: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Load Q via a 2D tensor descriptor.
+
+    Caller guarantees (via the wrapper's ``use_td_qo`` gate):
+      * ``HEAD_SIZE == HEAD_SIZE_PADDED`` (head_size is a power of 2),
+      * ``num_queries_per_kv`` is a power of 2,
+      * the ``num_queries_per_kv`` heads of the current KV group are
+        contiguous in memory (``query_stride_1 == HEAD_SIZE``, which is
+        the default vLLM query layout).
+
+    Under those preconditions the inner two axes are flattened into one
+    row of size ``num_queries_per_kv * HEAD_SIZE`` with stride 1, which
+    avoids the non-power-of-2 ``block_shape`` error from the Triton
+    tensor-descriptor validator.  Returns (BLOCK_M, HEAD_SIZE_PADDED).
+    """
+    q_base = (
+        query_ptr
+        + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
+        + (kv_head_idx * num_queries_per_kv) * query_stride_1
+    )
+    q_desc = tl.make_tensor_descriptor(
+        base=q_base,
+        shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
+        strides=(query_stride_0, 1),
+        block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
+    )
+    return q_desc.load([0, 0]).reshape(BLOCK_M, HEAD_SIZE_PADDED)
+
+
+@triton.jit
+def _load_kv_tile_td(
+    cache_ptr,
+    physical_block_idx_scalar,
+    kv_head_idx,
+    offset_in_block,
+    stride_cache_0: tl.int64,
+    stride_cache_1: tl.int64,
+    stride_cache_2: tl.int64,
+    stride_cache_3: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Load a KV cache tile via tensor descriptor.
+
+    Returns shape (TILE_SIZE, HEAD_SIZE_PADDED). Caller transposes for K.
+    Tensor descriptors zero-pad reads beyond the shape boundary, so
+    ``HEAD_SIZE_PADDED > HEAD_SIZE`` is handled correctly.
+    """
+    base = (
+        cache_ptr
+        + physical_block_idx_scalar * stride_cache_0
+        + kv_head_idx * stride_cache_2
+    )
+    desc = tl.make_tensor_descriptor(
+        base=base,
+        shape=(BLOCK_SIZE, HEAD_SIZE),
+        strides=(stride_cache_1, stride_cache_3),
+        block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+    )
+    return desc.load([offset_in_block, 0])
+
+
+@triton.jit
+def _store_output_td(
+    base_ptr,
+    acc,
+    q_block_local_len,
+    stride_token: tl.int64,
+    stride_head: tl.int64,
+    num_queries_per_kv: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Store an output tile via a tensor descriptor.
+
+    The 2D and 3D epilogues differ only in ``base_ptr`` and the
+    ``(stride_token, stride_head)`` pair: 2D writes directly to the
+    flat output buffer, 3D writes to a single per-segment slice of
+    ``segm_output_ptr``.  Descriptor shape / block_shape / reshape
+    are the same in both modes, so share one helper.
+    """
+    acc = acc.to(base_ptr.dtype.element_ty)
+    output_desc = tl.make_tensor_descriptor(
+        base=base_ptr,
+        shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
+        strides=(stride_token, stride_head, 1),
+        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
+    output_desc.store(
+        [0, 0, 0],
+        acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
+
+
+@triton.jit
 def kernel_unified_attention(
-    # Output destinations.  In 2D mode we write the final result into
-    # ``output_ptr``; in 3D mode we write per-segment partials into the
-    # three ``segm_*`` tensors and ``output_ptr`` is unused (callers may
-    # pass any non-null pointer).
+    # Output destination for the 2D path.  In 3D mode per-segment partials
+    # go to the ``segm_*`` tensors (see bottom of signature) and
+    # ``output_ptr`` is unused (callers may pass any non-null pointer).
     output_ptr,
-    segm_output_ptr,
-    segm_max_ptr,
-    segm_expsum_ptr,
     # Inputs
     query_ptr,
     key_cache_ptr,
@@ -55,12 +190,9 @@ def kernel_unified_attention(
     seq_lens_ptr,
     alibi_slopes_ptr,
     qq_bias_ptr,
-    # Per-(token, head) scale caches (used iff KV_QUANT_MODE in {2, 3}).
-    # For other modes callers may pass any non-null pointer.
-    k_scale_cache_ptr,
-    v_scale_cache_ptr,
     # Scalars
     scale,
+    q_scale,
     k_scale,
     v_scale,
     out_scale,
@@ -94,12 +226,6 @@ def kernel_unified_attention(
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
-    stride_ks_blk: tl.int64,
-    stride_ks_slot: tl.int64,
-    stride_ks_head: tl.int64,
-    stride_vs_blk: tl.int64,
-    stride_vs_slot: tl.int64,
-    stride_vs_head: tl.int64,
     query_start_len_ptr,
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
@@ -111,11 +237,27 @@ def kernel_unified_attention(
     # to ``[segm_idx, segm_idx+1) × tiles_per_segment`` and writes
     # per-segment partials, finalized by ``reduce_segments``.
     IS_3D: tl.constexpr,
-    # KV cache quantization mode handled inside this kernel.  Modes
-    # NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2) and
-    # FP8_PER_TOKEN_HEAD (3) all use this kernel via constexpr branches.
-    # Sub-byte packed modes (INT4=4, INT2=5) are dispatched to dedicated
-    # factories in ``vllm.v1.attention.ops.triton_quant_kv``.
+    # Parameters below default to None so Triton can skip materialising them
+    # on call sites where the corresponding constexpr branch is dead.
+    # Credit: @quinnlp identified this as a perf regression source in
+    # intel/intel-xpu-backend-for-triton#6758 (review comment r3204641104).
+    # Per-segment outputs: used in 3D mode; unused in 2D (IS_3D=False).
+    segm_output_ptr=None,
+    segm_max_ptr=None,
+    segm_expsum_ptr=None,
+    # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    k_scale_cache_ptr=None,
+    v_scale_cache_ptr=None,
+    stride_ks_blk: tl.int64 = None,
+    stride_ks_slot: tl.int64 = None,
+    stride_ks_head: tl.int64 = None,
+    stride_vs_blk: tl.int64 = None,
+    stride_vs_slot: tl.int64 = None,
+    stride_vs_head: tl.int64 = None,
+    # KV cache quantization mode handled inside this kernel via constexpr
+    # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4=4/INT2=5 use the triton_quant_kv
+    # factories, not this kernel.
     KV_QUANT_MODE: tl.constexpr = 0,
     # Use int8 WMMA/MFMA for the QK dot (requires KV_QUANT_MODE==2 and int8 cache)
     QK_INT8_WMMA: tl.constexpr = False,
@@ -126,8 +268,21 @@ def kernel_unified_attention(
     # over ``SLIDING_WINDOW`` inside the helpers.  ``-1`` disables.
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    # Tensor-descriptor load/store for HW 2D block reads on Intel Xe2/Xe3.
+    # ``USE_TD`` gates KV tile loads; ``USE_TD_QO`` separately gates Q/output
+    # (see ``unified_attention`` wrapper for the gating rules).
+    USE_TD: tl.constexpr = False,
+    USE_TD_QO: tl.constexpr = False,
+    Q_IS_FP8: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
+
+    if USE_TD:
+        tl.static_assert(
+            BLOCK_SIZE % TILE_SIZE == 0,
+            "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
+        )
 
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -153,6 +308,12 @@ def kernel_unified_attention(
     else:
         tiles_per_segment = 0
 
+    # Number of valid query rows in this block (used by TD descriptor
+    # shapes, but always computed so the variable stays in scope).
+    q_block_local_len = tl.minimum(
+        BLOCK_Q, cur_batch_query_len - q_block_local_idx * BLOCK_Q
+    )
+
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
@@ -171,11 +332,27 @@ def kernel_unified_attention(
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
-    Q = tl.load(
-        query_ptr + query_offset,
-        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        other=0.0,
-    )
+    if USE_TD_QO:
+        Q = _load_q_td(
+            query_ptr,
+            q_block_local_len,
+            query_stride_0,
+            query_stride_1,
+            cur_batch_in_all_start_index,
+            q_block_local_idx,
+            kv_head_idx,
+            num_queries_per_kv,
+            BLOCK_Q,
+            BLOCK_M,
+            HEAD_SIZE,
+            HEAD_SIZE_PADDED,
+        )
+    else:
+        Q = tl.load(
+            query_ptr + query_offset,
+            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            other=0.0,
+        )
 
     # Per-row symmetric int8 quantization of Q, reused across all K tiles.
     # Enables int8 WMMA/MFMA for the QK dot when the K cache is also int8.
@@ -193,6 +370,11 @@ def kernel_unified_attention(
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    score_scale = scale
+    value_scale = 1.0
+    if USE_FP8_Q_DESCALE:
+        score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
+        value_scale = tl.load(v_scale)
 
     context_len = seq_len - cur_batch_query_len
 
@@ -231,42 +413,80 @@ def kernel_unified_attention(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        v_offset = (
-            physical_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
-            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-        )
-        k_offset = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
-            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-        )
-        # K : (HEAD_SIZE, TILE_SIZE)
-        if QK_INT8_WMMA:
-            # Keep K in int8; pair with the int8-quantized Q for a WMMA/MFMA
-            # int8 dot. `other` must stay integer to avoid implicit promotion
-            # of the int8 load to float, which would break the int8 tl.dot.
-            K = tl.load(
-                key_cache_ptr + k_offset,
-                mask=dim_mask[:, None] & tile_mask[None, :],
-                other=0,
+        if USE_TD:
+            # All TILE_SIZE slots within a single KV tile map to one
+            # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
+            # from the static_assert above), so load the block index as
+            # a scalar instead of a broadcast reduction.
+            offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
+            physical_block_scalar = tl.load(
+                block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
+            ).to(tl.int64)
+            # K : (HEAD_SIZE, TILE_SIZE)
+            K_load = _load_kv_tile_td(
+                key_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_k_cache_0,
+                stride_k_cache_1,
+                stride_k_cache_2,
+                stride_k_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            ).T
+            # V : (TILE_SIZE, HEAD_SIZE)
+            V_load = _load_kv_tile_td(
+                value_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_v_cache_0,
+                stride_v_cache_1,
+                stride_v_cache_2,
+                stride_v_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
             )
+            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
         else:
-            K_load = tl.load(
-                key_cache_ptr + k_offset,
-                mask=dim_mask[:, None] & tile_mask[None, :],
+            v_offset = (
+                physical_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_2
+                + offs_d[None, :] * stride_v_cache_3
+                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+            )
+            k_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            # K : (HEAD_SIZE, TILE_SIZE)
+            if QK_INT8_WMMA:
+                K = tl.load(
+                    key_cache_ptr + k_offset,
+                    mask=dim_mask[:, None] & tile_mask[None, :],
+                    other=0,
+                )
+            else:
+                K_load = tl.load(
+                    key_cache_ptr + k_offset,
+                    mask=dim_mask[:, None] & tile_mask[None, :],
+                    other=0.0,
+                )
+                K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0.0,
             )
-            K = cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
-        V = cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -311,9 +531,9 @@ def kernel_unified_attention(
         elif USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
+            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
         else:
-            S += scale * tl.dot(Q, K)
+            S += score_scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -351,19 +571,48 @@ def kernel_unified_attention(
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
-        segm_output_offset = (
-            query_offset_0[:, None].to(tl.int64)
-            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + segm_idx * HEAD_SIZE_PADDED
-            + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
-        )
-        tl.store(
-            segm_output_ptr + segm_output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+        if USE_TD_QO:
+            # 3D target: segm_output[token, head, segm_idx, :].  Advance
+            # the base to the correct (token-start, head-start, segm)
+            # slice; strides step between tokens / heads of the flattened
+            # (T, H, SEGS, PAD) layout.
+            segm_base = (
+                segm_output_ptr
+                + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q).to(
+                    tl.int64
+                )
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + (kv_head_idx * num_queries_per_kv)
+                * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+            )
+            _store_output_td(
+                segm_base,
+                acc,
+                q_block_local_len,
+                num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED,
+                NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED,
+                num_queries_per_kv,
+                BLOCK_Q,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            segm_output_offset = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset,
+                acc,
+                mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            )
         store_segm_reduce_scalars(
             segm_max_ptr,
             segm_expsum_ptr,
@@ -379,19 +628,43 @@ def kernel_unified_attention(
         )
     else:
         acc = acc / L[:, None]
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         if USE_FP8:
             acc = acc * tl.load(out_scale)
             acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-        output_offset = (
-            query_offset_0[:, None] * output_stride_0
-            + query_offset_1[:, None] * output_stride_1
-            + offs_d[None, :]
-        )
-        tl.store(
-            output_ptr + output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+        if USE_TD_QO:
+            # 2D target: flat output[token, head, :].  Strides come
+            # straight from the caller (``output_stride_0`` per token,
+            # ``output_stride_1`` per head).
+            output_base = (
+                output_ptr
+                + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q)
+                * output_stride_0
+                + (kv_head_idx * num_queries_per_kv) * output_stride_1
+            )
+            _store_output_td(
+                output_base,
+                acc,
+                q_block_local_len,
+                output_stride_0,
+                output_stride_1,
+                num_queries_per_kv,
+                BLOCK_Q,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            output_offset = (
+                query_offset_0[:, None] * output_stride_0
+                + query_offset_1[:, None] * output_stride_1
+                + offs_d[None, :]
+            )
+            tl.store(
+                output_ptr + output_offset,
+                acc,
+                mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            )
 
 
 @triton.jit
@@ -548,9 +821,13 @@ def unified_attention(
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
+    # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
+    # loads and output stores.  Enables HW 2D block reads on Intel Xe2/Xe3.
+    # The non-TD branch is dead-code-eliminated at Triton compile time so
+    # disabling this flag costs nothing.
+    use_td: bool = False,
 ):
     assert causal, "Only causal attention is supported"
-    assert q_descale is None, "Q scales not supported"
 
     # Sub-byte packed modes (INT4 / INT2) need bespoke kernels — they
     # split the dot, look up centroids / dequantize from packed bytes,
@@ -666,6 +943,52 @@ def unified_attention(
         kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
     )
 
+    # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
+    # ``tl.static_assert`` in the kernel).  The default prefill tile
+    # size (32) is larger than a common ``block_size=16``, so clamp it
+    # down when TD is enabled.  Zero overhead when disabled.
+    if use_td:
+        TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, block_size)
+        TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, block_size)
+
+    # Tensor descriptors for Q load / output store require every element
+    # of ``block_shape`` to be a power of 2.  ``num_queries_per_kv`` is
+    # not always pow2 (e.g. Qwen2-7B: 28 / 4 = 7), so gate the Q/O paths
+    # separately from the KV tile loads (whose ``block_shape`` does not
+    # include ``num_queries_per_kv``).
+    #
+    # The Q/O descriptors also encode ``HEAD_SIZE_PADDED`` on the inner
+    # axis while the backing buffers (both flat output and per-segment
+    # output) are laid out with ``HEAD_SIZE``.  When they differ (e.g.
+    # Phi-3's head_size=96 → HEAD_SIZE_PADDED=128) the store would spill
+    # padded lanes into neighbouring heads because tensor-descriptor
+    # stores don't mask the padded tail.  Fall back to the pointer path
+    # for Q/O in that case — KV tile loads are unaffected because their
+    # ``shape`` already matches ``block_shape`` on the inner axis.
+    head_size_padded = triton.next_power_of_2(head_size)
+    _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
+    _is_pow2_hs = head_size == head_size_padded
+    use_td_qo = use_td and _is_pow2_nq and _is_pow2_hs
+
+    # ``_load_q_td`` / ``_store_output_td`` flatten ``(num_queries_per_kv,
+    # HEAD_SIZE)`` into a single contiguous inner axis.  That's only
+    # equivalent to the pointer path when the ``num_queries_per_kv`` heads
+    # for this KV group start at ``kv_head_idx * num_queries_per_kv`` and
+    # lie exactly HEAD_SIZE apart — i.e. ``query_stride_1 == HEAD_SIZE``
+    # and ``output_stride_1 == head_size``.  This is the default vLLM
+    # query/output layout; assert it explicitly so we fail fast if a
+    # future caller passes a non-contiguous query tensor.
+    if use_td_qo:
+        assert q.stride(1) == head_size, (
+            f"USE_TD_QO requires contiguous query heads "
+            f"(q.stride(1) = {q.stride(1)} != head_size = {head_size}); "
+            f"set VLLM_TRITON_ATTN_USE_TD=0 or pad the query layout."
+        )
+        assert out.stride(1) == head_size, (
+            f"USE_TD_QO requires contiguous output heads "
+            f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
+        )
+
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
@@ -700,7 +1023,6 @@ def unified_attention(
         # Pass the K cache as a stand-in pointer; never dereferenced.
         k_scale_ptr = k
         v_scale_ptr = v
-
     # 3D needs real segm tensors; 2D never touches them but Triton wants
     # a non-null pointer.  Reuse ``out`` as the placeholder.
     segm_output_ptr = softmax_segm_output if use_3d else out
@@ -732,6 +1054,7 @@ def unified_attention(
         k_scale_cache_ptr=k_scale_ptr,
         v_scale_cache_ptr=v_scale_ptr,
         scale=softmax_scale,
+        q_scale=q_descale,
         k_scale=k_descale,
         v_scale=v_descale,
         out_scale=1 / output_scale if output_scale is not None else 1.0,
@@ -747,7 +1070,7 @@ def unified_attention(
         BLOCK_SIZE=block_size,
         TILE_SIZE=tile_size,
         HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+        HEAD_SIZE_PADDED=head_size_padded,
         USE_ALIBI_SLOPES=use_alibi_slopes,
         USE_ALIBI_SQRT=use_alibi_sqrt,
         USE_QQ_BIAS=use_qq_bias,
@@ -782,8 +1105,11 @@ def unified_attention(
         # Enable the int8 WMMA/MFMA QK fast-path only for the 2D (prefill) path:
         # the 3D (decode) path has too few Q rows to benefit from the int8 dot.
         QK_INT8_WMMA=use_rocm_int8_wmma_qk and not use_3d,
+        Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
+        USE_TD=use_td,
+        USE_TD_QO=use_td_qo,
     )
 
     if use_3d:
@@ -801,7 +1127,7 @@ def unified_attention(
             block_table_stride=block_table.stride(0),
             TILE_SIZE=TILE_SIZE_DECODE,
             HEAD_SIZE=head_size,
-            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            HEAD_SIZE_PADDED=head_size_padded,
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,

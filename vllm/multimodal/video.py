@@ -390,7 +390,7 @@ class PyAVVideoBackendMixin:
         fps: float,
         duration: float,
     ) -> tuple[npt.NDArray, list[int]]:
-        """Decode target frames via per-frame seek + keyframe decode."""
+        """Decode target frames via per-frame seek + forward decode to PTS."""
         stream = container.streams.video[0]
         # SLICE parallelizes within a single frame without the
         # one-frame-per-thread latency penalty of FRAME threading.
@@ -402,14 +402,28 @@ class PyAVVideoBackendMixin:
         frame_interval = 1.0 / fps if fps > 0 else 0.1
         max_ts = max(0.0, duration - frame_interval) if duration > 0 else float("inf")
 
+        decoder = None
+        last_pts = None
         for idx in frame_indices:
             ts = min(idx / fps, max_ts) if fps > 0 else 0.0
             pts = int(ts / time_base)
-            container.seek(pts, stream=stream)
-            frame = next(container.decode(video=0), None)
-            if frame is not None:
-                frames_list.append(frame.to_ndarray(format="rgb24"))
+            # seek() snaps backward to a keyframe; reuse the running decoder
+            # while targets advance monotonically to avoid re-decoding the
+            # GOP prefix once per requested frame.
+            if decoder is None or last_pts is None or pts <= last_pts:
+                container.seek(pts, stream=stream)
+                decoder = container.decode(video=0)
+            chosen = None
+            for frame in decoder:
+                if frame.pts is not None and frame.pts >= pts:
+                    chosen = frame
+                    last_pts = frame.pts
+                    break
+            if chosen is not None:
+                frames_list.append(chosen.to_ndarray(format="rgb24"))
                 valid_indices.append(idx)
+            else:
+                decoder = None
 
         if not frames_list:
             return np.empty((0,), dtype=np.uint8), valid_indices

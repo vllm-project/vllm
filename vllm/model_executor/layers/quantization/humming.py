@@ -9,13 +9,14 @@ import regex as re
 import torch
 
 from vllm import envs
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEMethodBase,
+    RoutedExperts,
+    SharedExperts,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
-    FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -58,7 +59,7 @@ try:
     )
     from humming.utils.weight import quantize_weight
 
-    from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         BatchedHummingGroupedExperts,
         HummingGroupedExperts,
         HummingIndexedExperts,
@@ -182,7 +183,7 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str):
 
 
 class HummingConfig(QuantizationConfig):
-    packed_modules_mapping = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, full_config: dict[str, Any] | None = None):
         assert_humming_available()
@@ -334,20 +335,20 @@ class HummingConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         layer_type = "other"
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             layer_type = "moe"
         elif isinstance(layer, LinearBase):
             layer_type = "linear"
 
         quant_config = self.get_quant_config_for_layer(prefix, layer_type)
         if quant_config is None:
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             elif isinstance(layer, LinearBase):
                 return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             return HummingLinearMethod(quant_config)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return HummingMoEMethod(quant_config, layer.moe_config)
         return None
 
@@ -764,7 +765,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         return get_humming_moe_quant_config(layer)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(self, "processed", False):
             return
         self.processed = True
@@ -898,10 +899,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         workspace1, workspace2, output = self.experts.make_workspaces(
