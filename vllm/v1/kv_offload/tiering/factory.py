@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 
 class SecondaryTierFactory:
@@ -29,7 +29,7 @@ class SecondaryTierFactory:
         cls,
         tier_config: dict,
         primary_kv_view: memoryview,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
     ) -> SecondaryTierManager:
         config = tier_config.copy()
 
@@ -45,7 +45,7 @@ class SecondaryTierFactory:
 
         tier_cls = cls._registry[tier_type]()
         return tier_cls(
-            vllm_config=vllm_config,
+            offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
             **config,
@@ -56,4 +56,10 @@ SecondaryTierFactory.register_tier(
     "example",
     "vllm.v1.kv_offload.tiering.example.manager",
     "ExampleSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "fs_python",
+    "vllm.v1.kv_offload.tiering.fs.manager",
+    "FileSystemTierManager",
 )
