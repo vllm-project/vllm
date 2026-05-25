@@ -2,8 +2,13 @@
 
 Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
-!!! info
-    [API Reference](../api/README.md#offline-inference)
+## Model Types
+
+vLLM models can be categorized into two types:
+
+- **[Generative Models](../models/supported_models.md)** - Models that produce text completions or chat responses (e.g., LLaMA, Qwen, DeepSeek). Use `LLM.generate()` and `LLM.chat()` for these models.
+
+- **[Pooling Models](../models/pooling_models/README.md)** - These models do not generate content. They are primarily used for classification and retrieval tasks, such as bge-m3 and Qwen3 Reranker.
 
 ## Generative APIs
 
@@ -41,6 +46,11 @@ For further details on sleep mode, please refer to [this page](../features/sleep
 - `LLM.sleep` - Puts the engine into sleep mode.
 - `LLM.wake_up` - Wakes up the engine from sleep mode.
 
+## Cache Management APIs
+
+- `LLM.reset_mm_cache` - Resets the multi-modal cache.
+- `LLM.reset_prefix_cache` - Resets the prefix cache.
+
 ## Metrics APIs
 
 For further details on metrics, please refer to [this page](../design/metrics.md).
@@ -60,6 +70,10 @@ For further details on Weight Transfer, please refer to [this page](../training/
 
 - `LLM.collective_rpc` - Executes a method or callable collectively across all workers.
 - `LLM.apply_model` - Applies a function directly to the model inside each worker.
+
+## API Reference
+
+[Offline Inference](../api/README.md#offline-inference)
 
 ## Ray Data LLM API
 
