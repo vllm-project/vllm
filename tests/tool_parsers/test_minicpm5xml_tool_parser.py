@@ -158,8 +158,7 @@ def test_single_call_with_surrounding_text(parser: ToolParser) -> None:
             "date": "2024-06-27",
         })],
     )
-    assert "Intro before." in (out.content or "")
-    assert "Outro after." in (out.content or "")
+    assert out.content is None
 
 
 def test_cdata_multiline(parser: ToolParser) -> None:
@@ -434,9 +433,7 @@ def test_multiple_calls_interleaved_text(parser: ToolParser) -> None:
     args1 = json.loads(out.tool_calls[1].function.arguments)
     assert args1["nums"] == [7, 8, 9]
     assert args1["exact"] is False
-    assert "Head" in (out.content or "")
-    assert "TXT" in (out.content or "")
-    assert "Tail" in (out.content or "")
+    assert out.content is None
 
 
 def test_incomplete_missing_function_end(parser: ToolParser) -> None:

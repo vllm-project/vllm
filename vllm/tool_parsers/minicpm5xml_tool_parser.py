@@ -393,7 +393,13 @@ def _parse_function_block(
         except Exception:
             parsed_ok = False
 
-    if not func_name or func_name not in tool_names or param_invalid:
+    if not func_name or param_invalid:
+        return None
+
+    func_name, arguments = _normalize_alias_tool_call(
+        func_name, arguments, tool_names)
+
+    if func_name not in tool_names:
         return None
 
     req_props = name_to_required.get(func_name, set())
