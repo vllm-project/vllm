@@ -95,11 +95,6 @@ class SingleTypeKVCacheManager(ABC):
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
         return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
 
-    def _is_retained_checkpoint_block(
-        self, _request_id: str, _block: KVCacheBlock
-    ) -> bool:
-        return False
-
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -395,21 +390,8 @@ class SingleTypeKVCacheManager(ABC):
             self.num_cached_block.pop(request_id, None)
             return
 
-        # Partition into ordinary vs retained-checkpoint blocks so the retained
-        # ones go later in the free queue (best-effort prefix-cache retention).
-        ordinary_blocks: list[KVCacheBlock] = []
-        retained_blocks: list[KVCacheBlock] = []
-        for block in reversed(req_blocks):
-            if block.block_hash is not None and self._is_retained_checkpoint_block(
-                request_id, block
-            ):
-                retained_blocks.append(block)
-            else:
-                ordinary_blocks.append(block)
-
-        self.block_pool.free_blocks(ordinary_blocks)
-        if retained_blocks:
-            self.block_pool.free_blocks(retained_blocks)
+        ordered_blocks = list(reversed(req_blocks))
+        self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -510,10 +492,8 @@ class SingleTypeKVCacheManager(ABC):
 
         # Reuse skipped local blocks in order:
         #   scratch blocks: no prefix-cache value, reuse first.
-        #   ordinary cached blocks: reusable prefix cache, but not retained.
-        #   retained checkpoints: selected checkpoint tails, reuse last.
+        #   cached blocks: reusable prefix-cache value, reuse last.
         removed_cached_blocks: list[KVCacheBlock] = []
-        removed_retained_checkpoint_blocks: list[KVCacheBlock] = []
         removed_uncached_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
@@ -525,16 +505,13 @@ class SingleTypeKVCacheManager(ABC):
                 break
             if blocks[i].block_hash is None:
                 removed_uncached_blocks.append(blocks[i])
-            elif self._is_retained_checkpoint_block(request_id, blocks[i]):
-                removed_retained_checkpoint_blocks.append(blocks[i])
             else:
                 removed_cached_blocks.append(blocks[i])
             blocks[i] = self._null_block
         # `prepend=True` makes uncached scratch blocks the next allocation
-        # candidates, while retained checkpoints stay behind ordinary cached
-        # blocks as best-effort prefix-cache entries.
+        # candidates, while cached blocks stay behind them as best-effort
+        # prefix-cache entries.
         self.block_pool.free_blocks(removed_cached_blocks)
-        self.block_pool.free_blocks(removed_retained_checkpoint_blocks)
         self.block_pool.free_blocks(removed_uncached_blocks, prepend=True)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -622,7 +599,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self.sliding_window = kv_cache_spec.sliding_window
         self._last_interval_retention_boundary: dict[str, int] = {}
         self._latest_retention_cached: set[str] = set()
-        self._retention_block_hashes: dict[str, set[BlockHashWithGroupId]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -836,37 +812,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         end_block = boundary_token // self.block_size
         start_block = max(0, end_block - tail_blocks)
         self._cache_block_range(request, start_block, end_block)
-        self._mark_retention_block_range(request.request_id, start_block, end_block)
-
-    def _mark_retention_block_range(
-        self, request_id: str, start_block: int, end_block: int
-    ) -> None:
-        """Mark cached blocks in a retained checkpoint tail.
-
-        Marked blocks are still evictable, but skipped-block cleanup and request
-        cleanup return them to the free queue after ordinary cached blocks.
-        """
-        blocks = self.req_to_blocks[request_id]
-        end_block = min(end_block, len(blocks))
-        if start_block >= end_block:
-            return
-
-        retained_hashes = self._retention_block_hashes.setdefault(request_id, set())
-        for block in blocks[start_block:end_block]:
-            if block.block_hash is not None:
-                retained_hashes.add(block.block_hash)
-
-    def _is_retained_checkpoint_block(
-        self, request_id: str, block: KVCacheBlock
-    ) -> bool:
-        retained_hashes = self._retention_block_hashes.get(request_id)
-        return retained_hashes is not None and block.block_hash in retained_hashes
 
     def free(self, request_id: str) -> None:
         super().free(request_id)
         self._last_interval_retention_boundary.pop(request_id, None)
         self._latest_retention_cached.discard(request_id)
-        self._retention_block_hashes.pop(request_id, None)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
