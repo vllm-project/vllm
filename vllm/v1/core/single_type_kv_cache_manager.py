@@ -1221,8 +1221,8 @@ def get_manager_for_kv_cache_spec(
 
     Args:
         kv_cache_spec: The KVCacheSpec instance
-        **kwargs: Additional arguments to pass to the manager constructor
-
+        max_num_batched_tokens: The maximum number of tokens in a batch
+        max_model_len: The maximum context length the model could serve
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
     """

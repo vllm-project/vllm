@@ -220,7 +220,7 @@ class KVCacheSpecRegistry:
         KVCacheSpecs with uniform_type_base_spec will be trated as one group.
 
         Args:
-            spec: A KVCacheSpec instance
+            kvcache_spec: A KVCacheSpec instance
 
         Returns:
             The base KVCacheSpec class for checking uniform type kvcache specs
