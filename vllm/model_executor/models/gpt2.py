@@ -339,7 +339,7 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.transformer = GPT2Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "gpt2")
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
         self.score = nn.Linear(
             config.n_embd,
@@ -358,6 +358,7 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
+        weights = _add_transformer_prefix(weights)
         return loader.load_weights(weights)
 
     def forward(
