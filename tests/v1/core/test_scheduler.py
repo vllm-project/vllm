@@ -1892,6 +1892,7 @@ def create_scheduler_with_priority(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=block_size,
     )
 
 
@@ -2544,6 +2545,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
@@ -3926,6 +3928,45 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_delayed_kv_connector_free_keeps_scheduler_active():
+    scheduler = create_scheduler(use_kv_connector=True)
+    queued_request, request = create_requests(
+        num_requests=2, req_ids=["queued", "finished"]
+    )
+    scheduler.add_request(queued_request)
+
+    assert not scheduler.has_finished_requests()
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    scheduler.requests[request.request_id] = request
+    scheduler.finished_req_ids = set()
+
+    assert scheduler.has_finished_requests()
+    assert scheduler.has_requests()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.has_finished_requests()
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -4008,6 +4049,7 @@ def _create_encoder_decoder_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
+        hash_block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
 

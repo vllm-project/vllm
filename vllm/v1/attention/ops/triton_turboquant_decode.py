@@ -588,10 +588,16 @@ def triton_turboquant_decode_attention(
     )
 
     # Stage 2: Reduce across KV splits
-    if output_buf is not None and output_buf.shape[0] >= B:
+    # Output in query dtype — eliminates float16_copy kernel after stage2
+    out_dtype = query.dtype
+    if (
+        output_buf is not None
+        and output_buf.shape[0] >= B
+        and output_buf.dtype == out_dtype
+    ):
         output = output_buf[:B, :Hq, :D]
     else:
-        output = torch.empty(B, Hq, D, dtype=torch.float32, device=device)
+        output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
         if buf_holder is not None:
             buf_holder._tq_output_buf = output
     if lse_buf is not None and lse_buf.shape[0] >= B:
@@ -616,8 +622,9 @@ def triton_turboquant_decode_attention(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=cfg["BLOCK_D"],
         Lv=D,
+        OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
         num_warps=4,
         num_stages=2,
     )
 
-    return output.to(query.dtype)
+    return output  # already in query dtype

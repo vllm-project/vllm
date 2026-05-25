@@ -34,6 +34,18 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv32_tool_parser",
         "DeepSeekV32ToolParser",
     ),
+    "deepseek_v4": (
+        "deepseekv4_tool_parser",
+        "DeepSeekV4ToolParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_tool_parser",
+        "CohereCommand3ToolParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_tool_parser",
+        "CohereCommand4ToolParser",
+    ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
@@ -62,6 +74,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "poolside_v1": (
+        "poolside_v1_tool_parser",
+        "PoolsideV1ToolParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
@@ -77,6 +93,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "jamba": (
         "jamba_tool_parser",
         "JambaToolParser",
+    ),
+    "lfm2": (
+        "lfm2_tool_parser",
+        "Lfm2ToolParser",
     ),
     "kimi_k2": (
         "kimi_k2_tool_parser",
@@ -165,6 +185,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "gemma4": (
         "gemma4_tool_parser",
         "Gemma4ToolParser",
+    ),
+    "apertus": (
+        "apertus_tool_parser",
+        "ApertusToolParser",
     ),
 }
 
