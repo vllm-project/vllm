@@ -279,9 +279,9 @@ steps:
     - pytest -v -s kernels/moe/test_moe_layer.py
 
 - label: Kernels AITER MLA Test (MI355)
+  key: kernels-aiter-mla-test-mi355
   depends_on:
   - image-build-amd
-  key: kernels-aiter-mla-test-mi355
   timeout_in_minutes: 180
   device: mi355_1
   soft_fail: true
