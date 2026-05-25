@@ -914,8 +914,12 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
-        self.wo_a.is_bmm = True
-        self.wo_a.bmm_batch_size = self.n_local_groups
+        # Only enable DeepGEMM BMM mode when tp_size <= n_groups.
+        # When tp_size > n_groups, bmm_batch_size would be 0, causing
+        # ZeroDivisionError in deepgemm_post_process_fp8_weight_block.
+        if tp_size <= self.n_groups:
+            self.wo_a.is_bmm = True
+            self.wo_a.bmm_batch_size = self.n_local_groups
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,

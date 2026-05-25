@@ -1014,6 +1014,15 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
+    # Defensive fallback: if bmm_batch_size is 0, disable BMM mode to avoid
+    # ZeroDivisionError. This can happen when TP size exceeds n_groups.
+    if is_bmm and bmm_batch_size == 0:
+        logger.warning_once(
+            "bmm_batch_size is 0, falling back to non-BMM mode for FP8 weight "
+            "block processing. This may impact performance."
+        )
+        is_bmm = False
+
     if ws.dtype == torch.float8_e8m0fnu:
         # Scales already in E8M0 from checkpoint — upcast to fp32
         # and skip requantization (weights already have power-of-two scales).
