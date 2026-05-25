@@ -194,7 +194,7 @@ class TieringOffloadingManager(OffloadingManager):
                 job_metadata = self._transfer_jobs.pop(job_id, None)
                 assert job_metadata is not None, (
                     f"Finished job_id {job_id} from tier #{i}"
-                    f" ({tier.get_tier_type()}) not in _transfer_jobs"
+                    f" ({tier.tier_type}) not in _transfer_jobs"
                 )
 
                 if job_metadata.is_promotion:
