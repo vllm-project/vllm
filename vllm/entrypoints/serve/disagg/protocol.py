@@ -58,6 +58,15 @@ class MultiModalFeatures(BaseModel):
     ``None`` for metadata-only (cache-hit) responses.
     """
 
+    image_grid_thw: dict[str, list[list[int] | None]] | None = None
+    """Per-modality grid dimensions for mRoPE position computation.
+
+    Each value is a list parallel to ``mm_hashes[modality]``.  Each entry
+    is a ``[grid_t, grid_h, grid_w]`` list (or ``None`` for cache hits).
+    This allows the prefill worker to compute mRoPE positions without
+    deserializing the full ``kwargs_data`` blobs.
+    """
+
 
 class GenerateRequest(BaseModel):
     request_id: str = Field(

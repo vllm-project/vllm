@@ -123,6 +123,16 @@ async def test_render_to_generate_roundtrip(client, test_image):
     assert "image" in features["kwargs_data"]
     assert len(features["kwargs_data"]["image"]) > 0
 
+    assert "image_grid_thw" in features
+    assert "image" in features["image_grid_thw"]
+    image_grids = features["image_grid_thw"]["image"]
+    assert isinstance(image_grids, list)
+    assert len(image_grids) == len(features["kwargs_data"]["image"])
+    for grid in image_grids:
+        assert isinstance(grid, list)
+        assert len(grid) == 3
+        assert all(isinstance(v, int) and v > 0 for v in grid)
+
     # Build generate request from render output
     generate_payload = render_data
     generate_payload["sampling_params"] = {

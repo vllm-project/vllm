@@ -11,6 +11,7 @@ from collections.abc import Sequence as GenericSequence
 import msgspec
 import numpy as np
 import pybase64 as base64
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -43,6 +44,8 @@ from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
@@ -156,6 +159,23 @@ class ServingTokens(OpenAIServing):
                         decode_mm_kwargs_item(item) if item is not None else None
                         for item in items
                     ]
+            elif features.image_grid_thw is not None:
+                # Lightweight path: construct minimal items containing
+                # only grid metadata for mRoPE position computation.
+                for modality, grids in features.image_grid_thw.items():
+                    items_list: list[MultiModalKwargsItem | None] = []
+                    thw_key = f"{modality}_grid_thw"
+                    for grid in grids:
+                        if grid is not None:
+                            tensor = torch.tensor([grid], dtype=torch.int64)
+                            elem = MultiModalFieldElem(
+                                data=tensor,
+                                field=MultiModalBatchedField(keep_on_cpu=True),
+                            )
+                            items_list.append(MultiModalKwargsItem({thw_key: elem}))
+                        else:
+                            items_list.append(None)
+                    mm_kwargs[modality] = items_list
             else:
                 for modality, hashes in features.mm_hashes.items():
                     mm_kwargs[modality] = [None] * len(hashes)
