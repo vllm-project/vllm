@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -345,6 +346,28 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        kv_methods = [
+            mod.quant_method
+            for mod in self.module.modules()
+            if hasattr(mod, "quant_method")
+            and isinstance(mod.quant_method, BaseKVCacheMethod)
+        ]
+
+        if kv_methods:
+            params_dict = dict(self.module.named_parameters())
+
+            def remap_kv_scale_stream(weight_iter):
+                for name, tensor in weight_iter:
+                    new_name = name
+                    for method in kv_methods:
+                        remapped = method.remap_kv_scale_name(name, params_dict)
+                        if remapped is not None:
+                            new_name = remapped
+                            break
+                    yield new_name, tensor
+
+            weights = remap_kv_scale_stream(weights)
+
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name

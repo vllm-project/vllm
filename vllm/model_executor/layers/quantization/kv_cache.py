@@ -43,6 +43,23 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # Initialize P = softmax(QK^T) scales
         layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
 
+    def remap_kv_scale_name(self, name: str, params_dict: dict) -> str | None:
+        """
+        Remap checkpoint parameter names to vLLM internal names.
+
+        Subclasses should override this to handle format-specific naming
+        variations (e.g., ModelOpt, QKV-fused, etc.).
+
+        Args:
+            name: The original parameter name from the checkpoint.
+            params_dict: Dictionary of model parameters for validation.
+
+        Returns:
+            The remapped name if successful, None if no remapping is needed
+            or if the remapped name is not found in params_dict.
+        """
+        return None
+
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
