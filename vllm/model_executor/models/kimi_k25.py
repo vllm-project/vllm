@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -279,6 +280,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
 class KimiK25ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsQuant,
     SupportsEagle,
@@ -292,6 +294,17 @@ class KimiK25ForConditionalGeneration(
     """
 
     supports_encoder_tp_data = True
+
+    # LoRA on the vision tower and mm projector requires the experimental
+    # tower-connector LoRA path (LoRAConfig.enable_tower_connector_lora), which
+    # is currently only validated for the Qwen VL family. Skip those weights at
+    # adapter-load time so checkpoints that also include vision/projector LoRA
+    # tensors still load successfully and the language-tower LoRA is applied.
+    # The DeepseekV2 backbone (SupportsLoRA in its own right) supplies the
+    # packed_modules_mapping (gate_up_proj, MLA fused_qkv_a_proj when q_lora_rank
+    # is set) and get_expert_mapping (MoE experts), which are picked up via
+    # get_packed_modules_mapping's descent into the language_model child.
+    lora_skip_prefixes = ["mm_projector.", "vision_tower."]
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
