@@ -220,6 +220,7 @@ class OffloadingManager(ABC):
         """
         return
 
+    @abstractmethod
     def get_request_offloading_context(
         self, req_context: ReqContext
     ) -> RequestOffloadingContext:
@@ -232,7 +233,7 @@ class OffloadingManager(ABC):
         Args:
             req_context: per-request context.
         """
-        return RequestOffloadingContext()
+        pass
 
     def request_finished(self, req_context: ReqContext) -> None:
         """

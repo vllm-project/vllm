@@ -537,8 +537,7 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if the base or ANY secondary tier wants
         request-level. Stores per-tier decisions for use in prepare_store.
         """
-        base_ctx = super().get_request_offloading_context(req_context)
-        result_policy = base_ctx.policy
+        result_policy = OffloadPolicy.BLOCK_LEVEL
 
         tier_policies: dict[SecondaryTierManager, OffloadPolicy] = {}
         for tier in self.secondary_tiers:

@@ -11,6 +11,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -93,6 +94,11 @@ class CPUOffloadingManager(OffloadingManager):
         return CPULoadStoreSpec([block.block_id for block in blocks])
 
     # --- OffloadingManager interface ---
+
+    def get_request_offloading_context(
+        self, req_context: ReqContext
+    ) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         if self.counts is not None:
