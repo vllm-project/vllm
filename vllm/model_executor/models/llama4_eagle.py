@@ -176,7 +176,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         )
         self.model = LlamaModel(
             vllm_config=vllm_config,
-            prefix="model",
+            prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
             quant_config=quant_config,
         )

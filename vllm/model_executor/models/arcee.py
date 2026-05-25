@@ -45,6 +45,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_prefix,
 )
 
 
@@ -367,7 +368,10 @@ class ArceeForCausalLM(
         self.config = config
 
         # Initialize the inner Transformer model (ArceeModel)
-        self.model = ArceeModel(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        self.model = ArceeModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
@@ -378,7 +382,7 @@ class ArceeForCausalLM(
                 config.hidden_size,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
-                prefix=f"{prefix}.lm_head",
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix

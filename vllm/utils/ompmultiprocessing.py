@@ -40,12 +40,13 @@ class OMPProcessManager:
 
         assert not (self.use_iomp and self.use_gomp)
 
-        # at least reserve 1/local_world_size(for ARM) core for scheduler
+        # at least reserve 1/local_world_size(for ARM/RISC-V) core for scheduler
         # proc as always use MP executor
         # TODO: make scheduler proc sleep when idle
         self.reserve_cpu_num = (
             self.local_world_size
-            if current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            if current_platform.get_cpu_architecture()
+            in (CpuArchEnum.ARM, CpuArchEnum.RISCV)
             else 1
         )
         # reserve at one more core for nixl_connector under p/d case
@@ -83,13 +84,11 @@ class OMPProcessManager:
             )
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
-            envs_dict["KMP_BLOCKTIME"] = "1"
+            # A value of 5 masks thread underutilization.
+            # Set to 1 when debugging thread utilization issues.
+            envs_dict["KMP_BLOCKTIME"] = "5"
             # Prevents the CPU to run into low performance state
             envs_dict["KMP_TPAUSE"] = "0"
-            # Provides fine granularity parallelism
-            envs_dict["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
-            envs_dict["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
-            envs_dict["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
         elif self.use_gomp:
             # set GOMP envs
             # likes '0 1 2 ...'
@@ -140,8 +139,8 @@ class OMPProcessManager:
                 cpu_list, reserve_list = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
-            elif cpu_arch == CpuArchEnum.ARM:
-                # For AArch64, no SMT, use all logical CPU
+            elif cpu_arch in (CpuArchEnum.ARM, CpuArchEnum.RISCV):
+                # For AArch64 / RISC-V, no SMT, use all logical CPUs
                 cpu_list, reserve_list = self._get_autobind_cpu_ids(lambda cpus: cpus)
             else:
                 cpu_list, reserve_list = [], []
@@ -173,9 +172,15 @@ class OMPProcessManager:
             # skip
             self.cpu_lists = []
 
-        msg = "OpenMP thread binding info: \n"
-        for i in range(self.local_world_size):
-            msg += f"\tlocal_rank={i}, core ids={self.cpu_lists[i]}\n"
+        msg = (
+            "OpenMP thread binding info: \n"
+            f"\tVLLM_CPU_OMP_THREADS_BIND={vllm_mask!r}, "
+            f"auto_setup={self.auto_setup}, skip_setup={self.skip_setup}\n"
+            f"\tlocal_world_size={self.local_world_size}, "
+            f"reserve_cpu_num={self.reserve_cpu_num}\n"
+        )
+        for i, cpus in enumerate(self.cpu_lists):
+            msg += f"\tlocal_rank={i}, core ids={cpus}\n"
         msg += f"\treserved_cpus={self.reserved_cpu_list}"
         logger.info(msg)
 

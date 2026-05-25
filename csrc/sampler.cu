@@ -258,7 +258,13 @@ __device__ bool processHistogramStep(
   auto processBins = [&](float logit, int idx) {
     if (isPartialMatch<patternShift>(logit, logitPattern)) {
       uint32_t binIdx = extractBinIdx<step>(logit);
-      if (binIdx < thresholdBinIdx) {
+      // Only write elements with binIdx < thresholdBinIdx when:
+      // 1. This is step 0 and the threshold bin is small enough (no step 1)
+      // 2. This is step >= 1 (where pattern matching filters correctly)
+      // This prevents duplicates when step 0 and step 1 both run.
+      bool shouldWriteDirectly =
+          (step == 0 && smemFinalBinSize[0] <= kNumFinalItems) || (step >= 1);
+      if (binIdx < thresholdBinIdx && shouldWriteDirectly) {
         // The element is part of the top-k selection
         int dstIdx = atomicAdd(&smemFoundTopKValues[0], 1);
 

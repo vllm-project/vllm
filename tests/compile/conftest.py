@@ -24,10 +24,24 @@ def mock_cuda_platform():
     def _mock_platform(is_cuda: bool = True, capability: tuple[int, int] | None = None):
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
-        if capability is not None:
-            mock_platform.get_device_capability.return_value = DeviceCapability(
-                *capability
+        device_capability = (
+            DeviceCapability(*capability) if capability is not None else None
+        )
+        mock_platform.get_device_capability.return_value = device_capability
+
+        def is_device_capability_family(
+            requested_capability: int, device_id: int = 0
+        ) -> bool:
+            current_capability = mock_platform.get_device_capability(
+                device_id=device_id
             )
+            if current_capability is None:
+                return False
+            return current_capability.major == (requested_capability // 10)
+
+        mock_platform.is_device_capability_family.side_effect = (
+            is_device_capability_family
+        )
         with patch("vllm.platforms.current_platform", mock_platform):
             yield mock_platform
 
