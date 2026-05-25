@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from transformers import Qwen3Config
-from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
+from transformers import Siglip2VisionConfig
 
 
 class PixelShuffleSiglip2VisionConfig(Siglip2VisionConfig):
