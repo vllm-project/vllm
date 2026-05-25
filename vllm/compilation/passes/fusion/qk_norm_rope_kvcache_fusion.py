@@ -8,6 +8,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
@@ -21,7 +22,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
+from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
@@ -136,7 +137,6 @@ class QkNormRopeKvCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
@@ -170,11 +170,11 @@ class QkNormRopeKvCachePattern:
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
 
             q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-            q_normed = self.rmsnorm_matcher(q_by_head, q_weight)
+            q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
             q_flat = q_normed.view(-1, self.q_size)
 
             k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-            k_normed = self.rmsnorm_matcher(k_by_head, k_weight)
+            k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
             k_flat = k_normed.view(-1, self.k_size)
 
             q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -286,10 +286,10 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         )
 
         # RMS norm variants are no longer iterated: after the vLLM IR
-        # migration (#33825), `MatcherRMSNorm` dispatches via
-        # `ir.ops.rms_norm`, which resolves to the same backend (native /
-        # vllm_c / aiter / oink / ...) that the model's RMSNorm layer
-        # picks.  The pattern graph tracks the target graph automatically.
+        # migration (#33825), the pattern calls `vllm.ir.ops.rms_norm`
+        # directly, which resolves to the same backend (native / vllm_c /
+        # aiter / oink / ...) that the model's RMSNorm layer picks. The
+        # pattern graph tracks the target graph automatically.
         aiter_rope_variants = [False]
         if rocm_aiter_ops.is_triton_rotary_embed_enabled():
             aiter_rope_variants.append(True)
