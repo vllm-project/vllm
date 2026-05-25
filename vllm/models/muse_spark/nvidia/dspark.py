@@ -403,20 +403,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         if context_slot_mapping is None:
             return
         all_k = all_k_flat.view(num_layers, num_ctx, self._num_kv_heads, self._head_dim)
-        per_layer = isinstance(context_slot_mapping, (list, tuple))
-        for layer_idx, attn in enumerate(self._attn_layers):
-            slot_mapping = (
-                context_slot_mapping[layer_idx] if per_layer else context_slot_mapping
-            )
-            if slot_mapping is None:
-                continue
-            attn.impl.do_kv_cache_update(
-                attn,
-                all_k[layer_idx],
-                all_v[layer_idx],
-                attn.kv_cache,
-                slot_mapping,
-            )
+        self._store_context_kv(all_k, all_v, context_slot_mapping)
 
     def forward(
         self,

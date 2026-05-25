@@ -479,6 +479,7 @@ steps:
   device: h200_35gb
   optional: true
   source_file_dependencies:
+    - vllm/v1/attention/ops/batched_kv_cache.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
@@ -526,6 +527,7 @@ steps:
   device: b200-k8s
   optional: true
   source_file_dependencies:
+    - vllm/v1/attention/ops/batched_kv_cache.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
