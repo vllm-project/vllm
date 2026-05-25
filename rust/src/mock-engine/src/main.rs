@@ -1,16 +1,11 @@
 use anyhow::{Context, Result};
 use clap::Parser as _;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{Level, info};
 use vllm_mock_engine::Opt;
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vllm_mock_engine=info".into()),
-        )
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 }
 
 /// Create a cancellation token that is triggered by Ctrl-C.

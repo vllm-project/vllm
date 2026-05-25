@@ -12,6 +12,7 @@ use zeromq::{DealerSocket, PushSocket, SocketRecv as _, SocketSend as _, ZmqMess
 
 use crate::engine::{EngineInput, EngineOutput};
 
+/// Send one engine output batch to the client over the appropriate push socket.
 async fn send_engine_outputs_to_client(
     push_sockets: &mut [PushSocket],
     EngineOutput {
@@ -24,6 +25,8 @@ async fn send_engine_outputs_to_client(
     Ok(())
 }
 
+/// Create a stream of `EngineInput` by continuously receiving messages from the given dealer socket
+/// and decoding them into `EngineInput`.
 fn dealer_input_stream(dealer: DealerSocket) -> impl Stream<Item = Result<EngineInput>> {
     stream::unfold(dealer, |mut dealer| async {
         let input = loop {
@@ -45,6 +48,8 @@ fn dealer_input_stream(dealer: DealerSocket) -> impl Stream<Item = Result<Engine
     })
 }
 
+/// Decode a `ZmqMessage` into an `EngineInput`. Returns an error if the message is malformed or
+/// contains an unknown/unsupported request type.
 fn decode_request(message: ZmqMessage) -> Result<EngineInput> {
     let frames = message.into_vec();
     if frames.is_empty() {
@@ -78,6 +83,10 @@ fn decode_request(message: ZmqMessage) -> Result<EngineInput> {
     Ok(input)
 }
 
+/// Run the main IO loop for the mock engine, continuously receiving and decoding raw messages from
+/// the dealer sockets, sending them to the engine loop task via `input_tx`, and receiving
+/// `EngineOutput` from the engine loop task via `output_rx` and sending them to the client over the
+/// appropriate push socket, until `shutdown` is cancelled.
 pub(crate) async fn run_io_loop(
     data_sockets: Vec<MockEngineDataSockets>,
     input_tx: mpsc::UnboundedSender<EngineInput>,
@@ -94,17 +103,18 @@ pub(crate) async fn run_io_loop(
             biased;
             _ = shutdown.cancelled() => return Ok(()),
 
+            output = output_rx.recv() => {
+                let output = output
+                    .ok_or_else(|| anyhow!("mock engine output channel closed"))?;
+                send_engine_outputs_to_client(&mut push_sockets, output).await?;
+            }
+
             input = input_streams.next() => {
                 let input = input
                     .ok_or_else(|| anyhow!("mock engine input streams closed"))??;
                 input_tx
                     .send(input)
                     .map_err(|_| anyhow!("mock engine state task shut down"))?;
-            }
-            output = output_rx.recv() => {
-                let output = output
-                    .ok_or_else(|| anyhow!("mock engine output channel closed"))?;
-                send_engine_outputs_to_client(&mut push_sockets, output).await?;
             }
         }
     }

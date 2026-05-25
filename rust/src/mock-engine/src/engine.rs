@@ -51,6 +51,7 @@ fn request_output(
     }
 }
 
+/// Produce an empty output with a terminal finish reason for an invalid request.
 fn empty_finish_outputs(
     engine_index: u32,
     request_id: String,
@@ -108,6 +109,7 @@ fn utility_response(
     })
 }
 
+/// Message sent from the frontend to the mock engine task to drive the engine loop.
 pub(crate) enum EngineInput {
     Request(Box<EngineCoreRequest>),
     Abort(Vec<String>),
@@ -115,6 +117,7 @@ pub(crate) enum EngineInput {
     StartDpWave,
 }
 
+/// Message sent from the mock engine task to the frontend for one engine output batch.
 pub(crate) struct EngineOutput {
     pub client_index: u32,
     pub outputs: EngineCoreOutputs,
@@ -195,6 +198,7 @@ impl ActiveRequest {
     }
 }
 
+/// Internal state for one mock engine instance, owned by the engine loop task.
 struct Engine {
     engine_index: u32,
     opt: Opt,
@@ -279,6 +283,7 @@ impl Engine {
                     });
                 }
             }
+
             EngineInput::Utility(request) => {
                 debug!(
                     engine_index = self.engine_index,
@@ -295,6 +300,7 @@ impl Engine {
                     }
                 });
             }
+
             EngineInput::StartDpWave => {
                 debug!(
                     engine_index = self.engine_index,
@@ -365,6 +371,8 @@ impl Engine {
     }
 }
 
+/// Run the main loop for the mock engine, receiving `EngineInput` from `input_rx`
+/// and sending `EngineOutput` to `output_tx` until `shutdown` is cancelled.
 pub(crate) async fn run_engine_loop(
     engine_index: u32,
     opt: Opt,
@@ -389,6 +397,8 @@ pub(crate) async fn run_engine_loop(
                 engine.handle_input(input)?
             }
 
+            // If there are active requests, step them once after yielding to the scheduler to
+            // avoid blocking the engine loop while still making steady progress on request outputs.
             _ = yield_now(), if !engine.active_requests.is_empty() => {
                 engine.step()
             }

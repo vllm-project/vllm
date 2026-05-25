@@ -59,12 +59,14 @@ async fn run_engine(engine_index: u32, opt: Opt, shutdown: CancellationToken) ->
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (output_tx, output_rx) = mpsc::channel(64);
 
+    // IO loop: dealer -> input_tx, output_rx -> push
     let mut io_loop = tokio::spawn(io::run_io_loop(
         data_sockets,
         input_tx,
         output_rx,
         shutdown.clone(),
     ));
+    // Engine loop: input_rx -> engine logic -> output_tx
     let mut engine_loop = tokio::spawn(engine::run_engine_loop(
         engine_index,
         opt,
