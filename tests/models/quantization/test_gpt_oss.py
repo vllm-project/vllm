@@ -22,7 +22,13 @@ import pytest
 from packaging import version
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+
+try:
+    from vllm.platforms.rocm import on_gfx950
+except Exception:
+    # vllm.platforms.rocm import fails on non-ROCm torch builds (XPU/CPU).
+    def on_gfx950() -> bool:
+        return False
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
