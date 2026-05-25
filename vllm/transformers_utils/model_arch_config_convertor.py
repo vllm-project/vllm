@@ -540,6 +540,12 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return max(head_dim, global_head_dim) or super().get_head_size()
 
 
+class GlmGAModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        hf_config.architectures = ["GlmGAForConditionalGeneration"]
+        super().__init__(hf_config, hf_text_config)
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
@@ -566,6 +572,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "glmga": GlmGAModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,

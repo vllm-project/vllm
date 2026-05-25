@@ -123,15 +123,6 @@ logger = init_logger(__name__)
 _MAX_FRAMES_PER_VIDEO = 600
 
 
-def _is_glmga_model(processor: object) -> bool:
-    """Detect GLMGA variant via its Glmga sub-processors."""
-    for attr in ("image_processor", "video_processor"):
-        sub = getattr(processor, attr, None)
-        if sub and "Glmga" in type(sub).__name__:
-            return True
-    return False
-
-
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
     return VideoMetadata(
         **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
@@ -1216,15 +1207,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
 
-        if _is_glmga_model(hf_processor):
-            image_token_ids = [
-                hf_config.image_start_token_id,
-                hf_processor.image_token_id,
-                hf_config.image_end_token_id,
-            ]
-            image_token = tokenizer.decode(image_token_ids)
-        else:
-            image_token = hf_processor.image_token
+        image_token = hf_processor.image_token
         video_token_ids = [
             hf_config.video_start_token_id,
             hf_processor.video_token_id,
@@ -1473,77 +1456,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )(hf_inputs)
         )
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if _is_glmga_model(hf_processor) and hf_inputs.get("video_metadata"):
-            config["video_metadata"] = MultiModalFieldConfig.batched(
-                "video", keep_on_cpu=True
-            )
-
         return config
-
-    def _get_prompt_updates_glm46v(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        merge_length = image_processor.merge_size**2
-
-        def get_image_replacement_glm46v(item_idx: int):
-            out_item = out_mm_kwargs["image"][item_idx]
-            grid_thw = out_item["image_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            num_tokens = int(grid_thw.prod()) // merge_length
-            placeholder = [
-                hf_config.image_start_token_id,
-                *([hf_processor.image_token_id] * num_tokens),
-                hf_config.image_end_token_id,
-            ]
-            return PromptUpdateDetails.select_token_id(
-                placeholder,
-                embed_token_id=hf_processor.image_token_id,
-            )
-
-        def get_video_replacement_glm46v(item_idx: int):
-            out_item = out_mm_kwargs["video"][item_idx]
-            grid_thw = out_item["video_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            metadata_elem = out_item.get("video_metadata")
-            if metadata_elem is not None:
-                metadata = metadata_elem.data
-                if not isinstance(metadata, VideoMetadata):
-                    assert isinstance(metadata, Mapping)
-                    metadata = _to_video_metadata(metadata)
-            else:
-                _, raw_metadata = mm_items["video"][item_idx]
-                assert isinstance(raw_metadata, Mapping)
-                metadata = _to_video_metadata(raw_metadata)
-
-            placeholder = self.info._construct_video_placeholder_glm46v(
-                metadata, grid_thw
-            )
-            return PromptUpdateDetails.select_token_id(
-                placeholder,
-                embed_token_id=hf_processor.image_token_id,
-            )
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<|begin_of_image|><|image|><|end_of_image|>",
-                replacement=get_image_replacement_glm46v,
-            ),
-            PromptReplacement(
-                modality="video",
-                target="<|begin_of_video|><|video|><|end_of_video|>",
-                replacement=get_video_replacement_glm46v,
-            ),
-        ]
 
     def _get_prompt_updates(
         self,
@@ -1552,13 +1465,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if _is_glmga_model(hf_processor):
-            return self._get_prompt_updates_glm46v(
-                mm_items, hf_processor_mm_kwargs, out_mm_kwargs
-            )
-
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-
         merge_length = image_processor.merge_size**2
 
         def get_image_replacement_glm4v(item_idx: int):
@@ -1653,7 +1560,7 @@ class Glm4vForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        if config.model_type in ("glm4v", "glm_ocr"):
+        if config.model_type in ("glm4v", "glm_ocr", "glmga"):
             architectures = ["Glm4ForCausalLM"]
         elif config.model_type == "glm4v_moe":
             architectures = ["Glm4MoeForCausalLM"]

@@ -932,6 +932,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
+    "GlmGAForConditionalGeneration": _HfExamplesInfo(
+        "xxx",
+        min_transformers_version="5.8.0",
+        is_available_online=False,
+    ),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         min_transformers_version="5.1.0",

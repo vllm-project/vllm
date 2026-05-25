@@ -409,6 +409,7 @@ _MULTIMODAL_MODELS = {
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),
+    "GlmGAForConditionalGeneration": ("glmga", "GlmGAForConditionalGeneration"),
     "GlmOcrForConditionalGeneration": ("glm_ocr", "GlmOcrForConditionalGeneration"),
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
