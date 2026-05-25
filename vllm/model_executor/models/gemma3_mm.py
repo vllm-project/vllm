@@ -39,6 +39,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -467,7 +468,7 @@ class Gemma3MultiModalProjector(nn.Module):
     dummy_inputs=Gemma3DummyInputsBuilder,
 )
 class Gemma3ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEncoderCudaGraph
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -504,6 +505,7 @@ class Gemma3ForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
+        self.model_config = vllm_config.model_config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
@@ -682,3 +684,146 @@ class Gemma3ForConditionalGeneration(
         """
         # The Gemma3 connector maintains a 1:1 token mapping
         return num_vision_tokens
+
+    # --- Encoder CUDA Graph support ---
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key_by_modality={"image": "pixel_values"},
+            buffer_keys=[],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        return "image"
+
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = self.config.mm_tokens_per_image
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        num_patches = mm_kwargs["num_patches"]
+        vision_cfg = self.config.vision_config
+        vit_positions_per_patch = (
+            vision_cfg.image_size // vision_cfg.patch_size
+        ) ** 2
+        mm_tokens_per_image = self.config.mm_tokens_per_image
+
+        return [
+            EncoderItemSpec(
+                input_size=int(np) * vit_positions_per_patch,
+                output_tokens=int(np) * mm_tokens_per_image,
+            )
+            for np in num_patches
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        num_patches = mm_kwargs["num_patches"]
+
+        cum_patches = [0]
+        for p in num_patches:
+            cum_patches.append(cum_patches[-1] + int(p))
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "num_patches": num_patches[:0],
+            }
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]]
+             for i in indices]
+        )
+        selected_np = num_patches[indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "num_patches": selected_np,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        mm_tokens_per_image = self.config.mm_tokens_per_image
+        num_images = min(
+            (token_budget + mm_tokens_per_image - 1) // mm_tokens_per_image,
+            max_batch_size,
+        )
+
+        image_size = self.config.vision_config.image_size
+        dummy_pixel_values = torch.randn(
+            num_images, 3, image_size, image_size,
+            device=device, dtype=dtype,
+        )
+
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs={"pixel_values": dummy_pixel_values},
+            buffers={},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        return EncoderCudaGraphReplayBuffers(buffers={})
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        image_features = self.vision_tower(pixel_values)
+        image_features = self.multi_modal_projector(image_features)
+        return image_features.flatten(end_dim=1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        results = self._process_image_input(image_input)
+        return torch.cat(results, dim=0)
