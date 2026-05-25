@@ -727,9 +727,7 @@ class Gemma3ForConditionalGeneration(
 
         num_patches = mm_kwargs["num_patches"]
         vision_cfg = self.config.vision_config
-        vit_positions_per_patch = (
-            vision_cfg.image_size // vision_cfg.patch_size
-        ) ** 2
+        vit_positions_per_patch = (vision_cfg.image_size // vision_cfg.patch_size) ** 2
         mm_tokens_per_image = self.config.mm_tokens_per_image
 
         return [
@@ -759,8 +757,7 @@ class Gemma3ForConditionalGeneration(
             }
 
         selected_pv = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]]
-             for i in indices]
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
         )
         selected_np = num_patches[indices]
 
@@ -789,8 +786,12 @@ class Gemma3ForConditionalGeneration(
 
         image_size = self.config.vision_config.image_size
         dummy_pixel_values = torch.randn(
-            num_images, 3, image_size, image_size,
-            device=device, dtype=dtype,
+            num_images,
+            3,
+            image_size,
+            image_size,
+            device=device,
+            dtype=dtype,
         )
 
         return EncoderCudaGraphCaptureInputs(

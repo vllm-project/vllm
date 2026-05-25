@@ -86,6 +86,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 | Architecture | Models | CG for Image | CG for Video |
 | ------------ | ------ | ------------ | ------------ |
+| `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
