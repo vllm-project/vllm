@@ -600,7 +600,6 @@ class EplbState:
                     ]
                 )
 
-            # Per-model: лог + JSONL, оба под if rank == 0.
             for i, (expert_load_pass, eplb_model_state) in enumerate(
                 zip(expert_load_pass_list, self.model_states.values())
             ):

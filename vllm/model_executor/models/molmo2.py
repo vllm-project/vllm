@@ -489,7 +489,7 @@ class Molmo2VisionTransformer(nn.Module):
         self.transformer = Molmo2VisionBlockCollection(
             config,
             quant_config,
-            prefix=f"{prefix}.transformer",
+            prefix=maybe_prefix(prefix, "transformer"),
         )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
@@ -1338,6 +1338,9 @@ def exif_transpose(
 def build_flat_image_bool_length(
     image_grids: torch.LongTensor,
     hf_config: PretrainedConfig,
+    image_use_col_tokens: bool = True,
+    use_single_crop_col_tokens: bool | None = None,
+    use_single_crop_start_token: bool = True,
 ) -> tuple[torch.LongTensor, torch.LongTensor]:
     image_patch_id = hf_config.image_patch_id
     low_res_image_start_id = hf_config.low_res_image_start_token_id
@@ -1353,7 +1356,17 @@ def build_flat_image_bool_length(
     h = image_grids[:, 2]
     w = image_grids[:, 3]
 
-    lengths = resized_h * resized_w + h * (w + 1) + 4  # [B]
+    low_res_use_col_tokens = (
+        image_use_col_tokens
+        if use_single_crop_col_tokens is None
+        else use_single_crop_col_tokens
+    )
+    low_res_extra = int(low_res_use_col_tokens)
+    high_res_extra = int(image_use_col_tokens)
+
+    lengths = (
+        resized_h * (resized_w + low_res_extra) + h * (w + high_res_extra) + 4
+    )  # [B]
     total_len = int(lengths.sum().item())
 
     flat = torch.empty(total_len, dtype=torch.long, device=device)
@@ -1363,16 +1376,24 @@ def build_flat_image_bool_length(
         resized_h_i, resized_w_i, h_i, w_i = image_grids[i].tolist()
         L_i = int(lengths[i].item())
 
-        num_low_res_patches = resized_h_i * resized_w_i
-
         idx = offset
 
-        flat[idx] = low_res_image_start_id
+        flat[idx] = (
+            low_res_image_start_id if use_single_crop_start_token else image_start_id
+        )
         idx += 1
 
-        if num_low_res_patches > 0:
-            flat[idx : idx + num_low_res_patches] = image_patch_id
-            idx += num_low_res_patches
+        low_res_block_len = resized_w_i + low_res_extra
+        if low_res_block_len > 0 and resized_h_i > 0:
+            line = torch.empty(low_res_block_len, dtype=torch.long, device=device)
+            if resized_w_i > 0:
+                line[:resized_w_i] = image_patch_id
+            if low_res_use_col_tokens:
+                line[resized_w_i] = image_col_id
+
+            block = line.repeat(resized_h_i)
+            flat[idx : idx + resized_h_i * low_res_block_len] = block
+            idx += resized_h_i * low_res_block_len
 
         flat[idx] = image_end_id
         idx += 1
@@ -1380,12 +1401,13 @@ def build_flat_image_bool_length(
         flat[idx] = image_start_id
         idx += 1
 
-        block_len = w_i + 1
+        block_len = w_i + high_res_extra
         if block_len > 0 and h_i > 0:
             line = torch.empty(block_len, dtype=torch.long, device=device)
             if w_i > 0:
                 line[:w_i] = image_patch_id
-            line[w_i] = image_col_id
+            if image_use_col_tokens:
+                line[w_i] = image_col_id
 
             block = line.repeat(h_i)
             flat[idx : idx + h_i * block_len] = block
@@ -2108,7 +2130,13 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             (
                 processed_outputs["image_tokens"],
                 processed_outputs["num_image_tokens"],
-            ) = build_flat_image_bool_length(image_grids, hf_config)
+            ) = build_flat_image_bool_length(
+                image_grids,
+                hf_config,
+                image_use_col_tokens=hf_processor.image_use_col_tokens,
+                use_single_crop_col_tokens=hf_processor.use_single_crop_col_tokens,
+                use_single_crop_start_token=hf_processor.use_single_crop_start_token,
+            )
 
         return BatchFeature({**processed_outputs, **all_video_outputs})
 
