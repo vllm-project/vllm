@@ -31,6 +31,10 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.paged_attn import PagedAttention
+from vllm.v1.attention.ops.triton_fused_rope_and_cache import (
+    triton_fused_rope_and_cache,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
@@ -880,6 +884,53 @@ class FlashAttentionImpl(AttentionImpl):
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
+        )
+
+    def fused_rope_kvcache_supported(self) -> bool:
+        """Return True if fused RoPE+KVCache is supported."""
+        return True
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ) -> None:
+        """Fused RoPE + KV cache update.
+
+        Applies RoPE to query and key inplace, then writes key and value
+        to the paged KV cache in a single Triton kernel launch.
+        """
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache,
+            layer.num_kv_heads,
+            layer.head_size,
+        )
+
+        is_fp8_kv_cache = self.kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
+
+        triton_fused_rope_and_cache(
+            query,
+            key,
+            value,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            is_fp8_kv_cache,
         )
 
     def _forward_with_dcp(
