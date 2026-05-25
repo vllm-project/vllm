@@ -17,12 +17,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
@@ -402,7 +404,7 @@ def make_test_quant_config(
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
     make_gate: bool = True,
-    is_nvfp4_scale_swizzled: bool = True,
+    is_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
     (_, w1, w1_s, w1_gs), (_, w2, w2_s, w2_gs) = make_test_weights(
         e,
@@ -443,7 +445,7 @@ def make_test_quant_config(
             # TODO: make sure this is handled properly
             g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
             g2_alphas=(1 / w2_gs) if w2_gs is not None else None,
-            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
+            is_scale_swizzled=is_scale_swizzled,
         ),
     )
 

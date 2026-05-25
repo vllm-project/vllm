@@ -246,7 +246,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         ``check_batch_mode`` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
-
         final_results: dict[int, RequestOutput] = {}
         try:
             async for prompt_idx, res in merge_async_iterators(*generators):

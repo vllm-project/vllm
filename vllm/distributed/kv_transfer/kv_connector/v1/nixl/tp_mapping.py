@@ -10,6 +10,7 @@ import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
+    TransferTopology,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
@@ -62,11 +63,8 @@ class TPMapping:
 
 
 def compute_tp_mapping(
-    tp_rank: int,
-    tp_size: int,
+    transfer_topology: TransferTopology,
     remote_tp_size: int,
-    is_mla: bool,
-    total_num_kv_heads: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
@@ -74,13 +72,15 @@ def compute_tp_mapping(
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
     """
+    tp_rank = transfer_topology.tp_rank
+    tp_size = transfer_topology.tp_size
+    total_num_kv_heads = transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
-    if is_mla:
-        # All heads replicated across all ranks.
-        attn_ranks = [0]
-    elif tp_size >= remote_tp_size:
+    if transfer_topology.is_mla or tp_size >= remote_tp_size:
         # D (local TP) > P (remote TP): multiple local ranks read different chunks from
         # *one* remote rank, corresponding to different kv heads.
+        # For MLA, we only need one remote since cache is duplicated. When P TP=k*TP k,
+        # this will spread mla ranks to read from remote k*tp_rank.
         attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
         # P (remote TP) > D (local TP): one local rank
@@ -123,7 +123,7 @@ def compute_tp_mapping(
     }
 
     # --- Rank offset factor ---
-    if is_mla or tp_size <= remote_tp_size:
+    if transfer_topology.is_mla or tp_size <= remote_tp_size:
         # We don't index into remote for reading, no offset needed.
         rank_offset_factor = 0
     elif tp_size > total_num_kv_heads:
