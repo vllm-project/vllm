@@ -173,7 +173,7 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
-    def reset_after_preemption(self) -> None:
+    def reset(self) -> None:
         self.token_len = 0
         self.allocated_block_ids = ()
         self.num_saved_tokens = 0
