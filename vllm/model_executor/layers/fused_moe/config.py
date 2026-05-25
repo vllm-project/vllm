@@ -159,7 +159,7 @@ def get_routing_method_type(
 
     if scoring_func == "softmax":
         if renormalize:
-            return RoutingMethodType.Renormalize
+            return RoutingMethodType.RenormalizeNaive
         else:
             return RoutingMethodType.Default
 
@@ -805,6 +805,7 @@ def nvfp4_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -823,6 +824,7 @@ def nvfp4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -1270,6 +1272,11 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
+
+    # SwiGLU clamp limit. When set, backends that do not implement the clamp
+    # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
+    # cannot silently select one and drop the clamp.
+    swiglu_limit: float | None = None
 
     # This flag is used to disable the inplace optimization
     # in MoE kernels. If this flag is True then the kernel

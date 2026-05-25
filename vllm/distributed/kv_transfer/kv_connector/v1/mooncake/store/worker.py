@@ -16,7 +16,9 @@ import os
 import queue
 import socket
 import threading
+import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -57,6 +59,8 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+from .metrics import MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
 
@@ -176,6 +180,10 @@ def _align_up(value: int, alignment: int) -> int:
 def _estimate_disk_offload_staging_bytes(size_list: list[int]) -> int:
     data_size = sum(size_list)
     return _align_up(data_size, _DIRECT_IO_ALIGNMENT) + _DIRECT_IO_PADDING_BYTES
+
+
+def _sum_batch_bytes(sizes: list[list[int]]) -> int:
+    return sum(sum(size) for size in sizes)
 
 
 def _get_usable_disk_offload_buffer_budget_bytes(raw_budget_bytes: int) -> int:
@@ -337,6 +345,7 @@ class KVTransferThread(threading.Thread):
         tp_rank: int,
         ready_event: threading.Event,
         name: str,
+        record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.store = store
@@ -344,6 +353,7 @@ class KVTransferThread(threading.Thread):
         self.block_size = block_size
         self.tp_rank = tp_rank
         self.token_databases = token_databases
+        self._record_operation_cb = record_operation
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.finished_requests: set[str] = set()
@@ -379,6 +389,27 @@ class KVTransferThread(threading.Thread):
     def _handle_request(self, req_meta: Any):
         pass
 
+    def _record_operation(
+        self,
+        operation: str,
+        start_time: float,
+        num_keys: int,
+        *,
+        num_bytes: int = 0,
+        status: str = "ok",
+        num_failed_keys: int = 0,
+    ) -> None:
+        if self._record_operation_cb is None:
+            return
+        self._record_operation_cb(
+            operation=operation,
+            duration_seconds=time.perf_counter() - start_time,
+            num_keys=num_keys,
+            num_bytes=num_bytes,
+            status=status,
+            num_failed_keys=num_failed_keys,
+        )
+
     def update_kv_event(self, events: list[BlockStored]):
         with self.kv_event_lock:
             self.kv_events.extend(events)
@@ -405,6 +436,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         enable_kv_event: bool = False,
         replicate_config: Any = None,
+        record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
             store,
@@ -413,6 +445,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             tp_rank,
             ready_event,
             name="KVCacheStoreSendingThread",
+            record_operation=record_operation,
         )
         self.put_step = put_step
         self.coord = coord
@@ -520,7 +553,23 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return
 
         # Check which blocks already exist (dedup)
-        exists_states = self.store.batch_is_exist(keys)
+        save_exists_start = time.perf_counter()
+        try:
+            exists_states = self.store.batch_is_exist(keys)
+        except Exception:
+            self._record_operation(
+                "save_exists",
+                save_exists_start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            raise
+        self._record_operation(
+            "save_exists",
+            save_exists_start,
+            len(keys),
+        )
         missing_indices = [i for i, exists in enumerate(exists_states) if exists != 1]
 
         if not missing_indices:
@@ -574,6 +623,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if current_event is not None:
             current_event.synchronize()
 
+        batch_bytes = _sum_batch_bytes(sizes)
+        put_start = time.perf_counter()
         try:
             res = self.store.batch_put_from_multi_buffers(
                 keys,
@@ -582,9 +633,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.replicate_config,
             )
             failed = [i for i, v in enumerate(res) if v < 0]
+            self._record_operation(
+                "save_put",
+                put_start,
+                len(keys),
+                num_bytes=batch_bytes,
+                status="partial_failure" if failed else "ok",
+                num_failed_keys=len(failed),
+            )
             if failed:
-                # Compute total bytes attempted for this batch
-                total_bytes = sum(sum(s) if isinstance(s, list) else s for s in sizes)
                 failed_codes = set(res[i] for i in failed)
                 logger.warning(
                     "batch_put failed: %d/%d keys failed "
@@ -593,7 +650,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     len(failed),
                     len(keys),
                     failed_codes,
-                    total_bytes,
+                    batch_bytes,
                     len(keys),
                     keys[0] if keys else "N/A",
                 )
@@ -614,6 +671,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     "successful store batch"
                 )
         except Exception as e:
+            self._record_operation(
+                "save_put",
+                put_start,
+                len(keys),
+                num_bytes=batch_bytes,
+                status="error",
+                num_failed_keys=len(keys),
+            )
             logger.error("Failed to put key %s, error: %s", keys, e)
 
         if self.enable_kv_event and stored_events:
@@ -635,6 +700,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tp_rank: int,
         ready_event: threading.Event,
         disk_offload_buffer_budget_bytes: int | None = None,
+        record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
             store,
@@ -643,6 +709,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             tp_rank,
             ready_event,
             name="KVCacheStoreRecvingThread",
+            record_operation=record_operation,
         )
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
@@ -721,12 +788,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     return
 
         current_batch_keys: list[str] = key_list_c
+        batch_bytes = 0
         try:
             for batch_keys, batch_addrs, batch_sizes in load_batches:
                 current_batch_keys = batch_keys
+                batch_bytes = _sum_batch_bytes(batch_sizes)
                 tiers_by_key: dict[str, str] | None = None
                 if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
+                # Reset so the recorded RPC duration excludes tier lookup.
+                load_get_start = time.perf_counter()
                 res = self.store.batch_get_into_multi_buffers(
                     batch_keys, batch_addrs, batch_sizes
                 )
@@ -739,6 +810,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     for key, value in zip(batch_keys, res, strict=True)
                     if value < 0
                 ]
+                self._record_operation(
+                    "load_get",
+                    load_get_start,
+                    len(batch_keys),
+                    num_bytes=batch_bytes,
+                    status="partial_failure" if failed else "ok",
+                    num_failed_keys=len(failed),
+                )
                 if failed:
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
@@ -749,6 +828,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     break
         except Exception as e:
+            self._record_operation(
+                "load_get",
+                load_get_start,
+                len(current_batch_keys),
+                num_bytes=batch_bytes,
+                status="error",
+                num_failed_keys=len(current_batch_keys),
+            )
             logger.warning(
                 "Failed to get Mooncake sub-batch %s, error: %s",
                 current_batch_keys[:3],
@@ -921,6 +1008,8 @@ class MooncakeStoreWorker:
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
+        self._kv_connector_stats_lock = threading.Lock()
+        self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         self._kv_cache_config = kv_cache_config
         # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
@@ -1057,6 +1146,7 @@ class MooncakeStoreWorker:
                 ready_event_sending,
                 self.enable_kv_events,
                 self.store_replicate_config,
+                record_operation=self._record_kv_connector_operation,
             )
             self.kv_send_thread.start()
 
@@ -1069,6 +1159,7 @@ class MooncakeStoreWorker:
             self.tp_rank,
             ready_event_recving,
             disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
+            record_operation=self._record_kv_connector_operation,
         )
         self.kv_recv_thread.start()
         ready_event_recving.wait()
@@ -1104,14 +1195,7 @@ class MooncakeStoreWorker:
             if load_spec is None or not load_spec.can_load:
                 continue
 
-            token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-                load_spec.kvpool_cached_tokens == token_len - 1
-            ):
-                token_len = load_spec.kvpool_cached_tokens + 1
-            else:
-                token_len = load_spec.kvpool_cached_tokens
-            load_spec.token_len = token_len
+            load_spec.token_len = load_spec.kvpool_cached_tokens
 
             assert self.kv_recv_thread is not None
             self.kv_recv_thread.add_request(request)
@@ -1154,6 +1238,34 @@ class MooncakeStoreWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
+
+    def _record_kv_connector_operation(
+        self,
+        operation: str,
+        duration_seconds: float,
+        num_keys: int,
+        *,
+        num_bytes: int = 0,
+        status: str = "ok",
+        num_failed_keys: int = 0,
+    ) -> None:
+        with self._kv_connector_stats_lock:
+            self.kv_connector_stats.record_operation(
+                operation=operation,
+                duration_seconds=duration_seconds,
+                num_keys=num_keys,
+                num_bytes=num_bytes,
+                status=status,
+                num_failed_keys=num_failed_keys,
+            )
+
+    def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
+        with self._kv_connector_stats_lock:
+            if self.kv_connector_stats.is_empty():
+                return None
+            kv_connector_stats = self.kv_connector_stats
+            self.kv_connector_stats = MooncakeStoreConnectorStats()
+            return kv_connector_stats
 
     def _get_and_clear_finished_sending(
         self,
@@ -1216,9 +1328,22 @@ class MooncakeStoreWorker:
         if not candidate_keys:
             return 0
 
+        lookup_start = time.perf_counter()
         try:
             res = self.store.batch_is_exist(candidate_keys)
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(candidate_keys),
+            )
         except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(candidate_keys),
+                status="error",
+                num_failed_keys=len(candidate_keys),
+            )
             logger.error("Remote connection failed in lookup: %s", e)
             return 0
 
