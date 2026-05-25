@@ -293,6 +293,8 @@ BENCH_CMD=(
   --request-rate "${REQUEST_RATE}"
   --burstiness "${BURSTINESS}"
   --seed "${SEED}"
+  --custom-output-len "${SD}"
+  --ignore-eos
 )
 
 if [ "${SAVE_RESULT}" = "1" ]; then
