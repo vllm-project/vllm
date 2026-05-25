@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import URL, Headers, MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
@@ -80,7 +80,7 @@ class AuthenticationMiddleware:
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
         root_path = scope.get("root_path", "")
-        url_path = URL(scope=scope).path.removeprefix(root_path)
+        url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):

@@ -236,6 +236,12 @@ class ReqMeta:
         )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        # A ReqMeta must never carry both a save AND a load.
+        # The save would also be wasted work — the bytes are being looked up
+        # in the store right now. Later cached_reqs steps save new tokens
+        # normally.
+        if load_spec is not None and load_spec.can_load:
+            skip_save = True
         if skip_save and load_spec is None:
             return None
 
