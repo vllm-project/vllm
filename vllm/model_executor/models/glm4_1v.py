@@ -1452,14 +1452,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         prompt_text: str,
         tokenization_kwargs: Mapping[str, object],
     ) -> list[int]:
-        processor = self.info.get_hf_processor()
-        if not _is_glmga_processor(processor):
-            return super()._apply_hf_processor_text_only(
-                prompt_text, tokenization_kwargs
-            )
-
-        # Avoid calling GlmgaProcessor without matching multimodal data on the
-        # cache path; its generic replacement code requires media inputs.
+        # Both Glm46VProcessor and GlmgaProcessor use generic replacement
+        # code that requires matching media inputs; bypass them for text-only
+        # (cache path / dummy inputs) and tokenize directly.
         tokenizer = self.info.get_tokenizer()
         tokenizer_output = tokenizer(prompt_text, **tokenization_kwargs)
         input_ids = tokenizer_output["input_ids"]
