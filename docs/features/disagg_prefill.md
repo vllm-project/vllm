@@ -19,7 +19,7 @@ Two main reasons:
 
 Please refer to [examples/disaggregated/disaggregated_prefill.sh](../../examples/disaggregated/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
 
-Now supports 7 types of connectors:
+Now supports 9 types of connectors:
 
 - **ExampleConnector**: refer to [examples/disaggregated/example_connector/run.sh](../../examples/disaggregated/example_connector/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
 - **LMCacheConnectorV1**: refer to [examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission.
