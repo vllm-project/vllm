@@ -520,9 +520,8 @@ class MPClient(EngineCoreClient):
                     self.ctx, output_address, zmq.PULL
                 )
 
-                # For deferred-port placeholders (tcp://host:0), report the
-                # ZMQ-bound endpoints back so the parent can forward them
-                # to engines (mirrors the DPCoordinator pattern).
+                # Report bound endpoints back so the parent can forward
+                # them to engines (mirrors the DPCoordinator pattern).
                 actual_address_pipe: Connection | None = client_addresses.get(
                     "actual_address_pipe"
                 )
@@ -556,10 +555,8 @@ class MPClient(EngineCoreClient):
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
 
-                # Replace deferred ``tcp://host:0`` placeholders with the
-                # kernel-assigned endpoints so engines DEALER-connect to the
-                # real ports. No-op for the IPC case (``LAST_ENDPOINT``
-                # returns the same path that was bound).
+                # Resolve ``tcp://host:0`` placeholders to bound endpoints
+                # before engines DEALER-connect. No-op for IPC.
                 addresses.inputs[0] = self.input_socket.getsockopt(
                     zmq.LAST_ENDPOINT
                 ).decode()

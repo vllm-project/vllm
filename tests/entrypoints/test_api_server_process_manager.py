@@ -29,11 +29,11 @@ def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
     print("Mock worker completed successfully")
 
 
-# Module-level stub for the defer-addresses test. Must be importable by
-# `multiprocessing.spawn` (no closures, no nesting).
+# Module-level stub for the gather_actual_addresses test. Must be
+# importable by `multiprocessing.spawn` (no closures, no nesting).
 def defer_addresses_stub_worker(listen_address, sock, args, client_config):
-    """Bind the per-child ZMQ ROUTER/PULL with the kernel-assigned port,
-    report the actual endpoints back via the pipe, then exit."""
+    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
+    endpoints back via the pipe, then exit."""
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
@@ -310,31 +310,22 @@ def test_external_process_monitoring(api_server_args):
 
 
 @pytest.mark.timeout(60)
-def test_defer_addresses_end_to_end():
-    """Exercise the deferred-port path: parent emits ``tcp://host:0``
-    placeholders, each spawned child binds with a kernel-picked port and
-    reports the actual endpoints back via its per-child pipe; the manager
-    surfaces them via :py:meth:`gather_actual_addresses`.
-
-    This is intentionally single-host: the rank-0 parent's
-    spawn/bind/report loop is fully local. The cross-node aspect of a
-    multi-node DP deployment only kicks in when remote engines later
-    DEALER-connect to the reported addresses, which is outside this
-    component's scope.
-    """
+def test_gather_actual_addresses_end_to_end():
+    """Each child binds ROUTER/PULL with a kernel-picked port and reports
+    the bound endpoints back via its per-child pipe; the manager surfaces
+    them via :py:meth:`gather_actual_addresses`."""
     host = "127.0.0.1"
-    num_servers = 4  # mirrors a typical DP_local fan-out
+    num_servers = 4
 
     placeholder_inputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host, defer_port=True)
+        get_engine_client_zmq_addr(local_only=False, host=host)
         for _ in range(num_servers)
     ]
     placeholder_outputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host, defer_port=True)
+        get_engine_client_zmq_addr(local_only=False, host=host)
         for _ in range(num_servers)
     ]
     for addr in placeholder_inputs + placeholder_outputs:
-        # defer_port=True must emit a port-0 placeholder for TCP.
         assert addr == f"tcp://{host}:0", addr
 
     sock = socket.socket()
@@ -346,7 +337,6 @@ def test_defer_addresses_end_to_end():
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
         target_server_fn=defer_addresses_stub_worker,
-        defer_addresses=True,
     )
 
     try:
@@ -364,51 +354,24 @@ def test_defer_addresses_end_to_end():
         scheme, parsed_host, port = split_zmq_path(addr)
         assert scheme == "tcp", addr
         assert parsed_host == host, addr
-        # Kernel must have replaced the port-0 placeholder.
         assert port and int(port) > 0, addr
 
-    # All ports are distinct across the 2*num_servers sockets.
     all_addrs = actual_inputs + actual_outputs
     assert len(set(all_addrs)) == len(all_addrs), all_addrs
 
 
 @pytest.mark.timeout(30)
-def test_defer_addresses_requires_flag():
-    """``gather_actual_addresses`` must refuse to run when the manager was
-    constructed without ``defer_addresses=True``."""
-    sock = socket.socket()
-    manager = APIServerProcessManager(
-        listen_address="localhost:8000",
-        sock=sock,
-        args="test_args",
-        num_servers=1,
-        input_addresses=["tcp://127.0.0.1:5001"],
-        output_addresses=["tcp://127.0.0.1:6001"],
-        target_server_fn=mock_run_api_server_worker,
-        # defer_addresses defaults to False
-    )
-    try:
-        with pytest.raises(RuntimeError, match="defer_addresses=True"):
-            manager.gather_actual_addresses(timeout=1.0)
-    finally:
-        manager.shutdown()
-        time.sleep(0.2)
-        sock.close()
-
-
-@pytest.mark.timeout(30)
-def test_defer_addresses_child_crash_before_report():
-    """If a deferred-address child exits before sending its endpoints,
-    ``gather_actual_addresses`` must raise a clear ``RuntimeError`` rather
-    than hang or return ``None`` slots."""
+def test_gather_actual_addresses_child_crash_before_report():
+    """A child that exits before sending its endpoints must surface a
+    clear ``RuntimeError`` rather than hang or return ``None`` slots."""
     host = "127.0.0.1"
     num_servers = 2
     placeholder_inputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host, defer_port=True)
+        get_engine_client_zmq_addr(local_only=False, host=host)
         for _ in range(num_servers)
     ]
     placeholder_outputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host, defer_port=True)
+        get_engine_client_zmq_addr(local_only=False, host=host)
         for _ in range(num_servers)
     ]
 
@@ -420,15 +383,13 @@ def test_defer_addresses_child_crash_before_report():
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
-        # mock_run_api_server_worker exits quickly without touching the
-        # actual_address_pipe — simulating a child that died before
-        # reporting its ZMQ bind addresses.
+        # mock_run_api_server_worker exits without touching
+        # ``actual_address_pipe`` — simulates a child that dies before
+        # reporting its bound addresses.
         target_server_fn=mock_run_api_server_worker,
-        defer_addresses=True,
     )
     try:
-        # Either error path (sentinel fires first or pipe-EOF on close)
-        # carries the substring "reporting" in its message.
+        # Sentinel-first vs pipe-EOF-first both produce "reporting".
         with pytest.raises(RuntimeError, match="reporting"):
             manager.gather_actual_addresses(timeout=10.0)
     finally:

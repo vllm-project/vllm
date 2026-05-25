@@ -29,7 +29,7 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -148,22 +148,14 @@ def get_engine_client_zmq_addr(
     local_only: bool,
     host: str,
     port: int = 0,
-    *,
-    defer_port: bool = False,
 ) -> str:
-    """Assign a new ZMQ socket address.
+    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
 
-    local_only: return an IPC path.
-    defer_port: return ``tcp://host:0`` for the child to bind atomically
-      (avoids parent-probe vs child-bind TOCTOU; child must report back via
-      ``getsockopt(zmq.LAST_ENDPOINT)``).
-    Otherwise: TCP with ``port`` (or ``get_open_port()`` if 0)."""
-
+    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
+    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
     if local_only:
         return get_open_zmq_ipc_path()
-    if defer_port:
-        return get_tcp_uri(host, 0)
-    return get_tcp_uri(host, port or get_open_port())
+    return get_tcp_uri(host, port)
 
 
 class APIServerProcessManager:
@@ -184,9 +176,14 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
-        defer_addresses: bool = False,
     ):
         """Initialize and start API server worker processes.
+
+        ``input_addresses``/``output_addresses`` may contain
+        ``tcp://host:0`` placeholders; each child must report the actual
+        bound endpoint over its ``actual_address_pipe`` in ``client_config``
+        and the parent collects them via
+        :py:meth:`gather_actual_addresses`.
 
         Args:
             target_server_fn: Override function to call for each API server process
@@ -198,21 +195,14 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
-            defer_addresses: Treat ``input_addresses``/``output_addresses``
-                as placeholders; each child reports its real bound endpoint
-                via a per-child pipe (collected by
-                :py:meth:`gather_actual_addresses`).
         """
         self.listen_address = listen_address
         self.sock = sock
         self.args = args
 
-        # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
-        self._address_pipes: list[connection.Connection] | None = (
-            [] if defer_addresses else None
-        )
+        self._address_pipes: list[connection.Connection] = []
 
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
@@ -228,11 +218,9 @@ class APIServerProcessManager:
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
 
-            child_send: connection.Connection | None = None
-            if self._address_pipes is not None:
-                parent_recv, child_send = spawn_context.Pipe(duplex=False)
-                self._address_pipes.append(parent_recv)
-                client_config["actual_address_pipe"] = child_send
+            parent_recv, child_send = spawn_context.Pipe(duplex=False)
+            self._address_pipes.append(parent_recv)
+            client_config["actual_address_pipe"] = child_send
 
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
@@ -243,8 +231,7 @@ class APIServerProcessManager:
             proc.start()
 
             # Drop parent's write end so reader sees EOF on child death.
-            if child_send is not None:
-                child_send.close()
+            child_send.close()
 
         logger.info("Started %d API server processes", len(self.processes))
 
@@ -257,15 +244,8 @@ class APIServerProcessManager:
         timeout: float = 60.0,
     ) -> tuple[list[str], list[str]]:
         """Return (inputs, outputs) reported by each child, indexed by
-        ``client_index``. Requires ``defer_addresses=True``. Raises
-        ``RuntimeError`` on timeout or premature child exit."""
-        if self._address_pipes is None:
-            raise RuntimeError(
-                "gather_actual_addresses() requires that "
-                "APIServerProcessManager was constructed with "
-                "defer_addresses=True"
-            )
-
+        ``client_index``. Raises ``RuntimeError`` on timeout or premature
+        child exit."""
         n = len(self._address_pipes)
         inputs: list[str | None] = [None] * n
         outputs: list[str | None] = [None] * n
@@ -291,10 +271,9 @@ class APIServerProcessManager:
                     sentinel_to_idx.keys()
                 )
                 ready = connection.wait(waitables, timeout=remaining)
-                # Drain pipes first: a child that sent its message and
-                # then exited can surface both pipe-readable and sentinel
-                # in the same poll, and we must record the success before
-                # observing the exit.
+                # Drain pipes before checking sentinels: a child that sent
+                # its message and then exited can surface both events in
+                # the same poll, and we must record the success first.
                 for item in ready:
                     if isinstance(item, connection.Connection) and item in pending:
                         idx = pending.pop(item)
@@ -311,7 +290,6 @@ class APIServerProcessManager:
                         item.close()
                 for item in ready:
                     if item in sentinel_to_idx:
-                        # Pop to avoid re-firing on the same sentinel.
                         idx = sentinel_to_idx.pop(item)
                         pipe = self._address_pipes[idx]
                         if pipe in pending:
@@ -330,11 +308,10 @@ class APIServerProcessManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
-        if self._address_pipes is not None:
-            for pipe in self._address_pipes:
-                with contextlib.suppress(Exception):
-                    pipe.close()
-            self._address_pipes = None
+        for pipe in self._address_pipes:
+            with contextlib.suppress(Exception):
+                pipe.close()
+        self._address_pipes = []
 
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)

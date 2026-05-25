@@ -308,11 +308,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    # Per-API-server ports are deferred to each child's actual ``bind()`` call
-    # to avoid the parent-probe vs child-bind TOCTOU race; the Rust front-end
-    # is the one consumer that cannot report a kernel-assigned port back
-    # (addresses are passed as CLI args to an externally-launched subprocess),
-    # so it opts out and keeps pre-allocated TCP ports.
+    # Per-API-server ports are picked by the kernel at each child's bind()
+    # to avoid parent-probe vs child-bind TOCTOU; Rust front-end opts out
+    # because it has no port-report-back channel.
     addresses = get_engine_zmq_addresses(
         vllm_config,
         num_api_servers,
@@ -348,12 +346,10 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_addresses=addresses.outputs,
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
-                defer_addresses=True,
             )
 
-            # Collect actual ports the children bound and mutate
-            # ``addresses`` in place; the engine handshake (run on ``with``
-            # exit) ships these to every engine on every DP node.
+            # Forward each child's bound endpoints to the engine handshake
+            # (runs on ``with`` exit).
             actual_inputs, actual_outputs = api_server_manager.gather_actual_addresses()
             addresses.inputs = actual_inputs
             addresses.outputs = actual_outputs
