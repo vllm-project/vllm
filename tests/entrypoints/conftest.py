@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 
 
@@ -217,3 +221,143 @@ def opt125_lora_files() -> str:
     from huggingface_hub import snapshot_download
 
     return snapshot_download(repo_id="peft-internal-testing/opt-125m-dummy-lora")
+
+
+# ---------------------------------------------------------------------------
+# Shared test factories for entrypoint serving unit tests
+# ---------------------------------------------------------------------------
+
+_MODEL_NAME = "test-model"
+
+
+@dataclass
+class _MockModelConfig:
+    task = "generate"
+    runner_type = "generate"
+    model = _MODEL_NAME
+    tokenizer = _MODEL_NAME
+    trust_remote_code = False
+    tokenizer_mode = "auto"
+    max_model_len = 100
+    tokenizer_revision = None
+    encoder_config = None
+    generation_config = "auto"
+    skip_tokenizer_init = False
+    is_encoder_decoder = False
+    is_multimodal_model = False
+    hf_config = SimpleNamespace(model_type="any")
+    hf_text_config = SimpleNamespace(model_type="any")
+
+    def get_diff_sampling_param(self):
+        return {}
+
+
+def _make_engine():
+    engine = MagicMock()
+    engine.model_config = _MockModelConfig()
+    engine.renderer = None
+    engine.input_processor = None
+
+    async def _echo(*args, **kwargs):
+        return []
+
+    engine.generate = _echo
+    return engine
+
+
+def _make_models(engine):
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+
+    return OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=[
+            BaseModelPath(name=_MODEL_NAME, model_path=_MODEL_NAME),
+        ],
+    )
+
+
+def _make_render_mock(models):
+    mr = MagicMock(spec_set=["model_registry"])
+    mr.model_registry = models.registry
+    return mr
+
+
+def make_base(usage_policy=None, enable_force_include_usage=False):
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+
+    engine = _make_engine()
+    models = _make_models(engine)
+    return OpenAIServing(
+        engine_client=engine,
+        models=models,
+        request_logger=None,
+        usage_policy=usage_policy,
+        enable_force_include_usage=enable_force_include_usage,
+    )
+
+
+def make_chat(usage_policy=None, enable_force_include_usage=False):
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+
+    engine = _make_engine()
+    models = _make_models(engine)
+    return OpenAIServingChat(
+        engine_client=engine,
+        models=models,
+        response_role="assistant",
+        openai_serving_render=_make_render_mock(models),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        usage_policy=usage_policy,
+        enable_force_include_usage=enable_force_include_usage,
+    )
+
+
+def make_completion(usage_policy=None, enable_force_include_usage=False):
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+
+    engine = _make_engine()
+    models = _make_models(engine)
+    return OpenAIServingCompletion(
+        engine_client=engine,
+        models=models,
+        openai_serving_render=_make_render_mock(models),
+        request_logger=None,
+        usage_policy=usage_policy,
+        enable_force_include_usage=enable_force_include_usage,
+    )
+
+
+def make_disagg(usage_policy=None, enable_force_include_usage=False):
+    from vllm.entrypoints.serve.disagg.serving import ServingTokens
+
+    engine = _make_engine()
+    models = _make_models(engine)
+    return ServingTokens(
+        engine_client=engine,
+        models=models,
+        openai_serving_render=_make_render_mock(models),
+        request_logger=None,
+        usage_policy=usage_policy,
+        enable_force_include_usage=enable_force_include_usage,
+    )
+
+
+def make_anthropic(usage_policy=None, enable_force_include_usage=False):
+    from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+
+    engine = _make_engine()
+    models = _make_models(engine)
+    return AnthropicServingMessages(
+        engine_client=engine,
+        models=models,
+        response_role="assistant",
+        openai_serving_render=_make_render_mock(models),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        usage_policy=usage_policy,
+        enable_force_include_usage=enable_force_include_usage,
+    )
