@@ -59,6 +59,22 @@ static CUresult reserve_rocm_address(CUdeviceptr* d_mem, ssize_t size,
   return cuMemAddressReserve(d_mem, size, 0, 0, 0);
 }
 
+static CUresult reserve_rocm_address_at(CUdeviceptr d_mem, ssize_t size) {
+  CUdeviceptr d_mem_new = 0;
+  CUresult status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+  if (d_mem_new == d_mem) {
+    return CUresult(0);
+  }
+
+  cuMemAddressFree(d_mem_new, size);
+  std::cerr << "ROCm: VA re-reserve got " << (void*)d_mem_new << " instead of "
+            << (void*)d_mem << std::endl;
+  return hipErrorInvalidValue;
+}
+
 static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {
   // ROCm workaround: hipMemRelease does not return physical VRAM to the free
   // pool while the virtual-address reservation is still held. During sleep we
@@ -68,17 +84,16 @@ static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {
     return status;
   }
 
-  CUdeviceptr d_mem_new = 0;
-  status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+  status = reserve_rocm_address_at(d_mem, size);
   if (status != CUresult(0)) {
+    CUresult restore_status = reserve_rocm_address_at(d_mem, size);
+    if (restore_status != CUresult(0)) {
+      std::cerr << "ROCm: failed to restore VA reservation at " << (void*)d_mem
+                << " after cycling it; aborting to avoid dangling GPU pointers"
+                << std::endl;
+      std::abort();
+    }
     return status;
-  }
-
-  if (d_mem_new != d_mem) {
-    cuMemAddressFree(d_mem_new, size);
-    std::cerr << "ROCm: VA re-reserve got " << (void*)d_mem_new
-              << " instead of " << (void*)d_mem << std::endl;
-    return CUresult(1);
   }
 
   return CUresult(0);
