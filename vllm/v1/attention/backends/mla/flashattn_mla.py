@@ -419,7 +419,7 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             raise NotImplementedError(
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
-        
+
         if sliding_window is None:
             self.window_size = (-1, -1)
         elif attn_type == AttentionType.ENCODER_ONLY:
