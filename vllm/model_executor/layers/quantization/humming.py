@@ -43,9 +43,12 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 
-if current_platform.is_cuda():
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
+
+try:
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
@@ -62,16 +65,15 @@ if current_platform.is_cuda():
         HummingIndexedExperts,
         get_humming_moe_gemm_type,
     )
+except ModuleNotFoundError:
+    HummingMethod = None
 
-if TYPE_CHECKING:
-    from humming.schema import (
-        BaseInputSchema,
-        BaseWeightSchema,
-        HummingInputSchema,
-        HummingWeightSchema,
+
+def assert_humming_available():
+    assert HummingMethod is not None, (
+        "humming is not available, please run "
+        "'pip install git+https://github.com/inclusionAI/humming' to install it."
     )
-
-    from vllm.model_executor.models.utils import WeightsMapper
 
 
 def prepare_padded_shape(shape, x):
@@ -184,6 +186,7 @@ class HummingConfig(QuantizationConfig):
     packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, full_config: dict[str, Any] | None = None):
+        assert_humming_available()
         self.full_config: dict[str, Any] = full_config or {}
 
     @classmethod
