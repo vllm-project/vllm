@@ -149,7 +149,9 @@ async def _warmup_one(
         prompt = prompt_config.prompt or prompt_config.input or ""
         pooling_params = PoolingParams(**request_params)
         stream = engine_client.encode(
-            prompt=prompt, pooling_params=pooling_params, request_id=request_id
+            prompt=prompt,  # type: ignore[arg-type]
+            pooling_params=pooling_params,
+            request_id=request_id,
         )
     else:
         request_id = f"warmup_{id(prompt_config)}_{concurrency}_{idx}"
@@ -160,7 +162,7 @@ async def _warmup_one(
         else:
             prompt = ""
         params = SamplingParams(max_tokens=prompt_config.max_tokens, **request_params)
-        stream = engine_client.generate(
+        stream = engine_client.generate(  # type: ignore[assignment]
             prompt=prompt, sampling_params=params, request_id=request_id
         )
 
@@ -174,7 +176,7 @@ async def _render_messages(
 ) -> Any:
     """Convert a list of chat messages to an engine input object."""
     _, engine_inputs = await engine_client.renderer.render_chat_async(
-        [messages],
+        [messages],  # type: ignore[list-item]
         ChatParams(),
     )
     return engine_inputs[0]
