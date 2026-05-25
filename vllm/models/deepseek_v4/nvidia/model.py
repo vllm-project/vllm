@@ -853,21 +853,6 @@ class DeepseekV4Attention(nn.Module):
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
-        # Warn when n_groups is not evenly divisible by tp_size.
-        # This only affects the DeepGEMM BMM path which requires even
-        # distribution of groups across TP ranks. If you're using a different
-        # kernel (e.g., FlashInfer, Cutlass), this warning can be ignored.
-        if self.n_groups % tp_size != 0 and is_deep_gemm_supported():
-            logger.warning_once(
-                "n_groups (%d) is not evenly divisible by tp_size (%d). "
-                "This will cause issues with the DeepGEMM BMM kernel as "
-                "groups would be lost. If you're not using DeepGEMM "
-                "(e.g., using FlashInfer or Cutlass kernel instead), this "
-                "warning can be ignored. To avoid this, use a tp_size that "
-                "evenly divides n_groups.",
-                self.n_groups,
-                tp_size,
-            )
         self.window_size = config.sliding_window
         # NOTE(zyongye) Compress ratio can't be 0
         # we do this for because MTP layer is not included
@@ -914,12 +899,19 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
-        # Only enable DeepGEMM BMM mode when tp_size <= n_groups.
-        # When tp_size > n_groups, bmm_batch_size would be 0, causing
-        # ZeroDivisionError in deepgemm_post_process_fp8_weight_block.
-        if tp_size <= self.n_groups:
+        # DeepGEMM BMM mode requires n_groups to be evenly divisible by tp_size.
+        # If not, fall back to non-BMM mode with a warning.
+        if self.n_groups % tp_size == 0:
             self.wo_a.is_bmm = True
             self.wo_a.bmm_batch_size = self.n_local_groups
+        elif is_deep_gemm_supported():
+            logger.warning_once(
+                "n_groups (%d) is not evenly divisible by tp_size (%d). "
+                "DeepGEMM BMM mode is disabled for wo_a layer. "
+                "This may impact performance.",
+                self.n_groups,
+                tp_size,
+            )
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
