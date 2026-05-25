@@ -51,6 +51,7 @@ def _tq_decode_stage1(
     # Block table and sequence info
     Block_table_ptr,  # [B, max_num_blocks] int32
     Seq_lens_ptr,  # [B] int32
+    MM_prefix_range_ptr,  # [B, MAX_MM_RANGES, 2] int32
     # TQ parameters
     Centroids_ptr,  # [n_key_centroids] float32
     ValueCentroids_ptr,  # [n_value_centroids] float32
@@ -85,6 +86,8 @@ def _tq_decode_stage1(
     BLOCK_KV: tl.constexpr,  # tokens per tile (16)
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     VALUE_MSE: tl.constexpr,  # 1 if V is stored as rotated MSE values
+    USE_MM_PREFIX: tl.constexpr = False,
+    MAX_MM_RANGES: tl.constexpr = 0,
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
@@ -145,6 +148,25 @@ def _tq_decode_stage1(
     for start_n in range(split_start, split_end, BLOCK_KV):
         kv_offs = start_n + kv_range
         kv_mask = kv_offs < split_end
+        if USE_MM_PREFIX:
+            query_pos = seq_len - 1
+            mm_prefix_mask = kv_offs < 0
+            for range_idx in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    MM_prefix_range_ptr + bid * MAX_MM_RANGES * 2 + range_idx * 2
+                )
+                range_end = tl.load(
+                    MM_prefix_range_ptr + bid * MAX_MM_RANGES * 2 + range_idx * 2 + 1
+                )
+                is_valid = range_start < range_end
+                q_in_range = (
+                    (query_pos >= range_start) & (query_pos <= range_end) & is_valid
+                )
+                k_in_range = (
+                    (kv_offs >= range_start) & (kv_offs <= range_end) & is_valid
+                )
+                mm_prefix_mask = mm_prefix_mask | (q_in_range & k_in_range)
+            kv_mask = (kv_offs < split_end) & (kv_mask | mm_prefix_mask)
 
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
@@ -572,6 +594,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    mm_prefix_range: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -589,6 +612,17 @@ def triton_turboquant_decode_attention(
         raise ValueError("value_centroids must be provided when value_mse=True")
     if value_centroids is None:
         value_centroids = centroids
+    use_mm_prefix = False
+    max_mm_ranges = 0
+    mm_prefix_range_arg: torch.Tensor = block_table
+    if mm_prefix_range is not None:
+        if mm_prefix_range.ndim != 3:
+            raise ValueError(
+                f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
+            )
+        use_mm_prefix = True
+        max_mm_ranges = mm_prefix_range.shape[1]
+        mm_prefix_range_arg = mm_prefix_range
 
     cfg = _get_layout(
         D,
@@ -647,6 +681,7 @@ def triton_turboquant_decode_attention(
         kv_cache,
         block_table,
         seq_lens,
+        mm_prefix_range_arg,
         centroids,
         value_centroids,
         mid_o,
@@ -674,6 +709,8 @@ def triton_turboquant_decode_attention(
         BLOCK_KV=BLOCK_KV,
         KEY_FP8=1 if key_fp8 else 0,
         VALUE_MSE=1 if value_mse else 0,
+        USE_MM_PREFIX=use_mm_prefix,
+        MAX_MM_RANGES=max_mm_ranges,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
         num_warps=1,

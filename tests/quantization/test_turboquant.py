@@ -243,6 +243,66 @@ class TestTurboQuantConfig:
                 value_mse=False,
             )
 
+    def test_backend_supports_mm_prefix(self):
+        pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        assert TurboQuantAttentionBackend.supports_mm_prefix()
+
+    def test_decode_launcher_accepts_mm_prefix_range(self):
+        import inspect
+
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        sig = inspect.signature(triton_turboquant_decode_attention)
+        assert "mm_prefix_range" in sig.parameters
+
+    def test_sdpa_mask_applies_mm_prefix_bidirectional_range(self):
+        pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionImpl,
+        )
+
+        impl = object.__new__(TurboQuantAttentionImpl)
+        impl.scale = 1.0
+
+        query = torch.tensor(
+            [[[10.0, 0.0]], [[10.0, 0.0]], [[10.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        key = torch.tensor(
+            [[[-10.0, 0.0]], [[-10.0, 0.0]], [[10.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        value = torch.tensor(
+            [[[0.0, 0.0]], [[0.0, 0.0]], [[1.0, 0.0]]],
+            dtype=torch.float32,
+        )
+
+        causal_out = impl._sdpa_with_causal_and_mm_prefix_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=None,
+        )
+        mm_out = impl._sdpa_with_causal_and_mm_prefix_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=torch.tensor([[0, 2]], dtype=torch.int32),
+        )
+
+        assert causal_out[0, 0, 0] < 0.01
+        assert mm_out[0, 0, 0] > 0.99
+
     # ---- Per-preset concrete value checks (table-driven) ----
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
@@ -797,6 +857,88 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    def test_value_mse_decode_with_mm_prefix_range(self):
+        """Decode kernel supports VALUE_MSE=True with USE_MM_PREFIX=True."""
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        preset = "turboquant_k3v4_nc"
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
+        D = 128
+        Hk = 1
+        Hq = 1
+        block_size = 16
+        device = torch.device(DEVICE_TYPE)
+
+        Pi = _build_hadamard(D, DEVICE_TYPE)
+        PiT = Pi
+        centroids, _ = solve_lloyd_max(D, cfg.key_centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+        value_centroids, _ = solve_lloyd_max(D, cfg.value_centroid_bits)
+        value_centroids = value_centroids.float().to(device)
+        v_sorted, _ = value_centroids.sort()
+        value_midpoints = ((v_sorted[:-1] + v_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(123)
+        key = torch.randn(1, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(1, Hk, D, device=device, dtype=torch.float16)
+
+        kv_cache = torch.zeros(
+            1,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            torch.tensor([0], device=device, dtype=torch.int32),
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            value_midpoints=value_midpoints,
+            value_mse=cfg.value_mse_supported,
+        )
+
+        output = triton_turboquant_decode_attention(
+            query=key.expand(1, Hq, D).contiguous(),
+            kv_cache=kv_cache,
+            block_table=torch.tensor([[0]], device=device, dtype=torch.int32),
+            seq_lens=torch.tensor([1], device=device, dtype=torch.int32),
+            Pi=Pi,
+            centroids=centroids,
+            scale=1.0 / math.sqrt(D),
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            value_centroids=value_centroids,
+            value_mse=cfg.value_mse_supported,
+            norm_correction=cfg.norm_correction,
+            PiT=PiT,
+            max_num_kv_splits=4,
+            mm_prefix_range=torch.tensor([[[0, 0]]], device=device, dtype=torch.int32),
+        )
+
+        cos_sim = torch.nn.functional.cosine_similarity(
+            output.float().reshape(1, D),
+            value.float().reshape(1, D),
+        ).item()
+        assert cos_sim > 0.85
 
     @pytest.mark.parametrize(
         "preset",
