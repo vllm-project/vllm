@@ -51,7 +51,6 @@ FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
 }
 
 // [3] Half (FP16) Specialization
-// Load 8 FP16 values and convert to FP32 using FP16Vec8 -> FP32Vec8 conversion
 template <>
 FORCE_INLINE void load_row8_B_as_f32<c10::Half>(const c10::Half* p,
                                                 __vector float& b0,

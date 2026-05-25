@@ -7,13 +7,13 @@
 #include <algorithm>
 #include <torch/all.h>
 
-// Forward declarations for FP16 conversion functions
-
 namespace vec_op {
 
 // FP8 tag types for tag dispatch (see cpu_attn_vec.hpp)
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
+
+namespace vec_op {
 
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
@@ -49,10 +49,8 @@ FORCE_INLINE __vector float fp16_to_fp32_bits(__vector unsigned int x) {
   __vector unsigned int e = (x & mask_exp) >> 10;
   __vector unsigned int m = (x & mask_mant) << 13;
 
-  // Check for NaN/Inf: exponent = 0x1F in FP16
   __vector __bool int is_nan_inf = vec_cmpeq(e, exp_max_fp16);
 
-  // Normal: adjust bias; NaN/Inf: set to 0xFF
   __vector unsigned int e_normal = e + bias_adj;
   e = vec_sel(e_normal, exp_max_fp32, is_nan_inf);
 
@@ -78,7 +76,6 @@ FORCE_INLINE __vector unsigned int fp32_to_fp16_bits(__vector float f_in) {
   __vector unsigned int s = (in & mask_sign_32) >> 16;
   __vector unsigned int e_u = (in & mask_exp_32) >> 23;
 
-  // Check for NaN/Inf: exponent = 0xFF in FP32
   __vector __bool int is_nan_inf = vec_cmpeq(e_u, exp_max_fp32);
 
   __vector signed int e_s = (__vector signed int)e_u;
@@ -120,12 +117,11 @@ FORCE_INLINE __vector unsigned int fp32_to_fp16_bits(__vector float f_in) {
   return s | (e_final << 10) | m;
 }
 
-// Forward declarations for FP16 conversion functions
 template <typename T, T... indexes, typename F>
 constexpr void unroll_loop_item(std::integer_sequence<T, indexes...>, F&& f) {
   (f(std::integral_constant<T, indexes>{}), ...);
 }
-};  // namespace
+};
 
 template <typename T, T count, typename F,
           typename = std::enable_if_t<std::is_invocable_v<F, T>>>
@@ -189,17 +185,46 @@ struct FP16Vec8 : public Vec<FP16Vec8> {
   }
 };
 
+struct FP16Vec16 : public Vec<FP16Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  ss16x8x2_t reg;
+
+  explicit FP16Vec16(const void* ptr) {
+    reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)ptr);
+    reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
+  }
+
+  explicit FP16Vec16(bool, const void* ptr) : FP16Vec16(ptr) {}
+
+  explicit FP16Vec16(const FP32Vec16&);
+
+  void save(void* ptr) const {
+    vec_xst(reg.val[0], 0, (signed short*)ptr);
+    vec_xst(reg.val[1], 16, (signed short*)ptr);
+  }
+
+  void save(void* ptr, int elem_num) const {
+    int num = std::min(elem_num, VEC_ELEM_NUM);
+    if (num <= 8) {
+      vec_xst_len(reg.val[0], (signed short*)ptr, num * 2);
+    } else {
+      vec_xst(reg.val[0], 0, (signed short*)ptr);
+      vec_xst_len(reg.val[1], (signed short*)ptr + 8, (num - 8) * 2);
+    }
+  }
+};
+
 struct BF16Vec16 : public Vec<BF16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
 
   ss16x8x2_t reg;
 
   explicit BF16Vec16(const void* ptr) {
-    // Load 256 bits in two parts
     reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)ptr);
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
 
+  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {}
   explicit BF16Vec16(const FP32Vec16&);
 
   void save(void* ptr) const {
@@ -211,20 +236,16 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   void save(void* ptr, const int elem_num) const {
     const int clamped_elem = std::max(0, std::min(elem_num, 16));
 
-    // Calculate elements to store in each 128-bit part (8 elements each)
     const int elements_val0 = std::min(clamped_elem, 8);
     const int elements_val1 = std::max(clamped_elem - 8, 0);
 
-    // Convert elements to bytes (2 bytes per element)
     const size_t bytes_val0 = elements_val0 * sizeof(signed short);
     const size_t bytes_val1 = elements_val1 * sizeof(signed short);
 
     signed short* dest = static_cast<signed short*>(ptr);
-    // Store the first part using vec_xst_len
     if (bytes_val0 > 0) {
       vec_xst_len(reg.val[0], dest, bytes_val0);
     }
-    // Store the second part if needed
     if (bytes_val1 > 0) {
       vec_xst_len(reg.val[1], dest + elements_val0, bytes_val1);
     }
@@ -488,17 +509,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_xl(48, ptr);
   }
 
-<<<<<<< HEAD
-=======
   explicit FP32Vec16(const c10::Half* ptr) : FP32Vec16(FP16Vec16(ptr)) {}
-
-  // Non-temporal load constructor (stub - VSX doesn't have direct NT load
-  // support)
-  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {
-    // Falls back to regular load (same as ARM ASIMD approach)
-  }
-
->>>>>>> 8d46a7362 (feat(cpu): Enable FP16 support for Power (ppc64le) architecture)
+  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
   explicit FP32Vec16(const FP32Vec16& data) {
@@ -588,28 +600,20 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 max(const FP32Vec16& b, int elem_num) const {
     FP32Vec16 result;
 
-    // Create a vector of element indices for each chunk
     __vector unsigned int indices = {0, 1, 2, 3};
     __vector unsigned int elem_num_vec =
         vec_splats(static_cast<unsigned int>(elem_num));
 
-    // Compute masks for each chunk
-    __vector unsigned int chunk_offset0 = {0, 0, 0,
-                                           0};  // Chunk 0: Elements 0-3
-    __vector unsigned int chunk_offset1 = {4, 4, 4,
-                                           4};  // Chunk 1: Elements 4-7
-    __vector unsigned int chunk_offset2 = {8, 8, 8,
-                                           8};  // Chunk 2: Elements 8-11
-    __vector unsigned int chunk_offset3 = {12, 12, 12,
-                                           12};  // Chunk 3: Elements 12-15
+    __vector unsigned int chunk_offset0 = {0, 0, 0, 0};
+    __vector unsigned int chunk_offset1 = {4, 4, 4, 4};
+    __vector unsigned int chunk_offset2 = {8, 8, 8, 8};
+    __vector unsigned int chunk_offset3 = {12, 12, 12, 12};
 
-    // Compute masks for each chunk
     __vector bool int mask0 = vec_cmplt(indices + chunk_offset0, elem_num_vec);
     __vector bool int mask1 = vec_cmplt(indices + chunk_offset1, elem_num_vec);
     __vector bool int mask2 = vec_cmplt(indices + chunk_offset2, elem_num_vec);
     __vector bool int mask3 = vec_cmplt(indices + chunk_offset3, elem_num_vec);
 
-    // Apply masks to compute the result for each chunk
     result.reg.val[0] = vec_sel(this->reg.val[0],
                                 vec_max(this->reg.val[0], b.reg.val[0]), mask0);
     result.reg.val[1] = vec_sel(this->reg.val[1],
@@ -755,7 +759,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 };
 
 struct INT8Vec16 : public Vec<INT8Vec16> {
-  constexpr static int VEC_NUM_ELEM = 16;  // 128 bits / 8 bits = 16
+  constexpr static int VEC_NUM_ELEM = 16;
 
   union AliasReg {
     __vector signed char reg;
@@ -879,16 +883,13 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
 #endif
 }
 
-<<<<<<< HEAD
-=======
-
 inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
   __vector unsigned int fp16_hi = fp32_to_fp16_bits(v.reg.val[0]);
   __vector unsigned int fp16_lo = fp32_to_fp16_bits(v.reg.val[1]);
   reg = (__vector signed short)vec_perm((__vector unsigned char)fp16_hi,
                                         (__vector unsigned char)fp16_lo, omask);
 }
-// FP16Vec16 <-> FP32Vec16 conversions
+
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
   __vector unsigned int fp16_0 = fp32_to_fp16_bits(v.reg.val[0]);
   __vector unsigned int fp16_1 = fp32_to_fp16_bits(v.reg.val[1]);
@@ -917,8 +918,6 @@ inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
   reg.val[3] = fp16_to_fp32_bits(raw_lo1);
 }
 
-
->>>>>>> 8d46a7362 (feat(cpu): Enable FP16 support for Power (ppc64le) architecture)
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 #ifdef _ARCH_PWR10
   __vector signed short ret[4];
@@ -978,6 +977,41 @@ inline void prefetch(const void* addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
 }
 
-};  // namespace vec_op
+struct INT8Vec64 {
+  __vector signed char data[4];
 
+  INT8Vec64() = default;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    data[0] = vec_xl(0, ptr);
+    data[1] = vec_xl(16, ptr);
+    data[2] = vec_xl(32, ptr);
+    data[3] = vec_xl(48, ptr);
+  }
+
+  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {}
+
+  void save(int8_t* ptr) const {
+    vec_xst(data[0], 0, ptr);
+    vec_xst(data[1], 16, ptr);
+    vec_xst(data[2], 32, ptr);
+    vec_xst(data[3], 48, ptr);
+  }
+
+  void save(int8_t* ptr, int elem_num) const {
+    if (elem_num <= 0) return;
+    int full_vecs = elem_num / 16;
+    for (int i = 0; i < full_vecs && i < 4; i++) {
+      vec_xst(data[i], i * 16, ptr);
+    }
+
+    int remaining = elem_num % 16;
+    if (remaining > 0 && full_vecs < 4) {
+      vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
+    }
+  }
+
+  void nt_save(int8_t* ptr) const { save(ptr); }
+};
+}
 #endif

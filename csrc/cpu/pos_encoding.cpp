@@ -96,7 +96,6 @@ void rotary_embedding_impl(
   }
 }
 
-// Template specialization for FP16 (c10::Half)
 template <>
 void rotary_embedding_impl<c10::Half>(
     const int64_t* __restrict__ positions, c10::Half* __restrict__ query,
@@ -122,7 +121,6 @@ void rotary_embedding_impl<c10::Half>(
       const int64_t out_x = token_head + x_index;
       const int64_t out_y = token_head + y_index;
 
-      // Load FP16 vectors and convert to FP32 for computation
       const vec_op::FP16Vec8 cos_fp16(cache_ptr + x_index);
       const vec_op::FP16Vec8 sin_fp16(cache_ptr + y_index);
       const vec_op::FP16Vec8 q_x_fp16(qk + out_x);
@@ -133,11 +131,9 @@ void rotary_embedding_impl<c10::Half>(
       const vec_op::FP32Vec8 fp32_q_x(q_x_fp16);
       const vec_op::FP32Vec8 fp32_q_y(q_y_fp16);
 
-      // Compute in FP32
       auto out1 = fp32_q_x * fp32_cos - fp32_q_y * fp32_sin;
       auto out2 = fp32_q_y * fp32_cos + fp32_q_x * fp32_sin;
 
-      // Convert back to FP16 and store
       vec_op::FP16Vec8(out1).save(qk + out_x);
       vec_op::FP16Vec8(out2).save(qk + out_y);
     }
@@ -263,7 +259,6 @@ void rotary_embedding_gptj_impl(
   }
 }
 
-// Template specialization for FP16 (c10::Half) - GPTJ variant
 template <>
 void rotary_embedding_gptj_impl<c10::Half>(
     const int64_t* __restrict__ positions, c10::Half* __restrict__ query,
