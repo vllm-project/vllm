@@ -697,8 +697,20 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         Returns:
             A list of `EngineInput` objects ready to be passed into LLMEngine.
         """
-        renderer = self.renderer
         model_config = self.model_config
+
+        # Fast path: use KimiK25Preprocessor for Kimi-K2.5 models, bypassing
+        # the multi-modal registry / renderer entirely.
+        if model_config.hf_config.model_type == "kimi_k25":
+            from vllm.model_executor.models.kimi_k25_frontend import (
+                KimiK25Preprocessor,
+            )
+
+            return KimiK25Preprocessor.from_model_config(model_config).preprocess_cmpl(
+                prompts, tokenization_kwargs
+            )
+
+        renderer = self.renderer
 
         parsed_prompts = [
             parse_model_prompt(model_config, prompt) for prompt in prompts
