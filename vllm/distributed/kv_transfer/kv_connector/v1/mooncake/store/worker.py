@@ -706,20 +706,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 size_list.append(size)
                 block_id_list.append(block_id)
 
-        if not key_list:
-            logger.warning(
-                "SHOULD NOT HAPPEN: Skipping Mooncake load for request %s: every chunk filtered "
-                "by per-group load mask (token_len=%d, mask_num=%d, "
-                "num_block_hashes=%d)",
-                req_id,
-                token_len,
-                mask_num,
-                len(req_meta.block_hashes),
-            )
-            self.set_finished_request(req_id)
-            self.request_queue.task_done()
-            return
-
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
         key_list_c = _rotate_list(key_list, rotation)
