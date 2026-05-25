@@ -10,7 +10,7 @@ Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] cl
 For further details on generative models, please refer to [this page](../models/supported_models.md).
 
 - `LLM.generate` - Generates completions for the given input prompts.
-- `LLM.chat` - Generate responses for a chat conversation.
+- `LLM.chat` - Generates responses for a chat conversation.
 
 ## Asynchronous Queue APIs
 
