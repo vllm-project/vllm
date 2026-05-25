@@ -181,7 +181,11 @@ def _get_gcn_arch() -> str:
             "issues if CUDA_VISIBLE_DEVICES is not set yet."
         )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
-    return torch.cuda.get_device_properties("cuda").gcnArchName
+    try:
+        return torch.cuda.get_device_properties("cuda").gcnArchName
+    except Exception as e:
+        logger.debug("Failed to read gcnArchName from torch.cuda: %s", e)
+        return ""
 
 
 # Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
