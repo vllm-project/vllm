@@ -50,8 +50,10 @@ def is_pin_memory_available() -> bool:
 def is_uva_available() -> bool:
     """Check if Unified Virtual Addressing (UVA) is available."""
     # UVA requires pinned memory.
+    from vllm.platforms import current_platform
+
     # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available()
+    return is_pin_memory_available() or current_platform.is_cpu()
 
 
 @cache
