@@ -61,18 +61,14 @@ void merge_attn_states(
     const std::optional<int64_t> prefill_tokens_with_context,
     const std::optional<torch::Tensor>& output_scale = std::nullopt);
 
+// rms_norm and fused_add_rms_norm declarations also exist in
+// csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
+// because the CPU build still uses these torch::Tensor declarations.
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
-
-void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
-                        int64_t num_heads_k, int64_t num_heads_v,
-                        int64_t head_dim, double eps, torch::Tensor& q_weight,
-                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
-                        bool is_neox, torch::Tensor& position_ids,
-                        int64_t forced_token_heads_per_warp);
 
 void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::Tensor& q, torch::Tensor const& kv, torch::Tensor& k_cache,
@@ -99,37 +95,15 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
 
-void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                               torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
-
-void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                         torch::Tensor& input,
-                                         torch::Tensor& residual,
-                                         torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
-
-void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
-                                      torch::Tensor const& input,
-                                      torch::Tensor const& weight,
-                                      torch::Tensor& scales,
-                                      double const epsilon,
-                                      std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
-
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed);
-
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
                                   torch::Tensor& scales, int64_t group_size,
                                   std::optional<torch::Tensor> scale_ub,
                                   bool is_scale_transposed);
 
+// rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
+// ABI for CUDA). It remains here because the CPU build still uses these
+// torch::Tensor declarations.
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox,
@@ -149,16 +123,9 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
-void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
-
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
-
-void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
-                     double threshold);
-void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
-                       double alpha = 1.702, double limit = 7.0);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
@@ -174,28 +141,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n,
-                              std::optional<at::ScalarType> const& dtype);
-
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
-                                  int64_t type, int64_t row);
-
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
-                              int64_t row);
-
-torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t type,
-                          int64_t row, int64_t top_k, int64_t tokens);
-
-torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
-                              torch::Tensor topk_ids, int64_t top_k,
-                              int64_t type, int64_t row, int64_t tokens);
-
-int64_t ggml_moe_get_block_size(int64_t type);
-
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);
@@ -203,24 +148,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
-
-torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
-                        torch::Tensor b_gptq_qzeros,
-                        torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, bool use_v2_format, int64_t bit);
-
-void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
-
-void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
-    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
-
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor& scale);
-
-void dynamic_per_token_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
-    std::optional<torch::Tensor> const& scale_ub);
 
 void selective_scan_fwd(
     const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
