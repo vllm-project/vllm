@@ -43,11 +43,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 try:
     from mori.io import (
+        BackendType,
         EngineDesc,
         IOEngine,
         MemoryDesc,
         PollCqMode,
         RdmaBackendConfig,
+        XgmiBackendConfig,
     )
 
     logger.info("MoRIIO is available")
@@ -381,13 +383,24 @@ class MoRIIOWrapper:
         num_workers: int = 1,
     ) -> None:
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        rdma_cfg = RdmaBackendConfig(
-            qp_per_transfer,
-            post_batch_size,
-            num_workers,
-            PollCqMode.POLLING,
-        )
-        self.moriio_engine.create_backend(backend_type, rdma_cfg)
+        if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
+            self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        else:
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+            )
+            rdma_cfg = RdmaBackendConfig(
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+                PollCqMode.POLLING,
+            )
+            self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
     def get_agent_metadata(self):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"

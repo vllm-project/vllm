@@ -215,6 +215,7 @@ class MoRIIOConfig:
     qp_per_transfer: int = 1
     post_batch_size: int = -1
     num_workers: int = 1
+    backend: str = "rdma"
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -230,6 +231,8 @@ class MoRIIOConfig:
         # read_mode        -> If true, run the connector in READ mode (consumer
         #                     pulls KV from producer) instead of the default
         #                     WRITE mode.
+
+        # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
         # post_batch_size  -> Batch size for posting transfer work requests
         #                     (-1 lets the MoRI backend choose).
@@ -250,6 +253,12 @@ class MoRIIOConfig:
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
+        backend = str(extra_config.get("backend", "rdma")).lower()
+        if backend not in ("rdma", "xgmi"):
+            raise ValueError(
+                f"Invalid MoRIIO backend {backend!r} in kv_connector_extra_config; "
+                "must be one of 'rdma' or 'xgmi'."
+            )
 
         return cls(
             local_ip=get_ip(),
@@ -268,6 +277,7 @@ class MoRIIOConfig:
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
+            backend=backend,
         )
 
 

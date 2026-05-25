@@ -698,8 +698,13 @@ class MoRIIOConnectorWorker:
         # Agent.
         self.moriio_wrapper = MoRIIOWrapper(tp_rank=self.tp_rank, dp_rank=self.dp_rank)
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
+        backend = (
+            BackendType.XGMI
+            if self.moriio_config.backend == "xgmi"
+            else BackendType.RDMA
+        )
         self.moriio_wrapper.set_backend_type(
-            BackendType.RDMA,
+            backend,
             qp_per_transfer=self.moriio_config.qp_per_transfer,
             post_batch_size=self.moriio_config.post_batch_size,
             num_workers=self.moriio_config.num_workers,
