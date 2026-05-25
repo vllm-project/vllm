@@ -34,8 +34,10 @@ JOB_DIR="${JOB_DIR:-results/7717190}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${SCRIPT_DIR}"
+# Resolve JOB_DIR relative to where sbatch was invoked
+if [[ "${JOB_DIR}" != /* ]]; then
+    JOB_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}/${JOB_DIR}"
+fi
 
 echo "=== nsys export job ==="
 echo "Slurm Job ID: ${SLURM_JOB_ID:-local}"
