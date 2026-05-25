@@ -1110,9 +1110,11 @@ def launch_core_engines(
     if parallel_config.enable_elastic_ep:
         handshake_local_only = False
 
-    handshake_address = get_engine_client_zmq_addr(
-        handshake_local_only, host, parallel_config.data_parallel_rpc_port
-    )
+    # Preserve "port=0 means auto-pick" for the handshake address, which
+    # is consumed by engines spawned in this process and so cannot defer
+    # port resolution to bind time.
+    rpc_port = parallel_config.data_parallel_rpc_port or get_open_port()
+    handshake_address = get_engine_client_zmq_addr(handshake_local_only, host, rpc_port)
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
