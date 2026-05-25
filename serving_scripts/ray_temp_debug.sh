@@ -817,7 +817,7 @@ copy_ray_logs_from_node() {
 
 SP="${SP:-128}"
 SD="${SD:-128}"
-NUM_PROMPTS="${NUM_PROMPTS:-1}"
+NUM_PROMPTS="${NUM_PROMPTS:-32}"
 REQUEST_RATE="${REQUEST_RATE:-1.0}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
