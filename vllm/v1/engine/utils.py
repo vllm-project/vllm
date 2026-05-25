@@ -956,15 +956,22 @@ def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
     *,
-    defer_api_server_ports: bool = False,
+    defer_api_server_ports: bool = True,
 ) -> EngineZmqAddresses:
     """Allocate ZMQ addresses for engine-client communication.
 
-    ``defer_api_server_ports``: emit TCP placeholders (``tcp://host:0``)
-    for per-API-server input/output addresses; the actual ports are picked
-    by the kernel in each child at bind time and must be reported back via
-    ``APIServerProcessManager.gather_actual_addresses`` before the engine
-    handshake. No-op for the IPC (colocated) case."""
+    ``defer_api_server_ports`` (default ``True``): emit TCP placeholders
+    (``tcp://host:0``) for per-API-server input/output addresses; the actual
+    port is picked by the kernel at bind time and the bound endpoint must be
+    propagated back into ``addresses.inputs`` / ``addresses.outputs`` before
+    the engine handshake (via
+    :py:meth:`APIServerProcessManager.gather_actual_addresses` for the
+    cross-process case, or via ``getsockopt(zmq.LAST_ENDPOINT)`` for the
+    single-process ``MPClient`` case). No-op for the IPC (colocated) case.
+
+    Set this to ``False`` only when the consumer of the addresses cannot
+    report back a kernel-assigned port (e.g. the Rust front-end, which
+    receives ``--input-address`` / ``--output-address`` as CLI args)."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local

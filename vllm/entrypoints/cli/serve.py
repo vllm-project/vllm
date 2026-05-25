@@ -308,11 +308,11 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    # Defer per-API-server port allocation to the child's actual ``bind()``
-    # call (avoids parent-probe vs child-bind TOCTOU). The Rust front-end
-    # path uses a single externally-launched subprocess that takes the
-    # addresses as CLI args, so the deferred-port handshake doesn't apply
-    # there and we keep the pre-allocated TCP ports.
+    # Per-API-server ports are deferred to each child's actual ``bind()`` call
+    # to avoid the parent-probe vs child-bind TOCTOU race; the Rust front-end
+    # is the one consumer that cannot report a kernel-assigned port back
+    # (addresses are passed as CLI args to an externally-launched subprocess),
+    # so it opts out and keeps pre-allocated TCP ports.
     addresses = get_engine_zmq_addresses(
         vllm_config,
         num_api_servers,
