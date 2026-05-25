@@ -18,6 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    UsagePolicy,
     get_history_tool_calls_cnt,
     get_tool_call_id_type,
     make_tool_call_id,
@@ -62,7 +63,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -101,6 +102,7 @@ class OpenAIServingChat(OpenAIServing):
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        usage_policy: "UsagePolicy | None" = None,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -110,6 +112,8 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            usage_policy=usage_policy,
+            enable_force_include_usage=enable_force_include_usage,
         )
 
         self.openai_serving_render = openai_serving_render
@@ -491,8 +495,20 @@ class OpenAIServingChat(OpenAIServing):
             return
 
         stream_options = request.stream_options
-        include_usage, include_continuous_usage = should_include_usage(
-            stream_options, self.enable_force_include_usage
+        include_usage_param = (
+            bool(stream_options.include_usage)
+            if stream_options and stream_options.include_usage is not None
+            else None
+        )
+        continuous_usage_param = (
+            bool(stream_options.continuous_usage_stats)
+            if stream_options and stream_options.continuous_usage_stats is not None
+            else None
+        )
+        include_usage, include_continuous_usage = self.should_include_usage(
+            is_streaming=True,
+            include_usage=include_usage_param,
+            continuous_usage=continuous_usage_param,
         )
 
         try:
@@ -1596,3 +1612,27 @@ class OpenAIServingChat(OpenAIServing):
                 )
             ]
         )
+
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
+        if not is_streaming:
+            return (True, False)
+
+        policy = self.usage_policy
+        if policy is not None and policy.include_usage == "always":
+            in_chunks = policy.continuous_usage == "always"
+            return (True, in_chunks)
+
+        if self.enable_force_include_usage:
+            return (True, True)
+
+        if include_usage is not None:
+            in_chunks = bool(include_usage and continuous_usage)
+            return (include_usage, in_chunks)
+
+        return (False, False)

@@ -50,6 +50,13 @@ def init_speech_to_text_state(
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
 ):
+    from vllm.entrypoints.chat_utils import UsagePolicy
+
+    usage_policy = UsagePolicy(
+        include_usage=args.include_usage_policy,
+        continuous_usage=args.continuous_usage_policy,
+    )
+
     if "transcription" in supported_tasks:
         from .transcription.serving import OpenAIServingTranscription
 
@@ -58,6 +65,7 @@ def init_speech_to_text_state(
             state.openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
         from .translation.serving import OpenAIServingTranslation
@@ -67,6 +75,7 @@ def init_speech_to_text_state(
             state.openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
     if "realtime" in supported_tasks:
@@ -76,4 +85,6 @@ def init_speech_to_text_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
         )

@@ -1233,6 +1233,25 @@ class ChatTemplateConfig:
     trust_request_chat_template: bool = False
 
 
+@dataclass
+class UsagePolicy:
+    """
+    Policy for controlling usage statistics return behavior.
+
+    Fields:
+        include_usage: Controls when to include usage in responses.
+            - always: Always include usage information in responses.
+            - None: No effect, keep entrypoint default's behavior.
+        continuous_usage: Controls continuous usage stats during streaming.
+            - always: Send usage on every chunk (only valid if include_usage
+              is enabled).
+            - None: No effect, keep entrypoint default's behavior.
+    """
+
+    include_usage: Literal["always"] | None = None
+    continuous_usage: Literal["always"] | None = None
+
+
 def validate_chat_template(chat_template: Path | str | None):
     """Raises if the provided chat template appears invalid."""
     if chat_template is None:

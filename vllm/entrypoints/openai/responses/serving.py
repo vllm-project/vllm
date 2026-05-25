@@ -30,6 +30,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    UsagePolicy,
     get_tool_call_id_type,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -167,6 +168,7 @@ class OpenAIServingResponses(OpenAIServing):
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -175,6 +177,8 @@ class OpenAIServingResponses(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
         self.openai_serving_render = openai_serving_render

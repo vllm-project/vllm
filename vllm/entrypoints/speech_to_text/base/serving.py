@@ -7,7 +7,10 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
 from functools import cached_property
-from typing import Final, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypeVar, cast
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.chat_utils import UsagePolicy
 
 import numpy as np
 from fastapi import Request
@@ -97,12 +100,15 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         enable_force_include_usage: bool = False,
+        usage_policy: "UsagePolicy | None" = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()

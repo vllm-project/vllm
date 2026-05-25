@@ -18,6 +18,7 @@ from fastapi import Request
 from pydantic import Field
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -162,11 +163,15 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
+            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
         )
 
     async def create_generative_scoring(
