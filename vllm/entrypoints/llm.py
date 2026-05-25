@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LLM(OfflineInferenceMixin, BeamSearchOfflineMixin, PoolingOfflineMixin):
+class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     """An LLM for generating texts from given prompts and sampling parameters.
 
     This class includes a tokenizer, a language model (possibly distributed
