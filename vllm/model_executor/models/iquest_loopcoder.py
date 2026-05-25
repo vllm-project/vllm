@@ -72,6 +72,7 @@ class LoopCoderAttention(nn.Module):
         dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
         plt_window_size: int = -1,
+        plt_loop_nums: int = 0,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -98,6 +99,8 @@ class LoopCoderAttention(nn.Module):
 
         # Get loop_num from config, default to 2 if not specified
         self.loop_num = getattr(config, "loop_num", 2)
+        if plt_loop_nums:
+            self.loop_num = plt_loop_nums
 
         self.loop_window_size = getattr(config, "loop_window_size", 64)
         if plt_window_size != -1:
@@ -220,6 +223,7 @@ class LoopCoderDecoderLayer(nn.Module):
         prefix: str = "",
         layer_idx: int = 0,
         plt_window_size: int = -1,
+        plt_loop_nums: int = 0,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -245,6 +249,7 @@ class LoopCoderDecoderLayer(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
             layer_idx=self.layer_idx,
             plt_window_size=plt_window_size,
+            plt_loop_nums=plt_loop_nums,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -495,6 +500,7 @@ class IQuestLoopCoderModel(nn.Module):
                 prefix=prefix,
                 layer_idx=extract_layer_index(prefix),
                 plt_window_size=plt_window_size,
+                plt_loop_nums=self.plt_loop_nums,
             ),
             prefix=f"{prefix}.layers",
         )
