@@ -105,6 +105,7 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("use_td", [False, True])
 def test_batched_mm(
     num_experts: int,
     max_tokens_per_expert: int,
@@ -113,9 +114,14 @@ def test_batched_mm(
     dtype: torch.dtype,
     block_shape: list[int] | None,
     per_act_token_quant: bool,
+    use_td: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
+    if use_td and not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    monkeypatch.setenv("VLLM_TRITON_MOE_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -239,6 +245,7 @@ def test_batched_mm(
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("input_scales", [False])
+@pytest.mark.parametrize("use_td", [False, True])
 def test_fused_moe_batched_experts(
     m: int,
     n: int,
@@ -249,10 +256,15 @@ def test_fused_moe_batched_experts(
     per_act_token_quant: bool,
     block_shape: list[int] | None,
     input_scales: bool,
+    use_td: bool,
     workspace_init,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
+    if use_td and not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    monkeypatch.setenv("VLLM_TRITON_MOE_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
