@@ -327,6 +327,48 @@ def test_streaming_output_valid(output, empty_params, delta_len):
     assert json.dumps(json.loads(combined_messages)) == output_json
 
 
+def test_streaming_output_emits_header_for_each_tool_call():
+    output = [
+        {"name": "get_current_weather", "parameters": {"city": "Vienna"}},
+        {"name": "get_forecast", "parameters": {"city": "Berlin", "days": 3}},
+    ]
+    output_json = json.dumps(output)
+
+    previous_text = ""
+    function_name_returned = False
+    headers: dict[int, str] = {}
+    arguments: dict[int, str] = {}
+
+    for i in range(0, len(output_json), 4):
+        delta_text = output_json[i : i + 4]
+        current_text = previous_text + delta_text
+
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
+        )
+
+        if delta_message:
+            tool_call = delta_message.tool_calls[0]
+            index = tool_call.index
+            if tool_call.function.name:
+                headers[index] = tool_call.function.name
+            if tool_call.function.arguments:
+                arguments[index] = (
+                    arguments.get(index, "") + tool_call.function.arguments
+                )
+
+        previous_text = current_text
+
+    assert headers == {0: "get_current_weather", 1: "get_forecast"}
+    assert json.loads(arguments[0]) == output[0]["parameters"]
+    assert json.loads(arguments[1]) == output[1]["parameters"]
+
+
 def test_streaming_output_valid_with_trailing_extra_data():
     output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
     output_json = json.dumps(output) + "\nDONE"
