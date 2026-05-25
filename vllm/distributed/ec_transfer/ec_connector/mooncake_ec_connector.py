@@ -22,6 +22,7 @@ import uvicorn
 import zmq
 from fastapi import FastAPI, HTTPException
 
+from vllm import envs
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -232,6 +233,13 @@ class ECMooncakeConnector(ECConnectorBase):
                     ret = eng.batch_transfer_sync_write(
                         dst_session, [src_ptr], [dst_ptr], [nbytes]
                     )
+                    if (
+                        ret == 0
+                        and envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
+                        and torch.cuda.is_available()
+                        and tensor.is_cuda
+                    ):
+                        torch.cuda.synchronize(device=tensor.device)
                     sock.send_json({"ok": ret == 0, "mooncake_ret": int(ret)})
                 except Exception as e:
                     logger.exception("EC Mooncake pull handler error: %s", e)
@@ -305,6 +313,11 @@ class ECMooncakeConnector(ECConnectorBase):
                 ctx.term()
             if not resp.get("ok"):
                 raise RuntimeError(f"EC Mooncake pull failed: {resp}")
+            if (
+                envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
+                and device.type == "cuda"
+            ):
+                torch.cuda.synchronize(device=device)
             encoder_cache[spec.mm_hash] = t
             logger.debug("Loaded EC tensor for mm_hash=%s via Mooncake", spec.mm_hash)
 

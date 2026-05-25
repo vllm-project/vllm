@@ -21,6 +21,7 @@ import os
 import time
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 try:
@@ -157,6 +158,10 @@ def _consumer_entry(
     result_queue.put({"ok": True, "max_diff": max_diff})
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Requires at least 2 CUDA devices",
+)
 def test_ec_mooncake_two_process_transfer():
     """Producer on cuda:0 and consumer on cuda:1 transfer one EC tensor."""
     mm_hash = "e2e_mm_test_hash"
