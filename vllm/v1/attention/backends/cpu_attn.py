@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -16,29 +22,45 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 logger = init_logger(__name__)
 
-_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S390X)
+_CPU_ARCH_PREFER_MIXED_BATCH = (
+    CpuArchEnum.X86,
+    CpuArchEnum.ARM,
+    CpuArchEnum.S390X,
+    CpuArchEnum.RISCV,
+    CpuArchEnum.POWERPC,
+)
 
 
 class CPUAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
         torch.float32,
     ]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
     @staticmethod
     def get_name() -> str:
@@ -72,6 +94,10 @@ class CPUAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return 2, num_blocks, num_kv_heads, block_size, head_size
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -133,7 +159,13 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         if self.window_size is None:
             self.window_size = -1
         self.block_size = vllm_config.cache_config.block_size
-        self.isa = _get_attn_isa(self.dtype, self.block_size, self.head_dim)
+        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.isa = _get_attn_isa(
+            self.dtype,
+            self.block_size,
+            self.head_dim,
+            kv_cache_dtype_str,
+        )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
     def build(
@@ -181,7 +213,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             causal=causal,
             sliding_window_size=self.window_size,
             isa=self.isa,
-            enable_kv_split=True,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -247,8 +279,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if is_quantized_kv_cache(kv_cache_dtype):
-            raise NotImplementedError("FP8 KV cache is unsupported in CPU_ATTN")
+        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks
@@ -266,7 +297,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: CPUAttentionMetadata | None,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -282,7 +313,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
@@ -326,6 +356,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.isa,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -357,6 +390,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=attn_metadata.scheduler_metadata,
                 s_aux=self.sinks,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         return output
@@ -477,22 +513,62 @@ def _make_sliding_window_bias(
     return attn_biases
 
 
+@functools.lru_cache(maxsize=1)
+def _riscv_supports_rvv() -> bool:
+    """Whether the C++ RVV attention path is usable.
+
+    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses VLEN-agnostic RVVI()
+    macros and supports VLEN=128 and VLEN=256.  CMake auto-detects the
+    largest zvl<N>b from /proc/cpuinfo and passes it via -mrvv-vector-bits.
+    The RVV path is compiled whenever __riscv_v_min_vlen is defined, so
+    we check that at least one supported zvl<N>b is advertised.
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            cpuinfo = f.read()
+    except OSError:
+        return False
+    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(
+        f"zvl{n}b" not in cpuinfo for n in (512, 1024)
+    )
+
+
 def _get_attn_isa(
-    dtype: torch.dtype, block_size: int, head_size: int | None = None
+    dtype: torch.dtype,
+    block_size: int,
+    head_size: int | None = None,
+    kv_cache_dtype: str | None = None,
 ) -> str:
+    fp8_kv = is_quantized_kv_cache(kv_cache_dtype) if kv_cache_dtype else False
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
+        if fp8_kv:
+            raise NotImplementedError(
+                "FP8 KV cache requires head_size divisible by 32 on CPU."
+            )
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
-    supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
+    arch = current_platform.get_cpu_architecture()
+    supports_arm = arch == CpuArchEnum.ARM
+    supports_vxe = arch == CpuArchEnum.S390X
+    supports_riscv = arch == CpuArchEnum.RISCV
+    supports_vsx = arch == CpuArchEnum.POWERPC
+    supports_avx512 = torch.cpu._is_avx512_supported()
+    if fp8_kv and not supports_amx and not supports_avx512:
+        raise NotImplementedError(
+            "FP8 KV cache on CPU requires x86 with AVX-512 or AMX."
+        )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
+        elif supports_riscv and _riscv_supports_rvv():
+            return "rvv"
         elif supports_vxe:
             return "vxe"
+        elif supports_vsx:
+            return "vsx"
         else:
             return "vec"
     else:

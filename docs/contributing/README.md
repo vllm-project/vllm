@@ -43,16 +43,23 @@ If you are only developing vLLM's Python code, install vLLM using:
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
+To rebuild only the Rust frontend binary:
+
+```bash
+./build_rust.sh          # release build
+./build_rust.sh --debug  # faster build for development
+```
+
 If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
 uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
 ```
 
-Then install the necessary build dependencies from `requirements/build.txt`, skipping `torch` as it was installed in the previous step:
+Then install the necessary build dependencies from `requirements/build/cuda.txt`, skipping `torch` as it was installed in the previous step:
 
 ```bash
-grep -v '^torch==' requirements/build.txt | uv pip install -r -
+grep -v '^torch==' requirements/build/cuda.txt | uv pip install -r -
 ```
 
 Finally install vLLM using:
@@ -296,6 +303,18 @@ review process:
 - Note that not all CI checks will be executed due to limited computational
   resources. The reviewer will add `ready` label to the PR when the PR is
   ready to merge or a full CI run is needed.
+
+### Escalating Stalled Contributions
+
+If you have an important contribution that has not yet received maintainer attention, please email us at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
 
 ## Thank You
 

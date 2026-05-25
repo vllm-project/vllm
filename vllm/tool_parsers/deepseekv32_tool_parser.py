@@ -19,10 +19,18 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
+)
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+    partial_tag_overlap,
 )
 
 logger = init_logger(__name__)
@@ -43,27 +51,30 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    tool_call_start_token: str = "<｜DSML｜function_calls>"
+    tool_call_end_token: str = "</｜DSML｜function_calls>"
+
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
-        # Sentinel token
-        self.tool_call_start_token: str = "<｜DSML｜function_calls>"
-
         # Streaming state
-        self.is_tool_call_started: bool = False
         self.current_tool_index: int = 0
+        self._sent_content_idx: int = 0
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
+            re.escape(self.tool_call_start_token)
+            + r"(.*?)"
+            + re.escape(self.tool_call_end_token),
+            re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>', re.DOTALL
         )
         self.parameter_complete_regex = re.compile(
-            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(?:true|false)"\s*>(.*?)</｜DSML｜parameter>',
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</｜DSML｜parameter>',
             re.DOTALL,
         )
 
@@ -77,11 +88,13 @@ class DeepSeekV32ToolParser(ToolParser):
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
-    def adjust_request(self, request):
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
-            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # (e.g. <｜DSML｜function_calls>, </｜DSML｜function_calls>)
             # are not skippedduring decoding.
             # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in
@@ -93,72 +106,53 @@ class DeepSeekV32ToolParser(ToolParser):
         """Generate a unique tool call ID."""
         return f"call_{uuid.uuid4().hex[:24]}"
 
-    def _parse_invoke_params(self, invoke_str: str) -> dict:
-        param_dict = dict()
-        for param_name, param_val in self.parameter_complete_regex.findall(invoke_str):
-            param_dict[param_name] = param_val
+    def _parse_invoke_params(self, invoke_str: str) -> dict[str, tuple[str, str]]:
+        param_dict: dict[str, tuple[str, str]] = {}
+        for param_name, string_attr, param_val in self.parameter_complete_regex.findall(
+            invoke_str
+        ):
+            param_dict[param_name] = (param_val, string_attr)
         return param_dict
 
-    def _convert_param_value(self, value: str, param_type: str) -> Any:
-        """Convert parameter value to the correct type."""
-        if value.lower() == "null":
-            return None
-
-        param_type = param_type.lower()
-        if param_type in ["string", "str", "text"]:
-            return value
-        elif param_type in ["integer", "int"]:
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return value
-        elif param_type in ["number", "float"]:
-            try:
-                val = float(value)
-                return val if val != int(val) else int(val)
-            except (ValueError, TypeError):
-                return value
-        elif param_type in ["boolean", "bool"]:
-            return value.lower() in ["true", "1"]
-        elif param_type in ["object", "array"]:
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
-        else:
-            # Try JSON parse first, fallback to string
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+    @staticmethod
+    def _repair_param_dict(
+        param_dict: dict[str, Any],
+        param_config: dict[str, dict],
+    ) -> dict[str, Any]:
+        """Unwrap single 'arguments' / 'input' wrappers when the wrapper
+        is not part of the requested tool schema and the wrapped object
+        matches the schema fields."""
+        allowed = set(param_config.keys())
+        for wrapper in ("arguments", "input"):
+            if set(param_dict.keys()) != {wrapper} or wrapper in allowed:
+                continue
+            inner = param_dict[wrapper]
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(inner)
+                except json.JSONDecodeError:
+                    return param_dict
+            if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
+                return inner
+        return param_dict
 
     def _convert_params_with_schema(
         self,
         function_name: str,
-        param_dict: dict[str, str],
-        request: ChatCompletionRequest | None,
+        param_dict: dict[str, tuple[str, str]],
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
-        param_config: dict = {}
-        if request and request.tools:
-            for tool in request.tools:
-                if (
-                    hasattr(tool, "function")
-                    and tool.function.name == function_name
-                    and hasattr(tool.function, "parameters")
-                ):
-                    schema = tool.function.parameters
-                    if isinstance(schema, dict) and "properties" in schema:
-                        param_config = schema["properties"]
-                    break
+        param_config = find_tool_properties(self.tools, function_name)
 
         converted: dict[str, Any] = {}
-        for name, value in param_dict.items():
-            param_type = "string"
-            if name in param_config and isinstance(param_config[name], dict):
-                param_type = param_config[name].get("type", "string")
-            converted[name] = self._convert_param_value(value, param_type)
-        return converted
+        for name, (value, string_attr) in param_dict.items():
+            if string_attr == "true":
+                converted[name] = value
+                continue
+
+            param_types = extract_types_from_schema(param_config.get(name, {}))
+            converted[name] = coerce_to_schema_type(value, param_types)
+        return self._repair_param_dict(converted, param_config)
 
     def extract_tool_calls(
         self,
@@ -182,12 +176,13 @@ class DeepSeekV32ToolParser(ToolParser):
                     tool_call_match
                 ):
                     param_dict = self._parse_invoke_params(invoke_content)
+                    params = self._convert_params_with_schema(invoke_name, param_dict)
                     tool_calls.append(
                         ToolCall(
                             type="function",
                             function=FunctionCall(
                                 name=invoke_name,
-                                arguments=json.dumps(param_dict, ensure_ascii=False),
+                                arguments=json.dumps(params, ensure_ascii=False),
                             ),
                         )
                     )
@@ -214,7 +209,7 @@ class DeepSeekV32ToolParser(ToolParser):
     def _reset_streaming_state(self):
         """Reset all streaming state."""
         self.current_tool_index = 0
-        self.is_tool_call_started = False
+        self._sent_content_idx = 0
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
 
@@ -235,9 +230,7 @@ class DeepSeekV32ToolParser(ToolParser):
             invoke_name, invoke_body = complete_invokes[self.current_tool_index]
             param_dict = self._parse_invoke_params(invoke_body)
 
-            converted = self._convert_params_with_schema(
-                invoke_name, param_dict, request
-            )
+            converted = self._convert_params_with_schema(invoke_name, param_dict)
             args_json = json.dumps(converted, ensure_ascii=False)
             idx = self.current_tool_index
             self.current_tool_index += 1
@@ -261,6 +254,24 @@ class DeepSeekV32ToolParser(ToolParser):
 
         return delta_tool_calls
 
+    def _extract_content(self, current_text: str) -> str | None:
+        """Return unsent non-tool-call text, or None.
+
+        Holds back any suffix that could be a partial start marker
+        so that split markers are never leaked as content.
+        """
+        if self.tool_call_start_token not in current_text:
+            overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
+            sendable_idx = len(current_text) - overlap
+        else:
+            sendable_idx = current_text.index(self.tool_call_start_token)
+
+        if sendable_idx > self._sent_content_idx:
+            content = current_text[self._sent_content_idx : sendable_idx]
+            self._sent_content_idx = sendable_idx
+            return content
+        return None
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -282,29 +293,11 @@ class DeepSeekV32ToolParser(ToolParser):
         if not previous_text:
             self._reset_streaming_state()
 
-        # Detect whether we've entered the tool-call region.
-        # Use current_text (not delta_text) since the start token may
-        # be split across chunks.
-        content_before = None
-        if self.is_tool_call_started:
-            pass
-        elif self.tool_call_start_token in current_text:
-            # Tool-call region found, capture any plain text before it.
-            self.is_tool_call_started = True
-            start_idx = current_text.index(self.tool_call_start_token)
-            content_before = current_text[len(previous_text) : start_idx] or None
-        else:
-            # Still in plain-text region, forward as content.
-            return DeltaMessage(content=delta_text) if delta_text else None
-
-        # Inside tool-call region: emit any newly completed invokes.
+        content = self._extract_content(current_text)
         delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
 
-        if delta_tool_calls or content_before:
-            return DeltaMessage(
-                content=content_before,
-                tool_calls=delta_tool_calls,
-            )
+        if delta_tool_calls or content:
+            return DeltaMessage(content=content, tool_calls=delta_tool_calls)
 
         # Empty delta with token ids means EOS or closing tag; return
         # non-None so the serving framework can finalize finish_reason.

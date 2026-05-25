@@ -9,6 +9,7 @@ extract_hidden_states speculative decoding method.
 """
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import ClassVar
 
 import torch
@@ -23,19 +24,18 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
 )
 
 ########## Custom Ops ########
@@ -51,7 +51,7 @@ def unified_kv_cache_update(
     """
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[0]
+    kv_cache = attn_layer.kv_cache
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -79,13 +79,12 @@ def dummy_attention(layer_name, _placeholder):
 
 
 def basic_cache(
-    to_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
-    kv_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
+    to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
+    kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
-    num_blocks, block_size, num_heads, head_size = kv_cache.shape
-    token_kv_cache = kv_cache.view(num_blocks * block_size, num_heads, head_size)
-    token_kv_cache[slot_mapping] = to_cache
+    block_size = kv_cache.shape[1]
+    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -94,7 +93,6 @@ def basic_cache(
 class CacheOnlyAttentionBackend(AttentionBackend):
     """Attention backend that only caches KV without computing attention."""
 
-    accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -288,10 +286,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
         # Placeholder KV cache (replaced by bind_kv_cache)
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Register in compilation context
         compilation_config = vllm_config.compilation_config
@@ -326,11 +321,9 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Note: we use MLAAttentionSpec here to because it will
-        # produce page sizes of (block_size * num_kv_heads * head_size * dtype_size)
-        # whereas FullAttentionSpec will add an additional factor of 2
-        return MLAAttentionSpec(
-            block_size=self.block_size,
+        # Re-read block_size: hybrid models may bump it after __init__.
+        return HiddenStateCacheSpec(
+            block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
@@ -355,6 +348,10 @@ class ExtractHiddenStatesModel(nn.Module):
         )
 
         cache_config = vllm_config.cache_config
+
+        # Hidden states dtype should be independent of KV cache dtype.
+        if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
+            cache_config = replace(cache_config, cache_dtype="auto")
 
         # Create a single cache-only attention layer
         # Note: We set num_heads <- self.num_hidden_states
