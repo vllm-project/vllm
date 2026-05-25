@@ -381,6 +381,7 @@ def _run_eagle_correctness(
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
+    max_num_seqs: int | None = None,
 ):
     """
     Compare the outputs of an original LLM and a speculative LLM
@@ -434,12 +435,16 @@ def _run_eagle_correctness(
 
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
+        extra_llm_kwargs = (
+            {"max_num_seqs": max_num_seqs} if max_num_seqs is not None else {}
+        )
 
         ref_llm = LLM(
             model=model_name,
             max_model_len=max_model_len,
             tensor_parallel_size=tp_size,
             attention_config=attention_config,
+            **extra_llm_kwargs,
         )
         evaluate_llm_for_gsm8k(
             ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
@@ -464,6 +469,7 @@ def _run_eagle_correctness(
             enable_chunked_prefill=enable_chunked_prefill,
             model_impl=model_impl,
             attention_config=attention_config,
+            **extra_llm_kwargs,
         )
         # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
@@ -527,6 +533,10 @@ def test_eagle_correctness_light(
     model_impl: str,
     attn_backend: str,
 ):
+    # Cap concurrency (max_num_seqs=8), so the V2 warmup sampler batch
+    # fits in the h200_35gb MIG slice this shard runs on. Without the cap
+    # warmup builds a 256-row * 129K-vocab fp32 logits buffer that pushes
+    # the allocator past the slice budget.
     _run_eagle_correctness(
         monkeypatch,
         sampling_config,
@@ -536,6 +546,7 @@ def test_eagle_correctness_light(
         enable_chunked_prefill,
         model_impl,
         attn_backend,
+        max_num_seqs=8,
     )
 
 
