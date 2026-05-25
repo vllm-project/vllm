@@ -35,7 +35,7 @@ gh_icon = ":octicons-mark-github-16:"
 
 # Regex pieces
 TITLE = r"(?P<title>[^\[\]<>]+?)"
-REPO = r"(?P<repo>.+?/.+?)"
+REPO = r"(?P<repo>[^/\s\]\)<>]+/[^/\s\]\)<>]+)"
 TYPE = r"(?P<type>issues|pull|projects)"
 NUMBER = r"(?P<number>\d+)"
 PATH = r"(?P<path>[^\s]+?)"
@@ -106,8 +106,8 @@ class UrlSchemesPreprocessor(Preprocessor):
             return f"[{gh_icon} {title}]({url})"
 
         markdown = "\n".join(lines)
-        markdown = relative_link.sub(replace_relative_link, markdown)
         markdown = github_link.sub(replace_github_link, markdown)
+        markdown = relative_link.sub(replace_relative_link, markdown)
         return markdown.split("\n")
 
 
