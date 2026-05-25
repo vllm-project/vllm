@@ -435,10 +435,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         }
         per_engine_labelvalues = self.per_engine_labelvalues
 
-        gauge_last_iteration_ts = Gauge(
-            "vllm:last_engine_iteration_timestamp_seconds",
-            "Unix timestamp of the last engine iteration",
-            labelnames=["model_name", "engine"],
+        gauge_last_iteration_ts = self._gauge_cls(
+            name="vllm:last_engine_iteration_timestamp_seconds",
+            documentation="Unix timestamp of the last engine iteration",
+            labelnames=labelnames,
             multiprocess_mode="mostrecent",
         )
         self.gauge_last_iteration_ts = create_metric_per_engine(
