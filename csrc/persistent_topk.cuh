@@ -10,6 +10,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cuda/ptx>
+#include <algorithm>
 #include <cstdint>
 
 namespace vllm {
@@ -166,6 +167,113 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties, uint32_t num_abov
   if (wpos < TopK) output[wpos] = tie.idx;
 }
 
+// Extended tie_handle for TopK > kBlockSize (e.g. TopK=2048).
+// Each thread handles ceil(TopK/kBlockSize) ties from global memory.
+template <uint32_t TopK>
+__device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
+                                  uint32_t num_above, int32_t* output, void* _smem) {
+  static_assert(TopK > kBlockSize);
+  struct TS {
+    alignas(128) uint32_t counter;
+    alignas(128) MatchBin match;
+    uint32_t histogram[RADIX];
+    uint32_t warp_sum[kNumWarps];
+  };
+  auto* s = static_cast<TS*>(_smem);
+  const auto tx = threadIdx.x;
+  const auto li = tx % kWarpSize;
+  const auto wi = tx / kWarpSize;
+
+  constexpr uint32_t kPerThread = (TopK + kBlockSize - 1) / kBlockSize;
+  Tie my_ties[kPerThread];
+  uint32_t keys[kPerThread];
+  bool active[kPerThread];
+
+  for (uint32_t e = 0; e < kPerThread; e++) {
+    uint32_t idx = e * kBlockSize + tx;
+    if (idx < num_ties) {
+      my_ties[e] = ties[idx];
+      keys[e] = convert_to_uint32_v2(ties[idx].score);
+      active[e] = true;
+    } else {
+      my_ties[e] = {0, 0.0f};
+      keys[e] = 0;
+      active[e] = false;
+    }
+  }
+
+  uint32_t remain = TopK - num_above;
+  s->counter = 0;
+  __syncthreads();
+
+  for (int r = 0; r < 4; r++) {
+    uint32_t sh = 24 - r * 8;
+    if (tx < RADIX) {
+      s->histogram[tx] = 0;
+    }
+    __syncthreads();
+
+    for (uint32_t e = 0; e < kPerThread; e++) {
+      if (active[e]) {
+        atomicAdd(&s->histogram[(keys[e] >> sh) & 0xFF], 1);
+      }
+    }
+    __syncthreads();
+
+    uint32_t hv = 0;
+    if (tx < RADIX) {
+      hv = s->histogram[tx];
+      auto wi2 = warp_inclusive_sum(li, hv);
+      if (li == kWarpSize - 1) {
+        s->warp_sum[wi] = wi2;
+      }
+    }
+    __syncthreads();
+    if (tx < RADIX) {
+      auto tmp2 = (li < RADIX / kWarpSize) ? s->warp_sum[li] : 0;
+      auto total = warp_reduce_sum_full(tmp2);
+      auto inter = warp_reduce_sum_full(li < wi ? tmp2 : 0);
+      auto wi2 = warp_inclusive_sum(li, hv);
+      auto above = total - (inter + wi2);
+      if (above < remain && above + hv >= remain) {
+        s->match = {.bin = tx, .above_count = above, .equal_count = remain - above};
+      }
+    }
+    __syncthreads();
+
+    auto thr = s->match.bin;
+    auto na = s->match.above_count;
+
+    for (uint32_t e = 0; e < kPerThread; e++) {
+      if (!active[e]) {
+        continue;
+      }
+      uint32_t bin = (keys[e] >> sh) & 0xFF;
+      if (bin > thr) {
+        uint32_t wpos = num_above + atomicAdd(&s->counter, 1);
+        if (wpos < TopK) {
+          output[wpos] = my_ties[e].idx;
+        }
+        active[e] = false;
+      } else if (bin < thr) {
+        active[e] = false;
+      } else if (r == 3) {
+        uint32_t wpos = TopK - atomicAdd(&s->match.equal_count, -1u);
+        if (wpos < TopK) {
+          output[wpos] = my_ties[e].idx;
+        }
+      }
+    }
+
+    num_above += na;
+    remain -= na;
+    __syncthreads();
+    s->counter = 0;
+    __syncthreads();
+  }
+}
+
+
 // ============================================================================
 // DSMEM histogram reduce
 // ============================================================================
@@ -247,6 +355,8 @@ __device__ void register_topk(const float* __restrict__ scores,
     MatchBin match;
     uint32_t warp_sum[kNumWarps];
     union { uint32_t histogram[HIST_BINS]; Tie tie_buffer[kMaxTies]; };
+    static_assert(sizeof(uint32_t) * HIST_BINS >= TopK * sizeof(Tie),
+                  "histogram union must be large enough for TopK ties");
   };
   auto* smem = static_cast<LocalSmem*>(_smem);
   const auto tx = threadIdx.x;
@@ -360,7 +470,7 @@ __device__ void register_topk(const float* __restrict__ scores,
                 output[pos + num_above] = idx;
               }
             } else {
-              if (pos < kMaxTies) {
+              if (pos < TopK) {
                 smem->tie_buffer[pos] = {idx, elems[e]};
               }
             }
@@ -373,7 +483,7 @@ __device__ void register_topk(const float* __restrict__ scores,
   __syncthreads();
 
   // Fast warp-ballot tie-breaking for small tie counts
-  const uint32_t num_ties = min(num_equal, kMaxTies);
+  const uint32_t num_ties = min(num_equal, static_cast<uint32_t>(TopK));
   const uint32_t topk_remain = TopK - num_above;
 
   auto is_greater = [](const Tie& a, const Tie& b) {
@@ -418,7 +528,11 @@ __device__ void register_topk(const float* __restrict__ scores,
     }
   } else {
     // Large tie count: fall back to full radix refinement
-    tie_handle<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
+    if constexpr (TopK <= kBlockSize) {
+      tie_handle<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
+    } else {
+      tie_handle_large<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
+    }
   }
 }
 
@@ -534,7 +648,7 @@ using SmemSinglePass = SmemFused<kMaxSinglePassStages>;
 template <uint32_t TopK, uint32_t CS, typename SmemType>
 __device__ void large_topk_fused(const float* __restrict__ row_input,
                                  int32_t* __restrict__ row_output,
-                                 uint32_t seq_len, ClusterState* state,
+                                 uint32_t seq_len,
                                  uint32_t* phases, Tie* tie_ws) {
   const auto rank = blockIdx.y;
   const auto tx = threadIdx.x;
@@ -635,8 +749,12 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   constexpr uint32_t kAboveBits = 16;
   constexpr uint32_t kAboveMask = (1 << kAboveBits) - 1;
   static_assert(kAboveMask >= TopK);
+  static_assert(kAboveMask >= kMaxSinglePassPerBlock,
+                "kAboveBits must cover max per-block element count");
 
-  const uint32_t la = smem->counter_gt, le = smem->counter_eq;
+  const uint32_t la = smem->counter_gt;
+  const uint32_t le_full = smem->counter_eq;
+  const uint32_t le = min(le_full, kMaxTies);  // smem tie_buffer cap
 
   __shared__ uint32_t s_local_counts[CS];
   __shared__ uint32_t s_prefix_packed;
@@ -644,7 +762,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   {
     auto cluster = cooperative_groups::this_cluster();
     if (tx < CS) {
-      const uint32_t packed = (le << kAboveBits) | la;
+      const uint32_t packed = (le_full << kAboveBits) | la;
       const auto dst = cluster.map_shared_rank(s_local_counts, tx);
       dst[rank] = packed;
     }
@@ -657,7 +775,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
           s_prefix_packed = prefix;
         }
         ta += s_local_counts[i] & kAboveMask;
-        te += s_local_counts[i] >> kAboveBits;
+        te += s_local_counts[i] >> kAboveBits;  // full equal count for tie tracking
         prefix += s_local_counts[i];
       }
       s_total_above = ta;
@@ -679,7 +797,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
       row_output[p] = t.idx + my_start;
     }
     uint32_t tp = prefix_equal + i;
-    if (tp < kMaxTies) {
+    if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) {
       tie_ws[tp] = Tie{t.idx + my_start, t.score};
     }
   }
@@ -692,13 +810,19 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
     return;
   }
 
-  const uint32_t num_ties = min(s_total_equal, kMaxTies);
-  __syncthreads();
-  for (uint32_t i = tx; i < num_ties; i += kBlockSize) {
-    smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
+  if constexpr (TopK <= kBlockSize) {
+    const uint32_t num_ties = min(s_total_equal, kMaxTies);
+    __syncthreads();
+    for (uint32_t i = tx; i < num_ties; i += kBlockSize) {
+      smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
+    }
+    __syncthreads();
+    tie_handle<TopK>(smem->tie_buffer, num_ties, s_total_above, row_output, smem);
+  } else {
+    const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
+    __syncthreads();
+    tie_handle_large<TopK>(tie_ws, num_ties, s_total_above, row_output, smem);
   }
-  __syncthreads();
-  tie_handle<TopK>(smem->tie_buffer, num_ties, s_total_above, row_output, smem);
 }
 
 template <uint32_t TopK, uint32_t CS>
@@ -734,7 +858,9 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   tma_stream_pass<Smem4, kNumStages4, kHistBits, true>(ri + ms, ml, smem->match.bin, s_topk, sp, smem);
   __syncthreads();
 
-  const uint32_t la = smem->counter_gt, le = smem->counter_eq;
+  const uint32_t la = smem->counter_gt;
+  const uint32_t le_full = smem->counter_eq;
+  const uint32_t le = min(le_full, kMaxTies);  // smem tie_buffer cap
 
   __shared__ uint32_t s_off;
   if (tx == 0) s_off = atomicAdd(&state->output_counter, (int)la);
@@ -755,7 +881,7 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
     uint32_t p = s_toff + i;
     if (p < TopK) { ro[p] = t.idx + ms; }
     uint32_t tp = s_toff - s_ta + i;
-    if (tp < kMaxTies) { tie_ws[tp] = Tie{t.idx + ms, t.score}; }
+    if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) { tie_ws[tp] = Tie{t.idx + ms, t.score}; }
   }
 
   // cluster.sync() before tie refinement
@@ -769,7 +895,11 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
     smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
   }
   __syncthreads();
-  tie_handle<TopK>(smem->tie_buffer, min(tt, kMaxTies), s_ta, ro, smem);
+  if constexpr (TopK <= kBlockSize) {
+    tie_handle<TopK>(smem->tie_buffer, min(tt, kMaxTies), s_ta, ro, smem);
+  } else {
+    tie_handle_large<TopK>(tie_ws, min(tt, static_cast<uint32_t>(TopK)), s_ta, ro, smem);
+  }
 }
 
 // ============================================================================
@@ -917,7 +1047,11 @@ __global__ void __launch_bounds__(kBlockSize, 1)
     const auto [_, num_above, num_equal] = ss->match;
     if (num_equal + num_above > TopK) {
       __syncthreads();
-      tie_handle<TopK>(ss->tie_buffer, min(num_equal, kMaxTies), num_above, out, ss);
+      if constexpr (TopK <= kBlockSize) {
+        tie_handle<TopK>(ss->tie_buffer, min(num_equal, kMaxTies), num_above, out, ss);
+      } else {
+        tie_handle_large<TopK>(ss->tie_buffer, min(num_equal, kMaxTies), num_above, out, ss);
+      }
     }
   }
 }
@@ -956,7 +1090,8 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   // Large path: init mbarriers + state, then dispatch fused or twopass
   auto* st = &params.states[row];
   const uint32_t per_block = (params.stride + CS - 1) / CS;
-  const bool use_singlepass = per_block <= kMaxSinglePassPerBlock;
+  constexpr uint32_t kFusedMax = ((CS == 8) ? kNumStages8 : kMaxSinglePassStages) * kSizePerStage;
+  const bool use_singlepass = per_block <= kFusedMax;
 
   // Select smem type and stage count at compile time based on CS
   constexpr uint32_t kFusedStages = (CS == 8) ? kNumStages8 : kMaxSinglePassStages;
@@ -975,7 +1110,7 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
     }
     __syncthreads();
     uint32_t phases[kFusedStages] = {};
-    large_topk_fused<TopK, CS, FusedSmem>(in, out, sl, st, phases, params.tie_ws + row * kMaxTies);
+    large_topk_fused<TopK, CS, FusedSmem>(in, out, sl, phases, params.tie_ws + row * TopK);
   } else {
     // Two-pass: only CS=4 in practice (CS=8 always fits in singlepass)
     auto* smem = reinterpret_cast<Smem4*>(sr);
@@ -984,10 +1119,11 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
     }
     if (rank == 0 && tx == 0) {
       st->output_counter = 0;
+      __threadfence();
     }
     __syncthreads();
     uint32_t hp[kNumStages4] = {0, 0}, sp_ph[kNumStages4] = {0, 0};
-    large_topk_twopass<TopK, CS>(in, out, sl, st, hp, sp_ph, params.tie_ws + row * kMaxTies);
+    large_topk_twopass<TopK, CS>(in, out, sl, st, hp, sp_ph, params.tie_ws + row * TopK);
   }
 }
 
