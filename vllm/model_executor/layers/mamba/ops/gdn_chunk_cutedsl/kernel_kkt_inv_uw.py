@@ -536,7 +536,14 @@ class Sm100ChunkUWKernel:
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 1
-                # Ai[i,i-1] = -Ai[i,i] @ A[i,i-1] @ Ai[i-1,i-1].
+                # given
+                # [ Ai00               ]
+                # [  A10 Ai11          ]
+                # [  A20  A21 Ai22     ]
+                # [  A30  A31  A32 Ai33]
+                # warp1: Ai10 = -Ai11 @ A10 @ Ai00
+                # warp2: Ai21 = -Ai22 @ A21 @ Ai11
+                # warp3: Ai32 = -Ai33 @ A32 @ Ai22
                 if warp_id_ > 0:
                     neg_Ai = cute.make_rmem_tensor(4, Uint32)
                     for i in cutlass.range_constexpr(4):
@@ -567,6 +574,8 @@ class Sm100ChunkUWKernel:
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 2
+                # warp0: Ai20 = -Ai22 @ (A20 @ Ai00 + A21 @ Ai10)
+                # warp1: Ai31 = -Ai33 @ (A31 @ Ai11 + A32 @ Ai21)
                 if warp_id_ < 2:
                     cute.copy(
                         ldsm_atom,
@@ -616,6 +625,7 @@ class Sm100ChunkUWKernel:
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 3
+                # warp0: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
                 if warp_id_ == 0:
                     cute.copy(ldsm_atom, sA_ldsm[3, None, 0], Ai_bf16)
                     cute.copy(ldsm_trans_atom, sAi_ldsm[0, None, 0], mma_B_bf16)
