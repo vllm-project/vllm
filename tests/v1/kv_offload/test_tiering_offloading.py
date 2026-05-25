@@ -433,11 +433,11 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_policy_lifecycle_2")
         result = self.manager.get_request_offloading_context(ctx)
         assert result.policy == OffloadPolicy.REQUEST_LEVEL
-        assert ctx.req_id in self.manager._per_request_tier_policy
+        assert ctx.req_id in self.manager._request_level_tiers
 
         # Cleanup
         self.manager.request_finished(ctx)
-        assert ctx.req_id not in self.manager._per_request_tier_policy
+        assert ctx.req_id not in self.manager._request_level_tiers
 
     def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(
         self, manager_setup

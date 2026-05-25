@@ -160,12 +160,10 @@ class TieringOffloadingManager(OffloadingManager):
         # Reset at the end of each step in take_events().
         self._processed_jobs_this_step: bool = False
 
-        # Per-request per-tier offload policy decisions from
-        # get_request_offloading_context().
-        # Cleaned up in request_finished().
-        self._per_request_tier_policy: dict[
-            str, dict[SecondaryTierManager, OffloadPolicy]
-        ] = {}
+        # Per-request set of secondary tiers that requested REQUEST_LEVEL
+        # policy. Populated in get_request_offloading_context(),
+        # cleaned up in request_finished().
+        self._request_level_tiers: dict[str, set[SecondaryTierManager]] = {}
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -422,13 +420,14 @@ class TieringOffloadingManager(OffloadingManager):
             return None
 
         # Step 3: For request-level tiers, cascade blocks already in primary
-        tier_policies = self._per_request_tier_policy.get(req_context.req_id, {})
-        keys_to_store_set = set(primary_result.keys_to_store)
-        keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
-        if keys_already_in_primary:
-            self._cascade_existing_blocks_to_request_level_tiers(
-                keys_already_in_primary, req_context, tier_policies
-            )
+        request_level_tiers = self._request_level_tiers.get(req_context.req_id, set())
+        if request_level_tiers:
+            keys_to_store_set = set(primary_result.keys_to_store)
+            keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
+            if keys_already_in_primary:
+                self._cascade_existing_blocks_to_request_level_tiers(
+                    keys_already_in_primary, req_context, request_level_tiers
+                )
 
         return primary_result
 
@@ -436,7 +435,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: list[OffloadKey],
         req_context: ReqContext,
-        tier_policies: dict[SecondaryTierManager, OffloadPolicy],
+        request_level_tiers: set[SecondaryTierManager],
     ) -> None:
         """
         For tiers that requested request-level policy, submit_store() for
@@ -449,10 +448,7 @@ class TieringOffloadingManager(OffloadingManager):
         if not ready_keys:
             return
 
-        for tier, policy in tier_policies.items():
-            if policy != OffloadPolicy.REQUEST_LEVEL:
-                continue
-
+        for tier in request_level_tiers:
             primary_blocks_spec = self.primary_tier.prepare_read(
                 ready_keys, req_context
             )
@@ -533,27 +529,29 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Query each secondary tier for its offload policy preference.
 
-        Returns REQUEST_LEVEL if the base or ANY secondary tier wants
-        request-level. Stores per-tier decisions for use in prepare_store.
+        Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
+        Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
-        result_policy = OffloadPolicy.BLOCK_LEVEL
-
-        tier_policies: dict[SecondaryTierManager, OffloadPolicy] = {}
+        request_level_tiers: set[SecondaryTierManager] = set()
         for tier in self.secondary_tiers:
             tier_ctx = tier.get_request_offloading_context(req_context)
-            tier_policies[tier] = tier_ctx.policy
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
-                result_policy = OffloadPolicy.REQUEST_LEVEL
+                request_level_tiers.add(tier)
 
-        self._per_request_tier_policy[req_context.req_id] = tier_policies
+        self._request_level_tiers[req_context.req_id] = request_level_tiers
 
+        result_policy = (
+            OffloadPolicy.REQUEST_LEVEL
+            if request_level_tiers
+            else OffloadPolicy.BLOCK_LEVEL
+        )
         return RequestOffloadingContext(policy=result_policy)
 
     def request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.request_finished(req_context)
         for tier in self.secondary_tiers:
             tier.request_finished(req_context)
-        self._per_request_tier_policy.pop(req_context.req_id, None)
+        self._request_level_tiers.pop(req_context.req_id, None)
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
