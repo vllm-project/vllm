@@ -272,9 +272,11 @@ class CustomAllreduce:
             if torch.cuda.is_current_stream_capturing():
                 return self.all_reduce(input, registered=True)
             else:
-                # If warm up, mimic the allocation pattern since custom
-                # allreduce is out-of-place.
-                return torch.empty_like(input)
+                # Warmup forwards can still update persistent runtime state
+                # such as KV cache or indexing buffers. Return a numerically
+                # valid result while preserving custom allreduce's
+                # out-of-place allocation behavior.
+                return self.all_reduce(input, registered=False)
         else:
             # Note: outside of cuda graph context, custom allreduce incurs a
             # cost of cudaMemcpy, which should be small (<=1% of overall
