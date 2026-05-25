@@ -19,7 +19,6 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
@@ -449,8 +448,22 @@ _running_tasks: set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # Trigger snapshot post-startup if enabled
+        engine_client = getattr(app.state, "engine_client", None)
+        if (
+            engine_client is not None
+            and getattr(engine_client, "snapshot_manager", None) is not None
+        ):
+
+            async def _run_snapshot():
+                assert engine_client is not None
+                await asyncio.to_thread(engine_client.snapshot_manager.run_snapshot)
+
+            engine_client.snapshot_task = asyncio.create_task(_run_snapshot())
+            logger.info("Triggered snapshot post-startup task.")
+
         if app.state.log_stats:
-            engine_client: EngineClient = app.state.engine_client
+            engine_client = app.state.engine_client
 
             async def _force_log():
                 while True:

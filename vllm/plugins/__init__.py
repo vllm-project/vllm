@@ -21,6 +21,7 @@ PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
 # async mode.
 STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 
+
 # make sure one process only loads plugins once
 plugins_loaded = False
 

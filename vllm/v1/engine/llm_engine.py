@@ -14,6 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.snapshot.manager import SnapshotManager
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -130,6 +131,20 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Trigger snapshot if enabled
+        additional_config = self.vllm_config.additional_config
+        enable_snapshot = False
+        snapshot_provider = None
+        if isinstance(additional_config, dict):
+            enable_snapshot = additional_config.get(
+                "enable_snapshot_post_startup", False
+            )
+            snapshot_provider = additional_config.get("snapshot_provider", None)
+
+        self.snapshot_manager = None
+        if enable_snapshot:
+            self.snapshot_manager = SnapshotManager(snapshot_provider)
 
     @classmethod
     def from_vllm_config(
@@ -418,6 +433,13 @@ class LLMEngine:
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
+
+    def run_snapshot(self) -> None:
+        """Trigger a snapshot of the engine state."""
+        if self.snapshot_manager is not None:
+            self.snapshot_manager.run_snapshot()
+        else:
+            logger.warning("No snapshot provider configured or available.")
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
