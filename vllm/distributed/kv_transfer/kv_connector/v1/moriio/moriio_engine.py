@@ -45,11 +45,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 try:
     from mori.io import (
+        BackendType,
         EngineDesc,
         IOEngine,
         MemoryDesc,
         PollCqMode,
         RdmaBackendConfig,
+        XgmiBackendConfig,
     )
 
     logger.info("MoRIIO is available")
@@ -415,25 +417,35 @@ class MoRIIOWrapper:
 
     def set_backend_type(self, backend_type):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = self._qp_per_transfer
-        post_batch_size = self._post_batch_size
-        num_worker_threads = self._num_worker_threads
-        poll_mode = PollCqMode.POLLING
-        rdma_cfg = RdmaBackendConfig(
-            qp_per_transfer,
-            post_batch_size,
-            num_worker_threads,
-            poll_mode,
-            # vLLM uses ZMQ for completion signaling
-            # and never calls PopInboundTransferStatus.
-            # With notifications enabled, ibv_post_send
-            # ENOMEM at high concurrency permanently
-            # poisons TransferStatus before the data WR
-            # completes, hanging requests in
-            # WAITING_FOR_REMOTE_KVS indefinitely.
-            enable_notification=False,
-        )
-        self.moriio_engine.create_backend(backend_type, rdma_cfg)
+        if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
+            self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        else:
+            qp_per_transfer = self._qp_per_transfer
+            post_batch_size = self._post_batch_size
+            num_worker_threads = self._num_worker_threads
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                qp_per_transfer,
+                post_batch_size,
+                num_worker_threads,
+            )
+            rdma_cfg = RdmaBackendConfig(
+                qp_per_transfer,
+                post_batch_size,
+                num_worker_threads,
+                PollCqMode.POLLING,
+                # vLLM uses ZMQ for completion signaling
+                # and never calls PopInboundTransferStatus.
+                # With notifications enabled, ibv_post_send
+                # ENOMEM at high concurrency permanently
+                # poisons TransferStatus before the data WR
+                # completes, hanging requests in
+                # WAITING_FOR_REMOTE_KVS indefinitely.
+                enable_notification=False,
+            )
+            self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
     def get_agent_metadata(self):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"

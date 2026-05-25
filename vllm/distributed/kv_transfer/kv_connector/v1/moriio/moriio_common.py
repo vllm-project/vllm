@@ -191,6 +191,7 @@ class MoRIIOConfig:
     tp_size: int
     transfer_timeout: float
     defer_timeout: float
+    backend: str = "rdma"
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -201,6 +202,12 @@ class MoRIIOConfig:
         # local_kv_port     -> service port for mori engine
         # notify_port       -> For synchronizing stages between prefill and decode
         # handshake_port    -> For initial handshake between mori engine
+
+        # Advanced tuning knobs:
+        # transfer_timeout  -> Timeout for waiting_for_transfer_complete before
+        #                      raising TransferError (sec).
+        # defer_timeout     -> Timeout before a deferred send with no finished_sending
+        #                      notification is reaped and its blocks force-freed (sec).
 
         # TODO : merge notify_port and handshake_port to simplify port management
         #        supports non-contiguous ports
@@ -215,6 +222,21 @@ class MoRIIOConfig:
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
+        backend = str(extra_config.get("backend", "rdma")).lower()
+        if backend not in ("rdma", "xgmi"):
+            raise ValueError(
+                f"Invalid MoRIIO backend {backend!r} in kv_connector_extra_config; "
+                "must be one of 'rdma' or 'xgmi'."
+            )
+
+        transfer_timeout = float(
+            extra_config.get(
+                "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
+            )
+        )
+        defer_timeout = float(
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        )
 
         return cls(
             local_ip=get_ip(),
@@ -229,14 +251,9 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
-            transfer_timeout=float(
-                extra_config.get(
-                    "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
-                )
-            ),
-            defer_timeout=float(
-                extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
-            ),
+            backend=backend,
+            transfer_timeout=transfer_timeout,
+            defer_timeout=defer_timeout,
         )
 
 

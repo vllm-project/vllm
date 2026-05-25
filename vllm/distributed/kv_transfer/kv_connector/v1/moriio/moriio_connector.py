@@ -775,7 +775,12 @@ class MoRIIOConnectorWorker:
             transfer_timeout=self.moriio_config.transfer_timeout,
         )
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
-        self.moriio_wrapper.set_backend_type(BackendType.RDMA)
+        backend = (
+            BackendType.XGMI
+            if self.moriio_config.backend == "xgmi"
+            else BackendType.RDMA
+        )
+        self.moriio_wrapper.set_backend_type(backend)
         self.moriio_wrapper.notify_port = self.moriio_config.notify_port
         self.local_kv_cache_metadata: list[bytes] = []
         self.local_kv_cache_size: list[int] = []

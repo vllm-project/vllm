@@ -1204,6 +1204,15 @@ def try_get_dense_modules(
         return None
 
 
+def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
+    return {
+        param_name: info
+        for file_path in local_dir.glob("*.safetensors")
+        if file_path.is_file()
+        for param_name, info in parse_safetensors_file_metadata(file_path).items()
+    }
+
+
 def get_safetensors_params_metadata(
     model: str,
     *,
@@ -1212,24 +1221,36 @@ def get_safetensors_params_metadata(
     """
     Get the safetensors parameters metadata for remote/local model repository.
     """
-    full_metadata = {}
     if (model_path := Path(model)).exists():
-        safetensors_to_check = model_path.glob("*.safetensors")
-        full_metadata = {
-            param_name: info
-            for file_path in safetensors_to_check
-            if file_path.is_file()
-            for param_name, info in parse_safetensors_file_metadata(file_path).items()
+        return _read_safetensors_metadata_in_dir(model_path)
+
+    repo_mt = try_get_safetensors_metadata(model, revision=revision)
+    if repo_mt and (files_mt := repo_mt.files_metadata):
+        return {
+            param_name: asdict(info)
+            for file_mt in files_mt.values()
+            for param_name, info in file_mt.tensors.items()
         }
-    else:
-        repo_mt = try_get_safetensors_metadata(model, revision=revision)
-        if repo_mt and (files_mt := repo_mt.files_metadata):
-            full_metadata = {
-                param_name: asdict(info)
-                for file_mt in files_mt.values()
-                for param_name, info in file_mt.tensors.items()
-            }
-    return full_metadata
+
+    # Hub fetch failed (e.g. 429, network unreachable). Fall back to the
+    # local HF cache: weights may already be cached from a prior run, and
+    # weight loading itself uses the same cache.
+    try:
+        local_dir = huggingface_hub.snapshot_download(
+            repo_id=model,
+            revision=revision,
+            allow_patterns=["*.safetensors"],
+            local_files_only=True,
+        )
+    except huggingface_hub.errors.LocalEntryNotFoundError as e:
+        logger.warning_once(
+            "Could not retrieve safetensors metadata for %s "
+            "(Hub fetch failed and no local cache snapshot is available): %s.",
+            model,
+            str(e),
+        )
+        return {}
+    return _read_safetensors_metadata_in_dir(Path(local_dir))
 
 
 def _download_mistral_config_file(model, revision) -> dict:
