@@ -23,7 +23,10 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
