@@ -1139,8 +1139,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
     ),
     # use aiter rms norm op if aiter ops are enabled.
+    # Default is True on supported AITER arches EXCEPT gfx12 (Navi 4x / R9700)
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")
+        os.environ["VLLM_ROCM_USE_AITER_RMSNORM"].lower() in ("true", "1")
+        if "VLLM_ROCM_USE_AITER_RMSNORM" in os.environ
+        else not __import__(
+            "vllm.platforms.rocm", fromlist=["on_gfx12x"]
+        ).on_gfx12x()
     ),
     # Whether to use aiter mla ops.
     # By default is enabled.
