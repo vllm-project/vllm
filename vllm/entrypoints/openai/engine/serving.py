@@ -156,6 +156,12 @@ class OpenAIServing(BeamSearchOnlineMixin):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.usage_policy = usage_policy
         self.enable_force_include_usage = enable_force_include_usage
+        if enable_force_include_usage:
+            logger.warning_once(
+                "`--enable-force-include-usage` is deprecated. "
+                "Consider using `--include-usage-policy` and "
+                "`--continuous-usage-policy` instead."
+            )
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
