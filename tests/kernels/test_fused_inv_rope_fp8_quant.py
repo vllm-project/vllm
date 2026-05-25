@@ -7,7 +7,8 @@ Tests compare the fused kernel against a reference implementation built from
 the existing separate operations (inverse RoPE via rotate_neox + FP8 quant
 via per_token_group_quant_fp8).
 
-The reference faithfully reproduces the exact flow in deepseek_v4_attention.py:295-310:
+The reference faithfully reproduces the exact flow in
+deepseek_v4/nvidia/ops/attention.py:295-310:
   1. Apply inverse RoPE (NeoX style, last rope_dim=64 dims of each head)
   2. Reshape [T, H, head_dim] -> [T, G, D]
   3. Transpose+flatten to [G*T, D], quantize, reshape back
@@ -21,7 +22,7 @@ Usage:
 import pytest
 import torch
 
-from vllm.v1.attention.ops.deepseek_v4_ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
 
 # -- Default dimensions matching DeepSeek V3/V4 --------------------------
 HEAD_DIM = 512
@@ -667,7 +668,7 @@ def _unfused_inv_rope_fp8_quant(
     nope_dim: int = NOPE_DIM,
     rope_dim: int = ROPE_DIM,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Unfused path matching deepseek_v4_attention.py:295-310.
+    """Unfused path matching deepseek_v4/nvidia/ops/attention.py:295-310.
 
     Uses the production CUDA RoPE kernel + per_token_group_quant_fp8.
     """
