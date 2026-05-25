@@ -14,6 +14,12 @@ Install mooncake through pip: `uv pip install mooncake-transfer-engine-cuda13`.
 
 vLLM defaults to CUDA 13. On a CUDA 12 environment install `mooncake-transfer-engine` instead — the two are the same release built against different CUDA majors, and the wrong one fails to import with `libcudart.so.<major>: cannot open shared object file`.
 
+If you observe PD transfer data mismatches (`dst != src`) with the CUDA 13
+package, enable the mitigations in
+[Transfer reliability](#transfer-reliability) below (see
+[vllm #42395](https://github.com/vllm-project/vllm/issues/42395),
+[Mooncake #2086](https://github.com/kvcache-ai/Mooncake/issues/2086)).
+
 Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
 ## Usage
@@ -56,6 +62,36 @@ Now you can send requests to the proxy server through port 8000.
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
 
+### Transfer reliability
+
+Under concurrent PD load, some Mooncake transfer-engine builds (notably
+`mooncake-transfer-engine-cuda13==0.3.10.post2`) can produce destination bytes
+that do not match the producer source for very large coalesced descriptors.
+vLLM mitigations (env vars or `kv_connector_extra_config` keys):
+
+- `VLLM_MOONCAKE_MAX_TRANSFER_BYTES` / `max_transfer_bytes`: Split any single
+  transfer descriptor larger than this size into contiguous chunks (recommended
+  starting value: `262144` for multimodal PD workloads).
+- `VLLM_MOONCAKE_SYNC_AFTER_TRANSFER` / `sync_after_transfer`: Call
+  `torch.cuda.synchronize()` after each Mooncake batch transfer on producer and
+  consumer (reduces visibility races at some throughput cost).
+- `VLLM_MOONCAKE_VERIFY_TRANSFER_INTEGRITY` / `verify_transfer_integrity`:
+  Debug-only SHA-256 check that producer source memory is unchanged after
+  transfer (does not verify remote destination bytes).
+
+Example prefill/decode extra config:
+
+```json
+{
+  "kv_connector": "MooncakeConnector",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    "max_transfer_bytes": 262144,
+    "sync_after_transfer": true
+  }
+}
+```
+
 ## KV Transfer Config
 
 ### KV Role Options
@@ -69,6 +105,9 @@ Now you can send requests to the proxy server through port 8000.
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **max_transfer_bytes**: Split descriptors larger than this many bytes (see [Transfer reliability](#transfer-reliability))
+- **sync_after_transfer**: Synchronize CUDA after each Mooncake batch transfer (default false)
+- **verify_transfer_integrity**: Debug SHA-256 check of producer source after transfer (default false)
 
 ## Example Scripts/Code
 
