@@ -71,7 +71,7 @@ WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
 
 # After stopping the vLLM API server, keep Ray alive this long while waiting
 # for real worker_process_*.nsys-rep files to appear and be copied.
-WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-300}"
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-900}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
 
 # Treat files smaller than this as placeholders, not useful reports.
