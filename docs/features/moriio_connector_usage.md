@@ -39,7 +39,7 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
   --enable-expert-parallel \
   --port 20005 \
-  --gpu_memory_utilization 0.9 \
+  --gpu-memory-utilization 0.9 \
   --max-model-len 16384 \
   --kv-transfer-config '{
     "kv_connector": "MoRIIOConnector",
