@@ -47,28 +47,31 @@ def test_cosmos3_new_checkpoint_weights_mapper():
         "visual.blocks.0.attn.qkv.weight",
     ]
 
-    assert mapper.apply_list(
-        [
-            "layers.0.self_attn.add_q_proj.weight",
-            "layers.0.self_attn.add_k_proj.weight",
-            "layers.0.self_attn.add_v_proj.weight",
-            "layers.0.self_attn.to_add_out.weight",
-            "layers.0.self_attn.norm_added_q.weight",
-            "layers.0.self_attn.norm_added_k.weight",
-            "layers.0.self_attn.q_proj_moe_gen.weight",
-            "layers.0.mlp_moe_gen.gate_up_proj.weight",
-            "norm_moe_gen.weight",
-            "proj_in.weight",
-            "proj_out.weight",
-            "time_embedder.linear_1.weight",
-            "audio_proj_in.weight",
-            "audio_proj_out.weight",
-            "action_proj_in.weight",
-            "action_proj_out.weight",
-            "audio_modality_embed",
-            "action_modality_embed",
-        ]
-    ) == []
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.add_q_proj.weight",
+                "layers.0.self_attn.add_k_proj.weight",
+                "layers.0.self_attn.add_v_proj.weight",
+                "layers.0.self_attn.to_add_out.weight",
+                "layers.0.self_attn.norm_added_q.weight",
+                "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.q_proj_moe_gen.weight",
+                "layers.0.mlp_moe_gen.gate_up_proj.weight",
+                "norm_moe_gen.weight",
+                "proj_in.weight",
+                "proj_out.weight",
+                "time_embedder.linear_1.weight",
+                "audio_proj_in.weight",
+                "audio_proj_out.weight",
+                "action_proj_in.weight",
+                "action_proj_out.weight",
+                "audio_modality_embed",
+                "action_modality_embed",
+            ]
+        )
+        == []
+    )
 
 
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
