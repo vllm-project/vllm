@@ -98,6 +98,19 @@ def compute_token_logprobs(
     return logprobs
 
 
+def _drop_sampled_token_from_topk(
+    topk_token_ids: torch.Tensor,
+    sampled_token_ids: torch.Tensor,
+    num_logprobs: int,
+) -> torch.Tensor:
+    is_sampled = topk_token_ids == sampled_token_ids.unsqueeze(-1)
+    first_match = is_sampled.cumsum(dim=-1) == 1
+    remove_mask = is_sampled & first_match
+    sort_keys = remove_mask.to(torch.int8)
+    _, perm = sort_keys.sort(dim=-1, stable=True)
+    return topk_token_ids.gather(1, perm)[:, :num_logprobs]
+
+
 def compute_topk_logprobs(
     logits: torch.Tensor,
     num_logprobs: int,
@@ -114,7 +127,11 @@ def compute_topk_logprobs(
         # Fast path: no request asked for custom logprob_token_ids.
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
         if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+            k = min(num_logprobs + 1, vocab_size)
+            topk_indices = torch.topk(logits, k, dim=-1).indices
+            topk_indices = _drop_sampled_token_from_topk(
+                topk_indices, sampled_token_ids, num_logprobs
+            )
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
         logprobs = compute_token_logprobs(logits, logprob_token_ids)
     else:
@@ -126,13 +143,15 @@ def compute_topk_logprobs(
         assert expanded_idx_mapping is not None
 
         if num_logprobs > 0:
-            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            k = min(num_logprobs + 1, vocab_size)
+            topk_token_ids = torch.topk(logits, k, dim=-1).indices
             topk_token_ids = topk_token_ids.to(torch.int32)
         else:
+            k = 0
             # This tensor just used as an int32 pointer, data not accessed.
             topk_token_ids = logprob_token_ids_state.token_ids.gpu
 
-        num_cols = max(num_logprobs, max_per_req_token_ids)
+        num_cols = max(k, max_per_req_token_ids)
         logprob_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
         valid_mask = torch.zeros_like(logprob_token_ids, dtype=torch.bool)
         _fill_logprob_token_ids_kernel[(batch_size,)](
@@ -147,9 +166,24 @@ def compute_topk_logprobs(
             logprob_token_ids_state.num_token_ids.gpu,
             logprob_token_ids_state.token_ids.gpu,
             logprob_token_ids_state.token_ids.gpu.stride(0),
-            NUM_TOPK=num_logprobs,
+            NUM_TOPK=k,
             PADDED_COLS=triton.next_power_of_2(num_cols),
         )
+        if num_logprobs > 0:
+            num_custom = logprob_token_ids_state.num_token_ids.gpu[expanded_idx_mapping]
+            topk_rows = num_custom == 0
+            topk_cols = logprob_token_ids[:, 1 : 1 + k]
+            topk_cols = _drop_sampled_token_from_topk(
+                topk_cols, sampled_token_ids, num_logprobs
+            )
+            logprob_token_ids[topk_rows, 1 : 1 + num_logprobs] = topk_cols[topk_rows]
+
+            final_num_cols = max(num_logprobs, max_per_req_token_ids)
+            if final_num_cols > num_logprobs:
+                logprob_token_ids[topk_rows, 1 + num_logprobs :] = 0
+                valid_mask[topk_rows, 1 + num_logprobs :] = False
+            logprob_token_ids = logprob_token_ids[:, : 1 + final_num_cols]
+            valid_mask = valid_mask[:, : 1 + final_num_cols]
         logprobs = compute_token_logprobs(logits, logprob_token_ids)
         logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
 
