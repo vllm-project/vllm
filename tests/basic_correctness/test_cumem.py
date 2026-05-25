@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from typing import Literal
 
 import pytest
 import torch
@@ -14,7 +15,9 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
-CUMEM_PROCESS_METHOD = "spawn" if current_platform.is_rocm() else "fork"
+CUMEM_PROCESS_METHOD: Literal["spawn", "fork"] = (
+    "spawn" if current_platform.is_rocm() else "fork"
+)
 CUMEM_FAST_EXIT_ON_SUCCESS = current_platform.is_rocm()
 ROCM_SLEEP_MODE_GPU_MEMORY_UTILIZATION = 0.05
 ROCM_SLEEP_MODE_MAX_MODEL_LEN = 1024
