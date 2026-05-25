@@ -4,6 +4,11 @@ from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
+try:
+    from transformers.modeling_rope_utils import rope_config_validation
+except ImportError:
+    rope_config_validation = None
+
 
 class FlexOlmoConfig(PretrainedConfig):
     model_type = "flex_olmo"
@@ -26,6 +31,8 @@ class FlexOlmoConfig(PretrainedConfig):
         bos_token_id=None,
         eos_token_id=100257,
         tie_word_embeddings=False,
+        rope_theta=500000.0,
+        rope_scaling=None,
         rope_parameters: dict[str, Any] | None = None,
         attention_bias=False,
         attention_dropout=0.0,
@@ -34,6 +41,11 @@ class FlexOlmoConfig(PretrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.01,
         norm_topk_prob=False,
+        pre_norm=False,
+        head_dim=None,
+        use_head_qk_norm=False,
+        use_grouped_gemm=True,
+        moe_implementation="sonic",
         **kwargs,
     ):
         if "architectures" not in kwargs:
@@ -58,17 +70,31 @@ class FlexOlmoConfig(PretrainedConfig):
             num_key_value_heads = num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else (hidden_size // num_attention_heads)
+        )
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
-        rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
-        rope_theta = kwargs.pop("rope_theta", 500000.0)
-        if "rope_theta" not in rope_parameters:
-            rope_parameters["rope_theta"] = rope_theta
-        self.rope_parameters = rope_parameters
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        # Build rope_parameters for vLLM get_rope() from rope_scaling/rope_theta (HF style) or explicit rope_parameters
+        if rope_parameters is not None:
+            self.rope_parameters = dict(rope_parameters)
+        elif rope_scaling is not None:
+            self.rope_parameters = dict(rope_scaling)
+        else:
+            self.rope_parameters = {"rope_type": "default"}
+        if "rope_theta" not in self.rope_parameters:
+            self.rope_parameters["rope_theta"] = rope_theta
+        # BC: if there is a 'type' field, move it to 'rope_type'
+        if "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        if rope_config_validation is not None:
+            rope_config_validation(self)
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.num_experts_per_tok = num_experts_per_tok
@@ -76,7 +102,7 @@ class FlexOlmoConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.norm_topk_prob = norm_topk_prob
-        # Validate the correctness of rotary position embeddings parameters
-        # BC: if there is a 'type' field, move it to 'rope_type'.
-        if self.rope_parameters is not None and "type" in self.rope_parameters:
-            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        self.pre_norm = pre_norm
+        self.use_head_qk_norm = use_head_qk_norm
+        self.use_grouped_gemm = use_grouped_gemm
+        self.moe_implementation = moe_implementation

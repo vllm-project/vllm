@@ -276,9 +276,24 @@ class IquestMoeAttention(nn.Module):
             self.attn.populate_sinks_kv(sinks_k=self.sinks_k, sinks_v=self.sinks_v)
 
     def sinks_k_weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        weight_shard_start = self.tp_rank * self.num_kv_heads
-        weight_shard_end = (self.tp_rank + 1) * self.num_kv_heads
-        loaded_weight = loaded_weight[weight_shard_start:weight_shard_end]
+        # Match QKVParallelLinear's KV-head replication rule when TP exceeds the
+        # number of global KV heads. In that case multiple TP ranks share the
+        # same KV-head shard instead of linearly slicing by raw tp_rank.
+        if loaded_weight.shape[0] == self.total_num_kv_heads:
+            if self.total_num_kv_heads < self.tp_size:
+                num_kv_head_replicas = self.tp_size // self.total_num_kv_heads
+                shard_rank = self.tp_rank // num_kv_head_replicas
+            else:
+                shard_rank = self.tp_rank
+            weight_shard_start = shard_rank * self.num_kv_heads
+            weight_shard_end = weight_shard_start + self.num_kv_heads
+            loaded_weight = loaded_weight[weight_shard_start:weight_shard_end]
+        elif loaded_weight.shape[0] != self.num_kv_heads:
+            raise ValueError(
+                f"Unexpected sink_k shape {tuple(loaded_weight.shape)} for tp_rank={self.tp_rank}, "
+                f"tp_size={self.tp_size}, total_num_kv_heads={self.total_num_kv_heads}, "
+                f"local_num_kv_heads={self.num_kv_heads}"
+            )
 
         # NOTE(yxing): load model with supporting tensor parallel
         new_loaded_weight = loaded_weight[:, None].expand(-1, self.head_dim)
