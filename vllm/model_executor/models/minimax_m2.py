@@ -30,6 +30,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -57,6 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -68,6 +70,17 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+
+def _enable_router_pdl() -> bool:
+    is_hopper_or_blackwell = current_platform.is_device_capability(
+        (9, 0)
+    ) or current_platform.is_device_capability_family(100)
+    return (
+        current_platform.is_cuda()
+        and is_hopper_or_blackwell
+        and envs.TRTLLM_ENABLE_PDL
+    )
 
 
 class MiniMaxM2MoE(nn.Module):
@@ -108,6 +121,7 @@ class MiniMaxM2MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             router_logits_dtype=torch.float32,
+            enable_router_pdl=_enable_router_pdl(),
         )
 
         self.gate = GateLinear(

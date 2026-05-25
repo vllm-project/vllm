@@ -15,7 +15,8 @@ class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
     1. DSV3 specialized kernel (SM90+, fp32 out, M<=16, H=7168, E=256/384)
-    2. fp32 specialized kernel  (SM90+, fp32 in/out, M<=32, H=3072, E=256)
+    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out,
+       M<=32, H=3072, E=256)
     3. gpt-oss specialized kernel (SM90+, bf16, M<=128, H=2880, E=32/128)
     4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
     5. F.linear via ReplicatedLinear (ultimate fallback)
@@ -56,7 +57,7 @@ class GateLinear(ReplicatedLinear):
         )
 
         # If fp32 compute is required and no specialized kernel is available,
-        # store weights in fp32 so Tier 3 computes in fp32 natively.
+        # store weights in fp32 so the fallback linear path computes in fp32.
         if force_fp32_compute and not can_use_specialized_kernels:
             params_dtype = torch.float32
 
@@ -136,7 +137,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
         # capture does not freeze the runtime num_tokens branch.
-        if self.allow_fp32_router_gemm:
+        if self.allow_fp32_router_gemm and x.dtype in (
+            torch.float32,
+            torch.bfloat16,
+        ):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
             return output, None
 

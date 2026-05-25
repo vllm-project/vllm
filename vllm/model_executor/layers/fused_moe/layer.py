@@ -233,6 +233,8 @@ class FusedMoE(CustomOp):
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
         router_logits_dtype: Data type for router logits buffers.
+        enable_router_pdl: Whether fused top-k routing kernels should join a
+                           Programmatic Dependent Launch chain.
     """
 
     # --8<-- [end:fused_moe]
@@ -272,6 +274,7 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        enable_router_pdl: bool = False,
     ):
         super().__init__()
 
@@ -462,6 +465,7 @@ class FusedMoE(CustomOp):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            enable_pdl=enable_router_pdl,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 

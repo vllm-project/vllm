@@ -3,6 +3,7 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -54,11 +55,24 @@ void fp32_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
                       const at::Tensor& mat_b   // [num_experts, hidden_dim]
 ) {
   TORCH_CHECK(output.dim() == 2 && mat_a.dim() == 2 && mat_b.dim() == 2);
+  TORCH_CHECK(output.is_cuda() && mat_a.is_cuda() && mat_b.is_cuda(),
+              "fp32_router_gemm: all tensors must be CUDA tensors");
+  TORCH_CHECK(output.get_device() == mat_a.get_device() &&
+                  output.get_device() == mat_b.get_device(),
+              "fp32_router_gemm: all tensors must be on the same CUDA device");
+  TORCH_CHECK(output.is_contiguous() && mat_a.is_contiguous() &&
+                  mat_b.is_contiguous(),
+              "fp32_router_gemm: all tensors must be contiguous");
 
   const int num_tokens = mat_a.size(0);
   const int num_experts = mat_b.size(0);
   const int hidden_dim = mat_a.size(1);
 
+  TORCH_CHECK(output.size(0) == num_tokens && output.size(1) == num_experts,
+              "fp32_router_gemm: output must have shape [num_tokens, "
+              "num_experts], got [",
+              output.size(0), ", ", output.size(1), "], expected [",
+              num_tokens, ", ", num_experts, "]");
   TORCH_CHECK(
       mat_a.size(1) == mat_b.size(1),
       "fp32_router_gemm: mat_a and mat_b must have the same hidden_dim");
@@ -68,8 +82,8 @@ void fp32_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
   TORCH_CHECK(num_experts == FP32_NUM_EXPERTS,
               "fp32_router_gemm: expected num_experts=", FP32_NUM_EXPERTS,
               ", got ", num_experts);
-  TORCH_CHECK(num_tokens >= 1 && num_tokens <= FP32_MAX_TOKENS,
-              "fp32_router_gemm: num_tokens must be in [1, ", FP32_MAX_TOKENS,
+  TORCH_CHECK(num_tokens <= FP32_MAX_TOKENS,
+              "fp32_router_gemm: num_tokens must be in [0, ", FP32_MAX_TOKENS,
               "], got ", num_tokens);
   TORCH_CHECK(mat_a.dtype() == at::kFloat || mat_a.dtype() == at::kBFloat16,
               "fp32_router_gemm: mat_a must be float32 or bfloat16");
@@ -78,6 +92,11 @@ void fp32_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
   TORCH_CHECK(output.dtype() == at::kFloat,
               "fp32_router_gemm: output must be float32");
 
+  if (num_tokens == 0) {
+    return;
+  }
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(mat_a));
   const int sm = getSMVersion();
   TORCH_CHECK(sm >= 90, "fp32_router_gemm: requires SM90+, got SM", sm);
 

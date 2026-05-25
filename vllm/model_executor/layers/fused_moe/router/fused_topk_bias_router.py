@@ -45,7 +45,7 @@ def vllm_topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
-    enable_pdl: bool = True,  # FIXME
+    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -81,6 +81,7 @@ def fused_topk_bias(
     renormalize: bool,
     scoring_func: str = "softmax",
     indices_type: torch.dtype | None = None,
+    enable_pdl: bool = False,
 ):
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
@@ -110,6 +111,7 @@ def fused_topk_bias(
                 gating_output,
                 renormalize,
                 e_score_correction_bias,
+                enable_pdl,
             )
             return topk_weights, topk_ids
         elif scoring_func == "sigmoid":
@@ -120,6 +122,7 @@ def fused_topk_bias(
                 gating_output,
                 renormalize,
                 e_score_correction_bias,
+                enable_pdl,
             )
             return topk_weights, topk_ids
         else:
@@ -186,6 +189,7 @@ class FusedTopKBiasRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        enable_pdl: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -198,6 +202,7 @@ class FusedTopKBiasRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
+        self.enable_pdl = enable_pdl
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -224,6 +229,7 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             scoring_func=self.scoring_func,
             indices_type=indices_type,
+            enable_pdl=self.enable_pdl,
         )
 
         if self.routed_scaling_factor != 1.0:
