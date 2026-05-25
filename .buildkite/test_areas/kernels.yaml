@@ -277,3 +277,30 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+
+- label: Kernels AITER MLA Test (MI355)
+  depends_on:
+  - image-build-amd
+  key: kernels-aiter-mla-test-mi355
+  timeout_in_minutes: 180
+  device: mi355_1
+  soft_fail: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/attention/mla/
+  - csrc/rocm/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+  - tests/kernels/rocm/utils.py
+  commands:
+  - pytest -v -s kernels/attention/test_rocm_aiter_mla.py
+      kernels/attention/test_rocm_aiter_mla_sparse.py
+      kernels/attention/test_rocm_aiter_mla_variants.py
+      kernels/attention/test_rocm_aiter_mla_fp8_support.py
