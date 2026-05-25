@@ -35,7 +35,7 @@ from .deepseek_v2 import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .utils import get_pp_missing_layer_names, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -267,6 +267,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ),
         )
 
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
@@ -282,7 +283,12 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
             if _try_load_fp8_indexer_wk(
-                name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
             ):
                 continue
 
