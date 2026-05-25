@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import msgspec
 import numpy as np
 import pybase64 as base64
 from fastapi import Request
@@ -125,6 +126,18 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        sampling_params = request.sampling_params
+        max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+        if sampling_params.n > max_num_seqs:
+            return self.create_error_response(
+                f"sampling_params.n must be at most the server's max_num_seqs "
+                f"({max_num_seqs}), got {sampling_params.n}."
+            )
+        try:
+            msgspec.msgpack.encode(sampling_params)
+        except (OverflowError, TypeError, ValueError) as e:
+            return self.create_error_response(e)
+
         engine_input: EngineInput
         if features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
@@ -164,7 +177,6 @@ class ServingTokens(OpenAIServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        sampling_params = request.sampling_params
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
