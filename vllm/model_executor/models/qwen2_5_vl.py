@@ -47,7 +47,11 @@ from vllm.compilation.decorators import (
     support_torch_compile,
 )
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+    parallel_state,
+)
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -510,15 +514,24 @@ class Qwen2_5_VisionBlock(nn.Module):
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         # Only used for FlashInfer CuDNN backend.
         sequence_lengths: torch.Tensor | None = None,
+        sp_enabled: bool = False,
+        tp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
+        x = self.norm1(x)
+        if sp_enabled:
+            x_full = tp_group.all_gather(x, dim=0)
+        else:
+            x_full = x
         x_attn = self.attn(
-            self.norm1(x),
+            x_full,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
+        if sp_enabled:
+            x_attn = tp_group.reduce_scatter(x_attn, dim=0)
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
         return x
@@ -643,6 +656,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
+        self.tp_group = get_tp_group()
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.sp_min_token_num = 1000
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
@@ -1087,6 +1103,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         hidden_states = hidden_states.unsqueeze(1)
 
+        sp_enabled = (
+            self.tp_size > 1
+            and seq_len >= self.sp_min_token_num
+            and seq_len % self.tp_size == 0
+        )
+        if sp_enabled:
+            seq_chunk = hidden_states.shape[0] // self.tp_size
+            hidden_states = hidden_states[self.tp_rank * seq_chunk : (self.tp_rank + 1) * seq_chunk]
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
@@ -1104,7 +1129,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
                 sequence_lengths=sequence_lengths_now,
+                sp_enabled=sp_enabled,
+                tp_group=self.tp_group,
             )
+
+        if sp_enabled:
+            hidden_states = self.tp_group.all_gather(hidden_states, dim=0)
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.

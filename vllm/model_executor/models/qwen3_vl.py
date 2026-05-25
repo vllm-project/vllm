@@ -51,7 +51,7 @@ from transformers.video_utils import VideoMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group, parallel_state
+from vllm.distributed import get_pp_group, get_tp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -451,16 +451,25 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
+        sp_enabled: bool = False,
+        tp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x),
+        x = self.norm1(x)
+        if sp_enabled:
+            x_full = tp_group.all_gather(x, dim=0)
+        else:
+            x_full = x
+        attn_out = self.attn(
+            x_full,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
-
+        if sp_enabled:
+            attn_out = tp_group.reduce_scatter(attn_out, dim=0)
+        x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -546,6 +555,9 @@ class Qwen3_VisionTransformer(nn.Module):
             if use_data_parallel
             else parallel_state.get_tensor_model_parallel_world_size()
         )
+        self.tp_group = get_tp_group()
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.sp_min_token_num = 1000
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -811,6 +823,16 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states + pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
+        seq_len = hidden_states.size(0)
+        sp_enabled = (
+            self.tp_size > 1
+            and seq_len >= self.sp_min_token_num
+            and seq_len % self.tp_size == 0
+        )
+        if sp_enabled:
+            seq_chunk = hidden_states.shape[0] // self.tp_size
+            hidden_states = hidden_states[self.tp_rank * seq_chunk : (self.tp_rank + 1) * seq_chunk]
+
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -820,13 +842,23 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
                 max_seqlen=encoder_metadata["max_seqlen"],
                 sequence_lengths=encoder_metadata.get("sequence_lengths"),
+                sp_enabled=sp_enabled,
+                tp_group=self.tp_group,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
+                ds_input = (
+                    self.tp_group.all_gather(hidden_states, dim=0)
+                    if sp_enabled
+                    else hidden_states
+                )
                 deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
+                    ds_input
                 )
                 deepstack_feature_lists.append(deepstack_feature)
+
+        if sp_enabled:
+            hidden_states = self.tp_group.all_gather(hidden_states, dim=0)
         hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists, dim=1
