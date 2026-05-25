@@ -637,6 +637,29 @@ def cleanup_mamba_state_idx(
         mamba_state_idx.pop(req_id, None)
 
 
+def has_valid_mamba_copy_indices(
+    req_state: CachedRequestState,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    num_accepted_tokens: int,
+    has_temporal_state: bool,
+) -> bool:
+    """Return whether all logical Mamba copy indices exist in block tables."""
+    if src_block_idx < 0 or dest_block_idx < 0:
+        return False
+
+    max_src_block_idx = src_block_idx
+    if has_temporal_state:
+        max_src_block_idx += num_accepted_tokens - 1
+
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        if dest_block_idx >= len(block_ids) or max_src_block_idx >= len(block_ids):
+            return False
+    return True
+
+
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
@@ -659,6 +682,7 @@ def preprocess_mamba(
     assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
+    has_temporal_state = get_temporal_copy_spec in mamba_state_copy_funcs
 
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
@@ -688,6 +712,32 @@ def preprocess_mamba(
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
+            num_accepted_tokens = int(input_batch.num_accepted_tokens_cpu[i])
+            if not has_valid_mamba_copy_indices(
+                req_state,
+                mamba_group_ids,
+                prev_state_idx,
+                curr_state_idx,
+                num_accepted_tokens,
+                has_temporal_state,
+            ):
+                # The speculative temporal slot from the previous step is no
+                # longer present in the request block table. Fall back to a
+                # neutral copy from the last known running-state block instead
+                # of indexing past block_ids.
+                num_accepted_tokens = 1
+                input_batch.num_accepted_tokens_cpu[i] = 1
+
+            if not has_valid_mamba_copy_indices(
+                req_state,
+                mamba_group_ids,
+                prev_state_idx,
+                curr_state_idx,
+                num_accepted_tokens,
+                has_temporal_state,
+            ):
+                continue
+
             collect_mamba_copy_meta(
                 copy_bufs,
                 kv_cache_config,
@@ -695,7 +745,7 @@ def preprocess_mamba(
                 mamba_group_ids,
                 prev_state_idx,
                 curr_state_idx,
-                input_batch.num_accepted_tokens_cpu[i] - 1,
+                num_accepted_tokens - 1,
                 req_state,
                 forward_context,
             )
