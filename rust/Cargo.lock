@@ -5609,6 +5609,7 @@ dependencies = [
  "minijinja",
  "minijinja-contrib",
  "openai-harmony",
+ "paste",
  "reqwest",
  "rmp-serde",
  "serde",

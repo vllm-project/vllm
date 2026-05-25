@@ -52,6 +52,7 @@ ndarray = { version = "0.16.1", features = ["serde"] }
 openai-harmony = "0.0.8"
 openai-protocol = "1.6.0"
 parking_lot = "0.12.5"
+paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"

@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use futures::{Stream, StreamExt as _, stream};
-use serial_test::serial;
+use serde_json::json;
+use serde_json_fmt::JsonFormat as JsonFmt;
+use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
     ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
@@ -30,29 +32,90 @@ struct RoundtripCase {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used by the output processor.
     reasoning_parser: ParserSelection,
+    /// JSON formatting expected after this model's template has materialized
+    /// tool-call arguments.
+    json_fmt: JsonFmt,
 }
 
 impl RoundtripCase {
+    /// Qwen3 XML tool-call format with `qwen3` reasoning tags.
     fn qwen3() -> Self {
         Self {
             model_id: "Qwen/Qwen3-0.6B",
             assistant_stop_suffix: "<|im_end|>\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            json_fmt: spaced_json_fmt(),
+        }
+    }
+
+    /// Qwen3.5 coder-style JSON tool-call format with `qwen3` reasoning tags.
+    fn qwen35() -> Self {
+        Self {
+            model_id: "Qwen/Qwen3.5-4B",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// MiniMax M2.5 XML invoke format with `<think>` reasoning tags.
+    fn minimax_m25() -> Self {
+        Self {
+            model_id: "MiniMaxAI/MiniMax-M2.5",
+            assistant_stop_suffix: "[e~[\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// DeepSeek V4 official HF files.
+    fn deepseek_v4() -> Self {
+        Self {
+            model_id: "deepseek-ai/DeepSeek-V4-Flash",
+            assistant_stop_suffix: "<｜end▁of▁sentence｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// GLM-4.7 XML-like argument format with `<think>` reasoning tags.
+    fn glm47() -> Self {
+        Self {
+            model_id: "zai-org/GLM-4.7-Flash",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            json_fmt: compact_json_fmt(),
         }
     }
 }
 
-#[tokio::test]
-#[serial(hf_roundtrip)]
-async fn roundtrip_reasoning_and_content() -> Result<()> {
-    run_roundtrip_reasoning_and_content(RoundtripCase::qwen3()).await
+macro_rules! roundtrip_tests {
+    ($($case:ident => [$($fixture:ident),+ $(,)?]),+ $(,)?) => {
+        paste::paste! {
+            $(
+                $(
+                    #[tokio::test]
+                    #[file_serial([<hf_roundtrip_ $case>])]
+                    async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
+                        [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
+                    }
+                )+
+            )+
+        }
+    };
 }
 
-#[tokio::test]
-#[serial(hf_roundtrip)]
-async fn roundtrip_reasoning_and_multiple_tool_calls() -> Result<()> {
-    run_roundtrip_reasoning_and_multiple_tool_calls(RoundtripCase::qwen3()).await
+roundtrip_tests! {
+    qwen3 => [reasoning_and_content, tool_call_mix],
+    qwen35 => [reasoning_and_content, tool_call_mix],
+    minimax_m25 => [reasoning_and_content],
+    deepseek_v4 => [reasoning_and_content, tool_call_mix],
+    glm47 => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -99,7 +162,7 @@ async fn run_roundtrip_reasoning_and_content(case: RoundtripCase) -> Result<()> 
 }
 
 /// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
-async fn run_roundtrip_reasoning_and_multiple_tool_calls(case: RoundtripCase) -> Result<()> {
+async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     let backends = load_roundtrip_backends(&case).await?;
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
@@ -110,7 +173,7 @@ async fn run_roundtrip_reasoning_and_multiple_tool_calls(case: RoundtripCase) ->
         test_tools(),
     );
     let expected_reasoning = "Need call the weather and add tools.";
-    // let expected_text = "I will call the tools.";
+    let expected_text = "I will call the tools.";
 
     let result = run_roundtrip(
         &case,
@@ -121,18 +184,18 @@ async fn run_roundtrip_reasoning_and_multiple_tool_calls(case: RoundtripCase) ->
                 AssistantContentBlock::Reasoning {
                     text: expected_reasoning.to_string(),
                 },
-                // AssistantContentBlock::Text {
-                //     text: expected_text.to_string(),
-                // },
+                AssistantContentBlock::Text {
+                    text: expected_text.to_string(),
+                },
                 AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "call_weather".to_string(),
+                    id: "functions.get_weather:0".to_string(),
                     name: "get_weather".to_string(),
-                    arguments: r#"{"location": "Shanghai"}"#.to_string(),
+                    arguments: r#"{"location":"Shanghai"}"#.to_string(),
                 }),
                 AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "call_add".to_string(),
+                    id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    arguments: r#"{"y": 1, "x": 2}"#.to_string(),
+                    arguments: r#"{"y":1,"x":2}"#.to_string(),
                 }),
             ],
         },
@@ -143,14 +206,25 @@ async fn run_roundtrip_reasoning_and_multiple_tool_calls(case: RoundtripCase) ->
         result.parsed_message.reasoning().as_deref().map(str::trim),
         Some(expected_reasoning)
     );
-    // assert_eq!(result.parsed_message.text().trim(), expected_text);
+    assert_eq!(result.parsed_message.text().trim(), expected_text);
 
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
-    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(
+        tool_calls.len(),
+        2,
+        "parsed message: {:#?}",
+        result.parsed_message
+    );
     assert_eq!(tool_calls[0].name, "get_weather");
-    assert_eq!(tool_calls[0].arguments, r#"{"location": "Shanghai"}"#);
+    assert_eq!(
+        tool_calls[0].arguments,
+        expected_arguments(&case, json!({"location": "Shanghai"}))?,
+    );
     assert_eq!(tool_calls[1].name, "add");
-    assert_eq!(tool_calls[1].arguments, r#"{"y": 1, "x": 2}"#);
+    assert_eq!(
+        tool_calls[1].arguments,
+        expected_arguments(&case, json!({"y": 1, "x": 2}))?,
+    );
 
     assert_eq!(
         result.rerendered_closed_completion,
@@ -160,12 +234,34 @@ async fn run_roundtrip_reasoning_and_multiple_tool_calls(case: RoundtripCase) ->
     Ok(())
 }
 
-/// Load the real Hugging Face chat/text backend for one roundtrip case.
+/// Compact JSON argument formatting used by JSON-native parsers/renderers.
+fn compact_json_fmt() -> JsonFmt {
+    JsonFmt::new()
+}
+
+/// Python `json.dumps`-style compact formatting with a space after commas and
+/// colons.
+fn spaced_json_fmt() -> JsonFmt {
+    JsonFmt::new()
+        .comma(", ")
+        .expect("literal comma separator is valid JSON")
+        .colon(": ")
+        .expect("literal colon separator is valid JSON")
+}
+
+/// Format expected tool-call arguments using this case's JSON style.
+fn expected_arguments(case: &RoundtripCase, value: serde_json::Value) -> Result<String> {
+    case.json_fmt
+        .format_to_string(&value)
+        .context("failed to format expected tool-call arguments")
+}
+
+/// Load the real model chat/text backend for one roundtrip case.
 async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::LoadedModelBackends> {
     load_model_backends(
         case.model_id,
         LoadModelBackendsOptions {
-            renderer: RendererSelection::Hf,
+            renderer: RendererSelection::Auto,
             ..Default::default()
         },
     )
@@ -278,9 +374,10 @@ async fn parse_completion(
 
     while let Some(event) = events.next().await {
         if let ChatEvent::Done { message, .. } = event? {
-            // TODO: currently our parsers are not very strict about preserving or trimming whitespace,
-            // so we trim here to avoid roundtrip failures due to insignificant whitespace differences.
-            // However, this may hurt token-level fidelity so we should consider improving them.
+            // TODO: currently our parsers are not very strict about preserving or trimming
+            // whitespace, so we trim here to avoid roundtrip failures due to
+            // insignificant whitespace differences. However, this may hurt token-level
+            // fidelity so we should consider improving them.
             return Ok(message.trim());
         }
     }
@@ -369,7 +466,7 @@ fn roundtrip_request(
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
 ) -> ChatRequest {
-    ChatRequest {
+    let mut request = ChatRequest {
         request_id: request_id.into(),
         messages,
         tool_choice: if tools.is_empty() {
@@ -379,7 +476,15 @@ fn roundtrip_request(
         },
         tools,
         ..ChatRequest::for_test()
+    };
+
+    // Enable thinking for some models so that rendering and parsing the reasoning block is
+    // exercised in the roundtrip.
+    for key in ["thinking", "enable_thinking"] {
+        request.chat_options.template_kwargs.insert(key.to_string(), true.into());
     }
+
+    request
 }
 
 /// Return the function tools used by the multiple-tool-call fixture.
