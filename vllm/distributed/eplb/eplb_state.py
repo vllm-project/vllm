@@ -481,6 +481,9 @@ class EplbState:
     ) -> None:
         """Append one model's expert-load snapshot to its JSONL file."""
         dump_dir = self.parallel_config.eplb_config.expert_load_dump_dir
+        assert dump_dir is not None, (
+            "_dump_expert_load called without expert_load_dump_dir set"
+        )
         dump_path = Path(dump_dir)
         dump_path.mkdir(parents=True, exist_ok=True)
 
