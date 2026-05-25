@@ -41,6 +41,8 @@ steps:
 
 - label: Quantized MoE Test (MI355)
   key: quantized-moe-test-mi355
+  depends_on:
+  - image-build-amd
   timeout_in_minutes: 180
   device : mi355_1
   soft_fail: true
@@ -70,6 +72,8 @@ steps:
 
 - label: Quantization Quark Eval (2xMI355)
   key: quantized-quark-eval-2xmi355
+  depends_on:
+  - image-build-amd
   timeout_in_minutes: 180
   device: mi355_2
   optional: true
