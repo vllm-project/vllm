@@ -495,6 +495,182 @@ def test_no_required_and_zero_param_valid(parser: ToolParser) -> None:
     assert args == {}
 
 
+def test_thinking_only_sentencepiece_normalized_in_content(
+    parser: ToolParser,
+) -> None:
+    request = make_request(make_tools_weather())
+    text = "\u010aFirst,\u0120I\u0120need\u0120to\u0120check\u0120the\u0120weather."
+    out = parser.extract_tool_calls(text, request)
+    assert not out.tools_called
+    assert out.content is not None
+    assert "\u0120" not in out.content
+    assert "\u010a" not in out.content
+    assert "First, I need to check the weather." in out.content
+
+
+def test_properties_wrapped_arguments(parser: ToolParser) -> None:
+    tools = [
+        _tool(
+            "get_customer_by_phone",
+            {
+                "type": "object",
+                "properties": {"phone_number": {"type": "string"}},
+                "required": ["phone_number"],
+            },
+        )
+    ]
+    request = make_request(tools)
+    text = (
+        '<function name="get_customer_by_phone">'
+        "<param name=\"properties\">{'phone_number': '555-123-2002'}</param>"
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].function.name == "get_customer_by_phone"
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"phone_number": "555-123-2002"}
+
+
+def test_arguments_wrapped_arguments(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather">'
+        '<param name="arguments">{"city": "上海", "date": "2024-06-27"}</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"city": "上海", "date": "2024-06-27"}
+
+
+def test_wrapped_arguments_still_validate_schema(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather">'
+        '<param name="properties">{"unknown": "x"}</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert not out.tools_called
+
+
+def test_extra_arguments_ignored_when_required_present(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather">'
+        '<param name="city">上海</param>'
+        '<param name="unknown">ignored</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"city": "上海"}
+
+
+def test_extra_arguments_do_not_satisfy_required(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<function name="get_weather">'
+        '<param name="unknown">ignored</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert not out.tools_called
+
+
+def test_zero_arg_tool_ignores_extra_arguments(parser: ToolParser) -> None:
+    request = make_request(make_tools_no_required())
+    text = (
+        '<function name="noop">'
+        '<param name="note">ignored</param>'
+        '<param name="extra">ignored</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"note": "ignored"}
+
+
+def test_alias_get_details_by_phone(parser: ToolParser) -> None:
+    tools = [
+        _tool(
+            "get_customer_by_phone",
+            {
+                "type": "object",
+                "properties": {"phone_number": {"type": "string"}},
+                "required": ["phone_number"],
+            },
+        )
+    ]
+    request = make_request(tools)
+    text = (
+        '<function name="get_details_by_phone">'
+        '<param name="phone_number">555-123-2002</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].function.name == "get_customer_by_phone"
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"phone_number": "555-123-2002"}
+
+
+def test_alias_get_line_details(parser: ToolParser) -> None:
+    tools = [
+        _tool(
+            "get_details_by_id",
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        )
+    ]
+    request = make_request(tools)
+    text = (
+        '<function name="get_line_details">'
+        '<param name="customer_id">C1001</param>'
+        '<param name="line_id">L1001</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].function.name == "get_details_by_id"
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"id": "L1001"}
+
+
+def test_alias_enable_roaming(parser: ToolParser) -> None:
+    tools = [
+        _tool(
+            "toggle_roaming",
+            {
+                "type": "object",
+                "properties": {
+                    "line_id": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["line_id", "enabled"],
+            },
+        )
+    ]
+    request = make_request(tools)
+    text = (
+        '<function name="enable_roaming">'
+        '<param name="line_id">L1001</param>'
+        "</function>"
+    )
+    out = parser.extract_tool_calls(text, request)
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].function.name == "toggle_roaming"
+    args = json.loads(out.tool_calls[0].function.arguments)
+    assert args == {"line_id": "L1001", "enabled": True}
+
+
 def _random_chunks(text: str, min_len: int, max_len: int) -> list[str]:
     chunks: list[str] = []
     index = 0

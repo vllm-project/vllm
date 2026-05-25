@@ -49,24 +49,35 @@ _PARAM_WITH_NAME_REGEX = re.compile(
 _PARAM_MISSING_NAME_REGEX = re.compile(r"<param(?![^>]*\bname=)[^>]*>", re.DOTALL)
 _FUNC_BLOCK_REGEX = re.compile(r"<function.*?</function>", re.DOTALL)
 
-# SentencePiece/GPT-style decoders may emit U+0120 (Ġ) instead of ASCII space.
+# SentencePiece/GPT-style decoders may emit U+0120 (Ġ) / U+010A (Ċ).
 _TOKENIZER_SPACE = "\u0120"
+_TOKENIZER_NEWLINE = "\u010a"
 
 
 def _normalize_model_output(text: str) -> str:
     if (
         _TOKENIZER_SPACE not in text
+        and _TOKENIZER_NEWLINE not in text
         and "<functionname=" not in text
         and "<paramname=" not in text
     ):
         return text
 
     normalized = text.replace(_TOKENIZER_SPACE, " ")
+    normalized = normalized.replace(_TOKENIZER_NEWLINE, "\n")
     # Some model outputs collapse tag names and attributes, e.g.
     # <functionname="foo"> or <paramname="bar">.
     normalized = normalized.replace("<functionname=", "<function name=")
     normalized = normalized.replace("<paramname=", "<param name=")
     return normalized
+
+
+def _strip_thinking_content(text: str) -> str:
+    """Return only user-visible content after MiniCPM5 thinking, when present."""
+    if "</think>" not in text:
+        return text
+    visible = text.rsplit("</think>", 1)[-1].lstrip()
+    return visible if visible else text
 
 
 def _streaming_args_snapshot(args_json: str, *, is_complete: bool) -> str:
@@ -121,6 +132,132 @@ def _get_argument_type(
     if arg_key not in props:
         return None
     return props[arg_key].get("type")
+
+
+def _coerce_argument_value(
+    func_name: str,
+    arg_key: str,
+    value: Any,
+    name_to_tool: Dict[str, ChatCompletionToolsParam],
+) -> Any:
+    arg_type = _get_argument_type(func_name, arg_key, name_to_tool)
+    if arg_type == "string":
+        return value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False)
+    if isinstance(value, str):
+        parsed_val, _ = _parse_arguments(value)
+        return parsed_val
+    return value
+
+
+def _add_argument(
+    func_name: str,
+    key: str,
+    val_text: str,
+    arguments: Dict[str, Any],
+    seen_keys: Set[str],
+    allowed_props: Set[str],
+    name_to_tool: Dict[str, ChatCompletionToolsParam],
+) -> bool:
+    """Add one argument; return False if it violates the tool schema."""
+    # MiniCPM5 can emit OpenAI-style wrappers, e.g.
+    # <param name="properties">{'id': '...'}</param>. Keep known fields and
+    # ignore extra fields so valid tool calls do not fall back to long text.
+    if key in {"properties", "arguments"} and allowed_props and key not in allowed_props:
+        parsed_val, parsed_ok = _parse_arguments(val_text)
+        if not parsed_ok or not isinstance(parsed_val, dict):
+            return False
+        added = False
+        for wrapped_key, wrapped_value in parsed_val.items():
+            if wrapped_key not in allowed_props:
+                continue
+            if wrapped_key in seen_keys:
+                return False
+            seen_keys.add(wrapped_key)
+            arguments[wrapped_key] = _coerce_argument_value(
+                func_name, wrapped_key, wrapped_value, name_to_tool)
+            added = True
+        return added
+
+    if allowed_props and key not in allowed_props:
+        return True
+    if key in seen_keys:
+        return False
+    seen_keys.add(key)
+    arguments[key] = _coerce_argument_value(
+        func_name, key, val_text, name_to_tool)
+    return True
+
+
+def _normalize_alias_tool_call(
+    func_name: str,
+    arguments: Dict[str, Any],
+    tool_names: Set[str],
+) -> Tuple[str, Dict[str, Any]]:
+    """Map common MiniCPM5 alias tool names to the exposed tool schema."""
+    if func_name in tool_names:
+        return func_name, arguments
+
+    if func_name == "get_details_by_phone" and "get_customer_by_phone" in tool_names:
+        phone_number = arguments.get("phone_number") or arguments.get("phone")
+        if phone_number is not None:
+            return "get_customer_by_phone", {"phone_number": phone_number}
+
+    if func_name == "get_details_by_name" and "get_customer_by_name" in tool_names:
+        full_name = arguments.get("full_name") or arguments.get("name")
+        dob = arguments.get("date_of_birth") or arguments.get("dob")
+        mapped = {}
+        if full_name is not None:
+            mapped["full_name"] = full_name
+        if dob is not None:
+            mapped["date_of_birth"] = dob
+            mapped["dob"] = dob
+        if mapped:
+            return "get_customer_by_name", mapped
+
+    if func_name in {
+        "get_line_details",
+        "get_line_status",
+        "get_roaming_status",
+    } and "get_details_by_id" in tool_names:
+        detail_id = arguments.get("line_id") or arguments.get("id")
+        if detail_id is not None:
+            return "get_details_by_id", {"id": detail_id}
+
+    if func_name == "get_plan_details" and "get_details_by_id" in tool_names:
+        plan_id = arguments.get("plan_id") or arguments.get("id")
+        if plan_id is not None:
+            return "get_details_by_id", {"id": plan_id}
+
+    if func_name == "enable_roaming" and "toggle_roaming" in tool_names:
+        line_id = arguments.get("line_id") or arguments.get("id")
+        if line_id is not None:
+            return "toggle_roaming", {"line_id": line_id, "enabled": True}
+
+    if func_name == "disable_roaming" and "toggle_roaming" in tool_names:
+        line_id = arguments.get("line_id") or arguments.get("id")
+        if line_id is not None:
+            return "toggle_roaming", {"line_id": line_id, "enabled": False}
+
+    if func_name in {"add_refueled_data", "add_data_to_line"} and "refuel_data" in tool_names:
+        line_id = arguments.get("line_id") or arguments.get("id")
+        amount = (
+            arguments.get("amount_gb")
+            or arguments.get("gb")
+            or arguments.get("gb_amount")
+            or arguments.get("amount")
+        )
+        mapped = {}
+        if "customer_id" in arguments:
+            mapped["customer_id"] = arguments["customer_id"]
+        if line_id is not None:
+            mapped["line_id"] = line_id
+        if amount is not None:
+            mapped["amount_gb"] = amount
+        if mapped:
+            return "refuel_data", mapped
+
+    return func_name, arguments
 
 
 def _build_tool_maps(
@@ -205,20 +342,18 @@ def _parse_function_block(
                 if not key:
                     has_invalid_param = True
                     break
-                if allowed_props and key not in allowed_props:
-                    has_invalid_param = True
-                    break
-                if key in seen_keys:
-                    has_invalid_param = True
-                    break
-                seen_keys.add(key)
                 val_text = (param.text or "").strip()
-                arg_type = _get_argument_type(func_name or "", key, name_to_tool)
-                if arg_type != "string":
-                    parsed_val, _ = _parse_arguments(val_text)
-                    arguments[key] = parsed_val
-                else:
-                    arguments[key] = val_text
+                if not _add_argument(
+                    func_name or "",
+                    key,
+                    val_text,
+                    arguments,
+                    seen_keys,
+                    allowed_props,
+                    name_to_tool,
+                ):
+                    has_invalid_param = True
+                    break
             if has_invalid_param:
                 arguments.clear()
                 param_invalid = True
@@ -236,23 +371,21 @@ def _parse_function_block(
             allowed_props = name_to_allowed_props.get(func_name or "", set())
             for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
                 key = pm.group(1).strip()
-                if allowed_props and key not in allowed_props:
-                    has_invalid_param = True
-                    break
-                if key in seen_keys:
-                    has_invalid_param = True
-                    break
-                seen_keys.add(key)
                 val_text = (pm.group(2) or "")
                 if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
                     val_text = val_text[len("<![CDATA["):-len("]]>")]
                 val_text = val_text.strip()
-                arg_type = _get_argument_type(func_name or "", key, name_to_tool)
-                if arg_type != "string":
-                    parsed_val, _ = _parse_arguments(val_text)
-                    arguments[key] = parsed_val
-                else:
-                    arguments[key] = val_text
+                if not _add_argument(
+                    func_name or "",
+                    key,
+                    val_text,
+                    arguments,
+                    seen_keys,
+                    allowed_props,
+                    name_to_tool,
+                ):
+                    has_invalid_param = True
+                    break
             if has_invalid_param:
                 arguments.clear()
                 param_invalid = True
@@ -286,19 +419,19 @@ def _parse_partial_params(
         key = pm.group(1).strip()
         if not key or key in seen_keys:
             continue
-        if allowed_props and key not in allowed_props:
-            continue
-        seen_keys.add(key)
         val_text = (pm.group(2) or "")
         if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
             val_text = val_text[len("<![CDATA["):-len("]]>")]
         val_text = val_text.strip()
-        arg_type = _get_argument_type(func_name, key, name_to_tool)
-        if arg_type != "string":
-            parsed_val, _ = _parse_arguments(val_text)
-            arguments[key] = parsed_val
-        else:
-            arguments[key] = val_text
+        _add_argument(
+            func_name,
+            key,
+            val_text,
+            arguments,
+            seen_keys,
+            allowed_props,
+            name_to_tool,
+        )
     return arguments
 
 
@@ -343,7 +476,7 @@ class MiniCPM5XMLToolParser(ToolParser):
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
-                content=model_output,
+                content=_strip_thinking_content(model_output),
             )
 
         tool_names, name_to_allowed_props, name_to_required, name_to_tool = (
@@ -387,17 +520,18 @@ class MiniCPM5XMLToolParser(ToolParser):
             if last_end < len(model_output):
                 normal_parts.append(model_output[last_end:])
 
-            content = "".join(normal_parts).strip()
+            content = _strip_thinking_content("".join(normal_parts).strip())
 
             logger.debug(
                 "[MiniCPM5XMLToolParser] extracted %d tool calls",
                 len(tool_calls),
             )
 
+            tools_called = len(tool_calls) > 0
             return ExtractedToolCallInformation(
-                tools_called=len(tool_calls) > 0,
+                tools_called=tools_called,
                 tool_calls=tool_calls,
-                content=content,
+                content=None if tools_called else content,
             )
         except Exception as e:
             logger.error("Error in MiniCPM5XMLToolParser.extract_tool_calls: %s", e)
