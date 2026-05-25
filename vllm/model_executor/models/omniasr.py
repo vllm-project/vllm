@@ -74,10 +74,10 @@ class OmniASRModel(nn.Module):
         self.encoder_proj = ColumnParallelLinear(
             config.encoder_embed_dim, config.projection_dim, bias=True
         )
-        self.text_frontend = VocabParallelEmbedding(
-            config.target_vocab_size + config.n_special_tokens,
-            config.text_config.hidden_size,
-        )
+        #self.text_frontend = VocabParallelEmbedding(
+        #    config.target_vocab_size + config.n_special_tokens,
+        #    config.text_config.hidden_size,
+        #)
         self.lang_embeddings = VocabParallelEmbedding(
             config.num_languages, config.text_config.hidden_size
         )
@@ -368,6 +368,7 @@ class Wav2Vec2Frontend(nn.Module):
         x = self.model_dim_proj(x)
         pos = self.pos_encoder["conv"](x.transpose(1, 2))
         pos = pos[:, :, : x.shape[1]]
+        pos = nn.functional.gelu(pos)
         x = x + pos.transpose(1, 2)
         return x
 
@@ -626,12 +627,12 @@ class OmniAsrForConditionalGeneration(
                 name = name.replace(".ffn.inner_proj", ".mlp.up_proj")
                 name = name.replace(".ffn.output_proj", ".mlp.down_proj")
                 name = name.replace(".ffn.gate_proj", ".mlp.gate_proj")
-            # elif name.startswith("text_frontend"):
-            #    name = name.replace(
-            #        "text_frontend", "language_model.model.embed_tokens"
-            #    )
+            elif name.startswith("text_frontend"):
+               name = name.replace(
+                   "text_frontend", "language_model.model.embed_tokens"
+               )
             elif name.startswith("final_proj"):
-                name = name.replace("final_proj", "language_model.lm_head")
+                pass
             else:
                 name = "model." + name
 
