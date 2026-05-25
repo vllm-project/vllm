@@ -1744,7 +1744,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
         int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
     ),
-    # Allows vllm to find tuned config under customized folder
+    # User override folder for tuned Triton-kernel configs. Shared by MoE,
+    # Mamba SSU, and LoRA. Filenames are distinct so one folder can hold all.
+    # Each component first checks this folder, then the configs shipped with
+    # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
