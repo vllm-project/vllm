@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -29,7 +28,7 @@ from .typing import OfflineInputsContext, OfflineOutputsContext
 logger = init_logger(__name__)
 
 
-class PoolingOfflineMixin(OfflineInferenceMixin, ABC):
+class PoolingOfflineMixin(OfflineInferenceMixin):
     """Offline inference for pooling models"""
 
     runner_type: str

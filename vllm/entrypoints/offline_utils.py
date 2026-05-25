@@ -47,7 +47,7 @@ _O = TypeVar(
 _R = TypeVar("_R", default=Any)
 
 
-class OfflineInferenceMixin(ABC):
+class OfflineInferenceMixin:
     """Offline inference utils"""
 
     request_counter: Counter

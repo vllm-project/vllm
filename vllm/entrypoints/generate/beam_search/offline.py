@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from abc import ABC
 
 from tqdm import tqdm
 
@@ -22,7 +21,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class BeamSearchOfflineMixin(OfflineInferenceMixin, ABC):
+class BeamSearchOfflineMixin(OfflineInferenceMixin):
     """Offline inference for beam search"""
 
     def beam_search(
