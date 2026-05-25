@@ -11,11 +11,11 @@ Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn:
         head=128, MXFP4 (block=32), 4 ue8m0 bytes
 
-Additional split backend for profiling:
+Additional cutedsl kernels:
   - _compress_kv_sparse_attn_cutedsl / _norm_rope_insert_sparse_attn_cutedsl:
-        CuTe DSL split backend with explicit 16-warp sparse-attention mapping
+        CuTe DSL split kernels for C128
   - _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl:
-        CuTe DSL C4 fused backend for sparse-attention compressor layers
+        CuTe DSL fused kernels for C4
 
 RoPE is register-based via tl.reshape -> tl.split -> tl.interleave (or the
 even/odd halves are consumed directly for MXFP4, no interleave needed).
@@ -34,9 +34,6 @@ from .fused_indexer_q import _fp32x2_to_fp4x2
 
 @cache
 def _get_sparse_attn_cutedsl_impls():
-    # Import lazily so the normal Triton-only path does not require CuTe DSL at
-    # module import time. Cache the resolved callables because these wrappers
-    # are used in microbenchmarks where Python launch spacing matters.
     from .sparse_attn_compress_cutedsl import (
         _compress_kv_sparse_attn_cutedsl,
         _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
@@ -56,7 +53,7 @@ def _compress_kv_sparse_attn_cutedsl(*args, **kwargs):
 
 
 def _norm_rope_insert_sparse_attn_cutedsl(*args, **kwargs):
-    """CuTe DSL RMSNorm/RoPE/FP8-store wrapper for split testing."""
+    """CuTe DSL RMSNorm/RoPE/FP8-store wrapper."""
     return _get_sparse_attn_cutedsl_impls()[1](*args, **kwargs)
 
 
