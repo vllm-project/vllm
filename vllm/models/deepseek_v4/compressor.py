@@ -110,18 +110,8 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         num_reqs = common_attn_metadata.num_reqs
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        # slot_mapping may be CUDA-graph padded. Triton kernels tolerated a
-        # shorter token_to_req_indices pointer because padded slots return
-        # before reading it, but CuTe DSL validates matching tensor extents at
-        # launch time. Return the padded extent here and fill only real tokens.
-        num_slots = common_attn_metadata.slot_mapping.shape[0]
-        if x.shape[0] > num_slots:
-            raise ValueError(
-                "Compressor token_to_req_indices has more real tokens than "
-                f"slot_mapping entries: {x.shape[0]} > {num_slots}."
-            )
-        token_to_req_indices = self.token_to_req_indices[:num_slots]
-        token_to_req_indices[: x.shape[0]].copy_(x, non_blocking=True)
+        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
+        token_to_req_indices.copy_(x, non_blocking=True)
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -342,9 +332,6 @@ class DeepseekCompressor(nn.Module):
         num_actual = slot_mapping.shape[0]
         if token_to_req_indices is None:
             raise ValueError("Compressor metadata missing token_to_req_indices.")
-        token_to_req_indices = token_to_req_indices[:num_actual]
-        positions = positions[:num_actual]
-        slot_mapping = slot_mapping[:num_actual]
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
@@ -394,7 +381,6 @@ class DeepseekCompressor(nn.Module):
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
-        kv_slot_mapping = k_cache_metadata.slot_mapping[:num_actual]
 
         if self._use_cutedsl_sparse_compressor:
             if self._use_cutedsl_fused_sparse_compressor:
@@ -409,7 +395,7 @@ class DeepseekCompressor(nn.Module):
                     self.rms_norm_eps,
                     cos_sin_cache,
                     kv_cache,
-                    kv_slot_mapping,
+                    k_cache_metadata.slot_mapping,
                     kv_cache.shape[1],  # paged KV cache block size
                     kv_cache.stride(0),
                     head_size=self.head_dim,
@@ -445,7 +431,7 @@ class DeepseekCompressor(nn.Module):
                     self.rms_norm_eps,
                     cos_sin_cache,
                     kv_cache,
-                    kv_slot_mapping,
+                    k_cache_metadata.slot_mapping,
                     kv_cache.shape[1],  # paged KV cache block size
                     kv_cache.stride(0),
                     head_size=self.head_dim,
@@ -477,7 +463,7 @@ class DeepseekCompressor(nn.Module):
                 cos_sin_cache.stride(0),
                 # KV cache
                 kv_cache,
-                kv_slot_mapping,
+                k_cache_metadata.slot_mapping,
                 kv_cache.shape[1],  # paged KV cache block size (tokens per block)
                 # constexprs
                 HEAD_SIZE=self.head_dim,

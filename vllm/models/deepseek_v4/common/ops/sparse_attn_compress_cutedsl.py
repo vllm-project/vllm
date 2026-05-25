@@ -113,7 +113,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
         kv_cache_block_size: Int64,
         stream: CUstream,
     ):
-        grid = (positions.shape[0], 1, 1)
+        grid = (slot_mapping.shape[0], 1, 1)
         self.kernel(
             state_cache,
             token_to_req_indices,
@@ -153,10 +153,21 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
         elem1 = elem0 + 1
 
         slot_id = slot_mapping[token_idx]
-        position = positions[token_idx]
-        boundary = (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
-        kv_slot_idx = kv_slot_mapping[token_idx]
-        active = slot_id >= Int64(0) and boundary and kv_slot_idx >= Int64(0)
+        has_position = token_idx < positions.shape[0]
+        position = Int64(0)
+        if has_position:
+            position = positions[token_idx]
+        boundary = has_position and (
+            (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
+        )
+        has_req_idx = token_idx < token_to_req_indices.shape[0]
+        has_kv_slot_idx = token_idx < kv_slot_mapping.shape[0]
+        kv_slot_idx = Int64(-1)
+        if has_kv_slot_idx:
+            kv_slot_idx = kv_slot_mapping[token_idx]
+        active = (
+            slot_id >= Int64(0) and has_req_idx and boundary and kv_slot_idx >= Int64(0)
+        )
 
         if active:
             req_idx = token_to_req_indices[token_idx]
@@ -361,7 +372,10 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
         if scale_dim < expected_scale_dim:
             raise ValueError("scale_dim is too small for the UE8M0 scale row.")
 
-        num_tokens = cute.sym_int()
+        num_positions = cute.sym_int()
+        num_slots = cute.sym_int()
+        num_req_indices = cute.sym_int()
+        num_kv_slots = cute.sym_int()
         num_state_blocks = cute.sym_int()
         num_kv_blocks = cute.sym_int()
         state_cache_block_size = cute.sym_int()
@@ -379,9 +393,11 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
             ),
             assumed_align=16,
         )
-        token_to_req_indices = make_fake_tensor(Int32, (num_tokens,), divisibility=4)
-        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
-        slot_mapping = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
+        token_to_req_indices = make_fake_tensor(
+            Int32, (num_req_indices,), divisibility=4
+        )
+        positions = make_fake_tensor(Int64, (num_positions,), divisibility=8)
+        slot_mapping = make_fake_tensor(Int64, (num_slots,), divisibility=8)
         block_table = make_fake_tensor(
             Int32, (cute.sym_int(), block_table_width), divisibility=1
         )
@@ -404,7 +420,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
             ),
             assumed_align=16,
         )
-        kv_slot_mapping = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
+        kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
 
         kernel = SparseAttnCompressNormRopeStoreC4Kernel(
             head_size,
@@ -628,7 +644,7 @@ class SparseAttnCompressKernel:
         compressed_kv: cute.Tensor,
         stream: CUstream,
     ):
-        grid = (positions.shape[0] * self.num_splits, 1, 1)
+        grid = (slot_mapping.shape[0] * self.num_splits, 1, 1)
         self.kernel(
             state_cache,
             token_to_req_indices,
@@ -662,9 +678,15 @@ class SparseAttnCompressKernel:
         col_base = split_idx * self.head_tile + col_group * self.elems_per_lane
 
         slot_id = slot_mapping[token_idx]
-        position = positions[token_idx]
-        boundary = (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
-        active = slot_id >= Int64(0) and boundary
+        has_position = token_idx < positions.shape[0]
+        position = Int64(0)
+        if has_position:
+            position = positions[token_idx]
+        boundary = has_position and (
+            (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
+        )
+        has_req_idx = token_idx < token_to_req_indices.shape[0]
+        active = slot_id >= Int64(0) and has_req_idx and boundary
 
         if active:
             smem = cutlass.utils.SmemAllocator()
@@ -886,7 +908,9 @@ class SparseAttnCompressKernel:
     ):
         if head_size % SparseAttnCompressKernel.head_tile != 0:
             raise ValueError("head_size must be divisible by the 64-wide head tile.")
-        num_tokens = cute.sym_int()
+        num_positions = cute.sym_int()
+        num_slots = cute.sym_int()
+        num_req_indices = cute.sym_int()
         num_blocks = cute.sym_int()
         state_cache_block_size = cute.sym_int()
         block_table_width = cute.sym_int()
@@ -902,15 +926,17 @@ class SparseAttnCompressKernel:
             ),
             assumed_align=16,
         )
-        token_to_req_indices = make_fake_tensor(Int32, (num_tokens,), divisibility=4)
-        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
-        slot_mapping = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
+        token_to_req_indices = make_fake_tensor(
+            Int32, (num_req_indices,), divisibility=4
+        )
+        positions = make_fake_tensor(Int64, (num_positions,), divisibility=8)
+        slot_mapping = make_fake_tensor(Int64, (num_slots,), divisibility=8)
         block_table = make_fake_tensor(
             Int32, (cute.sym_int(), block_table_width), divisibility=1
         )
         compressed_kv = cute.runtime.make_fake_tensor(
             Float32,
-            (num_tokens, head_size),
+            (num_slots, head_size),
             stride=(cute.sym_int64(divisibility=4), 1),
             assumed_align=4,
         )
@@ -975,7 +1001,7 @@ class SparseAttnNormRopeStoreKernel:
         kv_cache_block_size: Int64,
         stream: CUstream,
     ):
-        grid = (positions.shape[0], 1, 1)
+        grid = (slot_mapping.shape[0], 1, 1)
         self.kernel(
             compressed_kv,
             positions,
@@ -1008,9 +1034,17 @@ class SparseAttnNormRopeStoreKernel:
         elem0 = tid * 2
 
         slot_id = slot_mapping[token_idx]
-        position = positions[token_idx]
-        boundary = (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
-        kv_slot_idx = kv_slot_mapping[token_idx]
+        has_position = token_idx < positions.shape[0]
+        position = Int64(0)
+        if has_position:
+            position = positions[token_idx]
+        boundary = has_position and (
+            (position + Int64(1)) % Int64(self.compress_ratio) == Int64(0)
+        )
+        has_kv_slot_idx = token_idx < kv_slot_mapping.shape[0]
+        kv_slot_idx = Int64(-1)
+        if has_kv_slot_idx:
+            kv_slot_idx = kv_slot_mapping[token_idx]
         active = slot_id >= Int64(0) and boundary and kv_slot_idx >= Int64(0)
 
         if active:
@@ -1139,18 +1173,20 @@ class SparseAttnNormRopeStoreKernel:
         expected_scale_dim = (head_size - rope_head_dim) // quant_block + 1
         if scale_dim < expected_scale_dim:
             raise ValueError("scale_dim is too small for the UE8M0 scale row.")
-        num_tokens = cute.sym_int()
+        num_positions = cute.sym_int()
+        num_slots = cute.sym_int()
+        num_kv_slots = cute.sym_int()
         max_pos = cute.sym_int()
         num_blocks = cute.sym_int()
 
         compressed_kv = cute.runtime.make_fake_tensor(
             Float32,
-            (num_tokens, head_size),
+            (num_slots, head_size),
             stride=(cute.sym_int64(divisibility=4), 1),
             assumed_align=4,
         )
-        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
-        slot_mapping = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
+        positions = make_fake_tensor(Int64, (num_positions,), divisibility=8)
+        slot_mapping = make_fake_tensor(Int64, (num_slots,), divisibility=8)
         rms_norm_weight = make_fake_tensor(
             norm_weight_dtype, (head_size,), divisibility=4
         )
@@ -1170,7 +1206,7 @@ class SparseAttnNormRopeStoreKernel:
             ),
             assumed_align=16,
         )
-        kv_slot_mapping = make_fake_tensor(Int64, (num_tokens,), divisibility=8)
+        kv_slot_mapping = make_fake_tensor(Int64, (num_kv_slots,), divisibility=8)
 
         kernel = SparseAttnNormRopeStoreKernel(
             head_size,
