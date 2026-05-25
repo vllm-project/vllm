@@ -107,13 +107,14 @@ class ServingScores(PoolingServing):
     ) -> JSONResponse:
         items: list[ScoreResponseData] = []
         num_prompt_tokens = 0
+        score_batch = ScoringRequestOutput.from_base_batch(final_res_batch)
 
-        for idx, final_res in enumerate(final_res_batch):
-            classify_res = ScoringRequestOutput.from_base(final_res)
-
+        for idx, (score_res, final_res) in enumerate(
+            zip(score_batch, final_res_batch)
+        ):
             item = ScoreResponseData(
                 index=idx,
-                score=classify_res.outputs.score,
+                score=score_res.outputs.score,
             )
             prompt_token_ids = final_res.prompt_token_ids
 
@@ -148,9 +149,10 @@ class ServingScores(PoolingServing):
 
         results: list[RerankResult] = []
         num_prompt_tokens = 0
-        for idx, final_res in enumerate(final_res_batch):
-            classify_res = ScoringRequestOutput.from_base(final_res)
-
+        score_batch = ScoringRequestOutput.from_base_batch(final_res_batch)
+        for idx, (score_res, final_res) in enumerate(
+            zip(score_batch, final_res_batch)
+        ):
             document = documents[idx]
             if isinstance(document, str):
                 rerank_document = RerankDocument(text=document)
@@ -162,7 +164,7 @@ class ServingScores(PoolingServing):
             result = RerankResult(
                 index=idx,
                 document=rerank_document,
-                relevance_score=classify_res.outputs.score,
+                relevance_score=score_res.outputs.score,
             )
             results.append(result)
             prompt_token_ids = final_res.prompt_token_ids
