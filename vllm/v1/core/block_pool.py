@@ -181,6 +181,11 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # Blocks whose hashes were eagerly registered this scheduler step but
+        # whose K/V bytes are not yet worker-confirmed. ``commit_step`` clears
+        # at step boundaries; ``rollback_uncommitted`` evicts on early free.
+        self._uncommitted: dict[str, list[KVCacheBlock]] = {}
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -264,6 +269,7 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        uncommitted_for_req: list[KVCacheBlock] | None = None
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -281,6 +287,13 @@ class BlockPool:
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+
+            # Track for commit_step / rollback_uncommitted. Lazy list alloc.
+            if uncommitted_for_req is None:
+                uncommitted_for_req = self._uncommitted.setdefault(
+                    request.request_id, []
+                )
+            uncommitted_for_req.append(blk)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -432,6 +445,22 @@ class BlockPool:
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
 
+    def rollback_uncommitted(self, request_id: str) -> int:
+        """Evict ``request_id``'s eager-registered-but-not-yet-worker-confirmed
+        cache entries. Returns the number evicted. Idempotent.
+        """
+        blocks = self._uncommitted.pop(request_id, None)
+        if not blocks:
+            return 0
+        return sum(self._maybe_evict_cached_block(b) for b in blocks)
+
+    def commit_step(self) -> None:
+        """Promote all pending eager registrations to committed. Called at
+        scheduler step boundaries. Idempotent.
+        """
+        if self._uncommitted:
+            self._uncommitted.clear()
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
@@ -471,6 +500,8 @@ class BlockPool:
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
+
+        self._uncommitted.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

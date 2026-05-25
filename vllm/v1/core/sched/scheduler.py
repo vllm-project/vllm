@@ -359,6 +359,9 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Previous step's worker has run by now; promote its eager cache
+        # registrations from uncommitted to committed.
+        self.kv_cache_manager.commit_step()
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
