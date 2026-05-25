@@ -78,7 +78,8 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         # embeddings shape: [n_tokens, embedding_size]
 
         # for matryoshka representation
-        embeddings = embeddings[..., : pooling_param.dimensions]
+        if pooling_param.dimensions is not None:
+            embeddings = embeddings[..., : pooling_param.dimensions]
 
         # for normalize
         if self.activation is not None and pooling_param.use_activation:

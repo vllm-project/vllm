@@ -30,6 +30,9 @@ class PassContext:
     def __init__(self, compile_range: Range):
         self.compile_range: Range = compile_range
 
+        # set of arg indices
+        self.donated_input_ids: set[int] = set()
+
 
 def get_pass_context() -> PassContext:
     """Get the current pass context."""

@@ -186,6 +186,9 @@ ray.get([train_handle, inference_handle])
 # Collect all weight metadata from the training actor
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
+# Start weight update
+ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
 inference_handle = llm.update_weights.remote(
@@ -202,6 +205,9 @@ inference_handle = llm.update_weights.remote(
 # Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+# Finish weight update
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 

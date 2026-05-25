@@ -71,12 +71,27 @@ class EmbedsInput(_InputOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_token_ids: NotRequired[list[int]]
+    """Token IDs of the rendered prompt. Only set for mixed-mode inputs
+    (chat completion with `prompt_embeds` content parts). When present,
+    `is_token_ids` MUST also be present and have the same length. 
+    For pure-embeds inputs this field is absent."""
+
+    is_token_ids: NotRequired[list[bool]]
+    """Per-position mask for mixed-mode inputs. `True` means the position
+    is a real token ID (use the model's embedding layer); `False` means
+    the position uses a pre-computed embedding row from `prompt_embeds`.
+    Length MUST equal `len(prompt_token_ids)`.
+    For pure-embeds inputs this field is absent."""
+
 
 def embeds_input(
     prompt_embeds: "torch.Tensor",
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    prompt_token_ids: list[int] | None = None,
+    is_token_ids: list[bool] | None = None,
 ) -> EmbedsInput:
     """
     Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
@@ -88,6 +103,10 @@ def embeds_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if prompt_token_ids is not None:
+        inputs["prompt_token_ids"] = prompt_token_ids
+    if is_token_ids is not None:
+        inputs["is_token_ids"] = is_token_ids
 
     return inputs
 
