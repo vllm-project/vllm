@@ -143,13 +143,17 @@ class AutoAWQConfig(QuantizationConfig):
         modules_to_not_convert = cls.get_from_keys_or(
             config, ["modules_to_not_convert"], None
         )
+        # Ensure full_config uses "awq" as quant_method for MoE fallback compatibility.
+        # MoeWNA16Config only accepts "gptq" or "awq", so we normalize here.
+        full_config = config.copy()
+        full_config["quant_method"] = "awq"
         return cls(
             weight_bits,
             group_size,
             zero_point,
             lm_head_quantized,
             modules_to_not_convert,
-            config,
+            full_config,
         )
 
     @classmethod
