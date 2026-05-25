@@ -518,8 +518,19 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 break
         if use_eagle and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
-            for computed in computed_blocks:
-                computed.pop()
+            # ════════════════════════════════════════════════════════════════
+            # [Genesis P83 vllm#38182 mitigation] Skip pop() when GENESIS_ENABLE_P83=1
+            # MTP drafter reads KV directly (not pre-materialised hidden states),
+            # so pop() is overly conservative for method='mtp'. Do NOT enable
+            # for true Eagle/Eagle3 — those drafters genuinely need the drop.
+            # ════════════════════════════════════════════════════════════════
+            import os as _genesis_p83_os
+            _genesis_p83_skip = _genesis_p83_os.environ.get(
+                'GENESIS_ENABLE_P83', '').strip().lower() in ('1', 'true', 'yes', 'on')
+            if not _genesis_p83_skip:
+                for computed in computed_blocks:
+                    computed.pop()
+
         while (
             block_size != alignment_tokens  # Faster for common case.
             and len(computed_blocks[0]) * block_size % alignment_tokens != 0
@@ -625,17 +636,25 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 for computed in computed_blocks:
                     computed.pop()
         if use_eagle and computed_blocks[0]:
-            for computed in computed_blocks:
-                computed.pop()
-            # Re-align after eagle pop: the pop may break the alignment
-            # when block_size != alignment_tokens (hybrid models with
-            # different page sizes, e.g. Gemma4).
-            while (
-                block_size != alignment_tokens
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
+            # ════════════════════════════════════════════════════════════════
+            # [Genesis P83 vllm#38182 mitigation] Skip pop() when GENESIS_ENABLE_P83=1
+            # See P83 wiring docstring. MTP-only safe.
+            # ════════════════════════════════════════════════════════════════
+            import os as _genesis_p83_os
+            _genesis_p83_skip = _genesis_p83_os.environ.get(
+                'GENESIS_ENABLE_P83', '').strip().lower() in ('1', 'true', 'yes', 'on')
+            if not _genesis_p83_skip:
                 for computed in computed_blocks:
                     computed.pop()
+                # Re-align after eagle pop: the pop may break the alignment
+                # when block_size != alignment_tokens (hybrid models with
+                # different page sizes, e.g. Gemma4).
+                while (
+                    block_size != alignment_tokens
+                    and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+                ):
+                    for computed in computed_blocks:
+                        computed.pop()
         return computed_blocks
 
     def _cache_block_mask(
