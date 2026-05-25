@@ -167,6 +167,7 @@ jobs:
         tests/kernels/quantization/test_dynamic_int8_lm_head.py
         tests/quantization/test_hip_w4a16_kernel.py
         tests/rocm/aiter/test_fused_qk_norm_mrope_kvcache.py
+        tests/kernels/test_wvsplitk_fused_silu.py
 
   test-kernels-performance:
     name: test-kernels (performance)
