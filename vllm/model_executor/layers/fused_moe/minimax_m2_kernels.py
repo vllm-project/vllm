@@ -20,6 +20,7 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     topk_ids_ptr,
     a1q_ptr,
     a1q_scale_ptr,
+    fp8_max_val,
     hidden_stride_m: tl.constexpr,
     logits_stride_m: tl.constexpr,
     fp8_min: tl.constexpr,
@@ -44,8 +45,10 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     ).to(tl.float32)
 
     absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1.0e-10)
-    scale = absmax / fp8_max
-    x_q = tl.clamp(x / scale, fp8_min, fp8_max).to(a1q_ptr.dtype.element_ty)
+    scale = tl.math.div_rn(absmax, fp8_max_val)
+    x_q = tl.clamp(
+        tl.math.div_rn(x, scale), fp8_min, fp8_max
+    ).to(a1q_ptr.dtype.element_ty)
 
     tl.store(
         a1q_ptr + token_id * hidden_stride_m + hidden_offsets,
@@ -141,6 +144,7 @@ def _minimax_moe_topk_sigmoid_quant_impl(
         topk_ids,
         a1q,
         a1q_scale,
+        fp8_max,
         hidden_states.stride(0),
         router_logits.stride(0),
         fp8_min=fp8_min,
