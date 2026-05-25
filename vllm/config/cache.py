@@ -247,6 +247,16 @@ class CacheConfig:
             )
         return calculate_kv_scales
 
+    @field_validator("mamba_block_size", mode="after")
+    @classmethod
+    def _validate_mamba_block_size(cls, mamba_block_size: int | None) -> int | None:
+        if mamba_block_size is not None and mamba_block_size % 8 != 0:
+            raise ValueError(
+                f"mamba_block_size ({mamba_block_size}) must be a multiple of 8 "
+                "to align with the causal_conv1d kernel."
+            )
+        return mamba_block_size
+
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
