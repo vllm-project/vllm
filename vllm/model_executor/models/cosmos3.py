@@ -17,28 +17,38 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
             regex.compile(
-                r"^model\.(?!language_model\.)(.+)$"
-            ): r"model.language_model.\1",
+                r"^(layers\.|embed_tokens\.|norm\.)(.+)$"
+            ): r"language_model.model.\1\2",
             regex.compile(
                 r"^(blocks\.|merger\.|patch_embed\.|pos_embed\.|deepstack_merger_list\.)"
-            ): r"model.visual.\1",
-            regex.compile(r"^sound_modality_embed$"): None,
-            regex.compile(r"^action_modality_embed$"): None,
+            ): r"visual.\1",
+            regex.compile(r"^audio_modality_embed(?:\..*)?$"): None,
+            regex.compile(r"^action_modality_embed(?:\..*)?$"): None,
         },
         orig_to_new_substr={
             "_moe_gen": None,
+            ".add_q_proj.": None,
+            ".add_k_proj.": None,
+            ".add_v_proj.": None,
+            ".to_add_out.": None,
+            ".norm_added_q.": None,
+            ".norm_added_k.": None,
+            ".to_q.": ".q_proj.",
+            ".to_k.": ".k_proj.",
+            ".to_v.": ".v_proj.",
+            ".to_out.": ".o_proj.",
+            ".norm_q.": ".q_norm.",
+            ".norm_k.": ".k_norm.",
         },
         orig_to_new_prefix={
-            "llm2vae.": None,
-            "vae2llm.": None,
+            "proj_in.": None,
+            "proj_out.": None,
             "time_embedder.": None,
-            "llm2sound.": None,
-            "sound2llm.": None,
-            "llm2action.": None,
-            "action2llm.": None,
-            "model.visual.": "visual.",
+            "audio_proj_in.": None,
+            "audio_proj_out.": None,
+            "action_proj_in.": None,
+            "action_proj_out.": None,
             "lm_head.": "language_model.lm_head.",
-            "model.language_model.": "language_model.model.",
         },
     )
 
