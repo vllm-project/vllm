@@ -1159,7 +1159,7 @@ class FlashMLASparseStaticSinkImpl(FlashMLASparseImpl):
             padded_heads = (
                 cdiv(self.num_heads, self.prefill_padding) * self.prefill_padding
             )
-            q_padded = q.new_empty((q.shape[0], padded_heads, q.shape[2]))
+            q_padded = q.new_zeros((q.shape[0], padded_heads, q.shape[2]))
             q_padded[:, : self.num_heads, :] = q
             q = q_padded
 
@@ -1167,9 +1167,10 @@ class FlashMLASparseStaticSinkImpl(FlashMLASparseImpl):
         sparse_o, _, sparse_lse = flash_mla_sparse_fwd(
             q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
         )
-        sparse_o = sparse_o[:, : self.num_heads, :]
+        sparse_o = sparse_o[:, : self.num_heads, :].contiguous()
+        sparse_lse = sparse_lse[:, : self.num_heads]
         # flash_mla_sparse_fwd returns lse as [num_tokens, num_heads]
-        return sparse_o, sparse_lse.transpose(0, 1)
+        return sparse_o, sparse_lse.transpose(0, 1).contiguous()
 
     def _forward_bf16_kv_with_lse(
         self,

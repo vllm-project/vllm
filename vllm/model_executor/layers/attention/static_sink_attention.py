@@ -4,6 +4,7 @@ import functools
 
 import torch
 from torch import nn
+from typing import cast
 
 from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig
@@ -22,6 +23,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionType,
     subclass_attention_backend_with_overrides,
+    MLAAttentionImpl,
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
@@ -290,6 +292,28 @@ class StaticSinkMLAAttention(MLAAttention):
         self.sink_len = sink_len
         self.sliding_window = sliding_window
         self.block_size = cache_config.block_size if cache_config is not None else 16
+        impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
+        self.impl = impl_cls(
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            scale=self.scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=self.sliding_window,
+            kv_cache_dtype=self.kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            kv_b_proj=kv_b_proj,
+            indexer=indexer,
+            **extra_impl_args,
+        )
 
     def update_sink_kv(self, sink_k_pe, sink_compressed_kv) -> None:
         self.impl.update_sink_kv(sink_k_pe, sink_compressed_kv)
@@ -351,16 +375,12 @@ class StaticSinkMLAAttention(MLAAttention):
                     attn_metadata,
                     output=output,
                 )
-                return torch.ops.vllm.piecewise_print(
-                    output, self.layer_name, "vllm_92B_layer0_sink_attn_out"
-                )
+                return output
             else:
                 output = self.impl.forward(
                     self, q, kv_c_normed, k_pe, impl_kv_cache, attn_metadata
                 )
-                return torch.ops.vllm.piecewise_print(
-                    output, self.layer_name, "vllm_92B_layer0_sink_attn_out"
-                )
+                return output
         else:
             if isinstance(self_kv_cache, (list, tuple)):
                 raise NotImplementedError(
@@ -382,9 +402,7 @@ class StaticSinkMLAAttention(MLAAttention):
                 self.layer_name,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-            return torch.ops.vllm.piecewise_print(
-                output, self.layer_name, "vllm_92B_layer0_sink_attn_out"
-            )
+            return output
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(

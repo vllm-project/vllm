@@ -489,12 +489,12 @@ MHC_DEBUG_LOG_DIR = "/home/yuantao/code/debug_log"
 
 
 def piecewise_print(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
-    if "model.layers.0" not in prefix:
+    if "model.layers.0." not in prefix and "model.layers.1." not in prefix:
         return tensor
     if tensor.shape[0] in (32768, 1024):
         return tensor
     log_msg = (
-        f"[DEBUG] {name}, tensor.shape: {tensor.shape}, "
+        f"[DEBUG] {prefix} {name}, tensor.shape: {tensor.shape}, "
         f"tensor.float().sum(): {tensor.float().sum()}, "
         f"tensor.ptr: {tensor.data_ptr()}, "
         f"tensor[:5]: {tensor.flatten()[:5]}\n"
@@ -570,7 +570,7 @@ class PanguIndexer(nn.Module):
         self.sink_len = getattr(config, 'param_sink_number', 0)
         self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
-        self.topk_tokens += self.sink_len
+        # self.topk_tokens += self.sink_len
 
     def forward(
         self,
@@ -833,26 +833,28 @@ def pangu_sparse_attn_indexer(
         topk_indices_buffer[:bs, :topk_tokens] = 0
         return topk_indices_buffer
 
-    block_table = block_table[:, num_sink_blocks:]
+    # block_table = block_table[:, num_sink_blocks:]
     topk_indices = topk_indices_buffer[:bs, :topk_tokens]
-    num_sink_tokens = min(sink_len, topk_tokens)
-    if num_sink_tokens > 0:
-        sink_indices = torch.arange(
-            num_sink_tokens, dtype=torch.int32, device=query.device)
-        topk_indices[:, :num_sink_tokens] = sink_indices
+    # num_sink_tokens = min(sink_len, topk_tokens)
+    # if num_sink_tokens > 0:
+    #     sink_indices = torch.arange(
+    #         num_sink_tokens, dtype=torch.int32, device=query.device)
+    #     topk_indices[:, :num_sink_tokens] = sink_indices
+    query_start_loc = getattr(attn_metadata, "query_start_loc", None)
+    seq_lens = getattr(attn_metadata, "seq_lens", None)
+
 
     token_to_seq = getattr(attn_metadata, "req_id_per_token", None)
     if token_to_seq is not None:
         token_to_seq = token_to_seq[:bs].to(device=query.device, dtype=torch.long)
     else:
-        q_start = getattr(attn_metadata, "query_start_loc", None)
         num_reqs = getattr(attn_metadata, "num_reqs", block_table.shape[0])
-        if q_start is not None and num_reqs > 0:
+        if query_start_loc is not None and num_reqs > 0:
             token_to_seq = torch.zeros(bs, dtype=torch.long, device=query.device)
             max_reqs = min(int(num_reqs), block_table.shape[0])
             for seq_idx in range(max_reqs):
-                start = q_start[seq_idx]
-                end = q_start[seq_idx + 1]
+                start = query_start_loc[seq_idx]
+                end = query_start_loc[seq_idx + 1]
                 token_to_seq[start:end] = seq_idx
         else:
             token_to_seq = torch.arange(bs, device=query.device)
@@ -861,23 +863,34 @@ def pangu_sparse_attn_indexer(
     for i in range(bs):
         seq_idx = token_to_seq[i]
         blocks = block_table[seq_idx]
-        valid_blocks = blocks[blocks >= 0]
+        valid_blocks = blocks[blocks > 0]
         if len(valid_blocks) == 0:
             continue
 
         valid_keys = q_cache[valid_blocks, :block_size]
         flat_keys = valid_keys.reshape(-1, head_dim)
+        if query_start_loc is not None and seq_lens is not None:
+            req_q_start = query_start_loc[seq_idx]
+            req_q_end = query_start_loc[seq_idx + 1]
+            q_len = req_q_end - req_q_start
+            q_offset = i - req_q_start
+            visible_len = seq_lens[seq_idx] - q_len + q_offset + 1
+            visible_len = torch.clamp(visible_len, min=0, max=flat_keys.shape[0])
+            visible_len_int = int(visible_len.item())
+            if visible_len_int <= 0:
+                continue
+            flat_keys = flat_keys[:visible_len_int]
         token_q = query[i]
         token_w = weights[i]
         logits = torch.matmul(token_q, flat_keys.transpose(0, 1))
         logits = logits * token_w.unsqueeze(-1)
         total_scores = logits.sum(dim=0)
 
-        k = min(topk_tokens - num_sink_tokens, total_scores.shape[0])
+        k = min(topk_tokens, total_scores.shape[0])
         if k > 0:
             _, indices = torch.topk(total_scores, k)
-            topk_indices[i, num_sink_tokens:num_sink_tokens + k] = (
-                indices.to(torch.int32) + sink_len)
+            topk_indices[i, :k] = torch.arange(k, device=query.device)
+        # print(f"[DEBUG] 92B topk_indices[i, :10]: {topk_indices[i, :10]}")
     # if "model.layers.0" in attn_layer_name:
     #     print(f"[DEBUG] after first layer PanguIndexer forward, topk_indices_buffer.shape: {topk_indices_buffer.shape}, topk_indices_buffer.sum(): {topk_indices_buffer.sum()}")
     return topk_indices_buffer
@@ -2129,7 +2142,7 @@ class OpenPanguModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
 
         if hasattr(config, "index_topk"):
-            topk_tokens = config.index_topk + 128
+            topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 topk_tokens,

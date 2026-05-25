@@ -746,7 +746,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         attn_metadata,
         layer,
     ):
-        if self.sink_len == 0 or self.window_size is None or self.window_size == (-1, -1):
+        if self.sink_len == 0:
             return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
 
         assert kv_c_and_k_pe_cache.numel() > 0
@@ -804,9 +804,9 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :].unsqueeze(-2)
 
         block_size = kv_c_and_k_pe_cache.size(1)
-        window_seqlens = decode.seq_lens - self.sink_len
+        window_seqlens = decode.seq_lens
         window_seqlens = torch.clamp(window_seqlens, min=0)
-        max_window_seqlen = max(decode.max_seq_len - self.sink_len, 1)
+        max_window_seqlen = max(decode.max_seq_len, 1)
         window_scheduler_metadata = get_scheduler_metadata(
             batch_size=num_reqs,
             max_seqlen_q=max_seqlen_q,
@@ -824,7 +824,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             window_size=self.window_size,
         )
 
-        cache_o, cache_lse = flash_attn_varlen_func(
+        no_sink_o, no_sink_lse = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache,
             v=kv_c_cache,
@@ -845,21 +845,21 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             cp_tot_seqused_k=decode.dcp_tot_seq_lens,
             window_size=self.window_size,
         )
-        cache_lse = cache_lse.transpose(0, 1)
+        no_sink_lse = no_sink_lse.transpose(0, 1)
 
-        o = torch.empty_like(cache_o)
+        o = torch.empty_like(no_sink_o)
         lse = (
-            torch.empty_like(cache_lse)
+            torch.empty_like(no_sink_lse)
             if self.need_to_return_lse_for_decode
             else None
         )
         merge_attn_states(
             output=o,
             output_lse=lse,
-            prefix_output=sink_o,
-            prefix_lse=sink_lse,
-            suffix_output=cache_o,
-            suffix_lse=cache_lse,
+            prefix_output=sink_o.contiguous(),
+            prefix_lse=sink_lse.contiguous(),
+            suffix_output=no_sink_o.contiguous(),
+            suffix_lse=no_sink_lse.contiguous(),
         )
         return o, lse
 

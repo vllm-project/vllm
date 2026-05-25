@@ -332,15 +332,9 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         k_pe = k_pe.squeeze(2).squeeze(0)
 
         layer_name = self.mla_attn.layer_name
-        q = torch.ops.vllm.piecewise_print(
-            q.reshape(q.shape[0], -1), layer_name, "vllm_92B_layer0_mla_q"
-        ).view(q.shape)
-        kv_c_normed = torch.ops.vllm.piecewise_print(
-            kv_c_normed, layer_name, "vllm_92B_layer0_mla_kv_c"
-        )
-        k_pe = torch.ops.vllm.piecewise_print(
-            k_pe, layer_name, "vllm_92B_layer0_mla_k_pe"
-        )
+        q = q.reshape(q.shape[0], -1).view(q.shape)
+        kv_c_normed = kv_c_normed
+        k_pe = k_pe
 
         attn_out = self.mla_attn(
             q,
@@ -353,6 +347,4 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             attn_out = attn_out.contiguous()
             attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
         output = self.o_proj(attn_out)[0]
-        return torch.ops.vllm.piecewise_print(
-            output, layer_name, "vllm_92B_layer0_o_proj_out"
-        )
+        return output
