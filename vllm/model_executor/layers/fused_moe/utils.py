@@ -6,6 +6,7 @@ from math import prod
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -449,3 +450,17 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+def resolve_moe_use_td() -> bool:
+    """Tri-state resolver for ``VLLM_TRITON_MOE_USE_TD``.
+
+    Returns ``True`` on XPU when the env is unset (auto-on), the explicit
+    boolean override when set to ``"1"``/``"0"``, and ``False`` everywhere
+    else.  Mirrors the dispatcher in ``triton_attn.py`` for the
+    unified-attention TD path.
+    """
+    override = envs.VLLM_TRITON_MOE_USE_TD
+    if override is None:
+        return current_platform.is_xpu()
+    return override
