@@ -136,8 +136,10 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
-    enable_qk_norm_rope_fusion: bool = False
+    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
+    """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -228,6 +230,7 @@ class PassConfig:
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
+        "fuse_rope_kvcache_cat_mla",
         mode="wrap",
     )
     @classmethod
@@ -285,6 +288,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "MLA KV cache update with RoPE fusion enabled but the "
+                "current platform is not CUDA or ROCm. The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache_cat_mla = False
 
     def log_enabled_passes(self) -> None:
         """
@@ -743,12 +752,13 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention_core",
+        "vllm::qwen_gdn_attention_core",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::deepseek_v4_attention",
     ]
 
     def compute_hash(self) -> str:
@@ -1002,6 +1012,14 @@ class CompilationConfig:
             raise ValueError(
                 "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (None = auto-infer)"
+            )
+
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
             )
 
         if self.backend == "":

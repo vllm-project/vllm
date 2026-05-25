@@ -237,6 +237,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             cls._convert_tool_use_block(block, tool_calls)
         elif block.type == "tool_result":
             cls._convert_tool_result_block(block, role, openai_messages, content_parts)
+        elif block.type == "tool_reference":
+            # Tool references are expanded during tool_result processing
+            # when they appear inside tool_result content.
+            pass
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
@@ -275,6 +279,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Convert user tool_result with text and image support"""
         tool_text = ""
         tool_image_urls: list[str] = []
+        tool_reference: list[dict[str, Any]] = []
 
         if isinstance(block.content, str):
             tool_text = block.content
@@ -291,6 +296,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                     url = cls._convert_image_source_to_url(source)
                     if url:
                         tool_image_urls.append(url)
+                elif item_type == "tool_reference":
+                    ref_name = item.get("tool_name") or item.get("name")
+                    if ref_name:
+                        tool_reference.append(
+                            {"type": "tool_reference", "name": ref_name}
+                        )
             tool_text = "\n".join(text_parts)
 
         openai_messages.append(
@@ -309,6 +320,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                         {"type": "image_url", "image_url": {"url": img}}
                         for img in tool_image_urls
                     ],
+                }
+            )
+
+        if tool_reference:
+            openai_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": block.tool_use_id or "",
+                    "content": tool_reference,  # type: ignore[dict-item]
                 }
             )
 
@@ -400,6 +420,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             "name": tool.name,
                             "description": tool.description,
                             "parameters": tool.input_schema,
+                            "defer_loading": tool.defer_loading,
                         },
                     }
                 )

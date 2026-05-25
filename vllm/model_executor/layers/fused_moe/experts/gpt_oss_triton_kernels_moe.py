@@ -5,7 +5,6 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -15,7 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -28,8 +29,207 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
+from ..utils import swiglu_limit_func
+
 logger = init_logger(__name__)
 
+
+def _triton_kernel_moe_supports_current_device() -> bool:
+    # Shared device gate for the OAI Triton MoE expert classes.
+    # Platform-aware to avoid ROCm capability aliasing — cap (9, 0)
+    # matches both gfx90a (verified) and gfx906 (unverified), so we
+    # dispatch on gfx-string helpers instead of the cap tuple on ROCm.
+    p = current_platform
+    if p.is_cuda():
+        cap = p.get_device_capability()
+        # Keep the original `(9, 0) <= cap < (11, 0)` window on
+        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
+        # SM120) — this PR is ROCm-scoped and the broader CUDA
+        # range was not validated.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+    if p.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x, on_gfx9
+
+        # gfx9 family: gfx90a (MI200), gfx942/gfx950 (MI3xx);
+        # on_gfx9() already excludes gfx906/gfx908.
+        # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
+        # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
+        return on_gfx9() or on_gfx1x()
+    return False
+
+
+def _patch_make_bitmatrix_metadata() -> None:
+    """Monkey-patch make_bitmatrix_metadata to support non-power-of-2 top_k.
+
+    triton's tl.arange requires a power-of-2 range.  The original kernel
+    computes BLOCK_SIZE = BLOCK_PER_TOK * TOKS_PER_ROW (= 32 * top_k).  For
+    DeepSeek-V4 with top_k=6 this gives 192, which is not a power of 2 and
+    causes a compile error at the first forward pass.
+
+    Fix: define a drop-in replacement kernel that accepts an extra constexpr
+    BLOCK_SIZE_PADDED (next power of 2 >= BLOCK_SIZE) and uses it for the
+    tl.arange call while keeping the actual BLOCK_SIZE as the stride between
+    thread-blocks so that all flat indices into NonzeroIndx stay correct.
+    Elements beyond BLOCK_SIZE are masked out (col_indx = 0xffff) and ignored.
+
+    This function is called once at module load time and patches the function
+    inside the triton_kernels tensor module so that SparseMatrix.__post_init__
+    picks up the fixed version transparently.
+    """
+    import torch
+    import triton
+    import triton.language as tl
+
+    try:
+        if current_platform.is_rocm():
+            from triton_kernels.tensor_details import bitmatrix as _bm
+            from triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
+        else:
+            from vllm.third_party.triton_kernels.tensor_details import (
+                bitmatrix as _bm,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
+    except ImportError:
+        return
+
+    @triton.jit
+    def _stage2_pow2(
+        ColSortedIndx,
+        RowSortedIndx,
+        NonzeroIndx,
+        n_tokens,
+        ColPartialSum,
+        stride_pm,
+        stride_pn,
+        ColOffs,
+        TOKS_PER_ROW: tl.constexpr,
+        BLOCK_PER_TOK: tl.constexpr,
+        BLOCK_SIZE_PADDED: tl.constexpr,
+    ):
+        # Actual number of elements per block (may not be a power of 2).
+        BLOCK_SIZE: tl.constexpr = BLOCK_PER_TOK * TOKS_PER_ROW
+        tl.static_assert(BLOCK_SIZE_PADDED <= 32768)
+        if isinstance(n_tokens, tl.tensor) and n_tokens.dtype.is_ptr():
+            n_tokens = tl.load(n_tokens)
+        nonzero_indx_size = n_tokens * TOKS_PER_ROW
+        pid_m = tl.program_id(0)
+        # Use BLOCK_SIZE_PADDED (a power of 2) for tl.arange, but stride by
+        # the actual BLOCK_SIZE so flat positions in NonzeroIndx are correct.
+        # Elements with offs_local >= BLOCK_SIZE have offs_global beyond the
+        # valid range, get col_indx = 0xffff, and are filtered by the mask
+        # below without producing any output.
+        offs_local = tl.arange(0, BLOCK_SIZE_PADDED)
+        offs_global = pid_m * BLOCK_SIZE + offs_local
+        mask = offs_global < nonzero_indx_size
+        col_indx = tl.load(NonzeroIndx + offs_global, mask=mask, other=-1).to(tl.uint32)
+        kv_pairs = ((col_indx << 16) | offs_local).to(tl.uint32)
+        kv_pairs = tl.sort(kv_pairs, 0)
+        col_indx = kv_pairs >> 16
+        offs_global = pid_m * BLOCK_SIZE + (kv_pairs & 0xFFFF)
+        mask = col_indx != 0xFFFF
+        x = kv_pairs & 0xFFFF0000 | 0x00000001
+        cols_and_inclusive_run_lengths = tl.associative_scan(x, 0, _keyed_add)
+        exclusive_run_lengths = (cols_and_inclusive_run_lengths - 1) & 0xFFFF
+        row_sorted_indx = tl.load(
+            ColPartialSum + pid_m * stride_pm + col_indx * stride_pn, mask=mask
+        )
+        row_sorted_indx += tl.load(ColOffs + col_indx, mask=mask)
+        row_sorted_indx += exclusive_run_lengths
+        tl.store(RowSortedIndx + offs_global, row_sorted_indx, mask=mask)
+        tl.store(ColSortedIndx + row_sorted_indx, offs_global, mask=mask)
+
+    def _make_bitmatrix_metadata_pow2_safe(nonzero_indx, bitmatrix):
+        assert nonzero_indx.ndim == 2
+        PARTIAL_BLOCK_M = 32
+        col_sum, col_partial_sum = sum_bitmatrix_rows(
+            bitmatrix, partials_block_size=PARTIAL_BLOCK_M
+        )
+        device = bitmatrix.device
+        n_indx = nonzero_indx.numel()
+        n_cols = bitmatrix.shape[1]
+        col_offs = torch.empty(n_cols, dtype=torch.int32, device=device)
+        combined_indx = torch.empty(n_indx * 2, dtype=torch.int32, device=device)
+        col_sorted_indx = combined_indx[:n_indx]
+        row_sorted_indx = combined_indx[n_indx:]
+        MEMSET_BLOCK = 1024
+        memset_grid = (cdiv(n_indx * 2, MEMSET_BLOCK) + n_cols + 1,)
+        _bm._bitmatrix_metadata_compute_stage1[memset_grid](
+            combined_indx,
+            n_indx * 2,
+            -1,
+            MEMSET_BLOCK,
+            col_sum,
+            col_offs,
+            col_sum.shape[0],
+            col_partial_sum,
+            col_partial_sum.shape[0],
+            col_partial_sum.stride(0),
+            col_partial_sum.stride(1),
+            BLOCK_M=512,
+            BLOCK_N=512,
+        )
+        toks_per_row = nonzero_indx.shape[-1]
+        block_size = PARTIAL_BLOCK_M * toks_per_row
+        # Next power of 2 >= block_size (required by tl.arange).
+        block_size_padded = 1 << (max(block_size, 1) - 1).bit_length()
+        compute_grid = (cdiv(bitmatrix.shape_max[0], PARTIAL_BLOCK_M),)
+        _stage2_pow2[compute_grid](
+            col_sorted_indx,
+            row_sorted_indx,
+            nonzero_indx,
+            bitmatrix.shape[0],
+            col_partial_sum,
+            col_partial_sum.stride(0),
+            col_partial_sum.stride(1),
+            col_offs,
+            TOKS_PER_ROW=toks_per_row,
+            BLOCK_PER_TOK=PARTIAL_BLOCK_M,
+            BLOCK_SIZE_PADDED=block_size_padded,
+        )
+        return BitmatrixMetadata(
+            col_sum=col_sum,
+            col_sorted_indx=col_sorted_indx,
+            row_sorted_indx=row_sorted_indx,
+        )
+
+    # The most reliable patch point: SparseMatrix.__post_init__ looks up
+    # make_bitmatrix_metadata via its own __globals__ dict (the tensor.py
+    # module dict).  Patching through __globals__ works regardless of how
+    # sys.modules maps "triton_kernels.tensor" vs
+    # "vllm.third_party.triton_kernels.tensor".
+    from triton_kernels.tensor import SparseMatrix as _SparseMatrix
+
+    _SparseMatrix.__post_init__.__globals__["make_bitmatrix_metadata"] = (
+        _make_bitmatrix_metadata_pow2_safe
+    )
+    # Also patch the bitmatrix module itself in case it is imported directly.
+    _bm.make_bitmatrix_metadata = _make_bitmatrix_metadata_pow2_safe
+
+
+# Two API generations of triton_kernels are supported:
+#   - v3.5.1 (the version bundled with vLLM): exposes `routing()` and
+#     `routing_from_bitmatrix()` in triton_kernels.routing; the `Bitmatrix`
+#     constructor takes a `scratchpad` argument.
+#   - v3.6.0+: removes the `routing` module in favor of a `SparseMatrix`
+#     based path, and adds a `dtype=BIT` kwarg to `Bitmatrix`. Used only
+#     when the user has triton_kernels installed system-wide at v3.6.0+.
+#
+# `use_legacy_triton_kernels` selects between them at import time based on
+# whether `SparseMatrix` is importable.
 use_legacy_triton_kernels = False
 
 if has_triton_kernels():
@@ -54,11 +254,12 @@ if has_triton_kernels():
                 make_ragged_tensor_metadata,
             )
         except ImportError:
-            if current_platform.is_rocm():
-                logger.warning_once("Using legacy triton_kernels on ROCm")
-                use_legacy_triton_kernels = True
-            else:
-                raise
+            # TODO(mgoin): drop the v3.5.1 pin and remove this fallback once
+            # the gpt-oss perf regression in v3.6.0+ is resolved upstream.
+            # Tracking: https://github.com/triton-lang/triton/issues/9969
+            use_legacy_triton_kernels = True
+        if not use_legacy_triton_kernels:
+            _patch_make_bitmatrix_metadata()
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -130,67 +331,54 @@ def triton_kernel_moe_forward(
     unpadded_N_w2=None,
     unpadded_K_w2=None,
 ) -> torch.Tensor:
-    if (
-        quant_config is not None
-        and quant_config.use_mxfp4_w4a8
-        and rocm_aiter_ops.is_enabled()
-    ):
-        from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
-
-        routing_data, gather_idx, scatter_idx = aiter_routing(
-            gating_output, topk, sm_first=not renormalize
-        )
-        return triton_kernel_fused_mxfp4_w4a8_experts(
-            None,
-            hidden_states,
-            w1,
-            w2,
-            routing_data,
-            gather_idx,
-            scatter_idx,
-            activation=activation.value,
-            quant_config=quant_config,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            unpadded_N_w1=unpadded_N_w1,
-            unpadded_K_w1=unpadded_K_w1,
-            unpadded_N_w2=unpadded_N_w2,
-            unpadded_K_w2=unpadded_K_w2,
-        )
-
-    from triton_kernels.topk import topk as topk_fn
-
     sm_first = not renormalize
-    logits = gating_output
-    if sm_first:
-        logits = torch.softmax(logits, dim=-1)
-    topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
-    # topk may return a tuple (vals, indx, bitmatrix) or a
-    # SparseMatrix depending on the triton_kernels version.
-    if isinstance(topk_result, tuple):
-        topk_weights, topk_ids_raw, _ = topk_result
-    else:
-        topk_weights = topk_result.vals
-        topk_ids_raw = topk_result.indx
 
-    if expert_map is not None:
-        # topk_ids_raw contains global expert IDs - remap to local.
-        topk_ids = expert_map[topk_ids_raw.to(torch.long)]
-        local_num_experts = w1.shape[0]
-        routing_data, gather_idx, scatter_idx = make_routing_data(
-            topk_ids, topk_weights, local_num_experts
+    # When no expert map is provided (no EP), call the fused `routing()`
+    # kernel directly. It combines softmax, topk, bitmatrix packing, and
+    # routing-metadata construction in a single launch, instead of the
+    # three separate kernels used by the generic path below.
+    # Only available in the legacy (v3.5.1) API; the v3.6.0+ path inlines
+    # equivalent logic via SparseMatrix in `make_routing_data`.
+    if use_legacy_triton_kernels and expert_map is None:
+        from triton_kernels.routing import routing as fused_routing
+
+        routing_data, gather_idx, scatter_idx = fused_routing(
+            gating_output, topk, sm_first=sm_first
         )
-        # expert_map already applied; pass None downstream.
         effective_expert_map = None
-        effective_global_num_experts = local_num_experts
-    else:
-        topk_ids = topk_ids_raw.to(torch.long)
-        routing_data, gather_idx, scatter_idx = make_routing_data(
-            topk_ids, topk_weights, gating_output.shape[-1]
-        )
-        effective_expert_map = expert_map
         effective_global_num_experts = global_num_experts
+    else:
+        from triton_kernels.topk import topk as topk_fn
+
+        logits = gating_output
+        if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+        topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # topk may return a tuple (vals, indx, bitmatrix) or a
+        # SparseMatrix depending on the triton_kernels version.
+        if isinstance(topk_result, tuple):
+            topk_weights, topk_ids_raw, _ = topk_result
+        else:
+            topk_weights = topk_result.vals
+            topk_ids_raw = topk_result.indx
+
+        if expert_map is not None:
+            # topk_ids_raw contains global expert IDs - remap to local.
+            topk_ids = expert_map[topk_ids_raw.to(torch.long)]
+            local_num_experts = w1.shape[0]
+            routing_data, gather_idx, scatter_idx = make_routing_data(
+                topk_ids, topk_weights, local_num_experts
+            )
+            # expert_map already applied; pass None downstream.
+            effective_expert_map = None
+            effective_global_num_experts = local_num_experts
+        else:
+            topk_ids = topk_ids_raw.to(torch.long)
+            routing_data, gather_idx, scatter_idx = make_routing_data(
+                topk_ids, topk_weights, gating_output.shape[-1]
+            )
+            effective_expert_map = expert_map
+            effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
     effective_quant_config = (
@@ -315,99 +503,6 @@ def triton_kernel_fused_experts(
     return output_tensor
 
 
-# This is a triton implementation of the fused_experts function
-def triton_kernel_fused_mxfp4_w4a8_experts(
-    output_tensor: torch.Tensor,
-    hidden_states: torch.Tensor,
-    w1,  # Tensor or triton_kernels.Tensor
-    w2,  # Tensor or triton_kernels.Tensor
-    routing_data,  # RoutingData
-    gather_indx,  # GatherIndx
-    scatter_indx,  # ScatterIndx
-    activation: str = "silu",
-    quant_config: FusedMoEQuantConfig | None = None,
-    swiglu_alpha: float = 1.702,
-    swiglu_limit: float = 7.0,
-    apply_router_weight_on_input: bool = False,
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    a1q_scale: torch.Tensor | None = None,
-    unpadded_N_w1=None,
-    unpadded_K_w1=None,
-    unpadded_N_w2=None,
-    unpadded_K_w2=None,
-) -> torch.Tensor:
-    assert quant_config is not None
-    # type check, uint8 means mxfp4
-    assert hidden_states.dtype == torch.bfloat16
-    assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
-    assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
-
-    # Shape check: weights are padded (e.g. hidden_size padded for
-    # GFX950 swizzle).
-    assert hidden_states.shape[-1] == w1.shape[-2]
-    assert w2.shape[-1] == w1.shape[1]
-
-    E, _, N = w1.shape
-
-    if global_num_experts == -1:
-        global_num_experts = E
-
-    gammas = routing_data.gate_scal if routing_data else None
-
-    from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
-    from aiter.ops.triton.quant_moe import downcast_to_static_fp8
-
-    assert quant_config.w1_precision is not None, (
-        "w1_precision in quant config can't be None"
-    )
-    assert quant_config.w2_precision is not None, (
-        "w2_precision in quant config can't be None"
-    )
-
-    hidden_states = downcast_to_static_fp8(
-        hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
-    )
-
-    intermediate_cache1 = moe_gemm_a8w4(
-        hidden_states,
-        w1.storage.data,
-        None,
-        quant_config.w1_precision.weight_scale.storage.data,
-        quant_config.w1_precision.flex_ctx.lhs_data.scale,
-        quant_config.w2_precision.flex_ctx.lhs_data.scale,
-        quant_config.w1_bias,
-        routing_data,
-        gather_indx=gather_indx,
-        gammas=gammas if apply_router_weight_on_input else None,
-        swizzle_mx_scale="CDNA4_SCALE",
-        out_dtype=torch.float8_e4m3fn,
-        apply_swiglu=True,
-        alpha=swiglu_alpha,
-        limit=swiglu_limit,
-        unpadded_N=unpadded_N_w1,
-        unpadded_K=unpadded_K_w1,
-    )
-
-    intermediate_cache3 = moe_gemm_a8w4(
-        intermediate_cache1,
-        w2.storage.data,
-        None,
-        quant_config.w2_precision.weight_scale.storage.data,
-        quant_config.w2_precision.flex_ctx.lhs_data.scale,
-        None,
-        quant_config.w2_bias,
-        routing_data,
-        scatter_indx=scatter_indx,
-        gammas=None if apply_router_weight_on_input else gammas,
-        swizzle_mx_scale="CDNA4_SCALE",
-        unpadded_N=unpadded_N_w2,
-        unpadded_K=unpadded_K_w2,
-    )
-
-    return intermediate_cache3
-
-
 def make_routing_data(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -489,15 +584,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -698,6 +785,37 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
         ops.moe_sum(input, output)
 
+    def activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+    ) -> None:
+        quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
+        if activation == MoEActivation.SWIGLUOAI:
+            alpha = (
+                quant_config.gemm1_alpha
+                if quant_config.gemm1_alpha is not None
+                else 1.702
+            )
+            limit = (
+                quant_config.gemm1_clamp_limit
+                if quant_config.gemm1_clamp_limit is not None
+                else 7.0
+            )
+            torch.ops._C.swigluoai_and_mul(output, input, alpha, limit)
+        elif (
+            activation == MoEActivation.SILU
+            and quant_config.gemm1_clamp_limit is not None
+        ):
+            swiglu_limit_func(
+                output,
+                input,
+                quant_config.gemm1_clamp_limit,
+            )
+        else:
+            super().activation(activation, output, input)
+
     def apply(
         self,
         output: torch.Tensor,
@@ -812,9 +930,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             act_input,
         )
 
-        # matmul_ogs grouped reduction fuse sum across multiple experts:
+        # matmul_ogs grouped reduction fuses sum across multiple experts:
         # y[dst_indx // n_expts_act, :] += x
-        # Need to set n_expts_act to 1 to unfuse moe_sum
+        # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
 
         matmul_ogs(
@@ -870,15 +988,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

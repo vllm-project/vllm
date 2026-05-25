@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from typing import Any
 
 import llguidance
@@ -11,353 +12,34 @@ from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
-    _prepare_apply_chat_template_tools_and_messages,
+    _validate_apply_chat_template_args,
 )
 
 
-@pytest.mark.parametrize(
-    "openai_request,expected_mistral_output",
-    [
-        (
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                        },
-                    }
-                ],
-            },
-            (
-                [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    }
-                ],
-            ),
-        ),
-        (
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    }
-                ],
-            },
-            (
-                [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    }
-                ],
-            ),
-        ),
-        (
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "unsupported_field": False,
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "unsupported_field2": False,
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                ],
-            },
-            (
-                [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                ],
-            ),
-        ),
-        (
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "unsupported_field": False,
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "unsupported_field2": False,
-                        "function": {
-                            "description": "Fetch the current local date and time 2.",
-                            "name": "get_current_time2",
-                            "parameters": {"a": "1"},
-                        },
-                    },
-                ],
-            },
-            (
-                [
-                    {
-                        "role": "user",
-                        "content": "What is the current local date and time?",
-                    }
-                ],
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time.",
-                            "name": "get_current_time",
-                            "parameters": {},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "description": "Fetch the current local date and time 2.",
-                            "name": "get_current_time2",
-                            "parameters": {"a": "1"},
-                        },
-                    },
-                ],
-            ),
-        ),
-    ],
-)
-def test_prepare_apply_chat_template_tools_and_messages(
-    openai_request, expected_mistral_output
-):
-    actual_request = _prepare_apply_chat_template_tools_and_messages(
-        openai_request["messages"], openai_request["tools"]
-    )
-    assert actual_request == expected_mistral_output
-
-
-# Tool use with list content and reasoning
-@pytest.mark.parametrize(
-    "openai_request,expected_mistral_output",
-    [
-        (
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What's the weather in Paris?",
-                    },
-                    {
-                        "role": "assistant",
-                        "reasoning": None,
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call123",
-                                "type": "function",
-                                "function": {
-                                    "name": "get_weather",
-                                    "arguments": '{"city": "Paris"}',
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "content": [{"type": "text", "text": "Rainy"}],
-                        "name": "get_weather",
-                        "tool_call_id": "call123",
-                    },
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "description": "Gets the current weather in a city.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "city": {
-                                        "type": "string",
-                                        "description": "The city name",
-                                    }
-                                },
-                                "required": ["city"],
-                            },
-                        },
-                    }
-                ],
-            },
-            (
-                [
-                    {
-                        "role": "user",
-                        "content": "What's the weather in Paris?",
-                    },
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call123",
-                                "type": "function",
-                                "function": {
-                                    "name": "get_weather",
-                                    "arguments": '{"city": "Paris"}',
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "content": [{"type": "text", "text": "Rainy"}],
-                        "name": "get_weather",
-                        "tool_call_id": "call123",
-                    },
-                ],
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "description": "Gets the current weather in a city.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "city": {
-                                        "type": "string",
-                                        "description": "The city name",
-                                    }
-                                },
-                                "required": ["city"],
-                            },
-                        },
-                    }
-                ],
-            ),
-        )
-    ],
-)
-def test_prepare_apply_chat_template_tools_and_messages_list_content(
-    openai_request, expected_mistral_output
-):
-    actual_request = _prepare_apply_chat_template_tools_and_messages(
-        openai_request["messages"], openai_request["tools"]
-    )
-    assert actual_request == expected_mistral_output
-
-
-def test_prepare_apply_chat_template_generation_prompt_and_continue():
+def test_validate_apply_chat_template_args():
+    # add_generation_prompt with assistant last message → error
     messages = [{"role": "assistant", "content": "Hello"}]
-    tools: list[dict[str, Any]] = []
     with pytest.raises(ValueError):
-        _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, add_generation_prompt=True
-        )
+        _validate_apply_chat_template_args(messages, add_generation_prompt=True)
 
+    # add_generation_prompt with user last message → ok
     messages = [{"role": "user", "content": "Hello"}]
-    out_messages, _ = _prepare_apply_chat_template_tools_and_messages(
-        messages, tools, add_generation_prompt=True
-    )
-    assert out_messages == [{"role": "user", "content": "Hello"}]
+    _validate_apply_chat_template_args(messages, add_generation_prompt=True)
 
+    # both add_generation_prompt and continue_final_message → error
     with pytest.raises(ValueError):
-        _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, add_generation_prompt=True, continue_final_message=True
+        _validate_apply_chat_template_args(
+            messages, add_generation_prompt=True, continue_final_message=True
         )
 
+    # continue_final_message with assistant last message → ok
     messages = [{"role": "assistant", "content": "Hello"}]
-    out_messages, _ = _prepare_apply_chat_template_tools_and_messages(
-        messages, tools, add_generation_prompt=False, continue_final_message=True
-    )
-    assert out_messages == [{"role": "assistant", "content": "Hello"}]
+    _validate_apply_chat_template_args(messages, continue_final_message=True)
 
+    # continue_final_message with user last message → error
     messages = [{"role": "user", "content": "Hello"}]
     with pytest.raises(ValueError):
-        _prepare_apply_chat_template_tools_and_messages(
-            messages, tools, add_generation_prompt=False, continue_final_message=True
-        )
+        _validate_apply_chat_template_args(messages, continue_final_message=True)
 
 
 @pytest.fixture(scope="module")
@@ -2435,3 +2117,120 @@ class TestMistralTokenizer:
         # Test caching
         llg_tokenizer_2 = mistral_tokenizer.llg_tokenizer
         assert llg_tokenizer is llg_tokenizer_2
+
+    @pytest.mark.parametrize(
+        "messages,tools,tekken_expected_substrings,spm_expected_substrings",
+        [
+            pytest.param(
+                [{"role": "user", "content": "Hello"}],
+                [{"type": "function", "function": {"name": "do_nothing"}}],
+                ["do_nothing", '"description": ""', '"parameters": {}'],
+                ["do_nothing", '"description":▁""', '"parameters":▁{}'],
+                id="tool_without_description_and_parameters",
+            ),
+            pytest.param(
+                [
+                    {"role": "user", "content": "Do nothing"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "123456789",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_nothing",
+                                    "arguments": None,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "123456789",
+                        "content": "done",
+                    },
+                ],
+                [{"type": "function", "function": {"name": "do_nothing"}}],
+                ["do_nothing"],
+                ["do_nothing"],
+                id="tool_call_with_none_arguments",
+            ),
+        ],
+    )
+    def test_apply_chat_template_tool_optional_fields(
+        self,
+        mistral_tokenizer: MistralTokenizer,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tekken_expected_substrings: list[str],
+        spm_expected_substrings: list[str],
+    ) -> None:
+        output = mistral_tokenizer.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True
+        )
+        decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
+
+        expected = (
+            tekken_expected_substrings
+            if mistral_tokenizer.is_tekken
+            else spm_expected_substrings
+        )
+        for substring in expected:
+            assert substring in decoded
+
+    def test_apply_chat_template_tools_not_mutated(
+        self, mistral_tokenizer: MistralTokenizer
+    ) -> None:
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Gets weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        ]
+        original_tools = copy.deepcopy(tools)
+
+        mistral_tokenizer.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True
+        )
+
+        assert tools == original_tools
+
+    @pytest.mark.parametrize(
+        "reasoning_key",
+        ["reasoning", "reasoning_content"],
+    )
+    def test_apply_chat_template_reasoning_assistant(
+        self, mistral_tokenizer: MistralTokenizer, reasoning_key: str
+    ) -> None:
+        if not mistral_tokenizer.is_tekken:
+            pytest.skip("Reasoning tokens only supported on tekken tokenizers")
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "content": "4",
+                reasoning_key: "2+2 equals 4",
+            },
+            {"role": "user", "content": "Are you sure?"},
+        ]
+
+        output = mistral_tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+        decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
+
+        assert "[THINK]2+2 equals 4[/THINK]" in decoded
