@@ -100,7 +100,7 @@ class OmniASRConfig(PretrainedConfig):
         num_languages=1694,
         bos_token_id=0,
         eos_token_id=2,
-        pad_token_id=g,
+        pad_token_id=1,
         **kwargs,
     ):
         super().__init__(
