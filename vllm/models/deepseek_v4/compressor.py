@@ -182,8 +182,8 @@ class DeepseekCompressor(nn.Module):
         max_num_tokens: int,
         head_dim: int,
     ) -> torch.Tensor:
-        if device == "cuda" and torch.cuda.is_available():
-            device_key = f"cuda:{torch.cuda.current_device()}"
+        if device == "cuda" and torch.accelerator.is_available():
+            device_key = f"cuda:{torch.accelerator.current_device_index()}"
             alloc_device = torch.device(device_key)
         else:
             device_key = str(device)

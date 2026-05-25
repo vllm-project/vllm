@@ -57,6 +57,7 @@ def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float3
         Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
     )
 
+
 @dsl_user_op
 def _fp32x2_to_fp8e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint16:
     out = llvm.inline_asm(
@@ -68,6 +69,7 @@ def _fp32x2_to_fp8e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint16
         is_align_stack=False,
     )
     return Uint16(out)
+
 
 class SparseAttnCompressNormRopeStoreC4Kernel:
     min_scale = 1.0e-4
@@ -456,6 +458,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
             options="--enable-tvm-ffi",
         )
 
+
 class SparseAttnCompressKernel:
     head_tile = 64
     rows_per_warp = 8
@@ -810,6 +813,7 @@ class SparseAttnCompressKernel:
             options="--enable-tvm-ffi",
         )
 
+
 class SparseAttnNormRopeStoreKernel:
     min_scale = 1.0e-4
 
@@ -1080,6 +1084,7 @@ class SparseAttnNormRopeStoreKernel:
             stream,
             options="--enable-tvm-ffi",
         )
+
 
 def _compress_kv_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
