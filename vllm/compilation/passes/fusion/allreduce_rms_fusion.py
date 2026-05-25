@@ -69,6 +69,9 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
 # All sizes are supported.
 SUPPORTED_PACKED_GROUP_QUANT_SIZES = [128]
 
+# Max num tokens for applying the AR+RMSNorm+packed FP8 group quant
+FI_ALLREDUCE_GROUP_QUANT_FUSION_MAX_TOKEN_NUM = 256
+
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
 FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
@@ -290,6 +293,36 @@ if flashinfer_comm is not None:
         )
         assert workspace is not None
         assert flashinfer_comm is not None
+
+        if num_tokens > FI_ALLREDUCE_GROUP_QUANT_FUSION_MAX_TOKEN_NUM:
+            # use separate group quant kernel instead of fused
+            assert quant_out is not None
+            assert scale_out is not None
+            flashinfer_comm.allreduce_fusion(
+                input=allreduce_in,
+                workspace=workspace,
+                pattern=ar_fusion_patterns.kARResidualRMSNorm,
+                launch_with_pdl=launch_with_pdl,
+                output=None,
+                residual_out=residual,
+                norm_out=allreduce_in,
+                residual_in=residual,
+                rms_gamma=rms_gamma,
+                rms_eps=rms_eps,
+                use_oneshot=use_oneshot,
+                fp32_acc=fp32_acc,
+            )
+            finfo = torch.finfo(torch.float8_e4m3fn)
+            torch.ops._C.per_token_group_fp8_quant_packed(
+                allreduce_in,
+                quant_out,
+                scale_out,
+                block_quant_group_size,
+                1e-10,
+                float(finfo.min),
+                float(finfo.max),
+            )
+            return
 
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
