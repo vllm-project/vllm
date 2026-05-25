@@ -21,7 +21,7 @@ from vllm.utils.flashinfer import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -80,7 +80,7 @@ def interleave_linear_and_gate(
 
 
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
-    layer: "FusedMoE",
+    layer: "RoutedExperts",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -286,7 +286,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: "FusedMoE",
+    layer: "RoutedExperts",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -317,6 +317,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        NvFp4MoeBackend.FLASHINFER_B12X,
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
@@ -328,6 +329,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         in [
             NvFp4MoeBackend.FLASHINFER_CUTLASS,
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_B12X,
         ]
     ):
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)

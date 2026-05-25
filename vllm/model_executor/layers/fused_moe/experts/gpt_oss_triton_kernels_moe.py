@@ -14,7 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -30,6 +32,30 @@ from vllm.utils.import_utils import has_triton_kernels
 from ..utils import swiglu_limit_func
 
 logger = init_logger(__name__)
+
+
+def _triton_kernel_moe_supports_current_device() -> bool:
+    # Shared device gate for the OAI Triton MoE expert classes.
+    # Platform-aware to avoid ROCm capability aliasing — cap (9, 0)
+    # matches both gfx90a (verified) and gfx906 (unverified), so we
+    # dispatch on gfx-string helpers instead of the cap tuple on ROCm.
+    p = current_platform
+    if p.is_cuda():
+        cap = p.get_device_capability()
+        # Keep the original `(9, 0) <= cap < (11, 0)` window on
+        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
+        # SM120) — this PR is ROCm-scoped and the broader CUDA
+        # range was not validated.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+    if p.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x, on_gfx9
+
+        # gfx9 family: gfx90a (MI200), gfx942/gfx950 (MI3xx);
+        # on_gfx9() already excludes gfx906/gfx908.
+        # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
+        # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
+        return on_gfx9() or on_gfx1x()
+    return False
 
 
 def _patch_make_bitmatrix_metadata() -> None:
@@ -55,17 +81,28 @@ def _patch_make_bitmatrix_metadata() -> None:
     import triton.language as tl
 
     try:
-        from vllm.third_party.triton_kernels.tensor_details import (
-            bitmatrix as _bm,
-        )
-        from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
-            BitmatrixMetadata,
-            _keyed_add,
-            cdiv,
-        )
-        from vllm.third_party.triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
-            sum_bitmatrix_rows,
-        )
+        if current_platform.is_rocm():
+            from triton_kernels.tensor_details import bitmatrix as _bm
+            from triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
+        else:
+            from vllm.third_party.triton_kernels.tensor_details import (
+                bitmatrix as _bm,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix import (
+                BitmatrixMetadata,
+                _keyed_add,
+                cdiv,
+            )
+            from vllm.third_party.triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows import (  # noqa: E501
+                sum_bitmatrix_rows,
+            )
     except ImportError:
         return
 
@@ -183,6 +220,16 @@ def _patch_make_bitmatrix_metadata() -> None:
     _bm.make_bitmatrix_metadata = _make_bitmatrix_metadata_pow2_safe
 
 
+# Two API generations of triton_kernels are supported:
+#   - v3.5.1 (the version bundled with vLLM): exposes `routing()` and
+#     `routing_from_bitmatrix()` in triton_kernels.routing; the `Bitmatrix`
+#     constructor takes a `scratchpad` argument.
+#   - v3.6.0+: removes the `routing` module in favor of a `SparseMatrix`
+#     based path, and adds a `dtype=BIT` kwarg to `Bitmatrix`. Used only
+#     when the user has triton_kernels installed system-wide at v3.6.0+.
+#
+# `use_legacy_triton_kernels` selects between them at import time based on
+# whether `SparseMatrix` is importable.
 use_legacy_triton_kernels = False
 
 if has_triton_kernels():
@@ -207,11 +254,10 @@ if has_triton_kernels():
                 make_ragged_tensor_metadata,
             )
         except ImportError:
-            if current_platform.is_rocm():
-                logger.warning_once("Using legacy triton_kernels on ROCm")
-                use_legacy_triton_kernels = True
-            else:
-                raise
+            # TODO(mgoin): drop the v3.5.1 pin and remove this fallback once
+            # the gpt-oss perf regression in v3.6.0+ is resolved upstream.
+            # Tracking: https://github.com/triton-lang/triton/issues/9969
+            use_legacy_triton_kernels = True
         if not use_legacy_triton_kernels:
             _patch_make_bitmatrix_metadata()
     except (AttributeError, ImportError) as e:
@@ -285,38 +331,54 @@ def triton_kernel_moe_forward(
     unpadded_N_w2=None,
     unpadded_K_w2=None,
 ) -> torch.Tensor:
-    from triton_kernels.topk import topk as topk_fn
-
     sm_first = not renormalize
-    logits = gating_output
-    if sm_first:
-        logits = torch.softmax(logits, dim=-1)
-    topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
-    # topk may return a tuple (vals, indx, bitmatrix) or a
-    # SparseMatrix depending on the triton_kernels version.
-    if isinstance(topk_result, tuple):
-        topk_weights, topk_ids_raw, _ = topk_result
-    else:
-        topk_weights = topk_result.vals
-        topk_ids_raw = topk_result.indx
 
-    if expert_map is not None:
-        # topk_ids_raw contains global expert IDs - remap to local.
-        topk_ids = expert_map[topk_ids_raw.to(torch.long)]
-        local_num_experts = w1.shape[0]
-        routing_data, gather_idx, scatter_idx = make_routing_data(
-            topk_ids, topk_weights, local_num_experts
+    # When no expert map is provided (no EP), call the fused `routing()`
+    # kernel directly. It combines softmax, topk, bitmatrix packing, and
+    # routing-metadata construction in a single launch, instead of the
+    # three separate kernels used by the generic path below.
+    # Only available in the legacy (v3.5.1) API; the v3.6.0+ path inlines
+    # equivalent logic via SparseMatrix in `make_routing_data`.
+    if use_legacy_triton_kernels and expert_map is None:
+        from triton_kernels.routing import routing as fused_routing
+
+        routing_data, gather_idx, scatter_idx = fused_routing(
+            gating_output, topk, sm_first=sm_first
         )
-        # expert_map already applied; pass None downstream.
         effective_expert_map = None
-        effective_global_num_experts = local_num_experts
-    else:
-        topk_ids = topk_ids_raw.to(torch.long)
-        routing_data, gather_idx, scatter_idx = make_routing_data(
-            topk_ids, topk_weights, gating_output.shape[-1]
-        )
-        effective_expert_map = expert_map
         effective_global_num_experts = global_num_experts
+    else:
+        from triton_kernels.topk import topk as topk_fn
+
+        logits = gating_output
+        if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+        topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # topk may return a tuple (vals, indx, bitmatrix) or a
+        # SparseMatrix depending on the triton_kernels version.
+        if isinstance(topk_result, tuple):
+            topk_weights, topk_ids_raw, _ = topk_result
+        else:
+            topk_weights = topk_result.vals
+            topk_ids_raw = topk_result.indx
+
+        if expert_map is not None:
+            # topk_ids_raw contains global expert IDs - remap to local.
+            topk_ids = expert_map[topk_ids_raw.to(torch.long)]
+            local_num_experts = w1.shape[0]
+            routing_data, gather_idx, scatter_idx = make_routing_data(
+                topk_ids, topk_weights, local_num_experts
+            )
+            # expert_map already applied; pass None downstream.
+            effective_expert_map = None
+            effective_global_num_experts = local_num_experts
+        else:
+            topk_ids = topk_ids_raw.to(torch.long)
+            routing_data, gather_idx, scatter_idx = make_routing_data(
+                topk_ids, topk_weights, gating_output.shape[-1]
+            )
+            effective_expert_map = expert_map
+            effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
     effective_quant_config = (
@@ -522,17 +584,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        if not has_triton_kernels():
-            return False
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -936,17 +988,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        if not has_triton_kernels():
-            return False
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

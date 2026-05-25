@@ -1,7 +1,7 @@
 include(FetchContent)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -195,10 +195,12 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
         message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")
+        # Sources gate FP16/BF16 paths on the compiler-provided
+        # __riscv_zvfh / __riscv_zvfbfmin macros, which GCC and clang
+        # define automatically when those extensions appear in -march.
         if(RVV_BF16_FOUND)
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
-            add_compile_definitions(RISCV_BF16_SUPPORT)
         elseif(RVV_FP16_FOUND)
             message(WARNING "BF16 functionality is not available")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
@@ -326,14 +328,6 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     set(ONEDNN_VERBOSE "ON")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
-    # TODO: Refactor this
-    if (ENABLE_X86_ISA)
-        # Note: only enable oneDNN for AVX512
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512})
-    else()
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS})
-    endif()
-
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
     FetchContent_MakeAvailable(oneDNN)
@@ -346,8 +340,14 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
     target_link_libraries(dnnl_ext dnnl torch)
-    target_compile_options(dnnl_ext PRIVATE ${DNNL_COMPILE_FLAGS} -fPIC)
+    if (ENABLE_X86_ISA)
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    else()
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    endif()
     list(APPEND LIBS dnnl_ext)
+
+
     set(USE_ONEDNN ON)
 else()
     set(USE_ONEDNN OFF)
@@ -411,12 +411,15 @@ endif()
 
 if (ENABLE_X86_ISA)
     set(VLLM_EXT_SRC_SGL
+        "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/sgl-kernels/conv.cpp"
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
+        "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")
 
     set(VLLM_EXT_SRC_AVX512
@@ -435,10 +438,11 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    set(VLLM_EXT_SRC_AVX2 
+    set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -453,7 +457,7 @@ if (ENABLE_X86_ISA)
 
     set(_C_LIBS numa dnnl_ext)
     set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa)
+    set(_C_AVX2_LIBS numa dnnl_ext)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
