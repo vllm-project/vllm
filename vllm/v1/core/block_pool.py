@@ -31,6 +31,15 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+class _NullBlockEntry:
+    """Logical prefix-cache entry without a physical KV cache block."""
+
+    __slots__ = ()
+
+
+_NULL_BLOCK_ENTRY = _NullBlockEntry()
+
+
 class BlockHashToBlockMap:
     """
     Cache of blocks that are used for prefix caching. It caches blocks
@@ -56,17 +65,27 @@ class BlockHashToBlockMap:
 
     def __init__(self):
         self._cache: dict[
-            BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
+            BlockHashWithGroupId,
+            KVCacheBlock | _NullBlockEntry | dict[int, KVCacheBlock],
         ] = {}
 
-    def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
+    def get_one_block(
+        self, key: BlockHashWithGroupId, null_block: KVCacheBlock | None = None
+    ) -> KVCacheBlock | None:
         """
         Gets any block with the given block hash key.
+
+        If the key maps to a null-block entry, it represents a logical
+        null-block cache entry for Mamba align-mode. In that case, return
+        the caller-provided null block.
         """
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
                 return blocks
+            if isinstance(blocks, _NullBlockEntry):
+                assert null_block is not None
+                return null_block
             if isinstance(blocks, dict):
                 return next(iter(blocks.values()))
             self._unexpected_blocks_type(blocks)
@@ -77,8 +96,9 @@ class BlockHashToBlockMap:
         Inserts the KVCacheBlock to the cache
         """
         blocks = self._cache.get(key)
-        if blocks is None:
-            # When key is not found, attach a single block to the key
+        if blocks is None or isinstance(blocks, _NullBlockEntry):
+            # When key is not found, attach a single block to the key. A real
+            # block replaces a logical null entry for the same key.
             self._cache[key] = block
         elif isinstance(blocks, KVCacheBlock):
             # If there's a block with the same key, merge the original block
@@ -89,6 +109,15 @@ class BlockHashToBlockMap:
             blocks[block.block_id] = block
         else:
             self._unexpected_blocks_type(blocks)
+
+    def insert_null(self, key: BlockHashWithGroupId) -> None:
+        """Insert a logical null-block entry for prefix-cache lookup.
+
+        This is used for Mamba align-mode positions that can participate in
+        hybrid prefix-cache matching but do not own a physical Mamba cache
+        block. Real blocks, if present, take precedence.
+        """
+        self._cache.setdefault(key, _NULL_BLOCK_ENTRY)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """
@@ -108,6 +137,10 @@ class BlockHashToBlockMap:
                 return blocks
             # If the single block ID doesn't match, we should put the
             # block back (it should happen rarely)
+            self._cache[key] = blocks
+            return None
+        if isinstance(blocks, _NullBlockEntry):
+            # Logical null entries are not tied to a physical block id.
             self._cache[key] = blocks
             return None
         if isinstance(blocks, dict):
@@ -201,9 +234,9 @@ class BlockPool:
                 block_hash, group_id
             )
             block = self.cached_block_hash_to_block.get_one_block(
-                block_hash_with_group_id
+                block_hash_with_group_id, self.null_block
             )
-            if not block:
+            if block is None:
                 return None
             cached_blocks.append(block)
         return cached_blocks
@@ -217,6 +250,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         block_mask: list[bool] | None = None,
+        cache_null_blocks: bool = False,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -241,6 +275,10 @@ class BlockPool:
                 consults a subset of blocks (e.g. SWA tail-window), so blocks
                 that can never serve a hit stay out of the prefix-cache hash
                 map.
+            cache_null_blocks: Whether logical entries should be cached for
+                null blocks. This is needed by Mamba align-mode, where earlier
+                prefix positions may not own physical Mamba blocks but must
+                still participate in hybrid prefix-cache lookup.
         """
         if num_cached_blocks >= num_full_blocks:
             return
@@ -265,20 +303,24 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
-            # Some blocks may be null or masked out when enabling sparse attention
-            # like sliding window attention, or Mamba models with prefix-caching
-            # in align mode. We skip null blocks here.
-            if blk.is_null or (block_mask is not None and not block_mask[i]):
+            if block_mask is not None and not block_mask[i]:
                 continue
-            assert blk.block_hash is None
             block_hash = new_block_hashes[i]
-
-            # Update and added the full block to the cache.
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id
             )
-            blk.block_hash = block_hash_with_group_id
-            self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+            if blk.is_null:
+                if cache_null_blocks:
+                    self.cached_block_hash_to_block.insert_null(
+                        block_hash_with_group_id
+                    )
+                continue
+            else:
+                assert blk.block_hash is None
+
+                # Update and added the full block to the cache.
+                blk.block_hash = block_hash_with_group_id
+                self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 

@@ -316,6 +316,7 @@ class SingleTypeKVCacheManager(ABC):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
             block_mask=block_mask,
+            cache_null_blocks=self._cache_null_blocks(),
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
@@ -334,6 +335,10 @@ class SingleTypeKVCacheManager(ABC):
         length.
         """
         return None
+
+    def _cache_null_blocks(self) -> bool:
+        """Whether null blocks should participate in prefix-cache lookup."""
+        return False
 
     def free(self, request_id: str) -> None:
         """
@@ -1096,6 +1101,9 @@ class MambaManager(SingleTypeKVCacheManager):
         num_computed_tokens - 1.
         """
         return num_computed_tokens - 1
+
+    def _cache_null_blocks(self) -> bool:
+        return self.mamba_cache_mode == "align"
 
     def cache_blocks(
         self,

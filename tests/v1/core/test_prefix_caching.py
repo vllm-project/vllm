@@ -1009,6 +1009,69 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+
+def test_prefill_hybrid_model_mamba_align_incremental_prefix_hit():
+    """Regression test for incremental prefix hits in mamba align mode.
+
+    In align mode the Mamba manager keeps only one real running-state block and
+    pads earlier block positions with null blocks.  Those earlier positions must
+    still be represented in the prefix-cache hash map so hybrid lookup can hit
+    an already-computed attention prefix instead of missing because the Mamba
+    group has no entry for that hash.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # Cache a request with three full blocks. The Mamba align group stores only
+    # the latest running state, but the first two block hashes are reusable by an
+    # incremental request below.
+    req0 = make_request(
+        "0",
+        [i for i in range(3) for _ in range(block_size)] + [3] * 7,
+        block_size,
+        hash_fn,
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, req0.num_tokens, num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.free(req0)
+
+    # Same first two blocks, changed third block: mirrors incremental multimodal
+    # prompts whose shared first blocks have identical block hashes.
+    req1 = make_request(
+        "1",
+        [0] * block_size + [1] * block_size + [99] * block_size + [4] * 7,
+        block_size,
+        hash_fn,
+    )
+    assert req0.block_hashes[0] == req1.block_hashes[0]
+    assert req0.block_hashes[1] == req1.block_hashes[1]
+    assert req0.block_hashes[2] != req1.block_hashes[2]
+
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 2 * block_size
+    assert [len(group_blocks) for group_blocks in computed_blocks.blocks] == [2, 2]
+    assert all(
+        block is manager.block_pool.null_block
+        for block in computed_blocks.blocks[1]
+    )
+
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 
@@ -2740,6 +2803,24 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_block_lookup_cache_null_entry():
+    cache = BlockHashToBlockMap()
+    key = BlockHashWithGroupId(b"hash")
+    null_block = KVCacheBlock(0)
+    null_block.is_null = True
+    real_block = KVCacheBlock(1)
+
+    cache.insert_null(key)
+    assert cache.get_one_block(key, null_block) is null_block
+    assert cache.pop(key, 0) is None
+    assert cache.get_one_block(key, null_block) is null_block
+
+    cache.insert(key, real_block)
+    assert cache.get_one_block(key, null_block) is real_block
+    assert cache.pop(key, real_block.block_id) is real_block
+    assert cache.get_one_block(key, null_block) is None
 
 
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
