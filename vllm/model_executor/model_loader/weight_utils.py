@@ -224,7 +224,7 @@ def convert_bin_to_safetensor_file(
     pt_filename: str,
     sf_filename: str,
 ) -> None:
-    loaded = torch.load(pt_filename, map_location="cpu", weights_only=True)
+    loaded = torch.load(pt_filename, map_location="cpu", weights_only=envs.VLLM_WEIGHTS_ONLY)
     if "state_dict" in loaded:
         loaded = loaded["state_dict"]
     shared = _shared_pointers(loaded)
@@ -732,7 +732,7 @@ def np_cache_weights_iterator(
                 disable=not enable_tqdm(use_tqdm_on_load),
                 bar_format=_BAR_FORMAT,
             ):
-                state = torch.load(bin_file, map_location="cpu", weights_only=True)
+                state = torch.load(bin_file, map_location="cpu", weights_only=envs.VLLM_WEIGHTS_ONLY)
                 for name, param in state.items():
                     param_path = os.path.join(np_folder, name)
                     with open(param_path, "wb") as f:
@@ -1216,7 +1216,7 @@ def pt_weights_iterator(
         bar_format=_BAR_FORMAT,
     ):
         state = torch.load(
-            bin_file, map_location=pt_load_map_location, weights_only=True
+            bin_file, map_location=pt_load_map_location, weights_only=envs.VLLM_WEIGHTS_ONLY
         )
         yield from state.items()
         del state
@@ -1232,7 +1232,7 @@ def multi_thread_pt_weights_iterator(
 
     def _load_file(bin_file: str):
         return torch.load(
-            bin_file, map_location=pt_load_map_location, weights_only=True
+            bin_file, map_location=pt_load_map_location, weights_only=envs.VLLM_WEIGHTS_ONLY
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
