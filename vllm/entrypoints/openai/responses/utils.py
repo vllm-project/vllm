@@ -118,7 +118,64 @@ def construct_input_messages(
     else:
         input_messages = construct_chat_messages_with_tool_call(request_input)
         messages.extend(input_messages)
-    return messages
+    return _normalize_messages_for_chat_template(messages)
+
+
+def _extract_text_from_content(content: Any) -> list[str]:
+    """Extract plain text from a message content field.
+
+    Handles both string content and OpenAI-style list of content parts.
+    Returns None if there is no extractable text.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [content] if content else []
+    if not isinstance(content, list):
+        return []
+    chunks: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("input_text", "output_text"):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+    return chunks
+
+
+def _normalize_messages_for_chat_template(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Normalize messages before passing them to the chat template.
+
+    1. Maps the "developer" role to "system" because most HF chat templates
+       do not recognize "developer".
+    2. Merges all system messages into a single message so that chat
+       templates (which typically expect at most one) do not receive multiples.
+    """
+    system_contents: list[str] = []
+    other_messages: list[ChatCompletionMessageParam] = []
+
+    for msg in messages:
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") in ("developer", "system")
+            and msg.get("type") == "message"
+        ):
+            texts = _extract_text_from_content(msg.get("content"))
+            if texts:
+                system_contents.extend(texts)
+            continue
+        other_messages.append(msg)
+
+    if system_contents:
+        merged_system: ChatCompletionMessageParam = {
+            "role": "system",
+            "content": "\n\n".join(system_contents),
+        }
+        return [merged_system, *other_messages]
+    return other_messages
 
 
 def construct_chat_messages_with_tool_call(

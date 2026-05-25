@@ -911,3 +911,109 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestConstructInputMessagesExtended:
+    def test_empty_instructions_ignored(self):
+        """Empty-string instructions must not create a system message."""
+        msgs = construct_input_messages(
+            request_instructions="",
+            request_input="hello",
+        )
+        assert msgs == [{"role": "user", "content": "hello"}]
+
+    def test_request_input_list(self):
+        """request_input as a list triggers tool-call message construction."""
+        msgs = construct_input_messages(
+            request_input=[
+                make_reasoning_item(content_text="Let me think"),
+                make_output_message("Hello"),
+            ],
+        )
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0]["reasoning"] == "Let me think"
+        assert msgs[0]["content"] == "Hello"
+
+    def test_prev_response_output_with_output_message(self):
+        """ResponseOutputMessage items are flattened into assistant messages."""
+        msgs = construct_input_messages(
+            request_input="Next",
+            prev_response_output=[
+                make_output_message("First"),
+                make_output_message("Second"),
+            ],
+        )
+        assert [m["role"] for m in msgs] == ["assistant", "assistant", "user"]
+        assert msgs[0]["content"] == "First"
+        assert msgs[1]["content"] == "Second"
+        assert msgs[2]["content"] == "Next"
+
+    def test_prev_response_output_skips_reasoning(self):
+        """ResponseReasoningItem must be skipped (not added as messages)."""
+        msgs = construct_input_messages(
+            request_input="Next",
+            prev_response_output=[
+                make_reasoning_item(content_text="think"),
+                make_output_message("Answer"),
+            ],
+        )
+        assert [m["role"] for m in msgs] == ["assistant", "user"]
+        assert msgs[0]["content"] == "Answer"
+        assert msgs[1]["content"] == "Next"
+
+    def test_prev_response_output_empty_list(self):
+        """An empty prev_response_output list adds nothing."""
+        msgs = construct_input_messages(
+            request_input="hello",
+            prev_response_output=[],
+        )
+        assert msgs == [{"role": "user", "content": "hello"}]
+
+    def test_all_params_combined(self):
+        """Full integration: instructions + prev_msg + prev_response_output
+        + list request_input."""
+        prev = [
+            {"role": "system", "content": "old"},
+            {"role": "user", "content": "Q"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="new",
+            request_input=[
+                make_reasoning_item(content_text="think"),
+                make_output_message("A"),
+            ],
+            prev_msg=prev,
+            prev_response_output=[
+                make_output_message("prev1"),
+                make_output_message("prev2"),
+            ],
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles == ["system", "user", "assistant", "assistant", "assistant"]
+        assert msgs[0]["content"] == "new"
+        assert msgs[1]["content"] == "Q"
+        assert msgs[2]["content"] == "prev1"
+        assert msgs[3]["content"] == "prev2"
+        assert msgs[4]["reasoning"] == "think"
+        assert msgs[4]["content"] == "A"
+
+    def test_system_messages_in_middle_of_prev_msg(self):
+        """System messages interleaved in prev_msg are all filtered."""
+        prev = [
+            {"role": "user", "content": "a"},
+            {"role": "system", "content": "s1"},
+            {"role": "assistant", "content": "b"},
+            {"role": "system", "content": "s2"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="inst",
+            request_input="c",
+            prev_msg=prev,
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert msgs[0]["content"] == "inst"
+        assert msgs[1]["content"] == "a"
+        assert msgs[2]["content"] == "b"
+        assert msgs[3]["content"] == "c"
