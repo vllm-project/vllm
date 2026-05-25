@@ -16,6 +16,16 @@ class ObjStoreConfig:
     scheme: str = "http"
     ca_bundle: str = ""
 
+    def __repr__(self) -> str:
+        return (
+            f"ObjStoreConfig(bucket={self.bucket!r}, "
+            f"endpoint_override={self.endpoint_override!r}, "
+            f"access_key={self.access_key!r}, "
+            f"secret_key='***', "
+            f"scheme={self.scheme!r}, "
+            f"ca_bundle={self.ca_bundle!r})"
+        )
+
     def to_nixl_params(self) -> dict[str, str]:
         """Build the NIXL backend params dict."""
         params: dict[str, str] = {
