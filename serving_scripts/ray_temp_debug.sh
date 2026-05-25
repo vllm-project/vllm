@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-arc-slurm-tmp-v3"
+SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-arc-slurm-tmp-v4-strict-slurm-tmp"
 
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
@@ -28,14 +28,20 @@ SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-arc-slurm-tmp-v3"
 # Storage layout:
 #
 #   Real Ray temp/session/socket/log/spill dirs:
-#       ARC/SLURM node-local tmp, preferably $TMPDIR if ARC sets it.
+#       ARC/SLURM node-local tmp.
 #
 #   Robust fallback order per node:
 #       1. ARC_RAY_REAL_TMP_PARENT, if explicitly set
-#       2. $TMPDIR, if ARC provides it and it is not already our Ray py_tmp
-#       3. /tmp/slurm-${SLURM_JOB_ID}/tmp, if it exists
-#       4. /tmp/slurm-${SLURM_JOB_ID}, if it exists
-#       5. create/use /tmp/slurm-${SLURM_JOB_ID}/tmp
+#       2. $TMPDIR, only if it is a real job-local Slurm tmp path
+#          matching /tmp/slurm-${SLURM_JOB_ID}*
+#       3. /tmp/slurm-${SLURM_JOB_ID}/tmp, creating it if needed
+#       4. /tmp/slurm-${SLURM_JOB_ID}, creating it if needed
+#
+#   Important:
+#       This script intentionally rejects TMPDIR=/tmp. The previous run accepted
+#       TMPDIR=/tmp and produced /tmp/ray-${SLURM_JOB_ID}-${node}, which avoided
+#       /tmp/ray but still used the plain /tmp filesystem rather than the
+#       intended Slurm job-local tmp directory.
 #
 #   Short Ray path passed to Ray:
 #       /tmp/vray-${SLURM_JOB_ID}-${node} -> real ARC/SLURM tmp dir
@@ -50,7 +56,8 @@ SCRIPT_VERSION="arc-ray-qwen3-30b-workers-nsys-arc-slurm-tmp-v3"
 #       ${TRACE_RUN_DIR}/ray_logs/
 #       ${TRACE_RUN_DIR}/ray_session_names/
 #
-# This prevents Ray from using plain /tmp/ray for large-model profiling.
+# This prevents Ray from using plain /tmp/ray and prevents the fallback from
+# silently using /tmp/ray-${SLURM_JOB_ID}-${node} for large-model profiling.
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -269,32 +276,42 @@ discover_arc_node_tmp_parent() {
     return 0
   fi
 
-  # Use ARC-provided TMPDIR if it exists and is not already our Ray py_tmp.
-  if [ -n "${TMPDIR:-}" ] && [ "${TMPDIR}" != "/" ]; then
+  # Use ARC-provided TMPDIR only if it looks like a job-local Slurm tmp.
+  # Do NOT accept plain /tmp, because that caused:
+  #   /tmp/ray-${SLURM_JOB_ID}-${node}
+  if [ -n "${TMPDIR:-}" ] && [ "${TMPDIR}" != "/" ] && [ "${TMPDIR}" != "/tmp" ]; then
     case "${TMPDIR}" in
       "${RAY_TMP_LINK_PARENT}/${RAY_TMP_PREFIX}-"*"/py_tmp")
         ;;
       *"/py_tmp")
         ;;
-      *)
+      /tmp/slurm-${SLURM_JOB_ID}*)
         printf '%s' "${TMPDIR}"
         return 0
         ;;
+      *)
+        echo "[ray-tmp] ignoring TMPDIR=${TMPDIR}; not an ARC/SLURM job-local tmp path" >&2
+        ;;
     esac
   fi
+
+  # Prefer the documented ARC/SLURM job-local tmp layout.
+  mkdir -p "${slurm_tmp_with_tmp}" 2>/dev/null || true
 
   if [ -d "${slurm_tmp_with_tmp}" ]; then
     printf '%s' "${slurm_tmp_with_tmp}"
     return 0
   fi
 
+  mkdir -p "${slurm_tmp_root}" 2>/dev/null || true
+
   if [ -d "${slurm_tmp_root}" ]; then
     printf '%s' "${slurm_tmp_root}"
     return 0
   fi
 
-  # Last resort: create the documented shape under /tmp/slurm-${SLURM_JOB_ID}/tmp.
-  printf '%s' "${slurm_tmp_with_tmp}"
+  echo "Error: could not create or find ARC/SLURM tmp dir for job ${SLURM_JOB_ID}" >&2
+  exit 1
 }
 
 ray_tmp_link_for_node() {
@@ -828,6 +845,8 @@ echo "ARC_RAY_REAL_TMP_PARENT=${ARC_RAY_REAL_TMP_PARENT:-<unset>}"
 echo "RAY_PLASMA_DIRECTORY=${RAY_PLASMA_DIRECTORY}"
 echo "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY}"
 echo "CLEAN_RAY_TMP_ON_EXIT=${CLEAN_RAY_TMP_ON_EXIT}"
+echo "NUM_PROMPTS=${NUM_PROMPTS}"
+echo "REQUEST_RATE=${REQUEST_RATE}"
 
 slurm_debug "SLURM_NTASKS=${SLURM_NTASKS:-} SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES:-}"
 slurm_debug "Full nodelist: $(scontrol show hostnames "${SLURM_NODELIST}" 2>/dev/null | tr '\n' ' ')"
@@ -1284,7 +1303,7 @@ done
 unset _health_wait_n
 
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
-echo "SP=${SP} SD=${SD}"
+echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS} REQUEST_RATE=${REQUEST_RATE}"
 
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   SP="${SP}" SD="${SD}" \
@@ -1371,7 +1390,7 @@ echo "Trace files:"
 find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
 
 echo "Verifying active paths from saved Ray step logs:"
-grep -R --line-buffered -E "RAY_TMPDIR=|real_root=|short_link=|--temp-dir=|--plasma-directory|--object-store-memory" \
+grep -R --line-buffered -E "RAY_TMPDIR=|real_root=|short_link=|--temp-dir=|--plasma-directory|--object-store-memory|ignoring TMPDIR=" \
   "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" \
   "${TRACE_RUN_DIR}"/slurm_ray_worker_*.out \
   2>/dev/null || true
