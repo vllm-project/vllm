@@ -21,9 +21,11 @@ Refer to the [Dockerfile.rocm_base](../../docker/Dockerfile.rocm_base) for more 
 
 For instructions on installing appropriate NIC userspace libraries, see [Installing NIC userspace libraries](#appendix-installing-nic-userspace-libraries).
 
-## Basic Usage (on the same host)
+## Basic usage (single host)
 
-### Producer (Prefiller) Configuration
+Start the proxy first; the producer and consumer instances will retry registration until the proxy is reachable.
+
+### Producer (prefiller) configuration
 
 Start a prefiller instance that produces KV caches
 
@@ -52,7 +54,7 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   }'
 ```
 
-### Consumer (Decoder) Configuration
+### Consumer (decoder) configuration
 
 Start a decoder instance that consumes KV caches:
 
@@ -81,7 +83,7 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   }'
 ```
 
-### Proxy Server
+### Proxy server
 
 The proxy fronts the producer and consumer instances and routes incoming requests to them. `vllm-router` is the recommended proxy; it can be installed manually or run as a Docker container. Note that the port `36367` below is the `proxy_ping_port` configured on each vLLM instance.
 
@@ -127,12 +129,12 @@ python examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
 
 The connector is configured at two levels: the application level and the transport level.
 
-### Application-level Configuration
+### Application-level configuration
 
 **Modes:** MoRI has two modes of operation: WRITE and READ mode.
 
-- In WRITE mode (default), the producer actively pushes computed KV blocks after every layer into the consumer's memory.
-- In READ mode the consumer pulls the KV blocks from the producer all at once, as soon as it has been notified those blocks are ready.
+- In WRITE mode, the producer actively pushes computed KV blocks after every layer into the consumer's memory.
+- In READ mode, the consumer pulls the KV blocks from the producer all at once, as soon as it has been notified those blocks are ready.
 
 WRITE mode is used by default. READ mode can be configured by setting `--kv-transfer-config.kv_connector_extra_config.read_mode true`.
 
@@ -154,7 +156,7 @@ The following keys are used to configure this metadata exchange, all part of the
 > [!NOTE]
 > `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
 
-### Transport Configuration
+### Transport configuration
 
 MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.
 
@@ -172,33 +174,34 @@ The configuration options for each backend are as follows.
 > Example: to set the number of QPs per transfer to 4, use the flag `--kv-transfer-config.kv_connector_extra_config.qp_per_transfer 4`. All other flags are
 set analogously.
 
-Advanced users can also configure MoRI itself using environment variables such as `MORI_IO_QP_MAX_SEND_WR`, `MORI_IO_QP_MAX_CQE`, etc. Please refer to the [MoRI repository](https://github.com/rocm/mori) for more information.
+Advanced users can also configure MoRI itself using environment variables such as `MORI_IO_QP_MAX_SEND_WR`, `MORI_IO_QP_MAX_CQE`, etc. These are MoRI library variables and are separate from vLLM's own `VLLM_MORIIO_*` settings. Refer to the [MoRI repository](https://github.com/rocm/mori) for more information.
 
 #### xGMI backend
 
-Currently only configured using MoRI-specific environment variables. See the MoRI documentation.
+Use xGMI when the prefiller and decoder run on the same physical host so transfers go over the AMD GPU fabric and skip the NIC entirely. Currently only configured using MoRI-specific environment variables; see the [MoRI repository](https://github.com/rocm/mori).
 
-## Multi-node deployments (different hosts)
+## Multi-node deployment
 
 The example below shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.
 
-### Manual deployment
-
-**On both nodes:**
+### On both nodes
 
 ```bash
 # Set on both nodes before running any command
 export PREFILL_IP=<node1-ip>
 export DECODE_IP=<node2-ip>
 
-# Update as required
-VLLM_IMAGE=vllm/vllm-openai-rocm:v0.21.0
+# Adjust to the image tag you want to run
+export VLLM_IMAGE=vllm/vllm-openai-rocm:v0.21.0
 ```
 
-**On node 1:**
+### On node 1
+
+Start the proxy first, then the prefill instance.
+
+Proxy:
 
 ```bash
-# Run the proxy
 docker run \
   --name vllm-router \
   --network host \
@@ -211,8 +214,11 @@ docker run \
   --policy consistent_hash \
   --prefill-policy consistent_hash \
   --decode-policy consistent_hash
+```
 
-# Run the prefill instance
+Prefill instance:
+
+```bash
 docker run \
   --rm \
   --name moriio-prefill \
@@ -250,10 +256,11 @@ docker run \
     }'
 ```
 
-**On node 2:**
+### On node 2
+
+Decode instance:
 
 ```bash
-# Run the decode instance
 docker run \
   --rm \
   --name moriio-decode \
@@ -295,18 +302,18 @@ docker run \
 
 ### `availDevices.size() > 0` assertion failure — incompatible NIC userspace libraries
 
-**Problem:** I see this log when launching vLLM:
+**Problem:** vLLM fails to launch with the following log:
 
 ```bash
 libibverbs: Warning: Driver bnxt_re does not support the kernel ABI of 6 (supports 1 to 1) for device /sys/class/infiniband/rdma4
 ...
-ker: /app/mori/src/io/rdma/backend_impl.cpp:42: mori::io::RdmaManager::RdmaManager(const RdmaBackendConfig, application::RdmaContext *): Assertion `availDevices.size() > 0' failed.
+ker: /app/mori/src/io/rdma/backend_impl.cpp: mori::io::RdmaManager::RdmaManager(const RdmaBackendConfig, application::RdmaContext *): Assertion `availDevices.size() > 0' failed.
 ```
 
 **Fix:** The installed RDMA userspace libraries do not match the driver and firmware version installed on the host. You must install NIC userspace libraries corresponding to your RDMA kernel module and firmware version. See [Installing NIC userspace
 libraries](#appendix-installing-nic-userspace-libraries) for more information.
 
-## Appendix: Installing NIC userspace libraries
+## Appendix: installing NIC userspace libraries
 
 To run MoRI with RDMA, your environment must have the necessary RDMA userspace libraries installed that match the associated kernel module and firmware version.
 
@@ -317,12 +324,6 @@ The official image `vllm/vllm-openai-rocm:v0.21.0` (and later) comes pre-install
 
 Refer to [Dockerfile.rocm](../../docker/Dockerfile.rocm) for more details. For users with NICs, kernel modules, and/or FW other than those stated above we refer to
 the vendors' own installation instructions.
-
-## Example Scripts
-
-Reference scripts in the vLLM repository:
-
-- [moriio_toy_proxy_server.py](../../examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py) — reference implementation of the disaggregation proxy.
 
 ## Further reading
 
