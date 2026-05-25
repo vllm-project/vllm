@@ -124,7 +124,15 @@ _MAX_FRAMES_PER_VIDEO = 600
 
 
 def _is_glmga_processor(processor: object) -> bool:
-    return type(processor).__name__ == "GlmgaProcessor"
+    if type(processor).__name__ == "GlmgaProcessor":
+        return True
+    # GlmgaProcessor was removed; Glm46VProcessor is reused with
+    # GlmgaImageProcessor / GlmgaVideoProcessor as sub-processors.
+    for attr in ("image_processor", "video_processor"):
+        sub = getattr(processor, attr, None)
+        if sub and "Glmga" in type(sub).__name__:
+            return True
+    return False
 
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
