@@ -56,15 +56,19 @@ class DPCoordinator:
     request wave / running state changes.
     """
 
-    def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
+    def _wait_for_zmq_addrs(
+        self, zmq_addr_pipe, timeout: int = 30
+    ) -> tuple[str, str, str]:
         try:
             ready = multiprocessing.connection.wait(
-                [zmq_addr_pipe, self.proc.sentinel], timeout=30
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
             )
             if not ready:
                 raise RuntimeError(
                     "DP Coordinator process failed to report ZMQ addresses "
-                    "during startup."
+                    f"within {timeout} seconds during startup. Consider "
+                    "increasing `--data_parallel_zmq_liveness_timeout` if in an "
+                    "environment with high file IO contention."
                 )
             try:
                 return zmq_addr_pipe.recv()
@@ -123,7 +127,10 @@ class DPCoordinator:
             front_publish_address,
             back_output_address,
             back_publish_address,
-        ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
+        ) = self._wait_for_zmq_addrs(
+            parent_zmq_addr_pipe,
+            timeout=parallel_config.data_parallel_zmq_liveness_timeout,
+        )
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
