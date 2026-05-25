@@ -33,14 +33,16 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4TextConfig,
 )
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -63,6 +65,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -71,6 +74,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    SupportsTranscription,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -920,7 +924,10 @@ class Gemma4ForConditionalGeneration(
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
+    SupportsTranscription,
 ):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1599,3 +1606,61 @@ class Gemma4ForConditionalGeneration(
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")
+
+    @classmethod
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
+
+        prompt = "<bos><|turn>user\n"
+        prompt += "Transcribe" if task_type == "transcribe" else "Translate"
+        prompt += " this audio"
+
+        full_lang_name = cls.supported_languages.get(language, "")
+        full_lang_name_to = cls.supported_languages.get(to_language, "")
+
+        if task_type == "transcribe" and full_lang_name:
+            prompt += f" into {full_lang_name}"
+        elif task_type == "translate":
+            if full_lang_name:
+                prompt += f" from {full_lang_name}"
+            if full_lang_name_to:
+                prompt += f" into {full_lang_name_to}"
+
+        prompt += ": <|audio|><turn|>\n<|turn>model\n"
+
+        return TextPrompt(
+            prompt=prompt,
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        processor = cached_processor_from_config(model_config)
+        feature_extractor = processor.feature_extractor
+        max_audio_clip_s = math.floor(
+            processor.audio_seq_length * processor.audio_ms_per_token / 1000
+        )
+        return SpeechToTextConfig(
+            max_audio_clip_s=max_audio_clip_s,
+            sample_rate=feature_extractor.sampling_rate,
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    def get_num_audio_tokens(
+        cls,
+        audio_duration_s: float,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+    ) -> int | None:
+        processor = cached_processor_from_config(model_config)
+        num_audio_tokens = math.ceil(
+            audio_duration_s * 1000 / processor.audio_ms_per_token
+        )
+        return min(num_audio_tokens, processor.audio_seq_length) + 2
