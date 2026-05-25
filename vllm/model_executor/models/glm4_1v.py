@@ -1361,22 +1361,20 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         mm_data = dict(mm_data)
         processor = self.info.get_hf_processor(**mm_kwargs)
 
-        if _is_glmga_processor(processor):
-            # GLMGA's HF processor expands image/video placeholders together.
-            # The GLM-4.1V split-video path would double-expand the video text.
-            glmga_mm_data, glmga_mm_kwargs = self._get_glmga_processor_inputs(
+        # Glm46VProcessor and GLMGA handle image/video placeholders
+        # together; only Glm4vProcessor (GLM-4.1V) needs the split-video
+        # path because it uses image_token_id as the video placeholder.
+        if type(processor).__name__ != "Glm4vProcessor":
+            prepared_data, prepared_kwargs = self._get_glmga_processor_inputs(
                 mm_data, mm_kwargs
             )
             return super()._call_hf_processor(
                 prompt=prompt,
-                mm_data=glmga_mm_data,
-                mm_kwargs=glmga_mm_kwargs,
+                mm_data=prepared_data,
+                mm_kwargs=prepared_kwargs,
                 tok_kwargs=tok_kwargs,
             )
 
-        # GLM-4.1V use `image_token_id` as video placeholder, we need to
-        # replace it with `video_token_id` for video processing. So we
-        # separate video processing from image processing.
         if (
             "videos" in mm_data
             and isinstance(mm_data["videos"], list)
