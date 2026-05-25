@@ -744,6 +744,15 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`activation()` calls `swiglu_limit_func` with
+        `quant_config.gemm1_clamp_limit` only on the SILU branch and
+        falls back to the base activation for the other SwiGLU-family
+        activations (which do not consume a clamp).
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike()
 
