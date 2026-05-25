@@ -2528,12 +2528,12 @@ class SpecBench(CustomDataset):
             random.shuffle(self.data)
 
     def sample(
-        self,
+        *args,
         **kwargs,
     ) -> list[SampleRequest]:
         # leverage CustomDataset sample
         return super().sample(
-            **kwargs,
+            *args, **kwargs,
         )
 
 
