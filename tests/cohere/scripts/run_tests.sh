@@ -665,6 +665,102 @@ run_model_arch_c5_3a30t_checks() {
     return 0
 }
 
+run_template_tokenizer_parser_check() {
+    echo "Running template/tokenizer/parser rendering check..."
+
+    cd ${VLLM_WORKSPACE}
+    source tests/cohere/scripts/run-helper.sh
+    check_gpus
+
+    local MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
+    local MODEL_NAME=c5-3a30t_fp8
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+    local think_start think_end
+    think_start=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import START_THINKING_TOKEN; print(START_THINKING_TOKEN)")
+    think_end=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN; print(END_THINKING_TOKEN)")
+    local reasoning_json="{\"reasoning_start_str\":\"${think_start}\",\"reasoning_end_str\":\"${think_end}\"}"
+
+    # CT_CHAT_TEMPLATE optionally overrides the server's chat template so a
+    # caller can compare rendering across templates. The test script reads
+    # rendered text + tokens back from the server via /tokenize, so it does
+    # not need to know which template is in use.
+    local chat_template_arg=""
+    if [[ -n "${CT_CHAT_TEMPLATE:-}" ]]; then
+        chat_template_arg="--chat-template ${CT_CHAT_TEMPLATE}"
+    fi
+
+    local base_cmd="vllm serve ${MODEL_DIR} --tensor-parallel-size 1 --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm --reasoning-config '${reasoning_json}' ${chat_template_arg}"
+    # Pass 1: no parsers — surfaces what the model raw-emits (raw text shows
+    # whether <|START_THINKING|> appears as the first generated token).
+    # Pass 2: parsers enabled, mirroring run_bee_samples() — surfaces how the
+    # reasoning + tool parsers split that raw output. A chat template that
+    # moves <|START_THINKING|> into the prompt will silently break the
+    # reasoning parser (empty msg.reasoning, thinking text leaks into
+    # msg.content); only the parser-enabled pass catches that regression.
+    local parsers="--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4"
+
+    local overall_result=0
+    local pass_label pass_cmd pass_suffix
+    for pass_label in no_parsers with_parsers; do
+        # Clean up stale shared memory before each server start. The previous
+        # pass is torn down with `kill -9`, which skips Python atexit handlers
+        # and leaves /dev/shm/VLLM_* files behind, so pass 2 (and any test that
+        # runs after this function) would otherwise hit "FileExistsError" when
+        # bringing up vllm serve with --mm-processor-cache-type shm.
+        cleanup_vllm_shm
+
+        if [[ "${pass_label}" == "no_parsers" ]]; then
+            pass_cmd="${base_cmd}"
+            pass_suffix="no_parsers"
+        else
+            pass_cmd="${base_cmd} ${parsers}"
+            pass_suffix="with_parsers"
+        fi
+
+        echo "----- template_tokenizer_parser_check pass: ${pass_label} -----"
+        echo "Server command: ${pass_cmd}"
+        bash -c "${pass_cmd}" &
+        local server_pid=$!
+
+        if ! wait_for_server; then
+            echo "vLLM server (${pass_label}) failed to start."
+            kill -9 $server_pid 2>/dev/null
+            kill_gpu_processes
+            overall_result=1
+            continue
+        fi
+        echo "vLLM server (${pass_label}) is up."
+
+        CT_MODEL_DIR=${MODEL_DIR} \
+        CT_MODEL_NAME=${MODEL_NAME} \
+        CT_DATA_DIR=tests/cohere/bee_eval_data \
+        CT_OUTPUT_DIR=${OUTPUT_DIR} \
+        CT_OUTPUT_SUFFIX=${pass_suffix} \
+        CT_PARSER_MODE=${pass_suffix} \
+        PYTHONUNBUFFERED=1 \
+            python3 tests/cohere/test_chat_template_rendering.py
+        local test_result=$?
+
+        kill -9 $server_pid 2>/dev/null
+        kill_gpu_processes
+
+        if [ $test_result -ne 0 ]; then
+            echo "Template/tokenizer/parser check (${pass_label}) FAILED."
+            overall_result=1
+        else
+            echo "Template/tokenizer/parser check (${pass_label}) passed."
+        fi
+    done
+
+    if [ $overall_result -ne 0 ]; then
+        echo "Template/tokenizer/parser check FAILED."
+        return 1
+    fi
+    echo "Template/tokenizer/parser check passed."
+    return 0
+}
+
 run_model_arch_c5_lora_checks() {
     echo "Running c5 LoRA serving sanity check..."
 
@@ -770,7 +866,7 @@ run_c4_sanity_check() {
 run_tests() {
     if [[ -z "${TEST_GROUP:-}" ]]; then
         echo "Error: TEST_GROUP environment variable is not set"
-        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
+        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
         exit 1
     fi
 
@@ -832,9 +928,12 @@ run_tests() {
         c4_sanity_check)
             run_c4_sanity_check
             ;;
+        template_tokenizer_parser_check)
+            run_template_tokenizer_parser_check
+            ;;
         *)
             echo "Unknown test group: $TEST_GROUP"
-            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
+            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
             exit 1
             ;;
     esac

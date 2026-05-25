@@ -63,6 +63,10 @@ This matrix is part of a three-layer documentation structure:
 - 4.3.2 `test_guided_generation_melody` SD (c5-3a30t_fp8 + eagle)
 - 4.3.3 `test_guided_generation_tools_melody` SD (c5-3a30t_fp8 + eagle)
 
+#### 4.4 [Template / Tokenizer / Parser Check](./features/template_tokenizer_parser.md)
+
+- *Diagnostic / investigation tool — no asserted entries (does not gate CI on rendered prompt, tokens, or parser output). Logs the chat-template + tokenization + parser pipeline end-to-end for `c5-3a30t_fp8` across `no_parsers` and `with_parsers` passes, with and without thinking budget.*
+
 ### 5. Speculative Decoding
 
 #### 5.1 [Request Cancellation](./features/speculative_decoding_test.md)

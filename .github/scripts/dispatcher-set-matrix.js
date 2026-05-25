@@ -135,6 +135,9 @@ function setMatrixOutput({ core, inputs }) {
   if (features === "quantization" || features === "all") {
     featureTests.push("quantization_32bit_logits");
   }
+  if (features === "template_tokenizer_parser_check" || features === "all") {
+    featureTests.push("template_tokenizer_parser_check");
+  }
   if (features === "GG" || features === "all") {
     featureTests.push("guided_generation");
   }
