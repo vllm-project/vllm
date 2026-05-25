@@ -39,8 +39,8 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   const int64_t num_rows = logits.size(0);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // 48 = max clusters for CS=4 (48 x 4 CTAs = 192 = num_sms on B300)
-  if (num_rows > 48) {
+  // 32 = max clusters for CS=4 (32 x 4 = 128 CTAs = 66% of SMs, leaves headroom)
+  if (num_rows > 32) {
     cudaError_t status =
         vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
             logits.data_ptr<float>(), output.data_ptr<int32_t>(),
