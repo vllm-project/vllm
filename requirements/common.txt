@@ -6,7 +6,7 @@ numpy
 requests >= 2.33.0
 tqdm
 blake3
-py-cpuinfo
+py-cpuinfo2 ~= 10.1
 transformers >= 5.16.1, < 5.19.0
 huggingface_hub >= 1.31.0  # Required for the `huggingface_hub.utils.httpx` re-export
 tokenizers >= 0.23.2  # Required for fast incremental detokenization.
