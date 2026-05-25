@@ -167,7 +167,7 @@ class ServingTokens(OpenAIServing):
                     thw_key = f"{modality}_grid_thw"
                     for grid in grids:
                         if grid is not None:
-                            tensor = torch.tensor([grid], dtype=torch.int64)
+                            tensor = torch.tensor(grid, dtype=torch.int64)
                             elem = MultiModalFieldElem(
                                 data=tensor,
                                 field=MultiModalBatchedField(keep_on_cpu=True),
