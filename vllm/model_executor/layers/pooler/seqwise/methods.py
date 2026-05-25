@@ -108,7 +108,9 @@ class MeanPool(SequencePoolingMethod):
         return segment_sums / prompt_lens.unsqueeze(1)
 
 
-def get_seq_pooling_method(pooling_type: SequencePoolingType | str):
+def get_seq_pooling_method(
+    pooling_type: SequencePoolingType | str,
+) -> SequencePoolingMethod:
     if pooling_type == "CLS":
         return CLSPool()
     if pooling_type == "LAST":

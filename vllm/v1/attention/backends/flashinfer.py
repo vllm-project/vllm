@@ -402,7 +402,7 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256]
+        return [64, 128, 256, 512]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -1451,15 +1451,16 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-        # to process the cache when the kv_cache_dtype is fp8
-        if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
-            self.kv_cache_dtype
-        ):
-            torch_dtype = FlashInferBackend.get_dtype_for_flashinfer(
-                self.kv_cache_dtype
-            )
-            kv_cache = kv_cache.view(torch_dtype)
+        # FlashInfer treats uint8 KV cache as NVFP4. vLLM stores FP8 KV cache
+        # as uint8 bytes, so pass FP8 caches with their logical dtype.
+        if not self.is_kvcache_nvfp4 and kv_cache.dtype == torch.uint8:
+            fp8_view_dtype = None
+            if self.kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn):
+                fp8_view_dtype = torch.float8_e4m3fn
+            elif self.kv_cache_dtype in ("fp8_e5m2", torch.float8_e5m2):
+                fp8_view_dtype = torch.float8_e5m2
+            if fp8_view_dtype is not None:
+                kv_cache = kv_cache.view(fp8_view_dtype)
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
