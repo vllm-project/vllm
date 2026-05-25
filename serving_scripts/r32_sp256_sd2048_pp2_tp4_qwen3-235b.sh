@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=vllm-qwen3-235b-tp4-pp2
+#SBATCH --job-name=r32_sp256_sd2048_pp2_tp4_qwen3-235b
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=vllm-qwen3-235b-tp4-pp2
-#SBATCH --nodes=2
+#SBATCH --job-name=r32_sp256_sd2048_tp4_qwen3-30b
+#SBATCH --nodes=1
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
 #SBATCH --ntasks-per-node=1
@@ -17,16 +17,15 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-235b-a22b-tp4-pp2-workers-nsys-arc-slurm-tmp-v2"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-tp4-pp1-single-node-workers-nsys-arc-slurm-tmp-v1"
 
 # Configuration:
-#   2 nodes x 4 H100s/node = 8 total GPUs
-#   TP=4 within each node
-#   PP=2 across the two nodes
+#   1 node x 4 H100s/node = 4 total GPUs
+#   TP=4 within the single node
+#   PP=1
 #
 # Layout:
-#   htc-g059: 4-GPU TP group for PP stage 0
-#   htc-g060: 4-GPU TP group for PP stage 1
+#   htc-g059 or htc-g060: 4-GPU TP group for the whole model
 #
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
@@ -818,8 +817,8 @@ copy_ray_logs_from_node() {
 
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
-SP="${SP:-128}"
-SD="${SD:-128}"
+SP="${SP:-256}"
+SD="${SD:-2048}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
 REQUEST_RATE="${REQUEST_RATE:-1.0}"
 
@@ -835,7 +834,11 @@ HEAD_NODE="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)"
 export WORKER_NODES
 WORKER_NODES="$(scontrol show hostnames "$SLURM_NODELIST" | tail -n+2)"
 
-echo "=== vLLM multi-node Qwen3-235B host job ==="
+if [ -n "${WORKER_NODES}" ]; then
+  echo "Warning: this is intended to be a single-node script, but WORKER_NODES is non-empty: ${WORKER_NODES}" >&2
+fi
+
+echo "=== vLLM single-node Qwen3-30B TP4 host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "Date: $(date -Is 2>/dev/null || date)"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
@@ -922,21 +925,21 @@ fi
 
 VENV_DIR="${REPO_ROOT}/.venv"
 
-MODEL_ID="${MODEL_ID:-Qwen/Qwen3-235B-A22B-Instruct-2507}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-# Recommended layout for 2 nodes x 4 GPUs/node.
+# Recommended layout for 1 node x 4 GPUs/node.
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
-NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
+NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-1}}"
 TOTAL_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
 
-# TP stays inside each node; PP spans the two nodes.
+# TP stays inside the single node; PP is disabled.
 TP="${TP:-${GPUS_PER_NODE}}"
-PP="${PP:-${NUM_NODES}}"
+PP="${PP:-1}"
 EP="${EP:-1}"
 
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -944,7 +947,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
-# With TP=4 and PP=2, expect one Ray worker report per GPU, i.e. 4 per node.
+# With TP=4 and PP=1, expect one Ray worker report per GPU, i.e. 4 on the single node.
 EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
