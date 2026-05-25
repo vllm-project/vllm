@@ -111,12 +111,9 @@ Start a decoder instance that consumes KV caches:
 
 ```bash
 # Decode instance (GPU 4-7)
-export VLLM_MORIIO_CONNECTOR_READ_MODE=1    # unset for write mode
 export VLLM_ROCM_USE_AITER=1
-export CUDA_VISIBLE_DEVICES=4,5,6,
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 export HIP_VISIBLE_DEVICES=4,5,6,7
-export MORI_DISABLE_AUTO_XGMI=1
-export MORI_IO_ENABLE_NOTIFICATION=0
 
 vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
@@ -132,7 +129,8 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
       "http_port": "40005"
       "proxy_ping_port": "36367",
       "handshake_port": "7301",
-      "notify_port": "7501"
+      "notify_port": "7501",
+      "read_mode": true
     
   }'
 ```
@@ -266,15 +264,8 @@ docker run \
   -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
   -e HF_HOME=/root/.cache/huggingface \
   -e HF_HUB_ENABLE_HF_TRANSFER=0 \
-  -e VLLM_MORIIO_CONNECTOR_READ_MODE=1 \
   -e NCCL_MIN_NCHANNELS=112 \
-  -e VLLM_USE_V1=1 \
-  -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
-  -e VLLM_SERVER_DEV_MODE=1 \
   -e VLLM_ROCM_USE_AITER=1 \
-  -e VLLM_ROCM_USE_AITER_PAGED_ATTN=0 \
-  -e VLLM_ROCM_USE_AITER_RMSNORM=1 \
-  -e VLLM_USE_AITER_TRITON_SILU_MUL=0 \
   $VLLM_IMAGE \
   deepseek-ai/DeepSeek-R1-0528 \
     --port 8200 \
