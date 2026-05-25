@@ -58,7 +58,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mhc import (
     HCHeadOp,
-    MHCFusedPostPreOp,
     MHCPostOp,
     MHCPreOp,
 )
@@ -1597,12 +1596,16 @@ class mHCModule(CustomOp):
             phi_output_hidden_size = (self.num_stream + 2) * self.num_stream
             self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.float32))
             self.branch_beta = nn.Parameter(
-                torch.empty(self.num_stream * (self.num_stream + 2), dtype=torch.float32)
+                torch.empty(
+                    self.num_stream * (self.num_stream + 2), dtype=torch.float32
+                )
             )
         else:
             phi_output_hidden_size = self.num_stream
             self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.float32))
-            self.branch_beta_pre = nn.Parameter(torch.empty(self.num_stream, dtype=torch.float32))
+            self.branch_beta_pre = nn.Parameter(
+                torch.empty(self.num_stream, dtype=torch.float32)
+            )
         self.phi = ReplicatedLinear(
             self.hidden_size * self.num_stream,
             phi_output_hidden_size,
@@ -1615,10 +1618,12 @@ class mHCModule(CustomOp):
         self.mhc_recur_norm = config.mhc_recur_norm
         self.hc_post_alpha = 2.0
         if self.mhc_use_gamma:
-            self.norm_gamma = nn.Parameter(torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16))
+            self.norm_gamma = nn.Parameter(
+                torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16)
+            )
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
-    
+
     def post_weight_load(self) -> None:
         if self.mhc_use_gamma:
             self.phi_weight = (self.phi.weight * self.norm_gamma).contiguous().float()
@@ -1628,7 +1633,9 @@ class mHCModule(CustomOp):
         x: torch.Tensor,
     ):
         x = x.view(-1, self.num_stream, self.hidden_size)
-        fn = (self.phi_weight if hasattr(self, 'phi_weight') else self.phi.weight).float()
+        fn = (
+            self.phi_weight if hasattr(self, "phi_weight") else self.phi.weight
+        ).float()
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
             fn=fn,
@@ -1642,7 +1649,13 @@ class mHCModule(CustomOp):
         )
         return layer_input, post_mix, res_mix
 
-    def hc_post(self, x: torch.Tensor, residual: torch.Tensor, h_post: torch.Tensor, h_res: torch.Tensor):
+    def hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        h_post: torch.Tensor,
+        h_res: torch.Tensor,
+    ):
         residual = residual.view(-1, self.num_stream, self.hidden_size)
         res = self.mhc_post(x, residual, h_post, h_res)
         res = res.view(-1, self.num_stream * self.hidden_size)
@@ -2009,11 +2022,13 @@ class OpenPanguModel(nn.Module):
         x = x.view(-1, self.num_stream, self.merge_mhc_module.hidden_size)
         res = self.hc_head_op(
             x,
-            self.merge_mhc_module.phi_weight if hasattr(self.merge_mhc_module, 'phi_weight') else self.merge_mhc_module.phi.weight.float(),
+            self.merge_mhc_module.phi_weight
+            if hasattr(self.merge_mhc_module, "phi_weight")
+            else self.merge_mhc_module.phi.weight.float(),
             self.merge_mhc_module.branch_alpha_pre,
             self.merge_mhc_module.branch_beta_pre,
             self.merge_mhc_module.norm_eps,
-            self.merge_mhc_module.hc_eps
+            self.merge_mhc_module.hc_eps,
         )
         return res
 
@@ -2031,7 +2046,6 @@ class OpenPanguModel(nn.Module):
                 hidden_states = self.embed_input_ids(input_ids)
                 if self.use_mhc:
                     hidden_states = hidden_states.repeat(1, self.num_stream)
-                    # hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.num_stream, 1)
             residual = None
         else:
             assert intermediate_tensors is not None
