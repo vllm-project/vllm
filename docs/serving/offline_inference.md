@@ -20,7 +20,7 @@ For further details on generative models, please refer to [this page](../models/
 
 ## Pooling APIs
 
-For further details on pooling models, please refer to [this page](../../models/pooling_models/README.md).
+For further details on pooling models, please refer to [this page](../models/pooling_models/README.md).
 
 - `LLM.classify` - Only applicable to [classification models](../models/pooling_models/classify.md).
 - `LLM.embed` - Only applicable to [embedding models](../models/pooling_models/embed.md).
