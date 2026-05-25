@@ -381,6 +381,10 @@ def _add_transformer_prefix(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterable[tuple[str, torch.Tensor]]:
     for name, tensor in weights:
-        if not name.startswith("transformer.") and not name.startswith("lm_head"):
+        if (
+            not name.startswith("transformer.")
+            and not name.startswith("lm_head.")
+            and not name.startswith("score.")
+        ):
             name = "transformer." + name
         yield name, tensor
