@@ -71,7 +71,7 @@ impl RoundtripCase {
         }
     }
 
-    /// DeepSeek V4 official HF files.
+    /// DeepSeek V4 DSML tool-call format.
     fn deepseek_v4() -> Self {
         Self {
             model_id: "deepseek-ai/DeepSeek-V4-Flash",
@@ -92,10 +92,22 @@ impl RoundtripCase {
             json_fmt: compact_json_fmt(),
         }
     }
+
+    /// Kimi K2.5 tool-call format with `<think>` reasoning tags.
+    #[allow(dead_code)]
+    fn kimi_k25() -> Self {
+        Self {
+            model_id: "moonshotai/Kimi-K2.5",
+            assistant_stop_suffix: "<|im_end|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            json_fmt: spaced_json_fmt(),
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($fixture:ident),+ $(,)?]),+ $(,)?) => {
+    ($($case:ident => [$($fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
                 $(
@@ -104,7 +116,7 @@ macro_rules! roundtrip_tests {
                     async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
                         [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
                     }
-                )+
+                )*
             )+
         }
     };
@@ -113,9 +125,13 @@ macro_rules! roundtrip_tests {
 roundtrip_tests! {
     qwen3 => [reasoning_and_content, tool_call_mix],
     qwen35 => [reasoning_and_content, tool_call_mix],
-    minimax_m25 => [reasoning_and_content],
+    minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+
+    // Note: Kimi K2.5 strips the reasoning content in history.
+    // TODO: we don't respect model-generated tool call id now so `tool_call_mix` cannot pass.
+    // kimi_k25 => [tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
