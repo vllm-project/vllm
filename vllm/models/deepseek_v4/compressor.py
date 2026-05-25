@@ -330,8 +330,6 @@ class DeepseekCompressor(nn.Module):
         token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
         num_actual = slot_mapping.shape[0]
-        if token_to_req_indices is None:
-            raise ValueError("Compressor metadata missing token_to_req_indices.")
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 

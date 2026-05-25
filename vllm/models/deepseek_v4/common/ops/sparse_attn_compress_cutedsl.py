@@ -2,14 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuTe DSL sparse-attention compressor for DeepSeek V4.
 
-The public wrappers provide the C4 fused and C128 split backends while avoiding
-an inline CUDA extension. The split compress kernel intentionally keeps the same
-work mapping as the fast CUDA prototype:
-
-* one CTA per ``(token, 64-head-dim tile)``
-* 512 threads/CTA, 16 warps
-* each warp owns eight rows of the 128-row compression window
-* each lane owns four adjacent head elements from one of two rows
+The public wrappers provide the C4 fused and C128 split kernels.
 """
 
 from __future__ import annotations
@@ -64,6 +57,17 @@ def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float3
         Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
     )
 
+@dsl_user_op
+def _fp32x2_to_fp8e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint16:
+    out = llvm.inline_asm(
+        T.i16(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;",
+        "=h,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
+    )
+    return Uint16(out)
 
 class SparseAttnCompressNormRopeStoreC4Kernel:
     min_scale = 1.0e-4
@@ -452,161 +456,6 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
             options="--enable-tvm-ffi",
         )
 
-
-def _compress_kv_sparse_attn_cutedsl(
-    state_cache: torch.Tensor,
-    token_to_req_indices: torch.Tensor,
-    positions: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    compressed_kv: torch.Tensor,
-    head_size: int = 512,
-    state_width: int = 512,
-    compress_ratio: int = 128,
-    overlap: bool = False,
-) -> None:
-    if positions.numel() == 0:
-        return
-    compiled = SparseAttnCompressKernel.compile(
-        head_size=head_size,
-        state_width=state_width,
-        compress_ratio=compress_ratio,
-        overlap=overlap,
-    )
-    compiled(
-        state_cache,
-        token_to_req_indices,
-        positions,
-        slot_mapping,
-        block_table,
-        block_size,
-        compressed_kv,
-    )
-
-
-def _norm_rope_insert_sparse_attn_cutedsl(
-    compressed_kv: torch.Tensor,
-    positions: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    rms_norm_weight: torch.Tensor,
-    rms_norm_eps: float,
-    cos_sin_cache: torch.Tensor,
-    k_cache: torch.Tensor,
-    kv_slot_mapping: torch.Tensor,
-    kv_cache_block_size: int,
-    kv_block_stride: int,
-    head_size: int = 512,
-    rope_head_dim: int = 64,
-    fp8_max: float = 448.0,
-    quant_block: int = 64,
-    token_stride: int = 576,
-    scale_dim: int = 8,
-    compress_ratio: int = 128,
-) -> None:
-    if positions.numel() == 0:
-        return
-    norm_weight_dtype = _TORCH_TO_CUTE.get(rms_norm_weight.dtype)
-    if norm_weight_dtype is None:
-        raise ValueError(
-            "CuTe DSL sparse-attn store supports rms_norm_weight dtype "
-            f"bf16/fp32, got {rms_norm_weight.dtype}."
-        )
-    if k_cache.ndim != 3:
-        raise ValueError(
-            "CuTe DSL sparse-attn store expects the real DeepSeek V4 "
-            f"3D k_cache layout [num_blocks, block_size, 584], got ndim={k_cache.ndim}."
-        )
-    compiled = SparseAttnNormRopeStoreKernel.compile(
-        head_size=head_size,
-        rope_head_dim=rope_head_dim,
-        fp8_max=fp8_max,
-        quant_block=quant_block,
-        token_stride=token_stride,
-        scale_dim=scale_dim,
-        kv_block_stride=kv_block_stride,
-        compress_ratio=compress_ratio,
-        norm_weight_dtype=norm_weight_dtype,
-    )
-    compiled(
-        compressed_kv,
-        positions,
-        slot_mapping,
-        rms_norm_weight,
-        rms_norm_eps,
-        cos_sin_cache,
-        k_cache,
-        kv_slot_mapping,
-        kv_cache_block_size,
-    )
-
-
-def _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
-    state_cache: torch.Tensor,
-    token_to_req_indices: torch.Tensor,
-    positions: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    rms_norm_weight: torch.Tensor,
-    rms_norm_eps: float,
-    cos_sin_cache: torch.Tensor,
-    k_cache: torch.Tensor,
-    kv_slot_mapping: torch.Tensor,
-    kv_cache_block_size: int,
-    kv_block_stride: int,
-    head_size: int = 512,
-    state_width: int = 1024,
-    rope_head_dim: int = 64,
-    fp8_max: float = 448.0,
-    quant_block: int = 64,
-    token_stride: int = 576,
-    scale_dim: int = 8,
-    compress_ratio: int = 4,
-    overlap: bool = True,
-) -> None:
-    if positions.numel() == 0:
-        return
-    norm_weight_dtype = _TORCH_TO_CUTE.get(rms_norm_weight.dtype)
-    if norm_weight_dtype is None:
-        raise ValueError(
-            "CuTe DSL sparse-attn fused store supports rms_norm_weight dtype "
-            f"bf16/fp32, got {rms_norm_weight.dtype}."
-        )
-    if k_cache.ndim != 3:
-        raise ValueError(
-            "CuTe DSL sparse-attn fused store expects the real DeepSeek V4 "
-            f"3D k_cache layout [num_blocks, block_size, 584], got ndim={k_cache.ndim}."
-        )
-    compiled = SparseAttnCompressNormRopeStoreC4Kernel.compile(
-        head_size=head_size,
-        state_width=state_width,
-        rope_head_dim=rope_head_dim,
-        fp8_max=fp8_max,
-        quant_block=quant_block,
-        token_stride=token_stride,
-        scale_dim=scale_dim,
-        kv_block_stride=kv_block_stride,
-        compress_ratio=compress_ratio,
-        overlap=overlap,
-        norm_weight_dtype=norm_weight_dtype,
-    )
-    compiled(
-        state_cache,
-        token_to_req_indices,
-        positions,
-        slot_mapping,
-        block_table,
-        block_size,
-        rms_norm_weight,
-        rms_norm_eps,
-        cos_sin_cache,
-        k_cache,
-        kv_slot_mapping,
-        kv_cache_block_size,
-    )
-
-
 class SparseAttnCompressKernel:
     head_tile = 64
     rows_per_warp = 8
@@ -961,7 +810,6 @@ class SparseAttnCompressKernel:
             options="--enable-tvm-ffi",
         )
 
-
 class SparseAttnNormRopeStoreKernel:
     min_scale = 1.0e-4
 
@@ -1233,15 +1081,155 @@ class SparseAttnNormRopeStoreKernel:
             options="--enable-tvm-ffi",
         )
 
-
-@dsl_user_op
-def _fp32x2_to_fp8e4m3x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint16:
-    out = llvm.inline_asm(
-        T.i16(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;",
-        "=h,f,f",
-        has_side_effects=False,
-        is_align_stack=False,
+def _compress_kv_sparse_attn_cutedsl(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    compressed_kv: torch.Tensor,
+    head_size: int = 512,
+    state_width: int = 512,
+    compress_ratio: int = 128,
+    overlap: bool = False,
+) -> None:
+    if positions.numel() == 0:
+        return
+    compiled = SparseAttnCompressKernel.compile(
+        head_size=head_size,
+        state_width=state_width,
+        compress_ratio=compress_ratio,
+        overlap=overlap,
     )
-    return Uint16(out)
+    compiled(
+        state_cache,
+        token_to_req_indices,
+        positions,
+        slot_mapping,
+        block_table,
+        block_size,
+        compressed_kv,
+    )
+
+
+def _norm_rope_insert_sparse_attn_cutedsl(
+    compressed_kv: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    kv_cache_block_size: int,
+    kv_block_stride: int,
+    head_size: int = 512,
+    rope_head_dim: int = 64,
+    fp8_max: float = 448.0,
+    quant_block: int = 64,
+    token_stride: int = 576,
+    scale_dim: int = 8,
+    compress_ratio: int = 128,
+) -> None:
+    if positions.numel() == 0:
+        return
+    norm_weight_dtype = _TORCH_TO_CUTE.get(rms_norm_weight.dtype)
+    if norm_weight_dtype is None:
+        raise ValueError(
+            "CuTe DSL sparse-attn store supports rms_norm_weight dtype "
+            f"bf16/fp32, got {rms_norm_weight.dtype}."
+        )
+    if k_cache.ndim != 3:
+        raise ValueError(
+            "CuTe DSL sparse-attn store expects the real DeepSeek V4 "
+            f"3D k_cache layout [num_blocks, block_size, 584], got ndim={k_cache.ndim}."
+        )
+    compiled = SparseAttnNormRopeStoreKernel.compile(
+        head_size=head_size,
+        rope_head_dim=rope_head_dim,
+        fp8_max=fp8_max,
+        quant_block=quant_block,
+        token_stride=token_stride,
+        scale_dim=scale_dim,
+        kv_block_stride=kv_block_stride,
+        compress_ratio=compress_ratio,
+        norm_weight_dtype=norm_weight_dtype,
+    )
+    compiled(
+        compressed_kv,
+        positions,
+        slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        k_cache,
+        kv_slot_mapping,
+        kv_cache_block_size,
+    )
+
+
+def _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    kv_cache_block_size: int,
+    kv_block_stride: int,
+    head_size: int = 512,
+    state_width: int = 1024,
+    rope_head_dim: int = 64,
+    fp8_max: float = 448.0,
+    quant_block: int = 64,
+    token_stride: int = 576,
+    scale_dim: int = 8,
+    compress_ratio: int = 4,
+    overlap: bool = True,
+) -> None:
+    if positions.numel() == 0:
+        return
+    norm_weight_dtype = _TORCH_TO_CUTE.get(rms_norm_weight.dtype)
+    if norm_weight_dtype is None:
+        raise ValueError(
+            "CuTe DSL sparse-attn fused store supports rms_norm_weight dtype "
+            f"bf16/fp32, got {rms_norm_weight.dtype}."
+        )
+    if k_cache.ndim != 3:
+        raise ValueError(
+            "CuTe DSL sparse-attn fused store expects the real DeepSeek V4 "
+            f"3D k_cache layout [num_blocks, block_size, 584], got ndim={k_cache.ndim}."
+        )
+    compiled = SparseAttnCompressNormRopeStoreC4Kernel.compile(
+        head_size=head_size,
+        state_width=state_width,
+        rope_head_dim=rope_head_dim,
+        fp8_max=fp8_max,
+        quant_block=quant_block,
+        token_stride=token_stride,
+        scale_dim=scale_dim,
+        kv_block_stride=kv_block_stride,
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+        norm_weight_dtype=norm_weight_dtype,
+    )
+    compiled(
+        state_cache,
+        token_to_req_indices,
+        positions,
+        slot_mapping,
+        block_table,
+        block_size,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        k_cache,
+        kv_slot_mapping,
+        kv_cache_block_size,
+    )
