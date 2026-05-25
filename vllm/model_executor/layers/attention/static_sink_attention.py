@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from typing import cast
 
 import torch
 from torch import nn
-from typing import cast
 
 from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig
@@ -14,16 +14,22 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
     direct_register_custom_op,
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadata,
     AttentionType,
-    subclass_attention_backend_with_overrides,
+    CommonAttentionMetadata,
     MLAAttentionImpl,
+    subclass_attention_backend_with_overrides
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
@@ -47,6 +53,8 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseStaticSinkImpl,
 )
+from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnStaticSinkMLAImpl
+from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
 
 logger = init_logger(__name__)
 
@@ -210,6 +218,9 @@ class StaticSinkAttention(Attention, CustomOp):
             **kwargs,
         )
         self.sink_len = sink_len
+
+    def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
+        self.sink_kv_block_offset = sink_kv_block_offset
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
         self.impl.update_sink_kv(sink_key, sink_value)
@@ -386,6 +397,7 @@ class StaticSinkMLAAttention(MLAAttention):
                 raise NotImplementedError(
                     "Composite DSA MLA KV cache requires direct attention calls."
                 )
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -399,7 +411,7 @@ class StaticSinkMLAAttention(MLAAttention):
                 kv_c_normed,
                 k_pe,
                 output,
-                self.layer_name,
+                encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output

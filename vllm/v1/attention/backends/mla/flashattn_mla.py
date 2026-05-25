@@ -304,14 +304,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "are not implemented for "
                 "FlashAttnMLAImpl"
             )
-                
-        if sliding_window is None:
-            self.window_size = (-1, -1)
-        elif attn_type == AttentionType.ENCODER_ONLY:
-            self.window_size = (sliding_window - 1, sliding_window - 1)
-        else:
-            self.window_size = (sliding_window - 1, 0)
-
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
@@ -365,7 +357,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
-            window_size=self.window_size
         )
 
         if self.need_to_return_lse_for_decode:
@@ -378,8 +369,40 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
 
 class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **mla_args,
+        )
+        if sliding_window is None:
+            self.window_size = (-1, -1)
+        elif attn_type == AttentionType.ENCODER_ONLY:
+            self.window_size = (sliding_window - 1, sliding_window - 1)
+        else:
+            self.window_size = (sliding_window - 1, 0)
         self.sink_k_pe = None
         self.sink_compressed_kv = None
         self.sink_len = 0

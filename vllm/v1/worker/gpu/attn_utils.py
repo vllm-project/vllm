@@ -20,6 +20,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    SinkDSAAttentionSpec,
+    SinkFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -33,6 +37,14 @@ from vllm.v1.worker.utils import (
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
+    
+
+_SINK_AWARE_SPEC_TYPES: tuple[type, ...] = (
+    SinkFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
+    SinkDSAAttentionSpec,
+)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -59,6 +71,7 @@ def init_attn_backend(
 ]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
+    sink_group_rank = 0
 
     # Phase 1: discover attention groups for each kv cache group.
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -68,8 +81,36 @@ def init_attn_backend(
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
+        layer_names = kv_cache_group_spec.layer_names
+        any_layer_name = next(iter(layer_names))
+
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+        attn_backend = attn_layers[any_layer_name].get_attn_backend()
+        for layer_name in layer_names:
+            attn_backends[layer_name] = attn_backend
+
+        attn_metadata_builder = attn_backend.get_builder_cls()(
+            kv_cache_group_spec.kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+        )
+
+        spec = kv_cache_group_spec.kv_cache_spec
+        if isinstance(spec, _SINK_AWARE_SPEC_TYPES):
+            sink_len = getattr(spec, "sink_len", 0) or 0
+            num_sink_block = sink_len // spec.block_size
+            sink_kv_block_offset = 1 + sink_group_rank * num_sink_block
+            if hasattr(attn_metadata_builder, "set_sink_kv_block_offset"):
+                attn_metadata_builder.set_sink_kv_block_offset(
+                    sink_kv_block_offset
+                )
+            for layer_name in layer_names:
+                layer = attn_layers[layer_name]
+                if hasattr(layer, "set_sink_kv_block_offset"):
+                    layer.set_sink_kv_block_offset(sink_kv_block_offset)
+            sink_group_rank += 1
 
         group_map: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
         group_order: list[tuple[tuple[str, str], KVCacheSpec]] = []

@@ -1024,6 +1024,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
+        # if "model.layers.0" in layer.layer_name:
+        #     print("[DEBUG] FlashMLASparseImpl forward")
+        #     print(f"q shape: {q.shape}, q.float().sum(): {q.float().sum()}")
+        #     print(f"k_c_normed shape: {k_c_normed.shape}, k_c_normed.float().sum(): {k_c_normed.float().sum()}")
+        #     print(f"k_pe shape: {k_pe.shape}, k_pe.float().sum(): {k_pe.float().sum()}")
+        #     print(f"self.topk_indices_buffer shape: {self.topk_indices_buffer.shape}, ,self.topk_indices_buffer.sum(): {self.topk_indices_buffer.sum()}, self.topk_indices_buffer.flatten()[:5]: {self.topk_indices_buffer.flatten()[:5]}")
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):

@@ -29,6 +29,10 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     TQFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
+    DSAAttentionSpec,
+    SinkDSAAttentionSpec,
 )
 from vllm.v1.request import Request
 

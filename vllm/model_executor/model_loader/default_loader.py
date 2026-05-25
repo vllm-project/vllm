@@ -431,7 +431,7 @@ class DefaultModelLoader(BaseModelLoader):
                         loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
-                raise ValueError(
+                logger.error(
                     "Following weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )

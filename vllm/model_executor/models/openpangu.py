@@ -98,6 +98,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 from vllm.v1.kv_cache_interface import DSAAttentionSpec, MomeSpec
 
+
 def check_ffn_act_fn(act_fn: str):
     if act_fn != "silu":
         raise ValueError(
@@ -1722,7 +1723,7 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
     def _init_rotary_emb(
         self,
         config: PretrainedConfig,
-        rope_parameters: dict[str, Any] | None,
+        rope_parameters: dict[str, Any],
         quant_config: QuantizationConfig | None,
     ) -> None:
         rope_parameters["partial_rotary_factor"] = self.qk_rope_dim / self.head_dim
