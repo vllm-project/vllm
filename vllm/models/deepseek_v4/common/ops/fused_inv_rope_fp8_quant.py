@@ -243,7 +243,11 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
-    pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
+    pdl_kwargs = (
+        {}
+        if current_platform.is_rocm() or current_platform.is_xpu()
+        else {"launch_pdl": False}
+    )
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
