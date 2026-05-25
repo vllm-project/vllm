@@ -245,8 +245,8 @@ def get_tokenizer(
         tokenizer_cls_ = tokenizer_cls
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
-    if needs_tokenizers_backend_cache:
-        from .hf import get_cached_tokenizer
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from vllm.tokenizers.hf import get_cached_tokenizer
 
         tokenizer = get_cached_tokenizer(tokenizer)
     if not tokenizer.is_fast:
