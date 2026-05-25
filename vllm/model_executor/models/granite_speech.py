@@ -390,8 +390,7 @@ class GraniteSpeechConformerAttention(nn.Module):
         dist = attention_dists.to(hidden_states.device)
         rel_pos_emb = self.rel_pos_emb(dist)
         pos_attn = (
-            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb)
-            * self.scale
+            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb) * self.scale
         )
 
         if remainder > 0:
