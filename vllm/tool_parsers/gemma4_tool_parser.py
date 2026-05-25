@@ -204,6 +204,21 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 # Value may be incomplete (e.g. partial boolean) —
                 # withhold to avoid type instability during streaming.
                 break
+            if i == val_start:
+                logger.warning(
+                    "Gemma4 args parser made no progress at position %d; "
+                    "aborting on malformed input.",
+                    i,
+                )
+                break
+            if partial:
+                raw_val = args_str[val_start:i].strip()
+                if raw_val.endswith("."):
+                    # Trailing dot means decimal digits may still arrive
+                    # (e.g. "108." may become "108.2"). Parsing now would
+                    # yield float("108.") == 108.0, whose json repr "108.0"
+                    # corrupts the streaming diff when the true digit lands.
+                    break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
     return result
@@ -258,6 +273,11 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
+                if arr_str[i:].startswith(STRING_DELIM):
+                    i += len(STRING_DELIM)
+                    nd = arr_str.find(STRING_DELIM, i)
+                    i = nd + len(STRING_DELIM) if nd != -1 else n
+                    continue
                 if arr_str[i] == "[":
                     depth += 1
                 elif arr_str[i] == "]":
@@ -275,6 +295,17 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                 i += 1
             if partial and i >= n:
                 break
+            if i == val_start:
+                logger.warning(
+                    "Gemma4 array parser made no progress at position %d; "
+                    "aborting on malformed input.",
+                    i,
+                )
+                break
+            if partial:
+                raw_val = arr_str[val_start:i].strip()
+                if raw_val.endswith("."):
+                    break
             items.append(_parse_gemma4_value(arr_str[val_start:i]))
 
     return items
