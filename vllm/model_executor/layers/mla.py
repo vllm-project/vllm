@@ -3,10 +3,8 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 
 from vllm.config import CacheConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -118,18 +116,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
-    def _get_indexer_kv_cache_and_metadata(self):
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.mla_attn.layer_name]
-        indexer_kv_cache = getattr(self.indexer, "kv_cache", None)
-        if indexer_kv_cache is not None:
-            kv_cache = indexer_kv_cache
-        else:
-            kv_cache = self.mla_attn.kv_cache
-        return kv_cache, attn_metadata
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -218,7 +204,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         prefix: str = "",
         sink_len: int = 0,
         sliding_window: int | None = None,
-        mome_attn: nn.Module | None = None,
+        mome_attn: torch.nn.Module | None = None,
         # is_hybrid_kv: bool = False
     ) -> None:
         PluggableLayer.__init__(self)

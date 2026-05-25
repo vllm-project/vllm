@@ -991,21 +991,19 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.reshape(
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.prefill_padding != 0:
-            apadded_heads = (
-                cdiv(self.num_heads, self.prefill_padding) * self.prefill_padding
-            )
+            assert self.prefill_padding % self.num_heads == 0
             logger.warning_once(
                 f"Padding num_heads from {self.num_heads} to "
-                f"{apadded_heads} for BF16 sparse prefill kernel"
+                f"{self.prefill_padding} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_empty((q.shape[0], apadded_heads, q.shape[2]))
+            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
             q_padded[:, : self.num_heads, :] = q
             q = q_padded
 

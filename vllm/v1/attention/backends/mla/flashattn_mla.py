@@ -290,11 +290,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
         assert flash_attn_supports_mla(), "FlashAttnMLA is not supported on this device"
 
-        unsupported_features = [alibi_slopes, logits_soft_cap]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "FlashAttnMLAImpl does not support one of the following: "
-                "alibi_slopes, logits_soft_cap"
+                "alibi_slopes, sliding_window, logits_soft_cap"
             )
 
         if attn_type != AttentionType.DECODER:
@@ -368,7 +368,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             return o, None
 
 
-class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
+class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -397,12 +397,36 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             kv_sharing_target_layer_name,
             **mla_args,
         )
+
+        assert flash_attn_supports_mla(), "FlashAttnMLA is not supported on this device"
+
+        unsupported_features = [alibi_slopes, logits_soft_cap]
+        if any(unsupported_features):
+            raise NotImplementedError(
+                "FlashAttnMLAImpl does not support one of the following: "
+                "alibi_slopes, logits_soft_cap"
+            )
+
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "FlashAttnMLAImpl"
+            )
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FlashAttnMLA V1 with FP8 KV cache not yet supported"
+            )
+        
         if sliding_window is None:
             self.window_size = (-1, -1)
         elif attn_type == AttentionType.ENCODER_ONLY:
             self.window_size = (sliding_window - 1, sliding_window - 1)
         else:
             self.window_size = (sliding_window - 1, 0)
+
         self.sink_k_pe = None
         self.sink_compressed_kv = None
         self.sink_len = 0
