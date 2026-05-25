@@ -834,7 +834,7 @@ def test_mixed_decode_prefill_caps_mid_long_prefill_more_tightly():
     mixed_output = scheduler.schedule()
 
     assert mixed_output.num_scheduled_tokens[decode_req.request_id] == 1
-    assert mixed_output.num_scheduled_tokens[mid_long_prefill_req.request_id] == 12
+    assert mixed_output.num_scheduled_tokens[mid_long_prefill_req.request_id] == 6
 
 
 def test_mixed_decode_prefill_caps_very_long_prefill_more_tightly():
@@ -871,7 +871,7 @@ def test_mixed_decode_prefill_caps_very_long_prefill_more_tightly():
     mixed_output = scheduler.schedule()
 
     assert mixed_output.num_scheduled_tokens[decode_req.request_id] == 1
-    assert mixed_output.num_scheduled_tokens[very_long_prefill_req.request_id] == 12
+    assert mixed_output.num_scheduled_tokens[very_long_prefill_req.request_id] == 6
 
 
 def test_preempt_during_execution():
