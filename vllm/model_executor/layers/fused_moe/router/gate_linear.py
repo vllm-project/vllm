@@ -21,9 +21,9 @@ class GateLinear(ReplicatedLinear):
     method which is only known later).
     """
 
-    # Dimensions supported by the DSV3 specialized kernel
+    # Dimensions supported by the DSV3-style specialized kernel
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-    DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
+    DSV3_SUPPORTED_HIDDEN_SIZES = [6144, 7168]
 
     def __init__(
         self,

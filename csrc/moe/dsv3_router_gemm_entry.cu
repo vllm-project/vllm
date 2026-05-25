@@ -31,6 +31,7 @@
 static constexpr int DEFAULT_NUM_EXPERTS = 256;
 static constexpr int KIMI_K2_NUM_EXPERTS = 384;
 static constexpr int DEFAULT_HIDDEN_DIM = 7168;
+static constexpr int GLM5_HIDDEN_DIM = 6144;
 
 template <typename T, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeRouterGemmFloatOutput(float* output, T const* mat_a, T const* mat_b,
@@ -110,8 +111,9 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
 
   TORCH_CHECK(mat_a.size(1) == mat_b.size(1),
               "mat_a and mat_b must have the same hidden_dim");
-  TORCH_CHECK(hidden_dim == DEFAULT_HIDDEN_DIM,
+  TORCH_CHECK(hidden_dim == DEFAULT_HIDDEN_DIM || hidden_dim == GLM5_HIDDEN_DIM,
               "Expected hidden_dim=", DEFAULT_HIDDEN_DIM,
+              " or hidden_dim=", GLM5_HIDDEN_DIM,
               ", but got hidden_dim=", hidden_dim);
   TORCH_CHECK(
       num_experts == DEFAULT_NUM_EXPERTS || num_experts == KIMI_K2_NUM_EXPERTS,
@@ -132,7 +134,8 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (output.dtype() == at::kFloat) {
-    if (num_experts == DEFAULT_NUM_EXPERTS) {
+    if (num_experts == DEFAULT_NUM_EXPERTS &&
+        hidden_dim == DEFAULT_HIDDEN_DIM) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_float_output(
               num_tokens, reinterpret_cast<float*>(output.mutable_data_ptr()),
@@ -144,9 +147,17 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
               num_tokens, reinterpret_cast<float*>(output.mutable_data_ptr()),
               reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
               reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
+    } else if (num_experts == DEFAULT_NUM_EXPERTS &&
+               hidden_dim == GLM5_HIDDEN_DIM) {
+      LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, GLM5_HIDDEN_DIM>::
+          unroll_float_output(
+              num_tokens, reinterpret_cast<float*>(output.mutable_data_ptr()),
+              reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
+              reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
     }
   } else if (output.dtype() == at::kBFloat16) {
-    if (num_experts == DEFAULT_NUM_EXPERTS) {
+    if (num_experts == DEFAULT_NUM_EXPERTS &&
+        hidden_dim == DEFAULT_HIDDEN_DIM) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_bf16_output(
               num_tokens,
@@ -155,6 +166,14 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
               reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
     } else if (num_experts == KIMI_K2_NUM_EXPERTS) {
       LoopUnroller<1, 16, KIMI_K2_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
+          unroll_bf16_output(
+              num_tokens,
+              reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr()),
+              reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
+              reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
+    } else if (num_experts == DEFAULT_NUM_EXPERTS &&
+               hidden_dim == GLM5_HIDDEN_DIM) {
+      LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, GLM5_HIDDEN_DIM>::
           unroll_bf16_output(
               num_tokens,
               reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr()),
