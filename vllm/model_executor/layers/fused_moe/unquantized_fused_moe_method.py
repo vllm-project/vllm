@@ -276,6 +276,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         gemm1_alpha = getattr(layer, "swiglu_alpha", None)
         gemm1_beta = getattr(layer, "swiglu_beta", None)
         gemm1_clamp_limit = getattr(layer, "swiglu_limit", None)
+        # Only forward swiglu_limit when strictly > 0, matching the oracle
+        # filter in modular_kernel.py::is_supported_config and the kernel-side
+        # guard in utils.py::swiglu_limit_func (`if swiglu_limit > 0`).
+        # Treating 0.0 as no-clamp avoids forwarding a value the oracle would
+        # skip but the kernel would silently honor as a degenerate clamp.
+        # alpha/beta are left untouched so MiniMax-M3 still receives them.
+        if gemm1_clamp_limit is not None and gemm1_clamp_limit <= 0:
+            gemm1_clamp_limit = None
 
         if self.moe.has_bias:
             return biased_moe_quant_config(

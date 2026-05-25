@@ -220,6 +220,20 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
         return True
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """CPUExpertsMxfp4 forwards `gemm1_clamp_limit` to `fused_experts_cpu`
+        only on the SILU branch. However, the underlying CPU kernel at
+        `csrc/cpu/sgl-kernels/moe.cpp:1051/1091` only activates
+        `CPUAcTMethod::swiglu` (the clamp-aware path) when BOTH `alpha`
+        and `limit` are provided; a SILU-only config has no `alpha`, so
+        the kernel falls back to `silu_and_mul` and silently drops the
+        limit. Until the CPU kernel grows a clamp path that accepts
+        `limit` without `alpha`, declare False on every activation so the
+        oracle does not route SwiGLU-clamp configs to CPU MXFP4.
+        """
+        return False
+
+    @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 

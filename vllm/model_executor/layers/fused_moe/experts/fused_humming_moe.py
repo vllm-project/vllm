@@ -243,6 +243,18 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`HummingExpertsBase.apply_activation` runs `swiglu_limit_func`
+        with `self.quant_config.gemm1_clamp_limit` only on the SILU
+        branch. Other SwiGLU variants (SWIGLUOAI, SWIGLUSTEP) reach the
+        base activation path which does not consume a clamp. The three
+        concrete subclasses (Indexed, GroupedContiguous, Batched) all
+        reuse this callback, so the per-activation contract is the same
+        regardless of gemm type.
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         # Humming uses apply_moe_activation() callback for activation,
         # so any activation supported there can be used here.

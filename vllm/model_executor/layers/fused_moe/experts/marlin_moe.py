@@ -697,9 +697,38 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
         return E, M, N, K, topk
 
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """Marlin threads `gemm1_clamp_limit` only on the SILU branch via
+        `swiglu_limit_func`. Other SwiGLU variants (SWIGLUOAI, SWIGLUSTEP)
+        fall through to `activation_func` without consuming the clamp.
+        See PR #42287 for the SILU-path wiring.
+        """
+        return activation == MoEActivation.SILU
+
 
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
+
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """MarlinExperts inherits clamp threading from MarlinExpertsBase.
+        Only the SILU branch threads `gemm1_clamp_limit`; other SwiGLU
+        variants are unwired. The LoRA branch problem is captured by
+        `supports_swiglu_clamp_limit_with_lora()` override below.
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def supports_swiglu_clamp_limit_with_lora(activation: MoEActivation) -> bool:
+        """False regardless of activation: `_fused_marlin_moe` has mutually
+        exclusive clamp/activation branches and the clamp path
+        (`swiglu_limit_func`) bypasses `activation_func`, which is exactly
+        where `activation_with_lora` injects `apply_w13_lora`. With both
+        LoRA and clamp enabled, LoRA would be silently dropped on any
+        SwiGLU activation. See gemini-code-assist comment on #42287.
+        """
+        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
