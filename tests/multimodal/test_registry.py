@@ -5,6 +5,8 @@ Unit tests for MultiModalRegistry.supports_multimodal_inputs and
 Qwen2.5-VL visual component loading behavior.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -32,3 +34,17 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
+
+
+def test_create_processor_error_uses_served_model_name():
+    model_config = SimpleNamespace(
+        is_multimodal_model=False,
+        model="/path/to/model/weights",
+        served_model_name="friendly-model-name",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="friendly-model-name is not a multimodal model",
+    ):
+        MULTIMODAL_REGISTRY.create_processor(model_config)

@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )

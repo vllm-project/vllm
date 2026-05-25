@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from dataclasses import dataclass, fields, replace
-from enum import IntEnum
+from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,7 @@ from typing_extensions import Self
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -75,6 +76,19 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
+
+
+class KVCacheSpecKind(str, Enum):
+    FULL_ATTENTION = "full_attention"
+    MLA_ATTENTION = "mla_attention"
+    SLIDING_WINDOW = "sliding_window"
+    SLIDING_WINDOW_MLA = "sliding_window_mla"
+    MAMBA = "mamba"
+    CHUNKED_LOCAL_ATTENTION = "chunked_local_attention"
+    SINK_FULL_ATTENTION = "sink_full_attention"
+    ENCODER_ONLY_ATTENTION = "encoder_only_attention"
+    CROSS_ATTENTION = "cross_attention"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -151,6 +165,16 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.kv_quant_mode.is_nvfp4:
+            # Packed layout: fp4 data + fp8 block scales per head.
+            full_dim = nvfp4_kv_cache_full_dim(self.head_size)
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * full_dim
+                * get_dtype_size(self.dtype)
+            )
         return (
             2
             * self.block_size
@@ -373,22 +397,38 @@ class MLAAttentionSpec(FullAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class HiddenStateCacheSpec(MLAAttentionSpec):
+    """Marker for hidden-state cache layers used by extract_hidden_states."""
+
+    pass
+
+
+@dataclass(frozen=True, kw_only=True)
 class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
+
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        """Per-request admission cap, in blocks.
+
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate, so requests
+        admitted by startup can also be admitted at runtime.
+        """
+        # During chunked prefill, we hold KV for at most one chunk window.
+        num_tokens = min(
+            self.attention_chunk_size + max_num_batched_tokens, max_model_len
+        )
+        return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-        # During chunked prefill, we allocate KV cache for at most
-        # `self.attention_chunk_size` computed tokens plus the newly scheduled
-        # tokens. And we won't allocate KV cache for more than `max_model_len`
-        # tokens.
-        num_tokens = min(
-            self.attention_chunk_size + max_num_batched_tokens, max_model_len
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
-
-        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+        return max_blocks * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -402,6 +442,17 @@ class SlidingWindowSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
+        if self.kv_quant_mode.is_nvfp4:
+            last_dim = nvfp4_kv_cache_full_dim(
+                self.head_size
+            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
+            return (
+                self.block_size
+                * self.num_kv_heads
+                * last_dim
+                * get_dtype_size(self.dtype)
+            )
         return (
             self.block_size
             * self.num_kv_heads
@@ -409,26 +460,38 @@ class SlidingWindowSpec(AttentionSpec):
             * get_dtype_size(self.dtype)
         )
 
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        """Per-request admission cap, in blocks.
+
+        Single source of truth for both startup pool sizing
+        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
+        real-held blocks plateau at this bound because
+        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
+        before each chunk's `get_num_blocks_to_allocate`.
+        """
+        # During chunked prefill, we hold KV for the last `sliding_window-1`
+        # computed tokens plus the newly scheduled tokens, and never more
+        # than `max_model_len`.
+        num_tokens = min(
+            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
+        )
+        # +1 because the sliding window may not start from the beginning of
+        # the block. E.g. block size 4 and num_token 4 needs two blocks
+        # [XXCD][EF] to store the 6-token window [CDEF].
+        return cdiv(num_tokens, self.block_size) + 1
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-        # During chunked prefill, we allocate KV cache for the last
-        # `self.sliding_window-1` computed tokens plus the newly scheduled
-        # tokens. And we won't allocate KV cache for more than `max_model_len`
-        # tokens.
-        num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
-
-        # +1 here because the sliding window may not start from the beginning
-        # of the block. For example, if the block size is 4 and num_token
-        # is 4, we need two blocks [XXCD] [EF] to store the sliding
-        # window [CDEF] of 6 tokens.
-        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+        return max_blocks * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -501,7 +564,7 @@ class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype]
     page_size_padded: int | None = None
-    mamba_type: str = "mamba2"
+    mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 
@@ -519,7 +582,9 @@ class MambaSpec(KVCacheSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
             max_model_len = vllm_config.model_config.max_model_len
-            return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+            return (
+                cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
+            ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
             return self.page_size_bytes * (2 + self.num_speculative_blocks)
         else:
@@ -698,6 +763,50 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
             for spec in self.kv_cache_specs.values()
         )
+
+
+def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        inner_kinds = {
+            get_kv_cache_spec_kind(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(inner_kinds) == 1:
+            return next(iter(inner_kinds))
+        return KVCacheSpecKind.UNKNOWN
+    # Keep subclass checks before base classes so specialized specs keep their
+    # more precise kind.
+    if isinstance(kv_cache_spec, SlidingWindowMLASpec):
+        return KVCacheSpecKind.SLIDING_WINDOW_MLA
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        return KVCacheSpecKind.MLA_ATTENTION
+    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
+        return KVCacheSpecKind.SINK_FULL_ATTENTION
+    if isinstance(kv_cache_spec, FullAttentionSpec):
+        return KVCacheSpecKind.FULL_ATTENTION
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return KVCacheSpecKind.SLIDING_WINDOW
+    if isinstance(kv_cache_spec, MambaSpec):
+        return KVCacheSpecKind.MAMBA
+    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        return KVCacheSpecKind.CROSS_ATTENTION
+    return KVCacheSpecKind.UNKNOWN
+
+
+def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        inner_windows = {
+            get_kv_cache_spec_sliding_window(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        return next(iter(inner_windows)) if len(inner_windows) == 1 else None
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return kv_cache_spec.sliding_window
+    return None
 
 
 @dataclass

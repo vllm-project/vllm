@@ -40,10 +40,16 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 messages.insert(0, {"role": "system"})
                 messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
-            # The V4 reference currently accepts only "max", "high", or None.
             reasoning_effort = kwargs.get("reasoning_effort")
-            if reasoning_effort not in ("max", "high"):
+            if not isinstance(reasoning_effort, str):
                 reasoning_effort = None
+            elif reasoning_effort == "none":
+                thinking_mode = "chat"
+                reasoning_effort = None
+            elif reasoning_effort in ("max", "xhigh"):
+                reasoning_effort = "max"
+            else:
+                reasoning_effort = "high"
 
             encode_config = dict(
                 thinking_mode=thinking_mode,
