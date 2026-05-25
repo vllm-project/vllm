@@ -325,13 +325,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
-        # torch.ops.vllm.piecewise_print(k_pe, self.mla_attn.layer_name, "k_pe")
 
         k_pe = k_pe.squeeze(2).squeeze(0)
-
-        q = q.reshape(q.shape[0], -1).view(q.shape)
-        kv_c_normed = kv_c_normed
-        k_pe = k_pe
 
         attn_out = self.mla_attn(
             q,

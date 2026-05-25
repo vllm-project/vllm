@@ -530,6 +530,7 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         self._ensure_sink_mha_kv()
         prefill = attn_metadata.prefill
         num_prefills = attn_metadata.num_prefills
+        assert self.sink_k is not None and self.sink_v is not None
         sink_k = self.sink_k.repeat(num_prefills, 1, 1)
         sink_v = self.sink_v.repeat(num_prefills, 1, 1)
         cu_seqlens_k = torch.arange(
@@ -791,9 +792,6 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         attn_metadata,
         layer,
     ):
-        if self.sink_len == 0:
-            return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
         assert self.sink_k_pe is not None and self.sink_compressed_kv is not None
@@ -890,7 +888,6 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             cp_tot_seqused_k=decode.dcp_tot_seq_lens,
             window_size=self.window_size,
         )
-        no_sink_lse = no_sink_lse.transpose(0, 1)
 
         o = torch.empty_like(no_sink_o)
         lse = (
@@ -901,41 +898,12 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         merge_attn_states(
             output=o,
             output_lse=lse,
-            prefix_output=sink_o.contiguous(),
-            prefix_lse=sink_lse.contiguous(),
-            suffix_output=no_sink_o.contiguous(),
-            suffix_lse=no_sink_lse.contiguous(),
+            prefix_output=sink_o,
+            prefix_lse=sink_lse,
+            suffix_output=no_sink_o,
+            suffix_lse=no_sink_lse,
         )
         return o, lse
-
-    def _run_prefill_new_tokens_fa(self, prefill, q, k, v, return_softmax_lse):
-        if self.sink_len == 0:
-            return super()._run_prefill_new_tokens_fa(
-                prefill, q, k, v, return_softmax_lse
-            )
-        query_start_loc = prefill.query_start_loc
-        num_prefills = len(query_start_loc) - 1
-        sink_len_offset = torch.arange(
-            0,
-            (num_prefills + 1) * self.sink_len,
-            self.sink_len,
-            dtype=query_start_loc.dtype,
-            device=query_start_loc.device,
-        )
-        cu_seqlens_k = query_start_loc + sink_len_offset
-        max_seqlen_k = prefill.max_query_len + num_prefills * self.sink_len
-        return self._flash_attn_varlen_diff_headdims(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=prefill.max_query_len,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=return_softmax_lse,
-        )
 
     @staticmethod
     def _insert_tensor_by_start_loc(raw_tensor, insert_segment, start_loc):

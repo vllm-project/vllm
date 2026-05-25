@@ -20,7 +20,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -375,7 +374,6 @@ def mome_attention(
         result = output_chunks[0]
     else:
         result = torch.cat(output_chunks, dim=0)
-    # torch.ops.vllm.piecewise_print(result, layer_name, "inside mome_attn")
     output[: result.shape[0]] = result
 
 
@@ -400,40 +398,6 @@ direct_register_custom_op(
     op_func=mome_attention,
     mutates_args=["output"],
     fake_impl=mome_attention_fake,
-)
-
-
-MHC_DEBUG_LOG_DIR = "/home/yuantao/code/debug_log"
-
-
-def piecewise_print(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
-    if "model.layers.0." not in prefix and "model.layers.1." not in prefix:
-        return tensor
-    if tensor.shape[0] in (32768, 1024):
-        return tensor
-    log_msg = (
-        f"[DEBUG] {prefix} {name}, tensor.shape: {tensor.shape}, "
-        f"tensor.float().sum(): {tensor.float().sum()}, "
-        f"tensor.ptr: {tensor.data_ptr()}, "
-        f"tensor[:5]: {tensor.flatten()[:5]}\n"
-    )
-    print(log_msg, end="")
-    os.makedirs(MHC_DEBUG_LOG_DIR, exist_ok=True)
-    with open(os.path.join(MHC_DEBUG_LOG_DIR, f"{name}.log"), "a") as f:
-        f.write(log_msg)
-    return tensor
-
-
-def piecewise_print_fake(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
-    return torch.empty_like(tensor)
-
-
-direct_register_custom_op(
-    op_name="piecewise_print",
-    op_func=piecewise_print,
-    mutates_args=[],
-    fake_impl=piecewise_print_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
 
