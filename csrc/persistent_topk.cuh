@@ -20,7 +20,8 @@ constexpr uint32_t kBlockSize = 1024;
 constexpr uint32_t kHistBits = 10;
 constexpr uint32_t kHistBins = 1 << kHistBits;
 constexpr uint32_t RADIX = 256;
-constexpr uint32_t kMaxTies = 2048;
+constexpr uint32_t kMaxTies = 1024;
+static_assert(kMaxTies <= kBlockSize, "tie_handle requires kMaxTies <= kBlockSize");
 constexpr uint32_t kWarpSize = 32;
 constexpr uint32_t kNumWarps = kBlockSize / kWarpSize;
 
@@ -636,8 +637,6 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   static_assert(kAboveMask >= TopK);
 
   const uint32_t la = smem->counter_gt, le = smem->counter_eq;
-  const auto midx = tx < la ? s_topk[tx] : 0;
-  const auto mtie = tx < le ? smem->tie_buffer[tx] : Tie{0, 0.0f};
 
   __shared__ uint32_t s_local_counts[CS];
   __shared__ uint32_t s_prefix_packed;
@@ -670,17 +669,18 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   const uint32_t prefix_above = s_prefix_packed & kAboveMask;
   const uint32_t prefix_equal = s_prefix_packed >> kAboveBits;
 
-  if (tx < la) {
-    row_output[prefix_above + tx] = midx + my_start;
+  for (uint32_t i = tx; i < la; i += kBlockSize) {
+    row_output[prefix_above + i] = s_topk[i] + my_start;
   }
-  if (tx < le) {
-    uint32_t p = s_total_above + prefix_equal + tx;
+  for (uint32_t i = tx; i < le; i += kBlockSize) {
+    const auto t = smem->tie_buffer[i];
+    uint32_t p = s_total_above + prefix_equal + i;
     if (p < TopK) {
-      row_output[p] = mtie.idx + my_start;
+      row_output[p] = t.idx + my_start;
     }
-    uint32_t tp = prefix_equal + tx;
+    uint32_t tp = prefix_equal + i;
     if (tp < kMaxTies) {
-      tie_ws[tp] = Tie{mtie.idx + my_start, mtie.score};
+      tie_ws[tp] = Tie{t.idx + my_start, t.score};
     }
   }
 
@@ -735,13 +735,11 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   __syncthreads();
 
   const uint32_t la = smem->counter_gt, le = smem->counter_eq;
-  const auto midx = tx < la ? s_topk[tx] : 0;
-  const auto mtie = tx < le ? smem->tie_buffer[tx] : Tie{0, 0.0f};
 
   __shared__ uint32_t s_off;
   if (tx == 0) s_off = atomicAdd(&state->output_counter, (int)la);
   __syncthreads();
-  if (tx < la) ro[s_off + tx] = midx + ms;
+  for (uint32_t i = tx; i < la; i += kBlockSize) { ro[s_off + i] = s_topk[i] + ms; }
 
   cooperative_groups::this_cluster().sync();
 
@@ -752,11 +750,12 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   if (tx == 0) s_toff = atomicAdd(&state->output_counter, (int)le);
   __syncthreads();
   if (s_ta >= TopK) return;
-    if (tx < le) {
-    uint32_t p = s_toff + tx;
-    if (p < TopK) ro[p] = mtie.idx + ms;
-    uint32_t tp = s_toff - s_ta + tx;
-    if (tp < kMaxTies) tie_ws[tp] = Tie{mtie.idx + ms, mtie.score};
+  for (uint32_t i = tx; i < le; i += kBlockSize) {
+    const auto t = smem->tie_buffer[i];
+    uint32_t p = s_toff + i;
+    if (p < TopK) { ro[p] = t.idx + ms; }
+    uint32_t tp = s_toff - s_ta + i;
+    if (tp < kMaxTies) { tie_ws[tp] = Tie{t.idx + ms, t.score}; }
   }
 
   // cluster.sync() before tie refinement
