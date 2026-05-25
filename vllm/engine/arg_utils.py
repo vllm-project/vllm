@@ -478,6 +478,9 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
+    data_parallel_coordinator_startup_timeout: int = (
+        ParallelConfig.data_parallel_coordinator_startup_timeout
+    )
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
@@ -1052,6 +1055,10 @@ class EngineArgs:
             help="Run a node-local supervisor that launches one external-LB API "
             "server per local data parallel rank and exposes aggregated health on "
             "a supervisor port.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-coordinator-startup-timeout",
+            **parallel_kwargs["data_parallel_coordinator_startup_timeout"],
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
@@ -1972,6 +1979,7 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            data_parallel_coordinator_startup_timeout=self.data_parallel_coordinator_startup_timeout,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
