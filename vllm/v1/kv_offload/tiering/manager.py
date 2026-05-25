@@ -422,14 +422,13 @@ class TieringOffloadingManager(OffloadingManager):
             return None
 
         # Step 3: For request-level tiers, cascade blocks already in primary
-        tier_policies = self._per_request_tier_policy.get(req_context.req_id)
-        if tier_policies:
-            keys_to_store_set = set(primary_result.keys_to_store)
-            keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
-            if keys_already_in_primary:
-                self._cascade_existing_blocks_to_request_level_tiers(
-                    keys_already_in_primary, req_context, tier_policies
-                )
+        tier_policies = self._per_request_tier_policy.get(req_context.req_id, {})
+        keys_to_store_set = set(primary_result.keys_to_store)
+        keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
+        if keys_already_in_primary:
+            self._cascade_existing_blocks_to_request_level_tiers(
+                keys_already_in_primary, req_context, tier_policies
+            )
 
         return primary_result
 
