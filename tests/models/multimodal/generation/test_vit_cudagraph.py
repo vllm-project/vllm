@@ -50,6 +50,14 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def gemma3_chat_template(content: str) -> str:
+    return (
+        "<bos><start_of_turn>user\n"
+        f"{content}<end_of_turn>\n"
+        "<start_of_turn>model\n"
+    )
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
@@ -121,6 +129,16 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="StepVLForConditionalGeneration",
             ),
         },
+    ),
+    "gemma3": VitCudagraphTestConfig(
+        model="google/gemma-3-4b-it",
+        modalities=["image"],
+        image_prompt=gemma3_chat_template(
+            "<start_of_image>What is in this image?"
+        ),
+        dtype="bfloat16",
+        max_model_len=4096,
+        marks=[pytest.mark.core_model],
     ),
 }
 
