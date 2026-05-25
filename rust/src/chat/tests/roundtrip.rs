@@ -112,7 +112,7 @@ macro_rules! roundtrip_tests {
             $(
                 $(
                     #[tokio::test]
-                    #[file_serial([<hf_roundtrip_ $case>])]
+                    #[file_serial([<hf_ $case>])]
                     async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
                         [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
                     }
