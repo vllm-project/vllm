@@ -2124,6 +2124,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 if state.is_complete():
                     if state.worker_type == "removing":
                         raise SystemExit
+                    if self.eep_scaling_state.worker_type == "new" and hasattr(
+                        self, "eep_notification_addresses"
+                    ):
+                        del self.eep_notification_addresses
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
                 elif not state.commit_requested and state.is_ready_for_switch():
