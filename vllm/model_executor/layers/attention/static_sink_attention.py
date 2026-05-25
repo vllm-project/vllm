@@ -7,14 +7,12 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import (
-    _encode_layer_name,
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
@@ -208,7 +206,7 @@ class StaticSinkAttention(Attention, CustomOp):
         self.sink_kv_block_offset = sink_kv_block_offset
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
-        self.impl.update_sink_kv(sink_key, sink_value)
+        self.impl.update_sink_kv(sink_key, sink_value)  # type: ignore[attr-defined]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
@@ -289,7 +287,7 @@ class StaticSinkMLAAttention(MLAAttention):
         self.sliding_window = sliding_window
         self.block_size = cache_config.block_size if cache_config is not None else 16
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(
+        self.impl = impl_cls(  # type: ignore[assignment]
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -312,88 +310,7 @@ class StaticSinkMLAAttention(MLAAttention):
         )
 
     def update_sink_kv(self, sink_k_pe, sink_compressed_kv) -> None:
-        self.impl.update_sink_kv(sink_k_pe, sink_compressed_kv)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        assert (
-            self.impl.sink_k_pe is not None and self.impl.sink_compressed_kv is not None
-        ), "sink_k_pe and sink_compressed_kv have not been prepared"
-        forward_context: ForwardContext = get_forward_context()
-        self_kv_cache = self.kv_cache
-        impl_kv_cache = (
-            self_kv_cache[0]
-            if isinstance(self_kv_cache, (list, tuple))
-            else self_kv_cache
-        )
-
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
-
-        if self.use_direct_call:
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata[self.layer_name]
-            slot_mapping = forward_context.slot_mapping
-
-            assert isinstance(slot_mapping, dict), (
-                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-            )
-
-            self.impl.do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
-
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
-                    self,
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    impl_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
-                return output
-            else:
-                output = self.impl.forward(
-                    self, q, kv_c_normed, k_pe, impl_kv_cache, attn_metadata
-                )
-                return output
-        else:
-            if isinstance(self_kv_cache, (list, tuple)):
-                raise NotImplementedError(
-                    "Composite DSA MLA KV cache requires direct attention calls."
-                )
-            encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self.layer_name,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
-            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            torch.ops.vllm.unified_mla_attention_with_output(
-                q,
-                kv_c_normed,
-                k_pe,
-                output,
-                encoded,
-                kv_cache_dummy_dep=kv_cache_dummy_dep,
-            )
-            return output
+        self.impl.update_sink_kv(sink_k_pe, sink_compressed_kv)  # type: ignore[attr-defined]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -408,7 +325,7 @@ class StaticSinkMLAAttention(MLAAttention):
             self.sliding_window,
         )
         if use_composite_kv_cache:
-            if self.sink_len > 0:
+            if self.sink_len is not None and self.sink_len > 0:
                 return SinkDSAAttentionSpec(
                     block_size=vllm_config.cache_config.block_size,
                     num_kv_heads=1,
@@ -438,7 +355,11 @@ class StaticSinkMLAAttention(MLAAttention):
                     ),
                 )
 
-        if self.sink_len > 0 and self.sliding_window is not None:
+        if (
+            self.sink_len is not None
+            and self.sink_len > 0
+            and self.sliding_window is not None
+        ):
             return SinkMLASlidingWindowSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
@@ -447,9 +368,9 @@ class StaticSinkMLAAttention(MLAAttention):
                 page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
                 sink_len=self.sink_len,
-                sliding_window=max_sliding_window,
+                sliding_window=max_sliding_window,  # type: ignore[arg-type]
             )
-        if self.sink_len > 0:
+        if self.sink_len is not None and self.sink_len > 0:
             return SinkMLAAttentionSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,

@@ -804,9 +804,9 @@ class SinkMLAAttentionSpec(MLAAttentionSpec):
 
 @dataclass(frozen=True)
 class MLASlidingWindowSpec(SlidingWindowSpec):
-    sliding_window: int | None = None
+    sliding_window: int
     cache_dtype_str: str | None = None
-    head_size_v: int | None = None
+    head_size_v: int = None  # type: ignore[assignment]
 
     def __post_init__(self):
         if self.head_size_v is None:

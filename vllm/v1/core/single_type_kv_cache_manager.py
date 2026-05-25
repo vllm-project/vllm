@@ -1242,7 +1242,7 @@ class SinkSlidingWindowManager(SlidingWindowManager):
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
 
-        sink_len = kv_cache_spec.sink_len
+        sink_len = kv_cache_spec.sink_len  # type: ignore[attr-defined]
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
         num_sink_block = sink_len // self.block_size
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
