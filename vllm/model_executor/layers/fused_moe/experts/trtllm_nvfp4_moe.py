@@ -132,7 +132,7 @@ class TrtLlmNvFp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def get_chunk_size(self) -> int:
+    def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
 
@@ -269,7 +269,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert a1q_scale is not None
 
         M = hidden_states.shape[0]
-        chunk_size = self.get_chunk_size()
+        chunk_size = self._get_chunk_size()
 
         if chunk_size >= M:
             self._invoke_kernel(
