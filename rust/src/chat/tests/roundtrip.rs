@@ -211,7 +211,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
                 AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    arguments: r#"{"y":1,"x":2}"#.to_string(),
+                    arguments: r#"{"y":1.0,"x":2}"#.to_string(),
                 }),
             ],
         },
@@ -239,7 +239,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, json!({"y": 1, "x": 2}))?,
+        expected_arguments(&case, json!({"y": 1.0, "x": 2}))?,
     );
 
     assert_eq!(
@@ -524,8 +524,8 @@ fn test_tools() -> Vec<ChatTool> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "y": { "type": "integer" },
-                    "x": { "type": "integer" }
+                    "y": { "type": "number" },
+                    "x": { "type": "number" }
                 },
                 "required": ["y", "x"]
             }),
