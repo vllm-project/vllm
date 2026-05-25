@@ -75,9 +75,13 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.aux_hidden_state_layers: tuple[int, ...] = ()
-        # Mistral Large 3 uses MLA, not MHA. Set explicitly because __init__
-        # bypasses DeepseekV2Model.__init__, whose load_weights reads self.use_mha.
+        # __init__ bypasses DeepseekV2Model.__init__, but load_weights inherited
+        # from that class reads self.use_mha and self.num_redundant_experts.
+        # Set them explicitly. Mistral Large 3 uses MLA, so use_mha is always False.
         self.use_mha = False
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
