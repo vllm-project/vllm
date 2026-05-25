@@ -564,7 +564,6 @@ class SimpleCPUOffloadScheduler:
             # --- Phase 1: Scan blocks, classify as cached vs to-store ---
             gpu_block_ids: list[int] = []
             # Dedup gpu_block_ids reused within a request by sliding-window
-            # attention. See issue #42571.
             seen_gpu_block_ids: set[int] = set()
             block_hashes_to_store: list[bytes] = []
             advanced_per_group: list[int] = [0] * num_groups
