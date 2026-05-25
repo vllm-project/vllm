@@ -199,11 +199,18 @@ class DeepseekV2Eagle3Model(nn.Module):
             ]
         )
 
-        # fc layer for combining auxiliary hidden states (3x hidden size input)
-        if hasattr(self.config, "target_hidden_size"):
-            fc_input_size = self.config.target_hidden_size * 3
-        else:
-            fc_input_size = self.config.hidden_size * 3
+        # fc layer for combining auxiliary hidden states
+        num_aux_hidden_states = getattr(self.config, "num_aux_hidden_states", None)
+        if num_aux_hidden_states is None:
+            eagle_config = getattr(self.config, "eagle_config", None) or {}
+            layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+            num_aux_hidden_states = len(layer_ids) if layer_ids else 3
+        self.num_aux_hidden_states = num_aux_hidden_states
+
+        target_hidden_size = getattr(
+            self.config, "target_hidden_size", self.config.hidden_size
+        )
+        fc_input_size = target_hidden_size * num_aux_hidden_states
 
         self.fc = ReplicatedLinear(
             input_size=fc_input_size,
@@ -215,6 +222,18 @@ class DeepseekV2Eagle3Model(nn.Module):
             return_bias=False,
         )
 
+        use_fc_norm = getattr(self.config, "fc_norm", False)
+        if use_fc_norm:
+            self.fc_norm = nn.ModuleList(
+                [
+                    RMSNorm(target_hidden_size, eps=self.config.rms_norm_eps)
+                    for _ in range(self.num_aux_hidden_states)
+                ]
+            )
+        else:
+            self.fc_norm = None
+
+        self.norm_output = getattr(self.config, "norm_output", False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -242,8 +261,13 @@ class DeepseekV2Eagle3Model(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
             )
+
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
-        return hidden_states, hidden_prenorm
+
+        # norm_output variant uses the post-norm hidden states.
+        aux_output = hidden_states if self.norm_output else hidden_prenorm
+
+        return hidden_states, aux_output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -318,7 +342,9 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.config.target_layer_count = target_layer_num
 
         self.model = DeepseekV2Eagle3Model(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)

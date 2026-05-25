@@ -17,11 +17,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 
 if current_platform.is_xpu():
-    from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+    from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
 def prepare_fp8_moe_layer_for_xpu(
@@ -47,6 +49,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.is_fp8 = False
         self.is_mxfp4 = False
+        self.is_mxfp8 = False
+        self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -62,7 +66,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -70,6 +74,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
@@ -128,25 +133,30 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        topk = topk_ids.size(-1)
-        xpu_fused_moe(
+        if self.fused_moe_impl is None:
+            topk = topk_ids.size(-1)
+            self.fused_moe_impl = XpuFusedMoe(
+                w13=w1,
+                w13_scales=self.w1_scale,
+                w13_bias=self.w1_bias,
+                w2=w2,
+                w2_scales=self.w2_scale,
+                w2_bias=self.w2_bias,
+                n_experts_per_token=topk,
+                activation=activation.value,
+                num_experts=self.moe_config.num_local_experts,
+                ep_rank=self.moe_config.ep_rank,
+                ep_size=self.moe_config.ep_size,
+                is_fp8=self.is_fp8,
+                is_mxfp4=self.is_mxfp4,
+                is_mxfp8=self.is_mxfp8,
+            )
+        assert self.fused_moe_impl is not None
+        self.fused_moe_impl.apply(
+            output=output,
             hidden_states=hidden_states,
-            w13=w1,
-            w13_scales=self.w1_scale,
-            w13_bias=self.w1_bias,
-            w2=w2,
-            w2_scales=self.w2_scale,
-            w2_bias=self.w2_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            n_experts_per_token=topk,
-            activation=activation.value,
-            num_experts=self.moe_config.num_local_experts,
-            ep_rank=self.moe_config.ep_rank,
-            ep_size=self.moe_config.ep_size,
-            output=output,
-            is_fp8=self.is_fp8,
-            is_mxfp4=self.is_mxfp4,
         )
 
 
@@ -165,6 +175,46 @@ class XPUExpertsFp8(XPUExperts):
             num_dispatchers,
         )
         self.is_fp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsMxfp8(XPUExpertsFp8):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        assert quant_config.quant_dtype == "mxfp8"
+        self.is_mxfp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp8Static, None),
+            (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 class XPUExpertsMXFp4(XPUExperts):

@@ -93,9 +93,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
-        super().__init__(vllm_config, role)
+        super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None, (
             "kv_transfer_config must be set for MoRIIOConnector"
         )
@@ -695,7 +695,12 @@ class MoRIIOConnectorWorker:
         # Agent.
         self.moriio_wrapper = MoRIIOWrapper(tp_rank=self.tp_rank, dp_rank=self.dp_rank)
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
-        self.moriio_wrapper.set_backend_type(BackendType.RDMA)
+        backend = (
+            BackendType.XGMI
+            if self.moriio_config.backend == "xgmi"
+            else BackendType.RDMA
+        )
+        self.moriio_wrapper.set_backend_type(backend)
         self.moriio_wrapper.notify_port = self.moriio_config.notify_port
         self.local_kv_cache_metadata: list[bytes] = []
         self.local_kv_cache_size: list[int] = []

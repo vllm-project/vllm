@@ -287,8 +287,11 @@ class CPUAWQLinearMethod(LinearMethodBase):
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         scales = layer.scales.data
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_weight, packed_zeros, scales
+        blocked_w, blocked_zp, blocked_s = ops.convert_weight_packed_scale_zp(
+            packed_weight,
+            packed_zeros,
+            scales,
+            ops.CPUQuantAlgo.AWQ,
         )
 
         layer.packed_weight = blocked_w
@@ -334,18 +337,13 @@ class CPUAWQLinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """SGLang INT4 W4A8 GEMM path."""
-        x_shape = x.shape
-        x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
-
-        out = torch.ops._C.int4_scaled_mm_cpu(
-            x_2d,
+        return ops.int4_scaled_mm_cpu(
+            x,
             layer.packed_weight,
             layer.packed_qzeros,
             layer.packed_scales,
             bias,
         )
-        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
-        return out
 
 
 def _get_isa_hint(dtype: torch.dtype) -> str:

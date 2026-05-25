@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 
@@ -26,7 +27,7 @@ class DummyConnectorMetadata(KVConnectorMetadata):
 
 
 class DummyKVConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config, role, kv_cache_config=None):
+    def __init__(self, vllm_config, role, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, role, kv_cache_config)
 
     def get_num_new_matched_tokens(
