@@ -361,14 +361,20 @@ class GumihoLlamaForCausalLM(LlamaForCausalLM):
             mlp_inputs.append(self.model.fuse_inputs(token_ids, hidden_states))
         mlp_input = torch.cat(mlp_inputs, dim=-1)
 
-        next_token_ids = []
-        for block in self.mlp[:num_tokens]:
-            hidden_states = block(mlp_input)
-            logits = self.compute_logits(hidden_states)
-            next_token_ids.append(logits.argmax(dim=-1))
-        if not next_token_ids:
+        # Run each MLP head, then batch the LM head projection + argmax into
+        # a single call. The LM head is the most expensive op (vocab projection
+        # is ~hidden * vocab MAC), so collapsing N small projections into one
+        # [N * batch, hidden] matmul measurably reduces drafter latency when
+        # ``num_speculative_tokens`` is large.
+        head_outputs = [block(mlp_input) for block in self.mlp[:num_tokens]]
+        if not head_outputs:
             return None
-        return torch.stack(next_token_ids, dim=1)
+        batch_size = mlp_input.shape[0]
+        # [num_tokens, batch, hidden] -> [num_tokens * batch, hidden]
+        stacked = torch.stack(head_outputs, dim=0).reshape(-1, self.config.hidden_size)
+        logits = self.compute_logits(stacked)
+        # [num_tokens * batch] -> [num_tokens, batch] -> [batch, num_tokens]
+        return logits.argmax(dim=-1).view(len(head_outputs), batch_size).transpose(0, 1)
 
     def _has_configured_mlp_head(self, name: str) -> bool:
         """Return True if ``name`` (e.g. ``mlp.3.0.linear.weight``) targets
