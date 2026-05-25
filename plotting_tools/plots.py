@@ -204,6 +204,62 @@ def plot_decomposed_timeline(
     save_figure(fig, out_path)
 
 
+COMM_TIMELINE_LAYERS = (
+    ("network_collective", "Network Collective", "#e45756"),
+    ("network_p2p", "Network P2P", "#d62728"),
+    ("device_copy", "Device Memcpy (D2D)", "#ff9896"),
+    ("host_transfer", "Host Transfer (H2D/D2H)", "#c5b0d5"),
+)
+
+
+def plot_comm_timeline(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Communication-only timeline",
+    max_ms: float | None = None,
+    time_origin_us: int | None = None,
+) -> None:
+    """Timeline showing only communication events (fabric + local memcpy)."""
+    comm_events = [
+        e for e in events
+        if e.get("kind") == "comm" or e.get("sub") in (
+            "network_collective", "network_p2p", "device_copy", "host_transfer"
+        )
+    ]
+    if not comm_events:
+        return
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
+    fig, ax = plt.subplots(figsize=(18, 3.5))
+    layers = COMM_TIMELINE_LAYERS
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
+
+    for sub, _label, color in layers:
+        intervals: list[tuple[float, float]] = []
+        for e in comm_events:
+            if e.get("sub") != sub:
+                continue
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                intervals.append(iv)
+        if not intervals:
+            continue
+        y = y_positions[sub]
+        ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+
+    ax.set_yticks([i + 0.4 for i in range(len(layers))])
+    ax.set_yticklabels([spec[1] for spec in layers])
+    ax.set_xlabel("Time (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    if max_ms is not None:
+        ax.set_xlim(0, max_ms)
+    else:
+        ax.set_xlim(left=0)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
 def _gpu_active_intervals(events: list[dict[str, Any]]) -> list[tuple[int, int]]:
     return [
         (e["ts"], e["end"])

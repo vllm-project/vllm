@@ -38,6 +38,7 @@ from plotting_tools.plots import (  # noqa: E402
     plot_classification_histogram,
     plot_classic_timeline,
     plot_collective_ops_breakdown_stats,
+    plot_comm_timeline,
     plot_data_movement_breakdown,
     plot_fabric_comm_breakdown,
     plot_decomposed_timeline,
@@ -241,6 +242,13 @@ def analyze_trace(
         max_ms=max_plot_ms,
         time_origin_us=time_origin_us,
         pp_comm_split=pp_comm_split,
+    )
+    plot_comm_timeline(
+        events,
+        trace_out / f"comm_timeline{PLOT_EXT}",
+        title=f"{node} (rank {global_rank}): communication-only timeline",
+        max_ms=max_plot_ms,
+        time_origin_us=time_origin_us,
     )
     plot_traffic_volume_pct(
         events,
@@ -490,6 +498,21 @@ def build_summary_plots(
                 time_origin_us=time_origin_us,
                 pp_comm_split=pp_comm_split,
             )
+
+    node_events = {
+        n: d["events"] for n, d in node_data.items() if d.get("events")
+    }
+    if node_events:
+        all_comm_events: list[dict[str, Any]] = []
+        for evs in node_events.values():
+            all_comm_events.extend(evs)
+        plot_comm_timeline(
+            all_comm_events,
+            summary_dir / f"comm_timeline{PLOT_EXT}",
+            title=f"{job_label}: communication-only timeline (all ranks)",
+            max_ms=max_plot_ms,
+            time_origin_us=time_origin_us,
+        )
 
     expert_gb = {n: d["expert_traffic_gb_heuristic"] for n, d in node_data.items()}
     plot_expert_traffic_by_node(

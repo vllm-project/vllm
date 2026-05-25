@@ -203,6 +203,20 @@ def parse_job_metadata(slurm_out: Path | None) -> dict[str, Any]:
         meta["tensor_parallel"] = int(m.group(2))
         meta["pipeline_parallel"] = int(m.group(3))
         meta["expert_parallel"] = int(m.group(4))
+
+    if "tensor_parallel" not in meta:
+        m = re.search(r"[_-]tp(\d+)", text, re.I)
+        if m:
+            meta["tensor_parallel"] = int(m.group(1))
+    if "pipeline_parallel" not in meta:
+        m = re.search(r"[_-]pp(\d+)", text, re.I)
+        if m:
+            meta["pipeline_parallel"] = int(m.group(1))
+    if "expert_parallel" not in meta:
+        m = re.search(r"[_-]ep(\d+)", text, re.I)
+        if m:
+            meta["expert_parallel"] = int(m.group(1))
+
     m = re.search(r"Successful requests:\s+(\d+)", text)
     if m:
         meta["successful_requests"] = int(m.group(1))

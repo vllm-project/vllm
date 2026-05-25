@@ -80,6 +80,7 @@ MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 # Ray compiled-DAG get timeout. Nsight + cold-start can exceed Ray's default 300s.
 RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-900}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-${RAY_CGRAPH_GET_TIMEOUT}}"
+export RAY_CGRAPH_submit_timeout="${RAY_CGRAPH_submit_timeout:-1800}"
 
 # Short path for Ray. This stays in /tmp only as a symlink, not as real storage.
 RAY_TMP_LINK_PARENT="${RAY_TMP_LINK_PARENT:-/tmp}"
@@ -821,7 +822,7 @@ copy_ray_logs_from_node() {
 SP="${SP:-2048}"
 SD="${SD:-256}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
-REQUEST_RATE="${REQUEST_RATE:-1.0}"
+REQUEST_RATE="${REQUEST_RATE:-0.05}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
@@ -1103,6 +1104,7 @@ export ARC_NODE_TMPDIR=''
 export RAY_PLASMA_DIRECTORY='${RAY_PLASMA_DIRECTORY}'
 export RAY_OBJECT_STORE_MEMORY='${RAY_OBJECT_STORE_MEMORY}'
 export RAY_CGRAPH_get_timeout='${RAY_CGRAPH_get_timeout}'
+export RAY_CGRAPH_submit_timeout='${RAY_CGRAPH_submit_timeout}'
 
 ensure_ray_tmp_for_node '${HEAD_NODE}'
 start_ray_nsight_live_copier
@@ -1200,6 +1202,7 @@ export ARC_NODE_TMPDIR=''
 export RAY_PLASMA_DIRECTORY='${RAY_PLASMA_DIRECTORY}'
 export RAY_OBJECT_STORE_MEMORY='${RAY_OBJECT_STORE_MEMORY}'
 export RAY_CGRAPH_get_timeout='${RAY_CGRAPH_get_timeout}'
+export RAY_CGRAPH_submit_timeout='${RAY_CGRAPH_submit_timeout}'
 
 ensure_ray_tmp_for_node '${WORKER}'
 start_ray_nsight_live_copier
