@@ -128,9 +128,9 @@ class RequestGroupState:
 class RequestOffloadState:
     config: SchedulerOffloadConfig
     req: Request
+    req_context: ReqContext
+    offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
-    req_context: ReqContext = field(init=False)
-    offloading_context: RequestOffloadingContext = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -141,11 +141,6 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
-        self.req_context = ReqContext(
-            req_id=self.req.request_id,
-            kv_transfer_params=self.req.kv_transfer_params,
-        )
-        self.offloading_context = RequestOffloadingContext()
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -482,9 +477,18 @@ class OffloadingConnectorScheduler:
                 group_state.block_ids.clear()
         else:
             is_new_request = True
-            req_status = RequestOffloadState(config=self.config, req=request)
-            req_status.offloading_context = self.manager.get_request_offloading_context(
-                req_status.req_context
+            req_context = ReqContext(
+                req_id=request.request_id,
+                kv_transfer_params=request.kv_transfer_params,
+            )
+            offloading_context = self.manager.get_request_offloading_context(
+                req_context
+            )
+            req_status = RequestOffloadState(
+                config=self.config,
+                req=request,
+                req_context=req_context,
+                offloading_context=offloading_context,
             )
             self._req_status[request.request_id] = req_status
 
