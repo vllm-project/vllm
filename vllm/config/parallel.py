@@ -146,7 +146,7 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
-    data_parallel_coordinator_startup_timeout: int = 30
+    data_parallel_coordinator_startup_timeout: int = Field(default=30, gt=0)
     """The maximum amount of time the DP Coordinator process is allowed to 
     take to report ZMQ addresses. May be useful to increase in shared 
     environments where IO load is high, especially when 
