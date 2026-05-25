@@ -201,6 +201,7 @@ class KVCacheSpecRegistry:
         Returns:
             The SingleTypeKVCacheManager class to use for this kvcache_spec
         """
+        cls._ensure_registered()
         kvcache_spec_cls = type(kvcache_spec)
 
         # Walk up the MRO to find a registered base class
@@ -224,6 +225,7 @@ class KVCacheSpecRegistry:
         Returns:
             The base KVCacheSpec class for checking uniform type kvcache specs
         """
+        cls._ensure_registered()
         kvcache_spec_cls = type(kvcache_spec)
 
         # Walk up the MRO to find a registered base spec
@@ -240,6 +242,7 @@ class KVCacheSpecRegistry:
         """
         Check if the KVCacheSpecs of each layer are registered as expected.
         """
+        cls._ensure_registered()
         for layer_name, spec in kv_cache_spec.items():
             # use raise instead of assert to make it effective in production environment
             if cls.get_uniform_type_base_spec(spec) is None:
