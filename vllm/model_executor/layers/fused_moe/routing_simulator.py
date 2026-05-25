@@ -136,14 +136,10 @@ class DistributionBasedRouting(RoutingStrategy):
         """Sample expert IDs based on the specified distribution."""
 
         if self.distribution == "uniform":
-            # Uniform random sampling
-            return torch.randint(
-                low=0,
-                high=num_experts,
-                size=(num_tokens, top_k),
-                dtype=indices_type,
-                device=device,
-            )
+            scores = torch.rand(
+                num_tokens, num_experts, device=device)
+            _, topk_ids = torch.topk(scores, top_k, dim=-1)
+            return topk_ids.to(indices_type)
 
         elif self.distribution == "normal":
             # For normal distribution, sample continuous values and map to
