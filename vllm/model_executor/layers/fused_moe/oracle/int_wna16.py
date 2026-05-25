@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-    from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
 logger = init_logger(__name__)
 
@@ -384,7 +384,7 @@ def _process_weights_marlin(
 
 def _process_awq_weights_marlin(
     layer: torch.nn.Module,
-    quant_config: "AWQMarlinConfig",
+    quant_config: "AutoAWQConfig",
     input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
@@ -574,11 +574,11 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
-        from vllm.model_executor.layers.quantization.awq_marlin import (
-            AWQMarlinConfig,
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQConfig,
         )
 
-        if isinstance(quant_config, AWQMarlinConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             if w13_qzeros is None or w2_qzeros is None:
                 raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
             return _process_awq_weights_marlin(
@@ -598,7 +598,7 @@ def convert_to_wna16_moe_kernel_format(
         if not isinstance(quant_config, AutoGPTQConfig):
             raise TypeError(
                 "Marlin WNA16 MoE backend requires AutoGPTQConfig or "
-                "AWQMarlinConfig, got "
+                "AutoAWQConfig, got "
                 f"{type(quant_config).__name__}."
             )
         if w13_g_idx is None or w2_g_idx is None:

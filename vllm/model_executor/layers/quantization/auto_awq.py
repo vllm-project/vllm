@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -9,6 +9,7 @@ from torch.nn import Parameter
 from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
+from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -22,10 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
@@ -37,7 +35,6 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
     set_weight_attrs,
 )
-from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -49,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
+    marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -56,7 +54,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
+from vllm.model_executor.parameter import (
+    GroupQuantScaleParameter,
+    PackedColumnParameter,
+    PackedvLLMParameter,
+    RowvLLMParameter,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -66,6 +69,233 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+
+class AutoAWQConfig(QuantizationConfig):
+    """Config class for AutoAWQ quantization.
+
+    Unified config that supports multiple backends: Triton, Marlin, and XPU.
+    Reference: https://arxiv.org/abs/2306.00978
+    """
+
+    # num_bits -> type
+    TYPE_MAP = {
+        4: scalar_types.uint4,
+    }
+
+    def __init__(
+        self,
+        weight_bits: int,
+        group_size: int,
+        zero_point: bool,
+        lm_head_quantized: bool,
+        modules_to_not_convert: list[str] | None = None,
+        full_config: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self.pack_factor = 32 // weight_bits  # packed into int32
+        self.group_size = group_size
+        self.zero_point = zero_point
+        self.lm_head_quantized = lm_head_quantized
+        self.weight_bits = weight_bits
+        self.modules_to_not_convert = modules_to_not_convert or []
+        self.full_config = full_config or {}
+
+        if self.weight_bits not in self.TYPE_MAP:
+            raise ValueError(
+                f"Unsupported num_bits = {self.weight_bits}. "
+                f"Supported num_bits = {self.TYPE_MAP.keys()}"
+            )
+
+        self.quant_type = self.TYPE_MAP[self.weight_bits]
+
+    def __repr__(self) -> str:
+        return (
+            f"AutoAWQConfig(quant_type={self.quant_type}, "
+            f"group_size={self.group_size}, "
+            f"zero_point={self.zero_point}, "
+            f"lm_head_quantized={self.lm_head_quantized}, "
+            f"modules_to_not_convert={self.modules_to_not_convert})"
+        )
+
+    @classmethod
+    def get_name(cls) -> "QuantizationMethods":
+        return "auto_awq"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.half, torch.bfloat16]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
+    @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return ["quantize_config.json", "quant_config.json"]
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "AutoAWQConfig":
+        weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
+        group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
+        zero_point = cls.get_from_keys(config, ["zero_point"])
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None
+        )
+        return cls(
+            weight_bits,
+            group_size,
+            zero_point,
+            lm_head_quantized,
+            modules_to_not_convert,
+            config,
+        )
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None
+    ) -> "QuantizationMethods | None":
+        """Override to use AutoAWQ for compatible AWQ models."""
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+
+        if quant_method != "awq":
+            return None
+
+        is_valid_user_quant = user_quant is None or user_quant in (
+            "awq",
+            "awq_marlin",
+            "auto_awq",
+            "marlin",
+        )
+
+        if is_valid_user_quant:
+            return cls.get_name()
+
+        return None
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
+        if isinstance(layer, LinearBase) or (
+            isinstance(layer, ParallelLMHead) and self.lm_head_quantized
+        ):
+            if is_layer_skipped(
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
+                skip_with_substr=True,
+            ):
+                return UnquantizedLinearMethod()
+
+            # Check if XPU - use XPU-specific linear method
+            if current_platform.is_xpu():
+                return AutoAWQXPULinearMethod(self)
+
+            # Check if Marlin is supported and not using batch invariant mode
+            # (Marlin kernels are not batch invariant)
+            use_marlin = (
+                not envs.VLLM_BATCH_INVARIANT
+                and current_platform.is_cuda()
+                and check_marlin_supported(
+                    self.quant_type, self.group_size, self.zero_point
+                )
+            )
+
+            if use_marlin:
+                if not check_marlin_supports_layer(layer, self.group_size):
+                    logger.warning_once(
+                        "Layer '%s' is not supported by AutoAWQMarlin. "
+                        "Falling back to unoptimized AWQ kernels.",
+                        prefix,
+                    )
+                    return AutoAWQLinearMethod(self)
+                quant_method = AutoAWQMarlinLinearMethod(self)
+                quant_method.input_dtype = get_marlin_input_dtype(prefix)
+                return quant_method
+
+            return AutoAWQLinearMethod(self)
+
+        elif isinstance(layer, RoutedExperts):
+            if is_layer_skipped(
+                prefix,
+                getattr(self, "modules_to_not_convert", []),
+                skip_with_substr=True,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_once(
+                    f"Layer '{prefix}' is not supported by AutoAWQMoEMarlin. "
+                    "Falling back to Moe WNA16 kernels."
+                )
+                from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
+
+            return AutoAWQMoEMethod(self, layer.moe_config)
+
+        return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
+
+    @staticmethod
+    def is_awq_marlin_compatible(quant_config: dict[str, Any]) -> bool:
+        """Check if the AWQ quantization config is compatible with Marlin kernels."""
+        num_bits = quant_config.get("bits")
+        has_zp = quant_config.get("zero_point")
+        group_size = quant_config.get("group_size")
+
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (
+            -1 if capability_tuple is None else capability_tuple.to_int()
+        )
+
+        # Marlin requires specific minimum capability
+        if device_capability < 70:
+            return False
+
+        # Check if we have the right bits and group size for Marlin
+        if num_bits != 4:
+            return False
+
+        if has_zp is None:
+            return False
+
+        # Marlin supports group_size > 0
+        if group_size is None or group_size <= 0:
+            return False
+
+        return check_marlin_supported(
+            scalar_types.uint4, group_size, has_zp
+        )
+
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        if self.modules_to_not_convert:
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_to_not_convert = list(layers - quant_layers)
+
 
 # AWQ uses a non-standard packing order within int32 values.
 # For 4-bit: standard order stores values at bit positions [0,4,8,12,16,20,24,28]
@@ -165,218 +395,245 @@ def _convert_awq_to_standard_format(
     setattr(layer, w_zp_name, new_zp_param)
 
 
-class AWQMarlinConfig(QuantizationConfig):
-    """Config class for AWQ Marlin"""
+class AutoAWQLinearMethod(LinearMethodBase):
+    """Linear method for AWQ using Triton kernels.
 
-    # num_bits -> type
-    TYPE_MAP = {
-        4: scalar_types.uint4,
-    }
+    Args:
+        quant_config: The AWQ quantization config.
+    """
 
-    def __init__(
+    def __init__(self, quant_config: AutoAWQConfig):
+        self.quant_config = quant_config
+
+    def create_weights(
         self,
-        weight_bits: int,
-        group_size: int,
-        zero_point: bool,
-        lm_head_quantized: bool,
-        modules_to_not_convert: list[str] | None,
-        full_config: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.pack_factor = 32 // weight_bits  # packed into int32
-        self.group_size = group_size
-        self.zero_point = zero_point
-        self.lm_head_quantized = lm_head_quantized
-        self.weight_bits = weight_bits
-        self.modules_to_not_convert = modules_to_not_convert or []
-        self.full_config = full_config
-
-        if self.weight_bits not in self.TYPE_MAP:
-            raise ValueError(
-                f"Unsupported num_bits = {self.weight_bits}. "
-                f"Supported num_bits = {self.TYPE_MAP.keys()}"
-            )
-
-        self.quant_type = self.TYPE_MAP[self.weight_bits]
-
-        verify_marlin_supported(
-            self.quant_type, group_size=self.group_size, has_zp=self.zero_point
-        )
-
-    def __repr__(self) -> str:
-        return (
-            f"AWQMarlinConfig(quant_type={self.quant_type}, "
-            f"group_size={self.group_size}, "
-            f"zero_point={self.zero_point}, "
-            f"lm_head_quantized={self.lm_head_quantized}, "
-            f"modules_to_not_convert={self.modules_to_not_convert})"
-        )
-
-    @classmethod
-    def get_name(cls) -> "QuantizationMethods":
-        return "awq_marlin"
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.half, torch.bfloat16]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
-
-    @classmethod
-    def get_config_filenames(cls) -> list[str]:
-        return ["quantize_config.json"]
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "AWQMarlinConfig":
-        weight_bits = cls.get_from_keys(config, ["bits"])
-        group_size = cls.get_from_keys(config, ["group_size"])
-        zero_point = cls.get_from_keys(config, ["zero_point"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
-        modules_to_not_convert = cls.get_from_keys_or(
-            config, ["modules_to_not_convert"], None
-        )
-        return cls(
-            weight_bits,
-            group_size,
-            zero_point,
-            lm_head_quantized,
-            modules_to_not_convert,
-            config,
-        )
-
-    @classmethod
-    def override_quantization_method(
-        cls, hf_quant_cfg, user_quant, hf_config=None
-    ) -> "QuantizationMethods | None":
-        # Skip override to marlin kernels, as they are not
-        # batch invariant
-        if envs.VLLM_BATCH_INVARIANT:
-            return None
-
-        can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
-        is_valid_user_quant = (
-            user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
-        )
-
-        if can_convert and is_valid_user_quant:
-            msg = (
-                "The model is convertible to {} during runtime."
-                " Using {} kernel.".format(cls.get_name(), cls.get_name())
-            )
-            logger.info(msg)
-            return cls.get_name()
-
-        if can_convert and user_quant == "awq":
-            logger.info(
-                "Detected that the model can run with awq_marlin"
-                ", however you specified quantization=awq explicitly,"
-                " so forcing awq. Use quantization=awq_marlin for"
-                " faster inference"
-            )
-        return None
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, LinearBase) or (
-            isinstance(layer, ParallelLMHead) and self.lm_head_quantized
-        ):
-            if is_layer_skipped(
-                prefix,
-                self.modules_to_not_convert,
-                self.packed_modules_mapping,
-                skip_with_substr=True,
-            ):
-                return UnquantizedLinearMethod()
-            # Check if the layer is supported by AWQMarlin.
-            if not check_marlin_supports_layer(layer, self.group_size):
-                logger.warning_once(
-                    "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
-                    prefix,
-                )
-                return AWQConfig.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-            quant_method = AWQMarlinLinearMethod(self)
-            quant_method.input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
-        elif isinstance(layer, RoutedExperts):
-            from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
-
-            if is_layer_skipped(
-                prefix,
-                getattr(self, "modules_to_not_convert", []),
-                skip_with_substr=True,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
-                logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
-                    "Falling back to Moe WNA16 kernels."
-                )
-                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-            moe_quant_method = AWQMarlinMoEMethod(self, layer.moe_config)
-            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
-            return moe_quant_method
-        return None
-
-    @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
-        # Extract data from quant config.
-        quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits")
-        group_size = quant_config.get("group_size")
-        zero_point = quant_config.get("zero_point")
-
-        if not current_platform.is_cuda_alike():
-            return False
-
-        if quant_method != "awq":
-            return False
-
-        # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or zero_point is None:
-            return False
-
-        if num_bits not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
-        )
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        if self.modules_to_not_convert:
-            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
-                self.modules_to_not_convert
-            )
-
-    def maybe_update_config(
-        self,
-        model_name: str,
-        hf_config: PretrainedConfig | None = None,
-        revision: str | None = None,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
     ):
-        if self.modules_to_not_convert:
-            return
+        # Normalize group_size
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
 
-        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-        metadata = get_safetensors_params_metadata(model_name, revision=revision)
-        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
-        quant_layers: set[str] = {
-            param_name.rsplit(".", 1)[0]
-            for param_name, info in metadata.items()
-            if (dtype := info.get("dtype", None))
-            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
-        }
-        self.modules_to_not_convert = list(layers - quant_layers)
+        if input_size_per_partition % group_size != 0:
+            raise ValueError(
+                "The input size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size."
+            )
+
+        output_size_per_partition = sum(output_partition_sizes)
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
+            raise ValueError(
+                "The output size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size."
+            )
+
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        num_groups = input_size_per_partition // group_size
+
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
+                num_groups,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        scales = GroupQuantScaleParameter(
+            data=torch.empty(
+                num_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("qzeros", qzeros)
+        layer.register_parameter("scales", scales)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.qzeros
+        pack_factor = self.quant_config.pack_factor
+        out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
+        # num_tokens >= threshold
+        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
+        # Batch invariant mode requires torch.matmul path
+        # for Triton override
+        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
+            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+            out = torch.matmul(reshaped_x, out)
+        else:
+            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+        if bias is not None:
+            out.add_(bias)
+        return out.reshape(out_shape)
 
 
-class AWQMarlinLinearMethod(LinearMethodBase):
+class AutoAWQXPULinearMethod(LinearMethodBase):
+    """Linear method for AWQ on XPU using int4 GEMM kernel.
+
+    Args:
+        quant_config: The AWQ quantization config.
+    """
+
+    def __init__(self, quant_config: AutoAWQConfig):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % self.quant_config.group_size != 0:
+            raise ValueError(
+                "The input size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size."
+            )
+
+        output_size_per_partition = sum(output_partition_sizes)
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
+            raise ValueError(
+                "The output size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size."
+            )
+
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        num_groups = input_size_per_partition // self.quant_config.group_size
+
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
+                num_groups,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        scales = GroupQuantScaleParameter(
+            data=torch.empty(
+                num_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("qzeros", qzeros)
+        layer.register_parameter("scales", scales)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
+
+        from vllm_xpu_kernels.quantization._quantize_convert import (
+            AWQUtils,
+            transpose_onednn_woq_format,
+        )
+
+        layer.xpu_output_size = (
+            layer.qweight.size(1) * self.quant_config.pack_factor
+        )
+        qweight_new, qzeros_new = AWQUtils.repack(layer.qweight, layer.qzeros)
+        if qweight_new.shape != layer.qweight.data.shape:
+            layer.qweight.data = layer.qweight.data.view_as(qweight_new)
+        if qzeros_new.shape != layer.qzeros.data.shape:
+            layer.qzeros.data = layer.qzeros.data.view_as(qzeros_new)
+        layer.qweight.data.copy_(qweight_new)
+        layer.qzeros.data.copy_(qzeros_new)
+        transpose_onednn_woq_format(layer, "awq", False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        out = torch.ops._xpu_C.int4_gemm_w4a16(
+            reshaped_x,
+            layer.qweight,
+            bias,
+            layer.scales,
+            layer.qzeros,
+            self.quant_config.group_size,
+            None,
+        )
+        out_shape = x.shape[:-1] + (layer.xpu_output_size,)
+        return out.reshape(out_shape)
+
+
+class AutoAWQMarlinLinearMethod(LinearMethodBase):
     """Linear method for AWQ Marlin.
 
     Uses choose_mp_linear_kernel to select the best available kernel
@@ -388,7 +645,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, quant_config: AWQMarlinConfig) -> None:
+    def __init__(self, quant_config: AutoAWQConfig) -> None:
         self.quant_config = quant_config
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
@@ -433,7 +690,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for AWQMarlinLinearMethod", kernel_type.__name__)
+            logger.info("Using %s for AutoAWQMarlinLinearMethod", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # Weights are loaded in AWQ checkpoint format (packed along output dim).
@@ -507,16 +764,16 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-class AWQMarlinMoEMethod(FusedMoEMethodBase):
+class AutoAWQMoEMethod(FusedMoEMethodBase):
     def __init__(
         self,
-        quant_config: AWQMarlinConfig,
+        quant_config: AutoAWQConfig,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
-            raise ValueError("AWQMarlinMoEMethod only supports 4bit now.")
+            raise ValueError("AutoAWQMoEMethod only supports 4bit now.")
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
         self.use_marlin = True

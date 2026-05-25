@@ -56,10 +56,8 @@ class MoeWNA16Config(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
         self.full_config = full_config
-        self.use_marlin = False
         # Avoid circular import
-        from vllm.model_executor.layers.quantization.awq import AWQConfig
-        from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
+        from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
         if self.linear_quant_method == "gptq":
             pass
@@ -68,7 +66,7 @@ class MoeWNA16Config(QuantizationConfig):
             device_capability = (
                 -1 if capability_tuple is None else capability_tuple.to_int()
             )
-            awq_min_capability = AWQConfig.get_min_capability()
+            awq_min_capability = AutoAWQConfig.get_min_capability()
             if device_capability < awq_min_capability:
                 raise ValueError(
                     "The quantization method moe_wna16 + awq is not supported "
@@ -76,7 +74,6 @@ class MoeWNA16Config(QuantizationConfig):
                     f"Minimum capability: {awq_min_capability}. "
                     f"Current capability: {device_capability}."
                 )
-            self.use_marlin = AWQMarlinConfig.is_awq_marlin_compatible(full_config)
         else:
             raise ValueError("moe_wna16 only support gptq and awq.")
 
@@ -149,9 +146,9 @@ class MoeWNA16Config(QuantizationConfig):
             -1 if capability_tuple is None else capability_tuple.to_int()
         )
         # Avoid circular import
-        from vllm.model_executor.layers.quantization.awq import AWQConfig
+        from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
-        awq_min_capability = AWQConfig.get_min_capability()
+        awq_min_capability = AutoAWQConfig.get_min_capability()
 
         gptq_compatible = quant_method == "gptq" and not desc_act and num_bits in [4, 8]
         awq_compatible = (
@@ -174,26 +171,16 @@ class MoeWNA16Config(QuantizationConfig):
             from vllm.model_executor.layers.quantization.auto_gptq import (
                 AutoGPTQConfig,
             )
-            from vllm.model_executor.layers.quantization.awq import AWQConfig
-            from vllm.model_executor.layers.quantization.awq_marlin import (
-                AWQMarlinConfig,
-            )
+            from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
             if self.linear_quant_method == "gptq":
                 return AutoGPTQConfig.from_config(self.full_config).get_quant_method(
                     layer, prefix
                 )
             elif self.linear_quant_method in ("awq", "awq_marlin"):
-                if self.use_marlin and check_marlin_supports_layer(
-                    layer, self.group_size
-                ):
-                    return AWQMarlinConfig.from_config(
-                        self.full_config
-                    ).get_quant_method(layer, prefix)
-                else:
-                    return AWQConfig.from_config(self.full_config).get_quant_method(
-                        layer, prefix
-                    )
+                return AutoAWQConfig.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, RoutedExperts):

@@ -61,7 +61,7 @@ class CPUAWQConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return (
-            f"AWQMarlinConfig("
+            f"CPUAWQConfig("
             f"group_size={self.group_size}, "
             f"zero_point={self.zero_point}, "
             f"lm_head_quantized={self.lm_head_quantized}, "
