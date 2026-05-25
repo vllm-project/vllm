@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use futures::{Stream, StreamExt as _, stream};
-use serde_json::json;
 use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
@@ -184,7 +183,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
             ChatRole::User,
-            "Check Shanghai weather and add 1 plus 2.",
+            "Check Shanghai weather and add 1.00 plus 2.",
         )],
         test_tools(),
     );
@@ -211,7 +210,9 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
                 AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    arguments: r#"{"y":1.0,"x":2}"#.to_string(),
+                    // Intentionally use a non-lexical order of keys and a different number
+                    // formatting style to verify text-level fidelity of the roundtrip.
+                    arguments: r#"{"y":1.00,"x":2}"#.to_string(),
                 }),
             ],
         },
@@ -234,12 +235,12 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[0].name, "get_weather");
     assert_eq!(
         tool_calls[0].arguments,
-        expected_arguments(&case, json!({"location": "Shanghai"}))?,
+        expected_arguments(&case, r#"{"location": "Shanghai"}"#)?,
     );
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, json!({"y": 1.0, "x": 2}))?,
+        expected_arguments(&case, r#"{"y": 1.00, "x": 2}"#)?,
     );
 
     assert_eq!(
@@ -265,8 +266,13 @@ fn spaced_json_fmt() -> JsonFmt {
         .expect("literal colon separator is valid JSON")
 }
 
-/// Format expected tool-call arguments using this case's JSON style.
-fn expected_arguments(case: &RoundtripCase, value: serde_json::Value) -> Result<String> {
+/// Parse and format expected tool-call arguments from raw JSON text.
+/// Pass in a raw JSON string instead of a structured value to ensure the exact precision and
+/// formatting of numbers are preserved.
+fn expected_arguments(case: &RoundtripCase, raw_json: &str) -> Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw_json).context("invalid expected tool-call arguments")?;
+
     case.json_fmt
         .format_to_string(&value)
         .context("failed to format expected tool-call arguments")
