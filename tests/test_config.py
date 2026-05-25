@@ -1467,3 +1467,19 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -2, -100])
+def test_max_model_len_rejects_zero_and_negative(bad_value):
+    with pytest.raises((ValueError, ValidationError)):
+        ModelConfig("facebook/opt-125m", max_model_len=bad_value)
+
+
+def test_max_model_len_accepts_auto_sentinel():
+    cfg = ModelConfig("facebook/opt-125m", max_model_len=-1)
+    assert cfg.max_model_len > 0
+
+
+def test_max_model_len_accepts_positive():
+    cfg = ModelConfig("facebook/opt-125m", max_model_len=512)
+    assert cfg.max_model_len == 512
