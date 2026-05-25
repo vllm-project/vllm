@@ -539,6 +539,7 @@ sacrebleu==2.6.0
     # via lm-eval
 safetensors==0.7.0
     # via
+    #   -c requirements/common.txt
     #   accelerate
     #   timm
     #   transformers
