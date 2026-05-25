@@ -161,6 +161,10 @@ class AutoAWQConfig(QuantizationConfig):
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
         """Override to use AutoAWQ for compatible AWQ models."""
+        # Don't override on CPU - let cpu_awq handle it
+        if current_platform.is_cpu():
+            return None
+
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
         if quant_method != "awq":
@@ -630,13 +634,19 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
+        # Normalize group_size to match create_weights logic
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = layer.qweight.shape[0]  # input_size_per_partition
+
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
             layer.qweight,
             bias,
             layer.scales,
             layer.qzeros,
-            self.quant_config.group_size,
+            group_size,
             None,
         )
         out_shape = x.shape[:-1] + (layer.xpu_output_size,)
