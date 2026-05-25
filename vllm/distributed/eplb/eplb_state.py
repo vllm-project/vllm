@@ -49,7 +49,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
-from .eplb_utils import CpuGpuEvent, heat_cell
+from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
@@ -243,11 +243,6 @@ class EplbState:
         `expert_rearrangement_step` value to ensure synchronization.
         Otherwise, the rearrangement will hang at collective
         communication calls.
-        """
-        self.global_step: int = 0
-        """
-        Monotonic step counter that is **not** reset on rearrangement.
-        Used to distinguish rearrangement cycles in EPLB logs.
         """
         self.expert_rearrangement_step_interval: int = 0
         """
@@ -479,49 +474,42 @@ class EplbState:
 
     def _dump_expert_load(
         self,
-        window_load_list: list[torch.Tensor],
-        latest_load_list: list[torch.Tensor],
+        window_load: torch.Tensor,
+        latest_load: torch.Tensor,
+        eplb_model_state: "EplbModelState",
         ep_size: int,
     ) -> None:
-        """Append expert-load snapshots to a per-model JSONL file."""
+        """Append one model's expert-load snapshot to its JSONL file."""
         dump_dir = self.parallel_config.eplb_config.expert_load_dump_dir
-        if dump_dir is None:
-            return
-
         dump_path = Path(dump_dir)
         dump_path.mkdir(parents=True, exist_ok=True)
 
-        for window_load, latest_load, eplb_model_state in zip(
-            window_load_list, latest_load_list, self.model_states.values()
-        ):
-            model = eplb_model_state.model
-            safe_name = eplb_model_state.model_name.replace("/", "_")
-            file_path = dump_path / f"{safe_name}_expert_load.jsonl"
+        model = eplb_model_state.model
+        safe_name = eplb_model_state.model_name.replace("/", "_")
+        file_path = dump_path / f"{safe_name}_expert_load.jsonl"
 
-            record = {
-                "model_name": eplb_model_state.model_name,
-                "world_size": ep_size,
-                "num_moe_layers": model.num_moe_layers,
-                "num_physical_experts": model.num_physical_experts,
-                "num_logical_experts": model.num_logical_experts,
-                "num_redundant_experts": model.num_redundant_experts,
-                "window_size": self.expert_load_window_size,
-                "step": self.global_step,
-                "window_expert_load": window_load.cpu().tolist(),
-                "latest_expert_load": latest_load.cpu().tolist(),
-                "physical_to_logical_map": (
-                    eplb_model_state.physical_to_logical_map.cpu().tolist()
-                ),
-            }
-
-            with open(file_path, "a") as f:
-                f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        record = {
+            "model_name": eplb_model_state.model_name,
+            "world_size": ep_size,
+            "num_moe_layers": model.num_moe_layers,
+            "num_physical_experts": model.num_physical_experts,
+            "num_logical_experts": model.num_logical_experts,
+            "num_redundant_experts": model.num_redundant_experts,
+            "window_size": self.expert_load_window_size,
+            "step": self.expert_rearrangement_step,
+            "window_expert_load": window_load.cpu().tolist(),
+            "latest_expert_load": latest_load.cpu().tolist(),
+            "physical_to_logical_map": (
+                eplb_model_state.physical_to_logical_map.cpu().tolist()
+            ),
+        }
+        with open(file_path, "a") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def _log_balancedness(
         self,
         num_tokens_per_rank: torch.Tensor,
         model_name: str,
-        verbose: bool = False,
     ) -> None:
         """Log EPLB balancedness stats."""
         layer_means = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
@@ -530,19 +518,12 @@ class EplbState:
         # Compute balancedness ratio:
         # for each layer:
         #   (mean load across ranks) / (max load across ranks)
-        avg_tokens = layer_means.sum().item()
-        max_tokens = layer_maxes.sum().item()
-        balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-
-        # Per-layer (max - mean) / mean averaged across active layers
-        # (matches TRT-LLM's imbalance metric).
-        active = layer_means > 0
-        if active.any():
-            active_means = layer_means[active]
-            active_maxes = layer_maxes[active]
-            imbalance = ((active_maxes - active_means) / active_means).mean().item()
-        else:
-            imbalance = 0.0
+        active = layer_maxes > 0
+        balancedness = (
+            (layer_means[active] / layer_maxes[active]).mean().item()
+            if active.any()
+            else 0.0
+        )
 
         rearrangement_step = self.expert_rearrangement_step
         steps_left = self.expert_rearrangement_step_interval - rearrangement_step
@@ -555,91 +536,13 @@ class EplbState:
                 "(async worker is slow or dead)"
             )
 
-        if not verbose:
-            logger.info(
-                "EPLB stats: model=%s, global_step=%d\n"
-                "  rearrangement_step=%d, %s\n"
-                "  avg_tokens=%.2f, max_tokens=%d\n"
-                "  balancedness=%.4f, imbalance=%.4f",
-                model_name,
-                self.global_step,
-                rearrangement_step,
-                schedule_line,
-                avg_tokens,
-                max_tokens,
-                balancedness,
-                imbalance,
-            )
-            return
-
-        # ---- verbose dump ----
-        lines: list[str] = [
-            "=== EPLB dump ===",
-            f"model={model_name}, global_step={self.global_step}",
-            f"rearrangement_step={rearrangement_step}, {schedule_line}",
-            f"avg_tokens={avg_tokens:.2f}, max_tokens={int(max_tokens)}",
-            f"balancedness={balancedness:.4f}, imbalance={imbalance:.4f}",
-        ]
-
-        num_ranks = num_tokens_per_rank.shape[1]
-        if num_ranks == 0:
-            lines += ["No EP ranks.", "=== end EPLB dump ==="]
-            logger.info("\n%s", "\n".join(lines))
-            return
-
-        # Per-layer / per-rank token table
-        table = num_tokens_per_rank.long().cpu()  # [n_layers, num_ranks]
-        n_layers = table.shape[0]
-        total = int(table.sum().item())
-        if total > 0:
-            row_sums = table.sum(dim=1)
-            col_sums = table.sum(dim=0)
-
-            # Auto-size columns to fit the widest value
-            biggest_value = max(int(table.max().item()), int(col_sums.max().item()))
-            val_w = max(6, len(str(biggest_value)))
-            sum_w = max(6, len(str(total)))
-            label_w = len(f"Layer{n_layers - 1}")
-
-            # Header
-            lines.append("Tokens per MoE layer and EP rank:")
-            rank_hdr = " ".join(f"{'rank' + str(r):>{val_w}}" for r in range(num_ranks))
-            lines.append(f"{'':{label_w}} {rank_hdr}  {'sum':>{sum_w}}  max/mean")
-
-            # One row per MoE layer
-            for i in range(n_layers):
-                row = table[i]
-                row_min = int(row.min().item())
-                row_max = int(row.max().item())
-                row_total = int(row_sums[i].item())
-                row_mean = row_total / num_ranks
-                ratio = row_max / row_mean if row_mean > 0 else float("inf")
-                vals = [int(row[r].item()) for r in range(num_ranks)]
-                cells = " ".join(
-                    heat_cell(f"{v:>{val_w}}", v, row_min, row_max) for v in vals
-                )
-                lines.append(
-                    f"{'Layer' + str(i):{label_w}} {cells}"
-                    f"  {row_total:>{sum_w}}  {ratio:.2f}x"
-                )
-
-            # Totals row
-            mean_per_rank = total / num_ranks
-            totals_max = int(col_sums.max().item())
-            totals_ratio = (
-                totals_max / mean_per_rank if mean_per_rank > 0 else float("inf")
-            )
-            totals_cells = " ".join(
-                f"{int(col_sums[r].item()):>{val_w}}" for r in range(num_ranks)
-            )
-            sigma = "\u03a3"
-            lines.append(
-                f"{sigma:{label_w}} {totals_cells}"
-                f"  {total:>{sum_w}}  {totals_ratio:.2f}x"
-            )
-
-        lines.append("=== end EPLB dump ===")
-        logger.info("\n%s", "\n".join(lines))
+        logger.info(
+            "EPLB stats: model=%s\n  rearrangement_step=%d\n  %s\n  balancedness=%.4f",
+            model_name,
+            rearrangement_step,
+            schedule_line,
+            balancedness,
+        )
 
     def step(
         self,
@@ -661,7 +564,7 @@ class EplbState:
             log_stats (bool): If `True`, log the expert load metrics.
 
         # Stats
-            The metrics are summed across layers.
+            The metrics are all summed up across layers.
             - `avg_tokens`: The average load across ranks.
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
@@ -676,14 +579,8 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        # Terminal log and JSONL dump are independent — each can be enabled
-        # on its own; both share the same `log_balancedness_interval` cadence
-        # and the same one synced expert-load pass.
-        dump_dir_set = self.parallel_config.eplb_config.expert_load_dump_dir is not None
-        need_periodic_stats = log_stats or dump_dir_set
-
         if (
-            need_periodic_stats
+            log_stats
             and self.expert_rearrangement_step
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
@@ -693,11 +590,21 @@ class EplbState:
             expert_load_pass_list = self._sync_load_pass()
             ep_group = get_ep_group().device_group
 
-            if log_stats:
-                for expert_load_pass, eplb_model_state in zip(
-                    expert_load_pass_list, self.model_states.values()
-                ):
-                    # num_tokens_per_rank: (num_moe_layers, num_ranks)
+            # Collective allreduce - ALL ranks, one time before loop.
+            window_load_list: list[torch.Tensor] | None = None
+            if self.parallel_config.eplb_config.expert_load_dump_dir is not None:
+                window_load_list = self._allreduce_list(
+                    [
+                        s.expert_load_window.sum(dim=0)
+                        for s in self.model_states.values()
+                    ]
+                )
+
+            # Per-model: лог + JSONL, оба под if rank == 0.
+            for i, (expert_load_pass, eplb_model_state) in enumerate(
+                zip(expert_load_pass_list, self.model_states.values())
+            ):
+                if ep_group.rank() == 0:
                     num_tokens_per_rank = (
                         expert_load_pass.reshape(
                             expert_load_pass.shape[0], ep_group.size(), -1
@@ -705,38 +612,21 @@ class EplbState:
                         .sum(dim=-1)
                         .float()
                     )
-
-                    if ep_group.rank() == 0:
-                        self._log_balancedness(
-                            num_tokens_per_rank,
-                            model_name=eplb_model_state.model_name,
-                            verbose=(
-                                self.parallel_config.eplb_config.log_balancedness_verbose
-                            ),
-                        )
-
-            # All-reduce the per-model window aggregates so the dumped window
-            # is the global view (consistent with the synced latest_load);
-            # only rank 0 actually writes the files.
-            if dump_dir_set:
-                window_load_list = self._allreduce_list(
-                    [
-                        s.expert_load_window.sum(dim=0)
-                        for s in self.model_states.values()
-                    ]
-                )
-                if ep_group.rank() == 0:
-                    self._dump_expert_load(
-                        window_load_list,
-                        expert_load_pass_list,
-                        ep_group.size(),
+                    self._log_balancedness(
+                        num_tokens_per_rank,
+                        eplb_model_state.model_name,
                     )
+                    if window_load_list is not None:
+                        self._dump_expert_load(
+                            window_load_list[i],
+                            expert_load_pass,
+                            eplb_model_state,
+                            ep_group.size(),
+                        )
 
         # Update the expert load sliding window
         if not is_dummy:
-            should_record = self._should_record_current_step(
-                log_stats=need_periodic_stats
-            )
+            should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
                 if should_record:
                     eplb_model_state.expert_load_window[
@@ -754,7 +644,6 @@ class EplbState:
         # rearrangement step and perform rearrangement to ensure all ranks are
         # performing collective communication.
         self.expert_rearrangement_step += 1
-        self.global_step += 1
 
         if self.is_async:
             # Run _move_to_workspace if all ranks have finished transferring the
@@ -1120,6 +1009,17 @@ class EplbLayerState:
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
     """
+
+    def set_layer_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.expert_load_view = expert_load_view[moe_layer_idx]
+        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
+        self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
 
 def _node_count_with_rank_mapping(

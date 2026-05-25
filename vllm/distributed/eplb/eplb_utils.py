@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
-import functools
 import os
-import sys
 import threading
 
 import torch
@@ -116,26 +114,3 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
             "deepep_low_latency backend",
             scope="global",
         )
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers for EPLB dump output
-# ---------------------------------------------------------------------------
-
-
-@functools.lru_cache(maxsize=1)
-def _use_heat_color() -> bool:
-    return (
-        not os.environ.get("NO_COLOR", "")
-        and os.environ.get("TERM", "") != "dumb"
-        and sys.stderr.isatty()
-    )
-
-
-def heat_cell(text: str, val: float, vmin: float, vmax: float) -> str:
-    """Wrap *text* in green-to-red ANSI color based on *val* in [vmin, vmax]."""
-    if not _use_heat_color() or vmin >= vmax:
-        return text
-    t = max(0.0, min(1.0, (val - vmin) / (vmax - vmin)))
-    r, g = int(220 * t), int(220 * (1 - t))
-    return f"\033[38;2;{r};{g};30m{text}\033[0m"

@@ -77,25 +77,16 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    log_balancedness_verbose: bool = False
-    """
-    When True (together with ``log_balancedness``), log a multi-line EPLB report
-    per interval step: per-rank routed expert layout, replication summary,
-    and a per-layer / per-rank token table.
-    Off by default to avoid large logs and extra CPU work on rank 0.
-    """
     expert_load_dump_dir: str | None = None
     """
     Directory to which JSONL records of per-step expert load are appended
     on every ``log_balancedness_interval`` step (one file per MoE model,
     named ``{model_name}_expert_load.jsonl``). Only EP rank 0 writes.
-    Independent of ``log_balancedness`` and ``log_balancedness_verbose``;
-    setting it alone is enough to start writing — the on-screen log and
-    the JSONL dump can be toggled separately or together.
+    Has effect only when ``log_balancedness`` is ``True``.
 
     Example::
 
-        --eplb-config '{"expert_load_dump_dir":"./eplb_stats"}'
+        --eplb-config '{"log_balancedness":true,"expert_load_dump_dir":"./eplb_stats"}'
     """
     use_async: bool = False
     """
