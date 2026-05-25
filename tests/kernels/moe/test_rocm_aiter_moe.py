@@ -600,6 +600,7 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         AiterExperts,
     )
+
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kMxfp4Static,
     )
@@ -619,10 +620,11 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
     MXFP4 reference."""
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         rocm_aiter_fused_experts,
     )
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     _assert_aiter_supported()
     case = _make_aiter_mxfp4_moe_case(
@@ -676,10 +678,11 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     """The gfx950 AITER MXFP4 W4A16 MoE path should stay bitwise
     deterministic."""
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         rocm_aiter_fused_experts,
     )
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     _assert_aiter_supported()
     case = _make_aiter_mxfp4_moe_case(
@@ -1018,12 +1021,13 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
 def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     """The MI3xx FP8 per-tensor MoE path should stay within the measured FP8
     error budget."""
-    from tests.kernels.moe.utils import make_test_weights
-    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
         ActivationMethod,
         QuantMethod,
     )
+
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
     torch.set_default_device("cuda")
