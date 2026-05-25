@@ -102,6 +102,20 @@ class All2AllManagerBase:
         # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
+    @property
+    def support_fault_tolerance(self) -> bool:
+        return False
+
+    def query_active_mask(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def clean_mask(self) -> None:
+        raise NotImplementedError
+
+    def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (has_fault scalar, current_active_mask)."""
+        raise NotImplementedError
+
     def set_num_sms(self, num_sms: int):
         pass
 

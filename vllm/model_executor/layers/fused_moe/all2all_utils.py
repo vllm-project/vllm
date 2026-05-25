@@ -49,7 +49,7 @@ if current_platform.is_cuda_alike():
         )
 
 
-def _get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
     if eep_stage:
         from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
 
@@ -134,7 +134,7 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            all2all_manager = _get_ep_all2all_manager(eep_stage)
+            all2all_manager = get_ep_all2all_manager(eep_stage)
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=all2all_manager.world_size,
@@ -143,7 +143,7 @@ def maybe_make_prepare_finalize(
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = _get_ep_all2all_manager(eep_stage)
+    all2all_manager = get_ep_all2all_manager(eep_stage)
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
