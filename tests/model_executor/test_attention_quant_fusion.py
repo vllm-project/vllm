@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import vllm.model_executor.layers.attention.attention as attention_module
@@ -88,6 +89,16 @@ def test_static_fp8_attn_output_scale_skipped_when_backend_unsupported():
     assert scale is None
 
 
+def test_static_fp8_attn_output_scale_skipped_when_backend_has_no_support_probe():
+    attn = _attention()
+    attn.impl = SimpleNamespace()
+    output_proj = _linear()
+
+    scale = get_static_fp8_attn_output_scale(attn, output_proj)
+
+    assert scale is None
+
+
 def test_static_fp8_attn_output_scale_skipped_for_non_static_fp8_linear():
     attn = _attention()
     output_proj = _linear(activation_quant_key=kFp8DynamicTokenSym)
@@ -130,3 +141,15 @@ def test_attention_forward_uses_fp8_output_when_scale_provided(monkeypatch):
     assert captured["output_scale"] is scale
     assert captured["output_dtype"] == current_platform.fp8_dtype()
     assert result.dtype == current_platform.fp8_dtype()
+
+
+def test_attention_forward_rejects_backend_without_support_probe():
+    attn = _attention()
+    attn.impl = SimpleNamespace()
+    q = torch.randn(3, 8)
+    k = torch.randn(3, 8)
+    v = torch.randn(3, 8)
+    scale = torch.tensor([0.5])
+
+    with pytest.raises(ValueError, match="static FP8 attention output quantization"):
+        attention_module.Attention.forward(attn, q, k, v, output_scale=scale)

@@ -464,7 +464,8 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         output_dtype = query.dtype
         if output_scale is not None:
-            if not self.impl.fused_output_quant_supported(kFp8StaticTensorSym):
+            fused_supported = getattr(self.impl, "fused_output_quant_supported", None)
+            if fused_supported is None or not fused_supported(kFp8StaticTensorSym):
                 raise ValueError(
                     f"{self.impl.__class__.__name__} does not support "
                     "static FP8 attention output quantization."
