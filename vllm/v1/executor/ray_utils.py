@@ -17,8 +17,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import get_ip
-from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
+from vllm.v1.utils import iteration_nvtx_range
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
@@ -139,38 +140,55 @@ try:
                 scheduler_output, grammar_output = execute_model_input
                 intermediate_tensors = None
             assert self.worker.model_runner is not None
-            output = self.worker.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+
+            def _sample_if_needed(
+                output: (
+                    ModelRunnerOutput
+                    | AsyncModelRunnerOutput
+                    | IntermediateTensors
+                    | None
+                ),
+            ) -> ModelRunnerOutput | IntermediateTensors | None:
+                if isinstance(output, AsyncModelRunnerOutput):
+                    output = output.get_output()
+                if not self._is_last_rank():
+                    assert not output or not output.req_ids
+                    return None
+                if output is None:
+                    output = self.worker.model_runner.sample_tokens(grammar_output)
+                    if isinstance(output, AsyncModelRunnerOutput):
+                        output = output.get_output()
+                return output
+
+            # Ray compiled DAG may bypass Worker.execute_model(). When
+            # intermediate_tensors is None, use the full worker path (PP recv,
+            # forward, PP send) which already sets iteration NVTX context.
+            if intermediate_tensors is None:
+                output = self.worker.execute_model(scheduler_output)
+            else:
+                with iteration_nvtx_range(
+                    scheduler_output, worker=self.worker
+                ):
+                    output = self.worker.model_runner.execute_model(
+                        scheduler_output, intermediate_tensors
+                    )
+                    output = _sample_if_needed(output)
+
             if self._is_intermediate_tensors(output):
                 if (
                     self.worker.model_runner.supports_mm_inputs
                     and get_pp_group().is_first_rank
                 ):
-                    # Strip mm_features before Ray forwards it to the next PP Stage.
-                    # PP Stage>0 only needs the intermediate tensors,
-                    # not preprocessed multimodal data.
-
-                    # scheduled_new_reqs is a required field of SchedulerOutput,
-                    # so accessing it directly will raise AttributeError if missing.
+                    # Strip mm_features before Ray forwards to next PP stage.
                     for req in scheduler_output.scheduled_new_reqs:
                         req.mm_features = []
                 return scheduler_output, grammar_output, output
 
-            if isinstance(output, AsyncModelRunnerOutput):
-                output = output.get_output()
-            if not self._is_last_rank():
-                # Case where there are no scheduled requests
-                # but may still be finished requests.
-                assert not output or not output.req_ids
-                output = scheduler_output, grammar_output, None
-            elif output is None:
-                output = self.worker.model_runner.sample_tokens(grammar_output)
-                # Ensure outputs crossing Ray compiled DAG are serializable.
-                # AsyncModelRunnerOutput holds CUDA events and cannot be
-                # pickled.
-                if isinstance(output, AsyncModelRunnerOutput):
-                    output = output.get_output()
+            if intermediate_tensors is None:
+                with iteration_nvtx_range(
+                    scheduler_output, worker=self.worker
+                ):
+                    output = _sample_if_needed(output)
             return output
 
         def override_env_vars(self, vars: dict[str, str]):

@@ -174,8 +174,11 @@ class RayPPCommunicator(Communicator):
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
 
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
         assert self._comm is not None
-        self._comm.send(buf, peer_rank)
+        with comm_nvtx_mark("pp_send", tensor=buf, peer=peer_rank):
+            self._comm.send(buf, peer_rank)
 
     def recv(
         self,
@@ -201,9 +204,19 @@ class RayPPCommunicator(Communicator):
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
 
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark, tensor_comm_metadata
+
         assert self._comm is not None
         size = torch.Size(shape)
-        buf = self._comm.recv(size, dtype, src=peer_rank)
+        element_size = int(torch.empty((), dtype=dtype).element_size())
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        _, nbytes = tensor_comm_metadata(
+            shape=shape, numel=numel, element_size=element_size
+        )
+        with comm_nvtx_mark("pp_recv", shape=shape, nbytes=nbytes, peer=peer_rank):
+            buf = self._comm.recv(size, dtype, src=peer_rank)
 
         # Buffer values are undefined if NCCL ops are aborted. Therefore, we
         # need to synchronize here and check that the channel is still

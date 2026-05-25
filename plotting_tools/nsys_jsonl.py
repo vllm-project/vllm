@@ -8,6 +8,7 @@ from typing import Any
 
 from plotting_tools.classify import CONTROL_PATTERNS, classify_event
 from plotting_tools.classify_report import ClassificationReport
+from plotting_tools.comm_nvtx import parse_comm_nvtx_label, parse_iter_nvtx_label
 
 # CUPTI cudaMemcpyKind
 _MEMCPY_KIND = {
@@ -27,6 +28,9 @@ _RUNTIME_COMM_HINTS = (
     "cudamemcpy2d",
 )
 
+# vLLM iteration_nvtx_range() outer step labels (VLLM_ITERATION_NVTX=1)
+_ITERATION_NVTX_NAMES = frozenset({"prefill", "decode", "mixed", "idle"})
+
 
 def _resolve_name(row: dict[str, Any], strings: dict[int, str]) -> str:
     for key in ("demangledName", "shortName", "mangledName", "nameId"):
@@ -41,6 +45,25 @@ def _resolve_name(row: dict[str, Any], strings: dict[int, str]) -> str:
 
 def _ns_to_us(ts_ns: int) -> int:
     return ts_ns // 1000
+
+
+def _resolve_nvtx_text(row: dict[str, Any], strings: dict[int, str]) -> str:
+    text = row.get("text")
+    if text is not None and not isinstance(text, int):
+        return str(text).strip()
+    tid = row.get("textId")
+    if tid is not None:
+        try:
+            return strings.get(int(tid), "").strip()
+        except (TypeError, ValueError):
+            pass
+    return _skipped_table_label(row, strings, "NVTX_EVENTS")
+
+
+def _is_iteration_nvtx_name(name: str) -> bool:
+    if name.startswith("iter|"):
+        return True
+    return name.lower().strip() in _ITERATION_NVTX_NAMES
 
 
 def _skipped_table_label(
@@ -67,14 +90,19 @@ def load_nsys_jsonl(
     *,
     strict: bool = False,
     report: ClassificationReport | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Stream Nsight JSONL and return classified duration events.
+    Stream Nsight JSONL and return (events, iteration NVTX ranges, comm NVTX records).
 
     Timestamps are in microseconds (Chrome-trace compatible).
+
+    - **iteration_nvtx_ranges**: outer prefill/decode/mixed/idle (timeline attribution)
+    - **comm_nvtx_records**: inner send/recv/collective markers (message records)
     """
     strings: dict[int, str] = {}
     events: list[dict[str, Any]] = []
+    iteration_nvtx_ranges: list[dict[str, Any]] = []
+    comm_nvtx_records: list[dict[str, Any]] = []
     uncl: list[str] = []
     lines = 0
     if report is None:
@@ -85,7 +113,11 @@ def load_nsys_jsonl(
             lines += 1
             report.jsonl_lines = lines
             if lines % 1_000_000 == 0:
-                print(f"  ... scanned {lines:,} lines, {len(events):,} events")
+                print(
+                    f"  ... scanned {lines:,} lines, {len(events):,} events, "
+                    f"{len(iteration_nvtx_ranges):,} iteration + "
+                    f"{len(comm_nvtx_records):,} comm NVTX records"
+                )
 
             line = line.strip()
             if not line:
@@ -96,6 +128,60 @@ def load_nsys_jsonl(
 
             if table == "StringIds":
                 strings[int(row["id"])] = row["value"]
+                continue
+
+            if table == "NVTX_EVENTS":
+                name = _resolve_nvtx_text(row, strings)
+                start = row.get("start")
+                end = row.get("end")
+                if start is None or end is None:
+                    report.skipped_rows["nvtx_no_duration"] += 1
+                    continue
+                dur_ns = int(end) - int(start)
+                if dur_ns <= 0:
+                    report.skipped_rows["nvtx_zero_duration"] += 1
+                    continue
+                if _is_iteration_nvtx_name(name):
+                    ts_us = _ns_to_us(int(start))
+                    end_us = _ns_to_us(int(end))
+                    if parsed_iter := parse_iter_nvtx_label(name):
+                        label = parsed_iter["phase"]
+                        report.iteration_nvtx_ranges[label] += 1
+                        iteration_nvtx_ranges.append(
+                            {
+                                **parsed_iter,
+                                "ts": ts_us,
+                                "end": end_us,
+                            }
+                        )
+                    else:
+                        label = name.lower().strip()
+                        report.iteration_nvtx_ranges[label] += 1
+                        iteration_nvtx_ranges.append(
+                            {
+                                "name": label,
+                                "scope": "iteration",
+                                "ts": ts_us,
+                                "end": end_us,
+                            }
+                        )
+                elif parsed := parse_comm_nvtx_label(name):
+                    ts_us = _ns_to_us(int(start))
+                    end_us = _ns_to_us(int(end))
+                    record = {
+                        **parsed,
+                        "ts": ts_us,
+                        "end": end_us,
+                        "dur_us": end_us - ts_us,
+                        "scope": "comm",
+                    }
+                    comm_nvtx_records.append(record)
+                    op_key = parsed["op"]
+                    if parsed.get("tensor_key"):
+                        op_key = f"{op_key}:{parsed['tensor_key']}"
+                    report.comm_nvtx_records[op_key] += 1
+                else:
+                    report.skipped_nvtx_names[name[:500] or "(empty)"] += 1
                 continue
 
             start = row.get("start")
@@ -143,11 +229,11 @@ def load_nsys_jsonl(
                 skip_name = _skipped_table_label(row, strings, table)
                 if table == "OSRT_API":
                     report.skipped_osrt_names[skip_name] += 1
-                elif table == "NVTX_EVENTS":
-                    report.skipped_nvtx_names[skip_name] += 1
                 continue
 
-            kind, sub = classify_event(name, cat, uncl if strict else None)
+            kind, sub = classify_event(
+                name, cat, uncl if strict else None, args=extra
+            )
             events.append(
                 {
                     "name": name,
@@ -168,5 +254,15 @@ def load_nsys_jsonl(
         summarize_unclassified(uncl)
         raise SystemExit(1)
 
-    print(f"  parsed {len(events):,} events from {lines:,} JSONL lines")
-    return sorted(events, key=lambda x: x["ts"])
+    iteration_nvtx_ranges.sort(key=lambda r: r["ts"])
+    comm_nvtx_records.sort(key=lambda r: r["ts"])
+    print(
+        f"  parsed {len(events):,} events, {len(iteration_nvtx_ranges):,} iteration "
+        f"NVTX ranges, {len(comm_nvtx_records):,} comm message records "
+        f"from {lines:,} JSONL lines"
+    )
+    return (
+        sorted(events, key=lambda x: x["ts"]),
+        iteration_nvtx_ranges,
+        comm_nvtx_records,
+    )

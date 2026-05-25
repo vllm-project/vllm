@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from plotting_tools.classify import classify_event
+from plotting_tools.comm_nvtx import finalize_comm_nvtx_records
 from plotting_tools.nsys_jsonl import load_nsys_jsonl
 
 
@@ -16,13 +17,48 @@ def load_trace(
     *,
     strict: bool = False,
     report: Any | None = None,
-) -> list[dict[str, Any]]:
-    """Load Chrome JSON, or Nsight JSONL (.jsonl) from GUI export."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Load trace events and inner comm NVTX message records.
+
+    Returns ``(events, comm_nvtx_records)``. Comm records are authoritative for
+    count/shape/logical tensor bytes; outer iteration NVTX is used for timeline
+    phase attribution on GPU events.
+    """
     suffix = path.suffix.lower()
     if suffix == ".jsonl":
-        return load_nsys_jsonl(path, strict=strict, report=report)
+        events, iteration_ranges, comm_records = load_nsys_jsonl(
+            path, strict=strict, report=report
+        )
+        if comm_records:
+            comm_records, comm_stats = finalize_comm_nvtx_records(
+                comm_records, iteration_ranges
+            )
+            if report is not None:
+                report.comm_nvtx_dedup_removed += comm_stats.get(
+                    "removed_nested_send_recv", 0
+                )
+                report.comm_nvtx_phases_assigned += comm_stats.get(
+                    "phases_assigned_from_iteration", 0
+                )
+            print(
+                f"  comm NVTX: {comm_stats.get('raw_count', 0):,} raw -> "
+                f"{comm_stats.get('deduped_count', 0):,} logical messages "
+                f"(removed {comm_stats.get('removed_nested_send_recv', 0):,} "
+                f"nested send/recv; assigned "
+                f"{comm_stats.get('phases_assigned_from_iteration', 0):,} "
+                f"unknown phases from iteration ranges; "
+                f"{comm_stats.get('unknown_phase_remaining', 0):,} still unknown; "
+                f"{comm_stats.get('comm_conclusive', 0):,} conclusive prefill/decode, "
+                f"excluded mixed={comm_stats.get('comm_mixed', 0):,}, "
+                f"nearest={comm_stats.get('comm_untrusted_nearest', 0):,})"
+            )
+        if iteration_ranges or comm_records:
+            tag_phase(events, iteration_ranges, comm_records)
+        return events, comm_records
     raw = load_chrome_trace(path)
-    return parse_duration_events(raw, strict=strict)
+    events = parse_duration_events(raw, strict=strict)
+    return events, []
 
 
 def load_chrome_trace(path: Path) -> list[dict[str, Any]]:
@@ -92,26 +128,65 @@ def parse_nvtx_ranges(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [r for r in ranges if r.get("end") is not None]
 
 
+def _narrowest_overlap_phase(
+    event: dict[str, Any],
+    ranges: list[tuple[str, int, int, int]],
+) -> str | None:
+    best: str | None = None
+    best_span: int | None = None
+    for phase, start, end, span in ranges:
+        if event["ts"] < end and event["end"] > start:
+            if best_span is None or span < best_span:
+                best = phase
+                best_span = span
+    return best
+
+
 def tag_phase(
     events: list[dict[str, Any]],
-    nvtx: list[dict[str, Any]],
+    iteration_nvtx: list[dict[str, Any]],
+    comm_nvtx_records: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Set event['phase'] to prefill|decode|unknown using NVTX name heuristics."""
-    phase_ranges: list[tuple[str, int, int]] = []
-    for r in nvtx:
-        n = r["name"].lower()
-        if "prefill" in n or "prompt" in n or "context" in n:
-            phase_ranges.append(("prefill", r["ts"], r["end"]))
-        elif "decode" in n or "generation" in n or "token" in n:
-            phase_ranges.append(("decode", r["ts"], r["end"]))
+    """
+    Set ``event['phase']`` for timeline plots.
+
+    Inner comm NVTX records win over outer iteration ranges when both overlap.
+    """
+    from plotting_tools.comm_nvtx import is_conclusive_comm_record
+
+    comm_ranges: list[tuple[str, int, int, int]] = []
+    for r in comm_nvtx_records or []:
+        if not is_conclusive_comm_record(r):
+            continue
+        phase = (r.get("phase") or "").lower().strip()
+        span = int(r["end"]) - int(r["ts"])
+        comm_ranges.append((phase, int(r["ts"]), int(r["end"]), span))
+
+    iteration_ranges: list[tuple[str, int, int, int]] = []
+    for r in iteration_nvtx:
+        if r.get("scope") == "comm":
+            continue
+        n = (r.get("name") or r.get("phase") or "").lower().strip()
+        span = int(r["end"]) - int(r["ts"])
+        if n in ("prefill", "decode", "mixed"):
+            iteration_ranges.append((n, int(r["ts"]), int(r["end"]), span))
+        elif n.startswith("iter|") and r.get("phase") in ("prefill", "decode", "mixed"):
+            phase = str(r["phase"])
+            iteration_ranges.append((phase, int(r["ts"]), int(r["end"]), span))
+        elif n == "idle":
+            continue
+        elif "prefill" in n or "prompt" in n or "context" in n:
+            iteration_ranges.append(("prefill", int(r["ts"]), int(r["end"]), span))
+        elif "decode" in n or "generation" in n:
+            iteration_ranges.append(("decode", int(r["ts"]), int(r["end"]), span))
 
     for e in events:
         e["phase"] = "unknown"
-        mid = (e["ts"] + e["end"]) // 2
-        for phase, s, en in phase_ranges:
-            if s <= mid <= en:
-                e["phase"] = phase
-                break
+        phase = _narrowest_overlap_phase(e, comm_ranges)
+        if phase is None:
+            phase = _narrowest_overlap_phase(e, iteration_ranges)
+        if phase is not None:
+            e["phase"] = phase
 
 
 def parse_job_metadata(slurm_out: Path | None) -> dict[str, Any]:
@@ -242,7 +317,7 @@ def adjust_duty_with_pp_balance(
     supplement = max(0.0, pp_reference_us_per_rank - local_pp)
     if supplement <= 0:
         return duty
-    totals["collective_comm"] = totals.get("collective_comm", 0) + int(supplement)
+    totals["network_p2p"] = totals.get("network_p2p", 0) + int(supplement)
     return {k: v / span for k, v in totals.items()}
 
 

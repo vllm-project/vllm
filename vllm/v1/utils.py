@@ -501,3 +501,37 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         num_generation_requests,
         num_generation_tokens,
     )
+
+
+def iteration_phase_nvtx_label(details: IterationDetails) -> str:
+    """Label for per-iteration NVTX range (visible in Nsight NVTX_EVENTS)."""
+    ctx = details.num_ctx_tokens
+    gen = details.num_generation_tokens
+    if ctx > 0 and gen == 0:
+        return "prefill"
+    if gen > 0 and ctx == 0:
+        return "decode"
+    if ctx > 0 and gen > 0:
+        return "mixed"
+    return "idle"
+
+
+@contextlib.contextmanager
+def iteration_nvtx_range(
+    scheduler_output: SchedulerOutput,
+    *,
+    worker: Any | None = None,
+):
+    """
+    Wrap a full worker iteration step in NVTX and thread-local phase context.
+
+    Covers PP recv, forward, and PP send when used around the whole
+    ``execute_model`` / ``execute_model_ray`` body.
+
+    Enable on workers: ``export VLLM_ITERATION_NVTX=1`` and include ``nvtx`` in
+    ``NSYS_TRACE`` (e.g. ``cuda,nvtx,osrt,cudnn,cublas``).
+    """
+    from vllm.distributed.iteration_phase_nvtx import iteration_nvtx_context
+
+    with iteration_nvtx_context(scheduler_output, worker=worker):
+        yield

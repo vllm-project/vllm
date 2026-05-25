@@ -172,6 +172,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
     def all_reduce(self, input_):
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+        with comm_nvtx_mark("all_reduce", tensor=input_):
+            return self._all_reduce_impl(input_)
+
+    def _all_reduce_impl(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
@@ -293,30 +299,43 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
 
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.send(tensor, dst)
-        else:
-            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
+        with comm_nvtx_mark("send", tensor=tensor, peer=dst):
+            pynccl_comm = self.pynccl_comm
+            if pynccl_comm is not None and not pynccl_comm.disabled:
+                pynccl_comm.send(tensor, dst)
+            else:
+                torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv(
         self, size: torch.Size, dtype: torch.dtype, src: int | None = None
     ) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark, tensor_comm_metadata
+
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
-        pynccl_comm = self.pynccl_comm
-        if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.recv(tensor, src)
-        else:
-            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
+        element_size = int(torch.empty((), dtype=dtype).element_size())
+        numel = 1
+        for dim in size:
+            numel *= int(dim)
+        _, nbytes = tensor_comm_metadata(
+            shape=size, numel=numel, element_size=element_size
+        )
+        with comm_nvtx_mark("recv", shape=size, nbytes=nbytes, peer=src):
+            tensor = torch.empty(size, dtype=dtype, device=self.device)
+            pynccl_comm = self.pynccl_comm
+            if pynccl_comm is not None and not pynccl_comm.disabled:
+                pynccl_comm.recv(tensor, src)
+            else:
+                torch.distributed.recv(tensor, self.ranks[src], self.device_group)
+            return tensor
 
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
         """Broadcast a tensor from source rank to all ranks."""
@@ -429,14 +448,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            is_sequence_parallel,
-            extra_tensors=extra_tensors,
-        )
+        with comm_nvtx_mark("all_to_all_dispatch", tensor=hidden_states):
+            return self.all2all_manager.dispatch(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel,
+                extra_tensors=extra_tensors,
+            )
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -445,11 +467,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
-        )
+        with comm_nvtx_mark("all_to_all_combine", tensor=hidden_states):
+            return self.all2all_manager.combine(
+                hidden_states,
+                is_sequence_parallel,
+            )
 
     def batch_isend_irecv(self, p2p_ops: list):
         pynccl_comm = self.pynccl_comm

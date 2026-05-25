@@ -9,12 +9,24 @@ Kind = Literal["compute", "comm", "control"]
 Subcategory = Literal[
     "attention_comp",
     "gate_comp",
-    "experts_comp",
     "add_norm_comp",
+    "matmul_gemm",
+    "moe_routing",
+    "moe_expert",
+    "kv_cache_write",
+    "rotary_embedding",
+    "sampling_overhead",
+    "masking_indexing",
     "other_compute",
-    "collective_comm",
+    "network_collective",
+    "network_p2p",
+    "device_copy",
+    "host_transfer",
     "control",
 ]
+
+# Legacy alias used in a few plot paths (maps to network_collective in timelines).
+LEGACY_COLLECTIVE_COMM = "network_collective"
 
 COMPUTE_PATTERNS = (
     "vectorized_elementwise_kernel",
@@ -36,20 +48,12 @@ COMPUTE_PATTERNS = (
     "vllm::modified_torch_code::mbtopk::",
     "flashattnvarlenfunc",
     "_layer_norm_kernel",
-    "gemm",
-    "cutlass::device_kernel",
-    "cublas",
-    "rotary_embedding",
-    "top2_sum_gate",
     "reduce_fused_impl",
     "reduce_kernel",
     "devicescan",
     "devicescankernel",
     "scatter",
     "gather",
-    "clean_and_count_expert",
-    "get_fused_mapping",
-    "get_dispatch_layout",
     "per_token_cast_to_fp8",
     "swiglu_forward",
     "compute_attn_ws",
@@ -65,22 +69,85 @@ COMPUTE_PATTERNS = (
     "cudamemsetasync",
     "memset (device)",
     "gpu_memset",
-    # vLLM / Qwen3 MoE
     "flashinfer",
     "fmha",
+    "paged_attention",
+)
+
+MATMUL_GEMM_PATTERNS = (
+    "nvjet_sm",
+    "cublas",
+    "cutlass::device_kernel",
+    "cutlass::kernel",
+    "gemm",
+    "wgmma",
+    "mma.sync",
+)
+
+MOE_ROUTING_PATTERNS = (
+    "expandinputrows",
+    "finalizemoerouting",
+    "computestridiestma",
+    "get_dispatch_layout",
+    "moe_align",
+    "get_fused_mapping",
+    "clean_and_count_expert",
+)
+
+KV_CACHE_PATTERNS = (
+    "reshape_and_cache_flash",
+    "reshape_and_cache",
+    "cache_flash",
+    "slot_mapping",
+)
+
+ROTARY_PATTERNS = (
+    "rotary_embedding",
+    "rotary_emb",
+)
+
+SAMPLING_PATTERNS = (
+    "compare_scalar",
+    "cunn_softmax",
+    "softmax",
+    "multinomial",
+    "distribution_elementwise",
+    "distributionnormal",
+    "topk",
+    "top_k",
+    "mbtopk",
+    "sort",
+    "radix_sort",
+    "revert_output_bin_count",
+    "mask_top_p",
+)
+
+MASKING_INDEX_PATTERNS = (
+    "masked_fill",
+    "compare_scalar",
+    "fillfunctor",
+    "index_elementwise",
+    "index_kernel_impl",
+    "index_put",
+    "scatter_gather",
+    "_scatter_gather",
+    "vectorized_gather",
+    "indexselect",
+)
+
+MOE_EXPERT_PATTERNS = (
+    "moefcgemm",
     "fused_moe",
     "fused_experts",
-    "moe_align",
-    "silu_and_mul",
-    "paged_attention",
+    "fusedmoe",
+    "moe_gemm",
+    "fusedmoe",
 )
 
 COMM_PATTERNS = (
     "nccl:",
     "nccl::",
     "nccldevkernel",
-    "memcpy htod",
-    "memcpy dtoh",
     "memcpy dtod",
     "gpu_memcpy",
     "dpsk::ep::internode::dispatch_ll",
@@ -121,6 +188,8 @@ CONTROL_PATTERNS = (
     "pytorch profiler",
     "invalid cuda_runtime",
     "cudamemcpyasync",
+    "memcpy htod",
+    "memcpy dtoh",
 )
 
 ATTENTION_PATTERNS = (
@@ -142,9 +211,6 @@ GATE_PATTERNS = (
     "router",
     "gate",
     "mbtopk",
-    "clean_and_count_expert",
-    "get_fused_mapping",
-    "get_dispatch_layout",
     "top2_sum_gate",
 )
 
@@ -152,9 +218,7 @@ EXPERT_PATTERNS = (
     "fused_moe",
     "fused_experts",
     "fusedmoe",
-    "moe_gemm",
     "expert",
-    "swiglu",
     "silu_and_mul",
 )
 
@@ -165,6 +229,24 @@ NORM_PATTERNS = (
     "rmsnorm",
     "_layer_norm",
     "add_norm",
+)
+
+_NETWORK_KERNEL_SIGNALS = (
+    "nccldevkernel",
+    "pnccl",
+    "two_shot_all_reduce",
+    "one_shot_all_reduce",
+    "multimem_all_reduce",
+    "allreduce",
+    "all_reduce",
+    "reducescatter",
+    "reduce_scatter",
+    "allgather",
+    "all_gather",
+    "alltoall",
+    "all_to_all",
+    "sendrecv",
+    "broadcast",
 )
 
 # NCCL / PyTorch comm op labels for breakdown bar charts (order = first match wins).
@@ -210,17 +292,26 @@ _COMM_OP_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "recv_tensor",
         "nccldevkernel_sendrecv",
     )),
-    ("memcpy_htod", ("memcpy htod", "memcpyhtod")),
-    ("memcpy_dtoh", ("memcpy dtoh", "memcpydtoh")),
-    ("memcpy_dtod", ("memcpy dtod", "memcpydtod")),
-    ("memcpy_async", ("cudamemcpyasync", "cuda_memcpy_async")),
+    ("host_transfer", (
+        "memcpy htod",
+        "memcpy dtoh",
+        "memcpyhtod",
+        "memcpydtoh",
+        "cudamemcpyasync",
+        "cuda_memcpy_async",
+    )),
+    ("device_copy", (
+        "memcpy dtod",
+        "memcpydtod",
+        "memcpy device",
+        "memcpy default",
+        "memcpy unknown",
+    )),
     ("nccl_other", ("nccldevkernel", "pnccl", "ncclkernel")),
 )
 
 _COLLECTIVE_SIGNALS = (
     "nccl",
-    "memcpy",
-    "cudamemcpy",
     "c10d",
     "collective",
     "allgather",
@@ -236,23 +327,23 @@ _COLLECTIVE_SIGNALS = (
     "one_shot_all_reduce",
 )
 
-_KERNEL_COLLECTIVE_SIGNALS = (
-    "nccldevkernel",
-    "pnccl",
-    "two_shot_all_reduce",
-    "one_shot_all_reduce",
-    "multimem_all_reduce",
-    "allreduce",
-    "all_reduce",
-    "reducescatter",
-    "reduce_scatter",
-    "allgather",
-    "all_gather",
-    "alltoall",
-    "all_to_all",
-    "sendrecv",
-    "broadcast",
-)
+_KERNEL_COLLECTIVE_SIGNALS = _NETWORK_KERNEL_SIGNALS
+
+
+def _memcpy_is_host_transfer(name: str, *, args: dict[str, Any] | None) -> bool:
+    name_l = name.lower().strip()
+    if "htod" in name_l or "dtoh" in name_l:
+        return True
+    kind = int((args or {}).get("copy_kind", 0))
+    return kind in (1, 2)
+
+
+def _is_network_kernel_or_runtime(name: str, cat: str) -> bool:
+    s = f"{name} {cat}".lower()
+    cat_l = cat.lower()
+    if cat_l == "kernel":
+        return any(k in s for k in _NETWORK_KERNEL_SIGNALS)
+    return any(k in s for k in ("nccldevkernel", "nccl:", "nccl::", "c10d::"))
 
 
 def classify_comm_operation(
@@ -265,7 +356,7 @@ def classify_comm_operation(
     Map a comm-related event name to a collective / transfer bucket.
 
     Returns None if the event does not look like communication.
-    Includes GPU collective kernels (e.g. custom all-reduce) when cat is kernel.
+    Network collective kernels (custom all-reduce, NCCL) match when cat is kernel.
     """
     name_l = name.lower().strip()
     cat_l = cat.lower().strip()
@@ -277,10 +368,9 @@ def classify_comm_operation(
         "memcpy default",
         "memcpy device",
     ):
-        kind = int((args or {}).get("copy_kind", 0))
-        return {1: "memcpy_htod", 2: "memcpy_dtoh", 3: "memcpy_dtod"}.get(
-            kind, "memcpy_async"
-        )
+        if _memcpy_is_host_transfer(name, args=args):
+            return "host_transfer"
+        return "device_copy"
 
     signals = (
         _KERNEL_COLLECTIVE_SIGNALS
@@ -304,10 +394,8 @@ _COMM_OP_DISPLAY = {
     "broadcast": "Broadcast",
     "all_scatter": "Scatter",
     "point_to_point": "Point-to-Point",
-    "memcpy_htod": "Memcpy H→D",
-    "memcpy_dtoh": "Memcpy D→H",
-    "memcpy_dtod": "Memcpy D→D",
-    "memcpy_async": "Memcpy (async)",
+    "host_transfer": "Host transfer (H↔D)",
+    "device_copy": "Device memcpy (CUPTI)",
     "nccl_other": "NCCL (other)",
     "unclassified_comm": "Unclassified comm",
     "other_comm": "Other comm",
@@ -318,14 +406,76 @@ def comm_operation_label(op: str) -> str:
     return _COMM_OP_DISPLAY.get(op, op.replace("_", " ").title())
 
 
-def classify_kind(name: str, cat: str) -> Kind:
-    s = f"{name} {cat}".lower()
+# Fabric = network comm events only (not device_copy / host_transfer).
+NETWORK_SUBS = frozenset({
+    "network_collective",
+    "network_p2p",
+})
 
-    if cat.lower() == "memcpy":
+# Op buckets for fabric breakdown bar charts (subset of fabric events).
+FABRIC_COMM_OPS = frozenset({
+    "all_reduce",
+    "all_gather",
+    "reduce_scatter",
+    "all_to_all",
+    "broadcast",
+    "point_to_point",
+})
+
+MOVEMENT_OPS = frozenset({
+    "device_copy",
+    "host_transfer",
+})
+
+
+def is_fabric_event(e: dict[str, Any]) -> bool:
+    """True for network/fabric traffic (rank heatmaps, fabric timing CDFs)."""
+    return e.get("kind") == "comm" and e.get("sub") in NETWORK_SUBS
+
+
+def is_fabric_comm_op(op: str) -> bool:
+    return op in FABRIC_COMM_OPS
+
+
+def is_fabric_op(op: str) -> bool:
+    """Alias for is_fabric_comm_op."""
+    return is_fabric_comm_op(op)
+
+
+def is_movement_op(op: str) -> bool:
+    return op in MOVEMENT_OPS
+
+
+# Backward-compatible alias
+FABRIC_OPS = FABRIC_COMM_OPS
+
+
+def classify_kind(
+    name: str,
+    cat: str,
+    *,
+    args: dict[str, Any] | None = None,
+) -> Kind:
+    s = f"{name} {cat}".lower()
+    cat_l = cat.lower()
+
+    if cat_l == "memcpy" or (
+        name.lower().strip() == "memcpy" and "nccl" not in s
+    ):
+        if _memcpy_is_host_transfer(name, args=args):
+            return "control"
         return "comm"
+
+    if _is_network_kernel_or_runtime(name, cat):
+        return "comm"
+
     if any(k in s for k in COMM_PATTERNS):
         return "comm"
-    if cat.lower() == "kernel":
+
+    if "memcpy htod" in s or "memcpy dtoh" in s:
+        return "control"
+
+    if cat_l == "kernel":
         return "compute"
     if any(k in s for k in COMPUTE_PATTERNS):
         return "compute"
@@ -334,24 +484,50 @@ def classify_kind(name: str, cat: str) -> Kind:
     return "control"
 
 
-def classify_subcategory(name: str, cat: str, kind: Kind) -> Subcategory:
+def classify_subcategory(
+    name: str,
+    cat: str,
+    kind: Kind,
+    *,
+    args: dict[str, Any] | None = None,
+) -> Subcategory:
     s = f"{name} {cat}".lower()
 
-    if kind == "comm":
-        return "collective_comm"
     if kind == "control":
+        if "memcpy" in s or _memcpy_is_host_transfer(name, args=args):
+            return "host_transfer"
         return "control"
-    if kind == "compute":
-        op = classify_comm_operation(name, "kernel")
-        if op is not None and not str(op).startswith("memcpy"):
-            return "collective_comm"
+
+    if kind == "comm":
+        op = classify_comm_operation(name, cat, args=args)
+        if op == "point_to_point":
+            return "network_p2p"
+        if op == "device_copy":
+            return "device_copy"
+        if op == "host_transfer":
+            return "host_transfer"
+        return "network_collective"
 
     if any(k in s for k in ATTENTION_PATTERNS):
         return "attention_comp"
     if any(k in s for k in GATE_PATTERNS):
         return "gate_comp"
-    if any(k in s for k in EXPERT_PATTERNS):
-        return "experts_comp"
+    if any(k in s for k in MOE_EXPERT_PATTERNS) or any(
+        k in s for k in EXPERT_PATTERNS
+    ):
+        return "moe_expert"
+    if any(k in s for k in MOE_ROUTING_PATTERNS):
+        return "moe_routing"
+    if any(k in s for k in KV_CACHE_PATTERNS):
+        return "kv_cache_write"
+    if any(k in s for k in ROTARY_PATTERNS):
+        return "rotary_embedding"
+    if any(k in s for k in MATMUL_GEMM_PATTERNS):
+        return "matmul_gemm"
+    if any(k in s for k in SAMPLING_PATTERNS):
+        return "sampling_overhead"
+    if any(k in s for k in MASKING_INDEX_PATTERNS):
+        return "masking_indexing"
     if any(k in s for k in NORM_PATTERNS):
         return "add_norm_comp"
     return "other_compute"
@@ -361,14 +537,19 @@ def classify_event(
     name: str,
     cat: str,
     unclassified: list[str] | None = None,
+    *,
+    args: dict[str, Any] | None = None,
 ) -> tuple[Kind, Subcategory]:
-    kind = classify_kind(name, cat)
-    sub = classify_subcategory(name, cat, kind)
+    kind = classify_kind(name, cat, args=args)
+    sub = classify_subcategory(name, cat, kind, args=args)
     if unclassified is not None and kind == "control" and sub == "control":
-        s = f"{name} {cat}".lower()
-        if not any(k in s for k in CONTROL_PATTERNS) and cat.lower() != "kernel":
-            if not any(k in s for k in COMM_PATTERNS + COMPUTE_PATTERNS):
-                unclassified.append(s)
+        if not any(k in f"{name} {cat}".lower() for k in CONTROL_PATTERNS):
+            if cat.lower() != "kernel":
+                if not any(
+                    k in f"{name} {cat}".lower()
+                    for k in COMM_PATTERNS + COMPUTE_PATTERNS
+                ):
+                    unclassified.append(f"{name} {cat}".lower())
     return kind, sub
 
 

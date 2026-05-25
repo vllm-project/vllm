@@ -16,6 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from plotting_tools.classify import FABRIC_COMM_OPS, MOVEMENT_OPS  # noqa: E402
 from plotting_tools.classify_report import (  # noqa: E402
     ClassificationReport,
     format_plotting_log,
@@ -36,8 +37,9 @@ from plotting_tools.plots import (  # noqa: E402
     plot_average_duty_pct,
     plot_classification_histogram,
     plot_classic_timeline,
-    plot_collective_ops_breakdown,
     plot_collective_ops_breakdown_stats,
+    plot_data_movement_breakdown,
+    plot_fabric_comm_breakdown,
     plot_decomposed_timeline,
     plot_multi_node_decomposed,
     plot_duty_by_node,
@@ -53,6 +55,7 @@ from plotting_tools.plots import (  # noqa: E402
     gpu_idle_windows_ms,
     summarize_idle_transitions,
     write_collective_ops_table,
+    write_comm_nvtx_table,
     write_summary_json,
 )
 from plotting_tools.trace_io import (  # noqa: E402
@@ -125,7 +128,7 @@ def _build_rank_node_names(
     loaded: list[tuple[Path, str, list[dict[str, Any]], ClassificationReport]],
 ) -> dict[int, str]:
     names: dict[int, str] = {}
-    for path, _, events, _ in loaded:
+    for path, _, events, _, _ in loaded:
         gr = infer_global_rank(path, job_meta, events)
         names[gr] = infer_node_name(path) or path.parent.name
     order = pp_rank_order(job_meta)
@@ -142,7 +145,7 @@ def _load_trace_events(
     *,
     strict: bool,
     report: ClassificationReport,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if trace_path.suffix.lower() == ".jsonl":
         return load_trace(trace_path, strict=strict, report=report)
     raw = load_chrome_trace(trace_path)
@@ -158,8 +161,8 @@ def _load_trace_events(
             args=e.get("args"),
         )
     if nvtx:
-        tag_phase(events, nvtx)
-    return events
+        tag_phase(events, nvtx, [])
+    return events, []
 
 
 def _time_axis_label(*, align_global: bool, trim_capture_skew: bool) -> str:
@@ -189,15 +192,17 @@ def analyze_trace(
     pp_reference_us_per_rank: float = 0.0,
     rank_node_names: dict[int, str] | None = None,
     classification_report: ClassificationReport | None = None,
+    comm_nvtx_records: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if events is None:
-        events = _load_trace_events(
+        events, comm_nvtx_records = _load_trace_events(
             trace_path,
             strict=strict,
             report=classification_report or ClassificationReport(
                 trace_path=str(trace_path)
             ),
         )
+    comm_nvtx_records = comm_nvtx_records or []
 
     trace_out = out_dir / prefix
     trace_out.mkdir(parents=True, exist_ok=True)
@@ -299,26 +304,59 @@ def analyze_trace(
         events,
         trace_out / f"message_stats_prefill_decode{PLOT_EXT}",
         prefix=node,
+        comm_nvtx_records=comm_nvtx_records,
     )
+    if comm_nvtx_records:
+        write_comm_nvtx_table(
+            comm_nvtx_records, trace_out / "comm_nvtx_messages.json"
+        )
 
-    comm_breakdown, comm_unclassified = plot_collective_ops_breakdown(
+    fabric_breakdown, fabric_unclassified = plot_fabric_comm_breakdown(
         events,
+        trace_out / f"fabric_comm_breakdown{PLOT_EXT}",
+        title=f"{node}: fabric communication (count & GPU time)",
+    )
+    movement_breakdown, movement_unclassified = plot_data_movement_breakdown(
+        events,
+        trace_out / f"data_movement_breakdown{PLOT_EXT}",
+        title=f"{node}: data movement — device & host (not fabric)",
+    )
+    # Backward-compatible filename (fabric-only).
+    plot_collective_ops_breakdown_stats(
+        fabric_breakdown,
         trace_out / f"collective_ops_breakdown{PLOT_EXT}",
-        title=f"{node}: communication ops (count & GPU time)",
+        title=f"{node}: fabric communication (count & GPU time)",
     )
     if classification_report is not None:
         classification_report.record_comm_breakdown(
-            comm_breakdown, comm_unclassified
+            fabric_breakdown, fabric_unclassified
         )
+    write_summary_json(
+        trace_out / "fabric_comm_breakdown.json",
+        {
+            "scope": "fabric",
+            "ops": fabric_breakdown,
+            "unclassified_comm": dict(fabric_unclassified.most_common(50)),
+        },
+    )
+    write_summary_json(
+        trace_out / "data_movement_breakdown.json",
+        {
+            "scope": "movement",
+            "ops": movement_breakdown,
+            "unclassified_comm": dict(movement_unclassified.most_common(50)),
+        },
+    )
     write_summary_json(
         trace_out / "collective_ops_breakdown.json",
         {
-            "ops": comm_breakdown,
-            "unclassified_comm": dict(comm_unclassified.most_common(50)),
+            "scope": "fabric",
+            "ops": fabric_breakdown,
+            "unclassified_comm": dict(fabric_unclassified.most_common(50)),
         },
     )
 
-    nccl_ops = collect_nccl_ops(events)
+    nccl_ops = collect_nccl_ops(events, comm_nvtx_records=comm_nvtx_records)
     write_collective_ops_table(nccl_ops, trace_out / "collective_ops.json")
 
     nocomm = nocomm_windows(events)
@@ -381,8 +419,10 @@ def analyze_trace(
         "duty_by_subcategory": duty,
         "expert_traffic_gb_heuristic": expert_gb,
         "message_stats": msg_stats,
-        "comm_ops_breakdown": comm_breakdown,
-        "comm_unclassified": dict(comm_unclassified.most_common(30)),
+        "fabric_ops_breakdown": fabric_breakdown,
+        "movement_ops_breakdown": movement_breakdown,
+        "comm_ops_breakdown": fabric_breakdown,
+        "comm_unclassified": dict(fabric_unclassified.most_common(30)),
         "nccl_op_count": len(nccl_ops),
         "idle_context": idle_ctx,
         "job_metadata": job_meta,
@@ -458,24 +498,57 @@ def build_summary_plots(
         title=f"{job_label}: expert routing heuristic by node",
     )
 
-    breakdowns = [
-        d["comm_ops_breakdown"]
+    fabric_breakdowns = [
+        d["fabric_ops_breakdown"]
         for d in node_data.values()
-        if d.get("comm_ops_breakdown")
+        if d.get("fabric_ops_breakdown")
     ]
-    merged_comm = merge_comm_operation_breakdowns(breakdowns)
+    movement_breakdowns = [
+        d["movement_ops_breakdown"]
+        for d in node_data.values()
+        if d.get("movement_ops_breakdown")
+    ]
+    merged_fabric = merge_comm_operation_breakdowns(
+        fabric_breakdowns, include_ops=FABRIC_COMM_OPS
+    )
+    merged_movement = merge_comm_operation_breakdowns(
+        movement_breakdowns, include_ops=MOVEMENT_OPS
+    )
     merged_uncl: Counter[str] = Counter()
     for d in node_data.values():
         merged_uncl.update(d.get("comm_unclassified") or {})
     plot_collective_ops_breakdown_stats(
-        merged_comm,
+        merged_fabric,
+        summary_dir / f"fabric_comm_breakdown{PLOT_EXT}",
+        title=f"{job_label}: fabric communication (all nodes combined)",
+    )
+    plot_collective_ops_breakdown_stats(
+        merged_movement,
+        summary_dir / f"data_movement_breakdown{PLOT_EXT}",
+        title=f"{job_label}: data movement — device & host (all nodes)",
+    )
+    plot_collective_ops_breakdown_stats(
+        merged_fabric,
         summary_dir / f"collective_ops_breakdown{PLOT_EXT}",
-        title=f"{job_label}: communication ops (all nodes combined)",
+        title=f"{job_label}: fabric communication (all nodes combined)",
+    )
+    write_summary_json(
+        summary_dir / "fabric_comm_breakdown.json",
+        {
+            "scope": "fabric",
+            "ops": merged_fabric,
+            "unclassified_comm": dict(merged_uncl.most_common(50)),
+        },
+    )
+    write_summary_json(
+        summary_dir / "data_movement_breakdown.json",
+        {"scope": "movement", "ops": merged_movement},
     )
     write_summary_json(
         summary_dir / "collective_ops_breakdown.json",
         {
-            "ops": merged_comm,
+            "scope": "fabric",
+            "ops": merged_fabric,
             "unclassified_comm": dict(merged_uncl.most_common(50)),
         },
     )
@@ -593,7 +666,9 @@ def build_summary_plots(
         "clock_offset_ms_by_node": offsets,
         "parallel_label": parallel_label,
         "rank_traffic": rank_summary,
-        "merged_comm_ops": merged_comm,
+        "merged_fabric_comm_ops": merged_fabric,
+        "merged_data_movement_ops": merged_movement,
+        "merged_comm_ops": merged_fabric,
         "idle_context": idle_summary,
         "benchmark": {
             k: job_meta.get(k)
@@ -697,7 +772,13 @@ def main() -> None:
         sys.exit(1)
 
     loaded: list[
-        tuple[Path, str, list[dict[str, Any]], ClassificationReport]
+        tuple[
+            Path,
+            str,
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            ClassificationReport,
+        ]
     ] = []
     classification_reports: list[ClassificationReport] = []
     for tp in traces:
@@ -708,25 +789,25 @@ def main() -> None:
         prefix = _trace_output_prefix(path)
         print(f"Loading {path}")
         rep = ClassificationReport(trace_path=str(path))
-        events = _load_trace_events(
+        events, comm_records = _load_trace_events(
             path, strict=args.strict_classify, report=rep
         )
         classification_reports.append(rep)
-        loaded.append((path, prefix, events, rep))
+        loaded.append((path, prefix, events, comm_records, rep))
 
     global_t0_us: int | None = None
     plot_t0_us: int | None = None
     align_global = sync_timelines
     trim_capture_skew = sync_timelines and len(loaded) > 1
     if sync_timelines and loaded:
-        all_ev = [ev for _, _, ev, _ in loaded]
+        all_ev = [ev for _, _, ev, _, _ in loaded]
         global_t0_us = global_align_t0(all_ev)
         plot_t0_us = global_t0_us
         if trim_capture_skew:
             plot_t0_us = sync_capture_t0(all_ev) or plot_t0_us
         if global_t0_us is not None:
             print(f"Synced timelines: global t0_us (earliest capture)={global_t0_us}")
-            for _, prefix, ev, _ in loaded:
+            for _, prefix, ev, _, _ in loaded:
                 off = clock_offset_ms(ev, time_origin_us=global_t0_us)
                 if off is not None:
                     print(f"  {prefix} capture starts +{off:.1f} ms vs global t0")
@@ -746,7 +827,7 @@ def main() -> None:
     pp_reference_us_per_rank = 0.0
     if pp > 1 and loaded:
         stage_pp: dict[int, int] = {}
-        for path, _, events, _ in loaded:
+        for path, _, events, _, _ in loaded:
             pr = infer_local_rank(path, job_meta)
             stage_pp[pr] = stage_pp.get(pr, 0) + pp_sendrecv_duration_us(events)
         pp_reference_us_per_rank = pp_comm_reference_per_rank_us(stage_pp, tp=tp)
@@ -760,7 +841,7 @@ def main() -> None:
     ep_meta = int(job_meta.get("expert_parallel", 1))
     parallel_label = f"TP={tp_meta} PP={pp_meta} EP={ep_meta}"
 
-    for path, prefix, events, rep in loaded:
+    for path, prefix, events, comm_records, rep in loaded:
         print(f"Analyzing {path} -> {out_dir / prefix}")
         summary, events = analyze_trace(
             path,
@@ -780,6 +861,7 @@ def main() -> None:
             pp_reference_us_per_rank=pp_reference_us_per_rank,
             rank_node_names=rank_node_names,
             classification_report=rep,
+            comm_nvtx_records=comm_records,
         )
         summary["events"] = events  # kept in memory for summary plots only
         per_node_summaries[prefix] = summary
@@ -822,14 +904,23 @@ def main() -> None:
         title=f"{job_dir.name}: skipped runtime API (not loaded into plots)",
     )
 
-    merged_comm_for_log: dict[str, dict[str, float | int]] | None = None
+    merged_fabric_for_log: dict[str, dict[str, float | int]] | None = None
+    merged_movement_for_log: dict[str, dict[str, float | int]] | None = None
     if len(per_node_summaries) >= 1:
-        merged_comm_for_log = (
-            all_summaries.get("summary_plots", {}).get("merged_comm_ops")
+        sp = all_summaries.get("summary_plots") or {}
+        merged_fabric_for_log = sp.get("merged_fabric_comm_ops") or sp.get(
+            "merged_comm_ops"
         )
-    if merged_comm_for_log is None and per_node_summaries:
-        merged_comm_for_log = merge_comm_operation_breakdowns(
-            [d["comm_ops_breakdown"] for d in per_node_summaries.values()]
+        merged_movement_for_log = sp.get("merged_data_movement_ops")
+    if merged_fabric_for_log is None and per_node_summaries:
+        merged_fabric_for_log = merge_comm_operation_breakdowns(
+            [d["fabric_ops_breakdown"] for d in per_node_summaries.values()],
+            include_ops=FABRIC_COMM_OPS,
+        )
+    if merged_movement_for_log is None and per_node_summaries:
+        merged_movement_for_log = merge_comm_operation_breakdowns(
+            [d["movement_ops_breakdown"] for d in per_node_summaries.values()],
+            include_ops=MOVEMENT_OPS,
         )
 
     job_merged_report = merge_reports(classification_reports)
@@ -840,7 +931,8 @@ def main() -> None:
         job_meta,
         classification_reports,
         parallel_label=parallel_label,
-        merged_comm=merged_comm_for_log,
+        merged_fabric_comm=merged_fabric_for_log,
+        merged_data_movement=merged_movement_for_log,
         job_inventory=job_inventory,
     )
     write_plotting_log(
@@ -848,7 +940,8 @@ def main() -> None:
         log_text,
         classification_reports,
         job_meta,
-        merged_comm=merged_comm_for_log,
+        merged_fabric_comm=merged_fabric_for_log,
+        merged_data_movement=merged_movement_for_log,
         job_inventory=job_inventory,
     )
     inv_path = out_dir / "classification_inventory.json"

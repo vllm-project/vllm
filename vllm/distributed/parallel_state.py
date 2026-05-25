@@ -617,7 +617,10 @@ class GroupCoordinator:
             and torch.cuda.is_available()
         )
         if not do_timing:
-            return fn()
+            from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+            with comm_nvtx_mark(op_name, tensor=sample_tensor):
+                return fn()
 
         stream = torch.cuda.current_stream()
         start_event = torch.cuda.Event(enable_timing=True)
@@ -627,7 +630,10 @@ class GroupCoordinator:
         in_dtype = str(sample_tensor.dtype)
         in_numel = int(sample_tensor.numel())
         in_bytes = int(in_numel * sample_tensor.element_size())
-        out = fn()
+        from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+        with comm_nvtx_mark(op_name, tensor=sample_tensor, nbytes=in_bytes):
+            out = fn()
         end_event.record(stream)
         end_event.synchronize()
         elapsed_us = float(start_event.elapsed_time(end_event) * 1000.0)
@@ -986,9 +992,12 @@ class GroupCoordinator:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
             comm_group = metadata_group if tensor.is_cpu else group
-            handle = torch.distributed.isend(
-                tensor, dst=self.ranks[dst], group=comm_group
-            )
+            from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+            with comm_nvtx_mark("pp_isend", tensor=tensor, peer=dst, key=key):
+                handle = torch.distributed.isend(
+                    tensor, dst=self.ranks[dst], group=comm_group
+                )
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
@@ -1089,9 +1098,14 @@ class GroupCoordinator:
                         all_gather_rank
                     ]
                     comm_group = metadata_group if slice_tensor.is_cpu else group
-                    handle = torch.distributed.irecv(
-                        slice_tensor, src=self.ranks[src], group=comm_group
-                    )
+                    from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+                    with comm_nvtx_mark(
+                        "pp_irecv", tensor=slice_tensor, peer=src, key=key
+                    ):
+                        handle = torch.distributed.irecv(
+                            slice_tensor, src=self.ranks[src], group=comm_group
+                        )
                     handles.append(handle)
 
                     def _postprocess(
@@ -1109,9 +1123,14 @@ class GroupCoordinator:
                     tensor_dict[key] = slice_tensor
                 else:
                     comm_group = metadata_group if full_tensor.is_cpu else group
-                    handle = torch.distributed.irecv(
-                        full_tensor, src=self.ranks[src], group=comm_group
-                    )
+                    from vllm.distributed.iteration_phase_nvtx import comm_nvtx_mark
+
+                    with comm_nvtx_mark(
+                        "pp_irecv", tensor=full_tensor, peer=src, key=key
+                    ):
+                        handle = torch.distributed.irecv(
+                            full_tensor, src=self.ranks[src], group=comm_group
+                        )
                     handles.append(handle)
                     tensor_dict[key] = full_tensor
             else:
