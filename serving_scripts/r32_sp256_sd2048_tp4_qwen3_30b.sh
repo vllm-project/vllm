@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059]
-#SBATCH --job-name=r32_sp256_sd2048_tp4_qwen3-30b
+#SBATCH --job-name=r32_sp256_sd2048_tp4_qwen3_30b
 #SBATCH --nodes=1
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
