@@ -532,7 +532,13 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        if input_size_per_partition % self.quant_config.group_size != 0:
+        # Normalize group_size
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
+
+        if input_size_per_partition % group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -561,7 +567,7 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
 
-        num_groups = input_size_per_partition // self.quant_config.group_size
+        num_groups = input_size_per_partition // group_size
 
         qzeros = PackedvLLMParameter(
             data=torch.empty(
