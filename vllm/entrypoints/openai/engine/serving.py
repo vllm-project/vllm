@@ -144,7 +144,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
         enable_force_include_usage: bool = False,
     ):
         super().__init__()
@@ -608,10 +608,12 @@ class OpenAIServing(BeamSearchOnlineMixin):
 
         Args:
             is_streaming: Whether the request is streaming.
-            include_usage: Request-level preference to include usage in final
-                response. If None, uses usage_policy or default behavior.
-            continuous_usage: Request-level preference to include usage in each
-                streaming chunk. If None, uses usage_policy or default behavior.
+            include_usage: Per-request parameter set by the user via
+                ``stream_options.include_usage``. ``None`` means the user
+                did not pass the parameter.
+            continuous_usage: Per-request parameter set by the user via
+                ``stream_options.continuous_usage_stats``. ``None`` means
+                the user did not pass the parameter.
 
         Returns:
             tuple[bool, bool]: (include_in_final, include_in_chunks)
@@ -620,17 +622,20 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 - include_in_chunks: Whether to include usage in each streaming
                   chunk.
 
-        Priority:
-            1. usage_policy.include_usage="always" overrides request-level
-               preferences.
-            2. Request-level include_usage/continuous_usage if provided.
-            3. Default behavior: non-streaming returns usage, streaming returns
-               usage in final chunk.
+        Resolution order:
+            1. ``usage_policy.include_usage == "always"``: force include,
+               override everything else.
+            2. ``enable_force_include_usage == True`` (deprecated): force
+               include usage in the final chunk only.
+            3. Per-request ``include_usage`` / ``continuous_usage``: use the
+               user-supplied values if they were explicitly provided.
+            4. Default: include usage in the final chunk for streaming
+               requests.
 
         Subclass override note:
             Subclasses may override this method to customize usage behavior.
             When overridden, the method can either:
-            1. Consult self.usage_policy and request-level parameters, or
+            1. Consult ``self.usage_policy`` and request-level parameters, or
             2. Ignore all parameters and implement fixed behavior
                (e.g., always return (False, False) for APIs that never
                return usage, or always return (True, True) for APIs that

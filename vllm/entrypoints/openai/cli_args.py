@@ -141,22 +141,27 @@ class BaseFrontendArgs:
     Policy for usage statistics return behavior.
     Possible values:
         - "always": Always include usage in responses.
-        - None: Do not include usage by default.
+        - None: No effect, keep the entrypoint's default behavior.
     """
     continuous_usage_policy: str | None = None
     """
     Policy for continuous usage statistics during streaming.
     Possible values:
-        - "always": Send usage on every chunk, if include_usage is enabled.
-        - None: No continuous usage stats.
+        - "always": Send usage on every chunk (only valid if
+          include_usage is enabled).
+        - None: No effect, keep the entrypoint's default behavior.
     """
     enable_force_include_usage: bool = False
     """
-    [Deprecated]
-    If set to True, including usage on every request.
-    Cannot be used together with --include-usage-policy or
-    --continuous-usage-policy.
-    Use `--include-usage-policy=always` instead.
+    [Deprecated] Consider using `--include-usage-policy` and
+    `--continuous-usage-policy` instead.
+
+    If set to True, force-include usage in streaming responses.
+
+    Configuring this parameter together with `--include-usage-policy` or
+    `--continuous-usage-policy` is not recommended. The two mechanisms
+    currently coexist without validation, but the behavior may change in
+    future versions.
     """
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat

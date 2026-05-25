@@ -63,7 +63,7 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -301,20 +301,12 @@ class OpenAIServingCompletion(OpenAIServing):
         first_iteration = True
 
         stream_options = request.stream_options
-        include_usage_param = (
-            bool(stream_options.include_usage)
-            if stream_options and stream_options.include_usage is not None
-            else None
-        )
-        continuous_usage_param = (
-            bool(stream_options.continuous_usage_stats)
-            if stream_options and stream_options.continuous_usage_stats is not None
-            else None
-        )
         include_usage, include_continuous_usage = self.should_include_usage(
             is_streaming=True,
-            include_usage=include_usage_param,
-            continuous_usage=continuous_usage_param,
+            include_usage=stream_options.include_usage if stream_options else None,
+            continuous_usage=(
+                stream_options.continuous_usage_stats if stream_options else None
+            ),
         )
 
         try:

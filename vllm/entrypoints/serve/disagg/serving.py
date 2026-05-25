@@ -69,7 +69,7 @@ class ServingTokens(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
@@ -368,15 +368,11 @@ class ServingTokens(OpenAIServing):
         include_usage, include_continuous_usage = self.should_include_usage(
             is_streaming=True,
             include_usage=(
-                bool(request.stream_options.include_usage)
-                if request.stream_options
-                and request.stream_options.include_usage is not None
-                else None
+                request.stream_options.include_usage if request.stream_options else None
             ),
             continuous_usage=(
-                bool(request.stream_options.continuous_usage_stats)
+                request.stream_options.continuous_usage_stats
                 if request.stream_options
-                and request.stream_options.continuous_usage_stats is not None
                 else None
             ),
         )

@@ -7,10 +7,7 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
 from functools import cached_property
-from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypeVar, cast
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.chat_utils import UsagePolicy
+from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -18,6 +15,7 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -100,7 +98,7 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         enable_force_include_usage: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,

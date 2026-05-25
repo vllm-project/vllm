@@ -140,6 +140,7 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
+    serving.usage_policy = None
     serving.model_cls = _StubTranscriptionModel
     serving.task_type = "transcribe"
     request = SimpleNamespace(
@@ -177,6 +178,7 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
+    serving.usage_policy = None
     serving.model_cls = _StubTranscriptionModel
     serving.task_type = "transcribe"
     request = SimpleNamespace(

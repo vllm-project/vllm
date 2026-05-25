@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
 
 from fastapi import Request
 
-if TYPE_CHECKING:
-    from vllm.entrypoints.chat_utils import UsagePolicy
-
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -41,7 +38,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
-        usage_policy: "UsagePolicy | None" = None,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
