@@ -128,7 +128,7 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     assert tracker.num_saved_tokens == 48
 
 
-def test_request_finished_after_preemption_without_tracker_is_noop():
+def test_preemption_resets_tracker_before_request_finished():
     scheduler = _make_bare_scheduler()
     _add_unfinished_request(
         scheduler,
@@ -139,9 +139,35 @@ def test_request_finished_after_preemption_without_tracker_is_noop():
 
     scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
-    assert "req-0" not in scheduler._request_trackers
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.token_len == 0
+    assert tracker.allocated_block_ids == ()
+    assert tracker.num_saved_tokens == 0
+    assert tracker.token_ids is None
+    assert tracker.prefill_end_tokens == 0
     request = SimpleNamespace(request_id="req-0")
     assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
+
+
+def test_preemption_clears_stale_load_state():
+    scheduler = _make_bare_scheduler()
+    _make_pending_load_unfinished_request(
+        scheduler,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=([10, 11, 12],),
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=True,
+    )
+
+    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+    assert meta.requests == []
+    assert "req-0" not in scheduler.load_specs
+    assert "req-0" not in scheduler._unfinished_requests
 
 
 def _make_pending_load_unfinished_request(

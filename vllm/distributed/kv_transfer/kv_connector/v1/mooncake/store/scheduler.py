@@ -176,7 +176,9 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
-            self._request_trackers.pop(req_id, None)
+            self.load_specs.pop(req_id, None)
+            if request_tracker := self._request_trackers.get(req_id):
+                request_tracker.reset_after_preemption()
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
