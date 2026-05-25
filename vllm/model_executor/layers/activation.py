@@ -169,9 +169,9 @@ class SiluAndMulWithClamp(CustomOp):
     def __init__(self, swiglu_limit: float, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         self.swiglu_limit = float(swiglu_limit)
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             self._forward_method = self.forward_native
-        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -190,7 +190,7 @@ class SiluAndMulWithClamp(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:mul_and_silu]
