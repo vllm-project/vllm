@@ -1,5 +1,5 @@
 from abc import ABC
-from collections import Counter
+from vllm.utils.counter import Counter
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, TypeVar
 
