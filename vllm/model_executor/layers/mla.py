@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
-import torch.nn as nn
 
-from vllm.forward_context import get_forward_context
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
@@ -119,18 +116,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
-    def _get_indexer_kv_cache_and_metadata(self):
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.mla_attn.layer_name]
-        indexer_kv_cache = getattr(self.indexer, "kv_cache", None)
-        if indexer_kv_cache is not None:
-            kv_cache = indexer_kv_cache
-        else:
-            kv_cache = self.mla_attn.kv_cache
-        return kv_cache, attn_metadata
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -219,7 +204,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         prefix: str = "",
         sink_len: int = 0,
         sliding_window: int | None = None,
-        mome_attn: Optional[nn.Module] = None,
+        mome_attn: torch.nn.Module | None = None,
         # is_hybrid_kv: bool = False
     ) -> None:
         PluggableLayer.__init__(self)
@@ -251,7 +236,10 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
-        from vllm.model_executor.layers.attention.static_sink_attention import StaticSinkMLAAttention
+        from vllm.model_executor.layers.attention.static_sink_attention import (
+            StaticSinkMLAAttention,
+        )
+
         self.mla_attn = StaticSinkMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -270,7 +258,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             sliding_window=sliding_window,
             # is_hybrid_kv=True
         )
-    
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -297,12 +285,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             )
             q_c = q_c.contiguous()
             if self.mome_attn is not None:
-                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "before mome_attn")
                 mome_output = self.mome_attn(q_c, state_indice=0)
-                # torch.ops.vllm.piecewise_print(mome_output, self.mla_attn.layer_name, "mome_attn output")
-                # q_c = self.mome_attn(q_c, state_indice=0) + q_c
                 q_c = mome_output + q_c
-                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "after mome_attn + q_c")
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -331,14 +315,11 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             )
 
         if self.indexer and self.is_sparse:
-            # kv_cache, attn_metadata = self._get_indexer_kv_cache_and_metadata()
             _topk_indices = self.indexer(
                 hidden_states,
                 q_c,
                 positions,
                 self.indexer_rope_emb,
-                # kv_cache=kv_cache,
-                # attn_metadata=attn_metadata,
                 attn_layer_name=self.mla_attn.layer_name,
             )
 
@@ -357,4 +338,5 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         if self.mome_attn is not None:
             attn_out = attn_out.contiguous()
             attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
-        return self.o_proj(attn_out)[0]
+        output = self.o_proj(attn_out)[0]
+        return output

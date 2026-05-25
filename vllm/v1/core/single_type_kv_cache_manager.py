@@ -15,20 +15,20 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
+    DSAAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     MomeSpec,
+    SinkDSAAttentionSpec,
     SinkFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     TQFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
-    DSAAttentionSpec,
-    SinkDSAAttentionSpec,
 )
 from vllm.v1.request import Request
 
@@ -498,7 +498,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec | DSAAttentionSpec
+            kv_cache_spec,
+            FullAttentionSpec | ChunkedLocalAttentionSpec | DSAAttentionSpec,
         ), (
             "FullAttentionManager can only be used for full attention, "
             "chunked local attention, and DSA attention groups"
@@ -1237,13 +1238,11 @@ class SinkFullAttentionManager(FullAttentionManager):
 
 
 class SinkSlidingWindowManager(SlidingWindowManager):
-    def __init__(
-        self, kv_cache_spec: SlidingWindowSpec, **kwargs
-    ) -> None:
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
 
-        sink_len = kv_cache_spec.sink_len
+        sink_len = kv_cache_spec.sink_len  # type: ignore[attr-defined]
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
         num_sink_block = sink_len // self.block_size
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
