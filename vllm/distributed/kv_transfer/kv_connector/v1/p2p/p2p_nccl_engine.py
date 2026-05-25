@@ -241,7 +241,7 @@ class P2pNcclEngine:
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
-                self.recv_store_cv.notify()
+                self.recv_store_cv.notify_all()
             return True
 
         item = SendQueueItem(
@@ -431,7 +431,7 @@ class P2pNcclEngine:
                 with self.recv_store_cv:
                     self.recv_store[tensor_id] = tensor
                     self.have_received_tensor_id(tensor_id)
-                    self.recv_store_cv.notify()
+                    self.recv_store_cv.notify_all()
 
             elif data["cmd"] == "GET":
                 tensor_id = data["tensor_id"]
