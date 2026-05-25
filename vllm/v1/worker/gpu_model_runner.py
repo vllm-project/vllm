@@ -155,21 +155,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
-
-# KV cache specs whose corresponding single-type manager reserves a
-# dedicated set of sink blocks from the global block pool during
-# `KVCacheCoordinator.__init__`. The order in which these managers are
-# constructed (i.e. the order of `kv_cache_config.kv_cache_groups`)
-# determines which global block ids each one pops, so the matching
-# attention layer / metadata builder needs the same group rank to
-# compute its `sink_kv_block_offset`.
-_SINK_AWARE_SPEC_TYPES: tuple[type, ...] = (
-    SinkFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
-    SinkDSAAttentionSpec,
-)
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -243,6 +228,20 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+# KV cache specs whose corresponding single-type manager reserves a
+# dedicated set of sink blocks from the global block pool during
+# `KVCacheCoordinator.__init__`. The order in which these managers are
+# constructed (i.e. the order of `kv_cache_config.kv_cache_groups`)
+# determines which global block ids each one pops, so the matching
+# attention layer / metadata builder needs the same group rank to
+# compute its `sink_kv_block_offset`.
+_SINK_AWARE_SPEC_TYPES: tuple[type, ...] = (
+    SinkFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
+    SinkDSAAttentionSpec,
+)
 
 logger = init_logger(__name__)
 
@@ -6979,25 +6978,7 @@ class GPUModelRunner(
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    reshape_kv_cache = getattr(
-                        attn_backend, "reshape_kv_cache", None
-                    )
-                    if reshape_kv_cache is not None:
-                        kv_cache = reshape_kv_cache(
-                            raw_tensor=raw_tensor,
-                            kv_cache_spec=kv_cache_spec,
-                            kv_cache_shape=kv_cache_shape,
-                            kernel_num_blocks=kernel_num_blocks,
-                            num_blocks=num_blocks,
-                            num_blocks_per_kv_block=num_blocks_per_kv_block,
-                            kv_cache_stride_order=kv_cache_stride_order,
-                        )
-                        if kv_cache is not None:
-                            kv_caches[layer_name] = kv_cache
-                            continue
-                    reshape_kv_cache = getattr(
-                        attn_backend, "reshape_kv_cache", None
-                    )
+                    reshape_kv_cache = getattr(attn_backend, "reshape_kv_cache", None)
                     if reshape_kv_cache is not None:
                         kv_cache = reshape_kv_cache(
                             raw_tensor=raw_tensor,

@@ -47,8 +47,8 @@ from vllm.v1.attention.ops.flashmla import (
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn import flash_attn_varlen_func  # type: ignore[attr-defined]
 from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.vllm_flash_attn import flash_attn_varlen_func  # type: ignore[attr-defined]
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -998,7 +998,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.prefill_padding != 0:
-            apadded_heads = cdiv(self.num_heads, self.prefill_padding) * self.prefill_padding
+            apadded_heads = (
+                cdiv(self.num_heads, self.prefill_padding) * self.prefill_padding
+            )
             logger.warning_once(
                 f"Padding num_heads from {self.num_heads} to "
                 f"{apadded_heads} for BF16 sparse prefill kernel"
@@ -1024,12 +1026,6 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
-        # if "model.layers.0" in layer.layer_name:
-        #     print("[DEBUG] FlashMLASparseImpl forward")
-        #     print(f"q shape: {q.shape}, q.float().sum(): {q.float().sum()}")
-        #     print(f"k_c_normed shape: {k_c_normed.shape}, k_c_normed.float().sum(): {k_c_normed.float().sum()}")
-        #     print(f"k_pe shape: {k_pe.shape}, k_pe.float().sum(): {k_pe.float().sum()}")
-        #     print(f"self.topk_indices_buffer shape: {self.topk_indices_buffer.shape}, ,self.topk_indices_buffer.sum(): {self.topk_indices_buffer.sum()}, self.topk_indices_buffer.flatten()[:5]: {self.topk_indices_buffer.flatten()[:5]}")
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
@@ -1205,9 +1201,7 @@ class FlashMLASparseStaticSinkImpl(FlashMLASparseImpl):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
         if self.sink_len == 0 or use_fp8_cache:
-            return super().forward_mqa(
-                q, kv_c_and_k_pe_cache, attn_metadata, layer
-            )
+            return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
 
         if isinstance(q, tuple):
             ql_nope, q_pe = q

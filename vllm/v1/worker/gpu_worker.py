@@ -399,12 +399,12 @@ class Worker(WorkerBase):
             # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            # if (
-            #     current_platform.is_cuda()
-            #     and self.vllm_config.compilation_config.cudagraph_mode
-            #     != CUDAGraphMode.NONE
-            # ):
-            #     cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            if (
+                current_platform.is_cuda()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
+                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (

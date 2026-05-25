@@ -19,11 +19,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     SinkDSAAttentionSpec,
     SinkFullAttentionSpec,
     SinkMLAAttentionSpec,
     SinkMLASlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -37,7 +37,7 @@ from vllm.v1.worker.utils import (
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
-    
+
 
 _SINK_AWARE_SPEC_TYPES: tuple[type, ...] = (
     SinkFullAttentionSpec,
@@ -103,9 +103,7 @@ def init_attn_backend(
             num_sink_block = sink_len // spec.block_size
             sink_kv_block_offset = 1 + sink_group_rank * num_sink_block
             if hasattr(attn_metadata_builder, "set_sink_kv_block_offset"):
-                attn_metadata_builder.set_sink_kv_block_offset(
-                    sink_kv_block_offset
-                )
+                attn_metadata_builder.set_sink_kv_block_offset(sink_kv_block_offset)
             for layer_name in layer_names:
                 layer = attn_layers[layer_name]
                 if hasattr(layer, "set_sink_kv_block_offset"):

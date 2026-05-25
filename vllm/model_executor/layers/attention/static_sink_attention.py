@@ -6,7 +6,6 @@ from typing import cast
 import torch
 from torch import nn
 
-from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -14,36 +13,16 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    LayerNameType,
     _encode_layer_name,
-    _resolve_layer_name,
-    direct_register_custom_op,
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionType,
-    CommonAttentionMetadata,
     MLAAttentionImpl,
-    subclass_attention_backend_with_overrides
-)
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
-)
-from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    DSAAttentionSpec,
-    KVCacheSpec,
-    SinkFullAttentionSpec,
-    MLAAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
-    SinkDSAAttentionSpec
+    subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.backends.mla.flashattn_mla import (
     FlashAttnMLAImpl,
@@ -53,8 +32,17 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseStaticSinkImpl,
 )
-from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnStaticSinkMLAImpl
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    DSAAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SinkDSAAttentionSpec,
+    SinkFullAttentionSpec,
+    SinkMLAAttentionSpec,
+    SinkMLASlidingWindowSpec,
+)
 
 logger = init_logger(__name__)
 
@@ -84,8 +72,7 @@ def create_static_sink_attention_backend(
     ):
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
         assert kv_cache_spec.page_size_bytes % dtype_size == 0, (
-            "Static sink KV cache page size must be aligned to the cache "
-            "dtype size."
+            "Static sink KV cache page size must be aligned to the cache dtype size."
         )
         raw_cache = raw_tensor.view(kv_cache_spec.dtype)
         page_size = kv_cache_spec.page_size_bytes // dtype_size
@@ -147,16 +134,14 @@ def create_static_sink_attention_backend(
             return None
 
         assert num_blocks_per_kv_block == 1, (
-            "Padded static sink KV cache pages require "
-            "num_blocks_per_kv_block == 1."
+            "Padded static sink KV cache pages require num_blocks_per_kv_block == 1."
         )
         inner_stride = [1]
         for size in reversed(physical_shape[1:]):
             inner_stride.insert(0, inner_stride[0] * size)
         inner_stride = inner_stride[1:]
         inv_order = [
-            kv_cache_stride_order.index(i)
-            for i in range(len(kv_cache_stride_order))
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
         return torch.as_strided(
             raw_cache,
@@ -337,8 +322,7 @@ class StaticSinkMLAAttention(MLAAttention):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         assert (
-            self.impl.sink_k_pe is not None
-            and self.impl.sink_compressed_kv is not None
+            self.impl.sink_k_pe is not None and self.impl.sink_compressed_kv is not None
         ), "sink_k_pe and sink_compressed_kv have not been prepared"
         forward_context: ForwardContext = get_forward_context()
         self_kv_cache = self.kv_cache
@@ -347,11 +331,6 @@ class StaticSinkMLAAttention(MLAAttention):
             if isinstance(self_kv_cache, (list, tuple))
             else self_kv_cache
         )
-
-        # if not self.sink_populated:
-        #     # torch.ops.vllm.piecewise_print(impl_kv_cache, self.layer_name, "impl_kv_cache")
-        #     torch.ops.vllm.maybe_populate_sink(impl_kv_cache, self.layer_name)
-            # torch.ops.vllm.piecewise_print(impl_kv_cache, self.layer_name, "impl_kv_cache after populate_sink")
 
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
@@ -421,12 +400,13 @@ class StaticSinkMLAAttention(MLAAttention):
             self.kv_cache_dtype, vllm_config.model_config
         )
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        use_composite_kv_cache = (
-            self.use_sparse
-            and self.indexer is not None
-        )
+        use_composite_kv_cache = self.use_sparse and self.indexer is not None
         # Use max_sliding_window for KV management grouping
-        max_sliding_window = getattr(vllm_config.model_config.hf_config, "max_sliding_window", self.sliding_window)
+        max_sliding_window = getattr(
+            vllm_config.model_config.hf_config,
+            "max_sliding_window",
+            self.sliding_window,
+        )
         if use_composite_kv_cache:
             if self.sink_len > 0:
                 return SinkDSAAttentionSpec(
@@ -437,7 +417,11 @@ class StaticSinkMLAAttention(MLAAttention):
                     page_size_padded=page_size_padded,
                     cache_dtype_str=vllm_config.cache_config.cache_dtype,
                     sink_len=self.sink_len,
-                    indexer_head_size=getattr(self.indexer, "composite_kv_cache_head_size", getattr(self.indexer, "head_dim", None)),
+                    indexer_head_size=getattr(
+                        self.indexer,
+                        "composite_kv_cache_head_size",
+                        getattr(self.indexer, "head_dim", None),
+                    ),
                 )
             else:
                 return DSAAttentionSpec(
@@ -447,7 +431,11 @@ class StaticSinkMLAAttention(MLAAttention):
                     dtype=kv_cache_dtype,
                     page_size_padded=page_size_padded,
                     cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                    indexer_head_size=getattr(self.indexer, "composite_kv_cache_head_size", getattr(self.indexer, "head_dim", None)),
+                    indexer_head_size=getattr(
+                        self.indexer,
+                        "composite_kv_cache_head_size",
+                        getattr(self.indexer, "head_dim", None),
+                    ),
                 )
 
         if self.sink_len > 0 and self.sliding_window is not None:
@@ -472,10 +460,10 @@ class StaticSinkMLAAttention(MLAAttention):
                 sink_len=self.sink_len,
             )
         return MLAAttentionSpec(
-                block_size=vllm_config.cache_config.block_size,
-                num_kv_heads=1,
-                head_size=self.head_size,
-                dtype=kv_cache_dtype,
-                page_size_padded=page_size_padded,
-                cache_dtype_str=vllm_config.cache_config.cache_dtype,
-            )
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            page_size_padded=page_size_padded,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        )

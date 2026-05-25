@@ -9,7 +9,6 @@ from typing import Any
 
 import torch
 
-from typing_extensions import deprecated
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention

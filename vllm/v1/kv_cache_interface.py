@@ -598,6 +598,7 @@ class MomeSpec(MambaSpec):
     Stores representations of `kernel_size - 1 + num_spec_tokens` tokens per block,
     with 3 state components: q_cache, kv_cache, o_cache.
     """
+
     kernel_size: int = 0
     num_spec_tokens: int = 0
 
@@ -608,13 +609,14 @@ class MomeSpec(MambaSpec):
     def __post_init__(self):
         if len(self.shapes) != 3:
             raise ValueError(
-                f"MoME has 3 components but got {len(self.shapes)} shapes.")
+                f"MoME has 3 components but got {len(self.shapes)} shapes."
+            )
         if len(self.dtypes) != 3:
             raise ValueError(
-                f"MoME has 3 components but got {len(self.dtypes)} dtypes.")
+                f"MoME has 3 components but got {len(self.dtypes)} dtypes."
+            )
         if self.kernel_size <= 0:
-            raise ValueError(
-                f"kernel_size must be positive, got {self.kernel_size}.")
+            raise ValueError(f"kernel_size must be positive, got {self.kernel_size}.")
 
 
 @dataclass(frozen=True)
@@ -745,7 +747,8 @@ class SinkDSAAttentionSpec(DSAAttentionSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, SinkDSAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be SinkDSAAttentionSpec."
+            "All attention layers in the same KV "
+            "cache group must be SinkDSAAttentionSpec."
         )
         merged_dsa = super().merge(specs)
         sink_len_set = set(spec.sink_len for spec in specs)
@@ -808,20 +811,21 @@ class MLASlidingWindowSpec(SlidingWindowSpec):
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
-    
+
     @property
     def real_page_size_bytes(self) -> int:
-        return(
+        return (
             self.block_size
             * self.num_kv_heads
             * self.head_size
             * get_dtype_size(self.dtype)
         )
-    
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLASlidingWindowSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLASlidingWindowSpec."
+            "All attention layers in the same KV "
+            "cache group must be MLASlidingWindowSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
@@ -835,7 +839,8 @@ class MLASlidingWindowSpec(SlidingWindowSpec):
         )
         head_size_set = set(spec.head_size for spec in specs)
         assert len(head_size_set) == 1, (
-            "All attention layers in the same KV cache group must use the same head_size."
+            "All attention layers in the same KV "
+            "cache group must use the same head_size."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -846,7 +851,7 @@ class MLASlidingWindowSpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             sliding_window=sliding_window_set.pop(),
         )
-        
+
 
 @dataclass(frozen=True)
 class SinkMLASlidingWindowSpec(MLASlidingWindowSpec):
@@ -855,7 +860,8 @@ class SinkMLASlidingWindowSpec(MLASlidingWindowSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLASlidingWindowSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLASlidingWindowSpec."
+            "All attention layers in the same KV "
+            "cache group must be MLASlidingWindowSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         assert len(cache_dtype_str_set) == 1, (
@@ -957,8 +963,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             )
         elif isinstance(one_spec, DSAAttentionSpec):
             return all(
-                isinstance(spec, DSAAttentionSpec)
-                for spec in kv_cache_specs.values()
+                isinstance(spec, DSAAttentionSpec) for spec in kv_cache_specs.values()
             )
         else:
             # NOTE(Chen): Please add new branches for new KV cache spec types.

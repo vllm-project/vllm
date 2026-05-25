@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -28,19 +29,18 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,
     get_scheduler_metadata,
 )
 
-from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 logger = init_logger(__name__)
 
 
@@ -472,7 +472,9 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             return attn_out, lse
         return attn_out
 
-    def update_sink_kv(self, sink_k_pe: torch.Tensor, sink_compressed_kv: torch.Tensor) -> None:
+    def update_sink_kv(
+        self, sink_k_pe: torch.Tensor, sink_compressed_kv: torch.Tensor
+    ) -> None:
         self.sink_k_pe = sink_k_pe.unsqueeze(1).clone()
         self.sink_compressed_kv = sink_compressed_kv.clone()
         self.sink_len = sink_k_pe.shape[0]
@@ -595,9 +597,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
     ) -> None:
         """Sink prefix + causal sliding-window attention over new tokens."""
         prefill = attn_metadata.prefill
-        k, v = self._expand_prefill_kv(
-            kv_c_normed, k_pe, prefill, use_fp8_prefill
-        )
+        k, v = self._expand_prefill_kv(kv_c_normed, k_pe, prefill, use_fp8_prefill)
         new_tokens_o, new_tokens_lse = self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -713,16 +713,15 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
 
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
-        use_fp8_prefill = (
-            prefill_metadata.q_data_type == current_platform.fp8_dtype()
-        )
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
         q_attn = q.to(prefill_metadata.q_data_type) if use_fp8_prefill else q
 
         sink_o, sink_lse = self._compute_sink_prefill_attn(q_attn, attn_metadata)
 
         has_context = prefill_metadata.chunked_context is not None
-        use_sliding_window = (
-            self.window_size is not None and self.window_size != (-1, -1)
+        use_sliding_window = self.window_size is not None and self.window_size != (
+            -1,
+            -1,
         )
 
         if has_context:
@@ -761,7 +760,6 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
                 use_fp8_prefill,
             )
 
-    
     def forward_mqa(
         self,
         q,
@@ -886,7 +884,6 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         )
         return o, lse
 
-
     def _run_prefill_new_tokens_fa(self, prefill, q, k, v, return_softmax_lse):
         if self.sink_len == 0:
             return super()._run_prefill_new_tokens_fa(
@@ -894,7 +891,13 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             )
         query_start_loc = prefill.query_start_loc
         num_prefills = len(query_start_loc) - 1
-        sink_len_offset = torch.arange(0, (num_prefills + 1) * self.sink_len, self.sink_len, dtype=query_start_loc.dtype, device=query_start_loc.device)
+        sink_len_offset = torch.arange(
+            0,
+            (num_prefills + 1) * self.sink_len,
+            self.sink_len,
+            dtype=query_start_loc.dtype,
+            device=query_start_loc.device,
+        )
         cu_seqlens_k = query_start_loc + sink_len_offset
         max_seqlen_k = prefill.max_query_len + num_prefills * self.sink_len
         return self._flash_attn_varlen_diff_headdims(
@@ -907,22 +910,29 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=True,
-            return_softmax_lse=return_softmax_lse
+            return_softmax_lse=return_softmax_lse,
         )
-    
+
     @staticmethod
     def _insert_tensor_by_start_loc(raw_tensor, insert_segment, start_loc):
         segment_len = insert_segment.shape[0]
         num_inserts = len(start_loc) - 1
         total_len = segment_len * num_inserts + raw_tensor.shape[0]
-        result = torch.empty(total_len, *raw_tensor.shape[1:], dtype=raw_tensor.dtype, device=raw_tensor.device)
+        result = torch.empty(
+            total_len,
+            *raw_tensor.shape[1:],
+            dtype=raw_tensor.dtype,
+            device=raw_tensor.device,
+        )
 
         offset = 0
         for i in range(num_inserts):
-            result[offset: offset + segment_len] = insert_segment.clone()
+            result[offset : offset + segment_len] = insert_segment.clone()
             offset += segment_len
             seg_len = start_loc[i + 1] - start_loc[i]
-            result[offset: offset + seg_len] = raw_tensor[start_loc[i]: start_loc[i + 1]]
+            result[offset : offset + seg_len] = raw_tensor[
+                start_loc[i] : start_loc[i + 1]
+            ]
             offset += seg_len
-        
+
         return result

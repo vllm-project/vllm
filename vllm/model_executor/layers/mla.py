@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
-from vllm.forward_context import get_forward_context
 from vllm.config import CacheConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -219,7 +218,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         prefix: str = "",
         sink_len: int = 0,
         sliding_window: int | None = None,
-        mome_attn: Optional[nn.Module] = None,
+        mome_attn: nn.Module | None = None,
         # is_hybrid_kv: bool = False
     ) -> None:
         PluggableLayer.__init__(self)
@@ -250,8 +249,11 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
-            
-        from vllm.model_executor.layers.attention.static_sink_attention import StaticSinkMLAAttention
+
+        from vllm.model_executor.layers.attention.static_sink_attention import (
+            StaticSinkMLAAttention,
+        )
+
         self.mla_attn = StaticSinkMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -270,7 +272,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             sliding_window=sliding_window,
             # is_hybrid_kv=True
         )
-    
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -297,12 +299,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             )
             q_c = q_c.contiguous()
             if self.mome_attn is not None:
-                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "before mome_attn")
                 mome_output = self.mome_attn(q_c, state_indice=0)
-                # torch.ops.vllm.piecewise_print(mome_output, self.mla_attn.layer_name, "mome_attn output")
-                # q_c = self.mome_attn(q_c, state_indice=0) + q_c
                 q_c = mome_output + q_c
-                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "after mome_attn + q_c")
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -345,7 +343,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
 
         k_pe = k_pe.squeeze(2).squeeze(0)
 
-        layer_name = self.mla_attn.layer_name
         q = q.reshape(q.shape[0], -1).view(q.shape)
         kv_c_normed = kv_c_normed
         k_pe = k_pe
