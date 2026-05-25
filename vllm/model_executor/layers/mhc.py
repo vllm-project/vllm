@@ -34,6 +34,8 @@ class MHCPreOp(CustomOp):
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         n_splits: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.mhc_pre_tilelang(
             residual,
@@ -46,6 +48,8 @@ class MHCPreOp(CustomOp):
             hc_post_mult_value,
             sinkhorn_repeat,
             n_splits,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_hip(
@@ -60,32 +64,38 @@ class MHCPreOp(CustomOp):
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         n_splits: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        hidden_size = residual.shape[-1]
-        if hidden_size % 256 == 0:
-            return torch.ops.vllm.mhc_pre_aiter(
-                residual,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
-        else:
-            return mhc_kernels.mhc_pre_torch(
-                residual,
-                fn,
-                hc_scale,
-                hc_base,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
+        # TODO: Reenable aiter after we are at the aiter
+        # version that has this bugfix
+        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
+        # It has accuracy problem at large number of tokens.
+        # hidden_size = residual.shape[-1]
+        # if hidden_size % 256 == 0:
+        #     return torch.ops.vllm.mhc_pre_aiter(
+        #         residual,
+        #         fn,
+        #         hc_scale,
+        #         hc_base,
+        #         rms_eps,
+        #         hc_pre_eps,
+        #         hc_sinkhorn_eps,
+        #         hc_post_mult_value,
+        #         sinkhorn_repeat,
+        #     )
+        # else:
+        return mhc_kernels.mhc_pre_torch(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_pre is not available")
@@ -124,21 +134,25 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_size = residual.shape[-1]
-        if hidden_size % 256 == 0:
-            return torch.ops.vllm.mhc_post_aiter(
-                x,
-                residual,
-                post_layer_mix,
-                comb_res_mix,
-            )
-        else:
-            return mhc_kernels.mhc_post_torch(
-                x,
-                residual,
-                post_layer_mix,
-                comb_res_mix,
-            )
+        # TODO: Reenable aiter after we are at the aiter
+        # version that has this bugfix
+        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
+        # It has accuracy problem at large number of tokens.
+        # hidden_size = residual.shape[-1]
+        # if hidden_size % 256 == 0:
+        #     return torch.ops.vllm.mhc_post_aiter(
+        #         x,
+        #         residual,
+        #         post_layer_mix,
+        #         comb_res_mix,
+        #     )
+        # else:
+        return mhc_kernels.mhc_post_torch(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+        )
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_post is not available")
@@ -254,6 +268,8 @@ class MHCFusedPostPreOp(CustomOp):
         sinkhorn_repeat: int,
         n_splits: int = 1,
         tile_n: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.mhc_fused_post_pre_tilelang(
             x,
@@ -270,6 +286,8 @@ class MHCFusedPostPreOp(CustomOp):
             sinkhorn_repeat,
             n_splits,
             tile_n,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_hip(self, *args, **kwargs):
