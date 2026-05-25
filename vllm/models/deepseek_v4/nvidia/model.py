@@ -1181,8 +1181,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=ffn_norm_weight,
             norm_eps=ffn_norm_eps,
         )
-        # ffn_norm is fused into mhc_fused_post_pre above; ffn() takes the
-        # already-normed activation directly.
+
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
