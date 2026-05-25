@@ -173,6 +173,13 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
+    def reset(self) -> None:
+        self.token_len = 0
+        self.allocated_block_ids = ()
+        self.num_saved_tokens = 0
+        self.token_ids = None
+        self.prefill_end_tokens = 0
+
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
