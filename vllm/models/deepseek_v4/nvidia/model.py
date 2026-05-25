@@ -74,9 +74,9 @@ def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
         ):
             return None
         # SGLang creates five streams for DeepSeek-V4: three top-level
-        # preparation branches and two C4-indexer sub-branches. vLLM keeps
-        # SWA insertion fused with q preparation, but uses the same hierarchy:
-        # [0] main compressor, [1] C4 indexer, [2:4] indexer sub-branches.
+        # preparation branches and two C4-indexer sub-branches:
+        # [0] main KV cache insert, [1] main compressor, [2] C4 indexer,
+        # [3] indexer Q branch, [4] indexer weights branch.
         return [
             torch.cuda.Stream(
                 priority=envs.VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY
@@ -803,15 +803,22 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
-            # NVIDIA uses aux_stream_list[2] for the legacy inner overlap. ROCm
-            # SGLang-style decode uses aux_stream_list[2:4] for the C4 indexer
-            # q/weights sub-branches while the outer indexer branch runs on
-            # aux_stream_list[1].
-            indexer_aux_stream = (
-                aux_stream_list[2] if aux_stream_list is not None else None
-            )
+            # NVIDIA uses aux_stream_list[2] for the legacy inner overlap.
+            # ROCm SGLang-style decode uses aux_stream_list[3:5] for the C4
+            # indexer q/weights sub-branches while the outer indexer branch
+            # runs on aux_stream_list[2].
+            if (
+                current_platform.is_rocm()
+                and aux_stream_list is not None
+                and len(aux_stream_list) >= 5
+            ):
+                indexer_aux_stream = aux_stream_list[3]
+            else:
+                indexer_aux_stream = (
+                    aux_stream_list[2] if aux_stream_list is not None else None
+                )
             indexer_aux_streams = (
-                aux_stream_list[2:4]
+                aux_stream_list[3:5]
                 if (
                     current_platform.is_rocm()
                     and aux_stream_list is not None

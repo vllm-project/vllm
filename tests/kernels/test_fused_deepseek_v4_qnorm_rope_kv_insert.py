@@ -136,6 +136,22 @@ def _call_fused(
     )
 
 
+def _split_ops_available() -> bool:
+    return hasattr(torch.ops._C, "deepseek_v4_qnorm_rope") and hasattr(
+        torch.ops._C, "deepseek_v4_kv_rope_quant_insert"
+    )
+
+
+def _call_q_split(q, positions, cos_sin_cache, eps):
+    torch.ops._C.deepseek_v4_qnorm_rope(q, positions, cos_sin_cache, eps)
+
+
+def _call_kv_split(kv, k_cache, slot_mapping, positions, cos_sin_cache, bs):
+    torch.ops._C.deepseek_v4_kv_rope_quant_insert(
+        kv, k_cache, slot_mapping, positions, cos_sin_cache, bs
+    )
+
+
 # ── Test 1: Q path numerical parity ──────────────────────────────────────────
 
 
@@ -415,3 +431,58 @@ def test_combined_q_and_kv(
             "padded head slots must be exact zero"
         )
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not _split_ops_available(),
+    reason="split DeepseekV4 q/kv ops not built in",
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 64])
+@pytest.mark.parametrize("n_heads", [8, 64])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_split_q_and_kv_match_combined(
+    num_tokens: int, n_heads: int, block_size: int
+):
+    torch.manual_seed(4)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    max_pos = 4096
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    q_fused = q.clone()
+    k_cache_fused = torch.zeros(
+        num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    _call_fused(
+        q_fused,
+        kv,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+    )
+
+    q_split = q.clone()
+    k_cache_split = torch.zeros_like(k_cache_fused)
+    _call_q_split(q_split, positions, cos_sin_cache, eps)
+    _call_kv_split(
+        kv,
+        k_cache_split,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        block_size,
+    )
+
+    torch.testing.assert_close(q_split, q_fused, rtol=0, atol=0)
+    torch.testing.assert_close(k_cache_split, k_cache_fused, rtol=0, atol=0)

@@ -437,7 +437,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         num_decodes = _deepseek_v4_num_decodes(attn_metadata)
         min_decode = envs.VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE
         max_decode = envs.VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE
-        if num_decodes < min_decode or num_decodes > max_decode:
+        if num_decodes < min_decode:
+            return "off"
+        # max_decode <= 0 is an explicit no-cap experiment knob. The default
+        # remains capped at 64 because unlimited decode improves the largest
+        # one-wave backlogs but regresses c128 TTFT substantially on MI355X.
+        if 0 < max_decode < num_decodes:
             return "off"
 
         graph_mode = forward_context.cudagraph_runtime_mode
@@ -486,7 +491,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self,
         hidden_states: torch.Tensor,
         compressor: DeepseekCompressor,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if out is not None:
+            return torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out=out,
+                out_dtype=torch.float32,
+            )
         return torch.mm(
             hidden_states,
             compressor.fused_wkv_wgate.weight.T,
@@ -509,10 +522,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # The ROCm SGLang-style strategy deliberately defers these branch
-        # projections until the post-rmsnorm fan-out. That avoids capturing
-        # side-stream hipBLASLt nodes beside the fused WQA/WKV GEMM, which is
-        # the graph topology that previously hung/regressed on ROCm.
+        # ROCm can optionally defer these branch projections until the
+        # post-rmsnorm fan-out for A/B testing. Current ROCm/PyTorch stacks do
+        # not need that for allocator safety, so the default keeps projections
+        # here and only overlaps the post-rmsnorm CSA branches.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None and not defer_rocm_branch_projections:
@@ -636,6 +649,134 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
+    def _rocm_sglang_post_rmsnorm_prepare(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv: torch.Tensor,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+        aux_streams: list[torch.cuda.Stream],
+        defer_rocm_branch_projections: bool,
+    ) -> torch.Tensor:
+        assert len(aux_streams) >= 5
+        stream_kv = aux_streams[0]
+        stream_compressor = aux_streams[1]
+        stream_indexer = aux_streams[2]
+        current_stream = torch.cuda.current_stream()
+
+        stream_kv.wait_stream(current_stream)
+        stream_compressor.wait_stream(current_stream)
+        stream_indexer.wait_stream(current_stream)
+
+        compressor_kv_score_out: torch.Tensor | None = None
+        if self.compressor is not None and kv_score is None:
+            compressor_kv_score_out = self._rocm_aux_buffer(
+                "deferred_compressor_kv_score",
+                (
+                    hidden_states.shape[0],
+                    self.compressor.fused_wkv_wgate.weight.shape[0],
+                ),
+                torch.float32,
+                hidden_states.device,
+            )
+
+        indexer_weights_out: torch.Tensor | None = None
+        indexer_kv_score_out: torch.Tensor | None = None
+        if self.indexer is not None:
+            if indexer_weights is None:
+                indexer_weights_out = self._rocm_aux_buffer(
+                    "deferred_indexer_weights",
+                    (
+                        hidden_states.shape[0],
+                        self.indexer.weights_proj.weight.shape[0],
+                    ),
+                    hidden_states.dtype,
+                    hidden_states.device,
+                )
+            if indexer_kv_score is None:
+                indexer_kv_score_out = self._rocm_aux_buffer(
+                    "deferred_indexer_kv_score",
+                    (
+                        hidden_states.shape[0],
+                        self.indexer.compressor.fused_wkv_wgate.weight.shape[0],
+                    ),
+                    torch.float32,
+                    hidden_states.device,
+                )
+
+        def q_b_qnorm_rope() -> torch.Tensor:
+            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+            self._fused_qnorm_rope(q, positions)
+            return q
+
+        def run_kv_insert() -> None:
+            self._fused_kv_rope_insert(kv, positions, attn_metadata)
+
+        def run_compressor() -> Any:
+            if self.compressor is None:
+                return None
+            local_kv_score = kv_score
+            if local_kv_score is None:
+                local_kv_score = self._project_compressor_kv_score(
+                    hidden_states,
+                    self.compressor,
+                    out=compressor_kv_score_out,
+                )
+            return self.compressor(local_kv_score, positions, self.rotary_emb)
+
+        def run_indexer() -> Any:
+            if self.indexer is None:
+                return None
+            return self.indexer(
+                hidden_states,
+                qr,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                self.indexer_rotary_emb,
+                use_aux_stream=envs.VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS,
+                project_inputs=defer_rocm_branch_projections,
+                compressed_kv_score_out=indexer_kv_score_out,
+                indexer_weights_out=indexer_weights_out,
+            )
+
+        launched_indexer = (
+            self.indexer is not None and envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER
+        )
+        launched_compressor = (
+            self.compressor is not None
+            and envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
+        )
+
+        if launched_indexer:
+            with torch.cuda.stream(stream_indexer):
+                run_indexer()
+        with torch.cuda.stream(stream_kv):
+            run_kv_insert()
+        if launched_compressor:
+            with torch.cuda.stream(stream_compressor):
+                run_compressor()
+
+        q = q_b_qnorm_rope()
+
+        current_stream.wait_stream(stream_kv)
+        if launched_compressor:
+            current_stream.wait_stream(stream_compressor)
+        else:
+            run_compressor()
+        if launched_indexer:
+            current_stream.wait_stream(stream_indexer)
+        else:
+            run_indexer()
+
+        return q
+
     def attention_impl(
         self,
         hidden_states: torch.Tensor,
@@ -672,6 +813,65 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.eps,
         )
 
+        if (
+            current_platform.is_rocm()
+            and rocm_ms_strategy == "sglang"
+            and envs.VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST
+            and aux_streams is not None
+            and len(aux_streams) >= 5
+        ):
+            q = self._rocm_sglang_post_rmsnorm_prepare(
+                hidden_states,
+                qr,
+                kv,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                attn_metadata,
+                aux_streams,
+                defer_rocm_branch_projections,
+            )
+        else:
+            q = self._legacy_post_rmsnorm_prepare(
+                hidden_states,
+                qr,
+                kv,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                attn_metadata,
+                aux_streams,
+                rocm_ms_strategy,
+                defer_rocm_branch_projections,
+            )
+
+        # Pad q to FlashMLA-required head count (64 or 128)
+        if self.n_local_heads < self.padded_heads:
+            pad_size = self.padded_heads - self.n_local_heads
+            q = F.pad(q, (0, 0, 0, pad_size), value=0.0)
+
+        # MLA attention writes into the pre-allocated `out` buffer
+        # ([num_tokens, padded_heads, head_dim]).
+        self.mla_attn(q, kv, positions, output=out)
+
+    def _legacy_post_rmsnorm_prepare(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv: torch.Tensor,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+        aux_streams: list[torch.cuda.Stream] | None,
+        rocm_ms_strategy: str,
+        defer_rocm_branch_projections: bool,
+    ) -> torch.Tensor:
         # wq_b + kv_insert (+ MLA compressor when an indexer is present) ride
         # on the default stream so q stays on its consumer stream (mla_attn
         # downstream reads q on default). Indexer/compressor go on aux for
@@ -682,11 +882,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             and post_aux_streams is not None
             and len(post_aux_streams) >= 5
         ):
-            # ROCm SGLang-style mapping:
-            #   aux[0]: main compressor branch
-            #   aux[1]: C4 indexer branch
-            #   aux[2:4]: C4 indexer sub-branches
-            outer_post_aux_streams = [post_aux_streams[1], post_aux_streams[0]]
+            # Legacy ROCm fallback keeps q+kv fused on default. Match the
+            # SGLang stream IDs where possible: aux[2] indexer, aux[1]
+            # compressor.
+            outer_post_aux_streams = [post_aux_streams[2], post_aux_streams[1]]
         elif post_aux_streams is not None:
             outer_post_aux_streams = [post_aux_streams[0], post_aux_streams[1]]
         else:
@@ -705,8 +904,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
             # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
             # MLA compressor. Slot [2] is reserved for the indexer's inner
-            # overlap. ROCm uses the SGLang-style deferred projection path only
-            # under VLLM_ROCM_DSV4_CSA_MULTISTREAM=1.
+            # overlap. ROCm can optionally defer branch projections under
+            # VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS=1.
             run_indexer: Callable[[], Any] = lambda: indexer(
                 hidden_states,
                 qr,
@@ -763,7 +962,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             # wq_b + kv_insert on default, compressor on aux.
             aux_stream = (
                 (
-                    post_aux_streams[0]
+                    (
+                        post_aux_streams[1]
+                        if len(post_aux_streams) >= 5
+                        else post_aux_streams[0]
+                    )
                     if current_platform.is_rocm() and post_aux_streams is not None
                     else outer_post_aux_streams[0]
                 )
@@ -805,9 +1008,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
             q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
-        # MLA attention writes into the pre-allocated `out` buffer
-        # ([num_tokens, padded_heads, head_dim]).
-        self.mla_attn(q, kv, positions, output=out)
+        return q
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -853,6 +1054,47 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.rotary_emb.cos_sin_cache,
             self.padded_heads,
             self.eps,
+            swa_metadata.block_size,
+        )
+
+    def _fused_qnorm_rope(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        torch.ops._C.deepseek_v4_qnorm_rope(
+            q,
+            positions.to(torch.int64),
+            self.rotary_emb.cos_sin_cache,
+            self.eps,
+        )
+
+    def _fused_kv_rope_insert(
+        self,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> None:
+        if not isinstance(attn_metadata, dict):
+            return
+
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata | None",
+            attn_metadata.get(self.swa_cache_layer.prefix),
+        )
+        assert swa_metadata is not None
+
+        swa_kv_cache = self.swa_cache_layer.kv_cache
+        swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+
+        torch.ops._C.deepseek_v4_kv_rope_quant_insert(
+            kv,
+            swa_kv_cache_2d,
+            swa_metadata.slot_mapping,
+            positions.to(torch.int64),
+            self.rotary_emb.cos_sin_cache,
             swa_metadata.block_size,
         )
 
@@ -1207,17 +1449,26 @@ class DeepseekV4Indexer(nn.Module):
         compressor = self.compressor
 
         def project_indexer_weights() -> torch.Tensor:
-            # Keep the ROCm deferred path numerically identical to the baseline
-            # ReplicatedLinear path. Raw torch.mm can select a different BF16
-            # GEMM implementation for this skinny projection and perturb the
-            # sparse top-k boundary.
-            weights, _ = self.weights_proj(hidden_states)
             if indexer_weights_out is not None:
-                indexer_weights_out.copy_(weights)
-                return indexer_weights_out
+                return torch.mm(
+                    hidden_states,
+                    self.weights_proj.weight.T,
+                    out=indexer_weights_out,
+                )
+            # Keep the default path numerically identical to the baseline
+            # ReplicatedLinear path. The explicit out= path above is only used
+            # for ROCm graph-safe deferred side-stream projection buffers.
+            weights, _ = self.weights_proj(hidden_states)
             return weights
 
         def project_compressed_kv_score() -> torch.Tensor:
+            if compressed_kv_score_out is not None:
+                return torch.mm(
+                    hidden_states,
+                    compressor.fused_wkv_wgate.weight.T,
+                    out=compressed_kv_score_out,
+                    out_dtype=torch.float32,
+                )
             return torch.mm(
                 hidden_states,
                 compressor.fused_wkv_wgate.weight.T,
@@ -1257,6 +1508,9 @@ class DeepseekV4Indexer(nn.Module):
             stream_q.wait_stream(current_stream)
             stream_weights.wait_stream(current_stream)
 
+            local_kv_score = project_compressed_kv_score()
+            k = compressor(local_kv_score, positions, rotary_emb)
+
             with torch.cuda.stream(stream_weights):
                 weights = project_indexer_weights()
                 weights_ready = stream_weights.record_event()
@@ -1265,9 +1519,6 @@ class DeepseekV4Indexer(nn.Module):
             with torch.cuda.stream(stream_q):
                 stream_q.wait_event(weights_ready)
                 q_result[0] = wq_b_and_q_quant(weights)
-
-            local_kv_score = project_compressed_kv_score()
-            k = compressor(local_kv_score, positions, rotary_emb)
 
             current_stream.wait_stream(stream_q)
             assert q_result[0] is not None

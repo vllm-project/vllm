@@ -135,10 +135,17 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
-
-            self.apply_rotary_emb_flash_attn = apply_rotary
+        if (
+            not current_platform.is_cpu()
+            and not current_platform.is_rocm()
+            and find_spec("flash_attn") is not None
+        ):
+            try:
+                from flash_attn.ops.triton.rotary import apply_rotary
+            except ImportError:
+                logger.debug("Failed to import flash_attn rotary helper", exc_info=True)
+            else:
+                self.apply_rotary_emb_flash_attn = apply_rotary
 
     @staticmethod
     def forward_static(

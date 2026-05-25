@@ -105,6 +105,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
 
+  ops.def("deepseek_v4_qnorm_rope("
+          "Tensor! q, Tensor position_ids, Tensor cos_sin_cache, "
+          "float eps) -> ()");
+  ops.impl("deepseek_v4_qnorm_rope", torch::kCUDA, &deepseek_v4_qnorm_rope);
+
+  ops.def("deepseek_v4_kv_rope_quant_insert("
+          "Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
+          "Tensor position_ids, Tensor cos_sin_cache, "
+          "int cache_block_size) -> ()");
+  ops.impl("deepseek_v4_kv_rope_quant_insert", torch::kCUDA,
+           &deepseek_v4_kv_rope_quant_insert);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "

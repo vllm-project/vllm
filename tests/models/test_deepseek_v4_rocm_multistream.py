@@ -24,10 +24,28 @@ def test_deepseek_v4_rocm_aux_streams_enabled(monkeypatch):
     assert len(aux_streams) == 5
 
 
-def test_deepseek_v4_rocm_aux_streams_disabled_by_default(monkeypatch):
+def test_deepseek_v4_rocm_aux_streams_enabled_by_default(monkeypatch):
+    streams = [object(), object(), object(), object(), object()]
+
+    def make_stream(**kwargs):
+        assert kwargs == {"priority": 0}
+        return streams.pop()
+
     monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(rocm_model.torch.cuda, "Stream", make_stream)
     monkeypatch.delenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", raising=False)
+
+    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+
+    assert aux_streams is not None
+    assert len(aux_streams) == 5
+
+
+def test_deepseek_v4_rocm_aux_streams_disabled_by_env(monkeypatch):
+    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "0")
 
     aux_streams = rocm_model.make_deepseek_v4_aux_streams()
 

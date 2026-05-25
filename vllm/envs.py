@@ -257,18 +257,19 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
-    VLLM_ROCM_DSV4_CSA_MULTISTREAM: bool = False
+    VLLM_ROCM_DSV4_CSA_MULTISTREAM: bool = True
     VLLM_ROCM_DSV4_CSA_MS_STRATEGY: Literal["off", "indexer_only", "sglang"] = (
         "sglang"
     )
     VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE: int = 1
-    VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE: int = 32
+    VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE: int = 64
     VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES: set[Literal["none", "piecewise", "full"]] = {
         "none",
         "piecewise",
     }
     VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR: bool = True
     VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS: bool = False
+    VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST: bool = True
     VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER: bool = True
     VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS: bool = True
     VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY: int = 0
@@ -1900,7 +1901,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # hipBLASLt ordering differ by PyTorch/ROCm release. "indexer_only" keeps
     # the conservative single indexer branch path for A/B testing.
     "VLLM_ROCM_DSV4_CSA_MULTISTREAM": lambda: bool(
-        int(os.getenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "0"))
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "1"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_STRATEGY": env_with_choices(
         "VLLM_ROCM_DSV4_CSA_MS_STRATEGY",
@@ -1912,7 +1913,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE", "1")
     ),
     "VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE": lambda: int(
-        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE", "32")
+        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE", "64")
     ),
     "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES": env_set_with_choices(
         "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES",
@@ -1925,6 +1926,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS": lambda: bool(
         int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS", "0"))
+    ),
+    "VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST": lambda: bool(
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST", "1"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER": lambda: bool(
         int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER", "1"))
