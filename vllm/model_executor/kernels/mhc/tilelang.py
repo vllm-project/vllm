@@ -170,7 +170,7 @@ def _mhc_pre_tilelang_fake(
     sinkhorn_repeat: int,
     n_splits: int = 1,
     norm_weight: torch.Tensor | None = None,
-    norm_eps: float = 0.0,
+    norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
@@ -238,7 +238,7 @@ def mhc_fused_post_pre_tilelang(
     n_splits: int = 1,
     tile_n: int = 1,
     norm_weight: torch.Tensor | None = None,
-    norm_eps: float = 0.0,
+    norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Run one MHC post block followed by the next MHC pre block.
@@ -450,7 +450,7 @@ def _mhc_fused_post_pre_tilelang_fake(
     n_splits: int = 1,
     tile_n: int = 1,
     norm_weight: torch.Tensor | None = None,
-    norm_eps: float = 0.0,
+    norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     hc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
