@@ -179,7 +179,7 @@ def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
     # For multi-chunk audio (>30s), audio_features has one item per chunk
     # (total_chunks) while audio_feature_lens has one item per audio (N).
-    # Use flat_from_sizes to group audio_features by audio so both fields
+    # Use flat to group audio_features by audio so both fields
     # share the same batch size (N).
     audio_features_cfg = MultiModalFieldConfig.batched("audio")
 
@@ -212,9 +212,17 @@ def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
                     else:
                         chunks_per_audio.append(1)
 
-            audio_features_cfg = MultiModalFieldConfig.flat_from_sizes(
+            # Use flat (not flat_from_sizes) because audio_features
+            # is list[Tensor] with variable-length chunks (post-unpad).
+            slice_idxs = [0]
+            for n in chunks_per_audio:
+                slice_idxs.append(slice_idxs[-1] + n)
+            audio_features_cfg = MultiModalFieldConfig.flat(
                 "audio",
-                torch.tensor(chunks_per_audio),
+                [
+                    slice(slice_idxs[i], slice_idxs[i + 1])
+                    for i in range(len(chunks_per_audio))
+                ],
             )
 
     return dict(
