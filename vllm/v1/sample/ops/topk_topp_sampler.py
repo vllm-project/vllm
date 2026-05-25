@@ -96,8 +96,7 @@ class TopKTopPSampler(nn.Module):
 
                 self.aiter_ops = torch.ops.aiter
                 logger.info_once(
-                    "Using aiter sampler on ROCm (requires the accuracy fix "
-                    "from ROCm/aiter#2035, Feb 2026+)."
+                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
                 )
                 self.forward = self.forward_hip
             except ImportError:
