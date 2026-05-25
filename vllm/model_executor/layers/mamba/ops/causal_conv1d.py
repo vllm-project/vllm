@@ -455,10 +455,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
-        if ZERO_INITIAL_STATE_OUTPUT:
-            if chunk_offset == 0:
-                zero_warmup = (load_init_state == 0) & (idx_token < state_len)
-                acc = tl.where(zero_warmup, 0.0, acc)
+        if ZERO_INITIAL_STATE_OUTPUT and chunk_offset == 0:
+            zero_warmup = (load_init_state == 0) & (idx_token < state_len)
+            acc = tl.where(zero_warmup, 0.0, acc)
         mask_1d = (idx_token < segment_len) & (
             idx_feats < dim
         )  # token-index  # feature-index

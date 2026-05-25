@@ -56,6 +56,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
 from vllm.model_executor.layers.mla import (
     MLAModules,
     MultiHeadLatentAttentionWrapper,
@@ -244,8 +249,7 @@ class MomeAttention(MambaBase, CustomOp):
 
         return MomeAttentionBackend
 
-    def forward(self, hidden_states: torch.Tensor,
-                state_indice: int) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, state_indice: int) -> torch.Tensor:
         output = torch.empty_like(hidden_states)
         torch.ops.vllm.mome_attention_fused_op(
             hidden_states,
@@ -344,7 +348,8 @@ def mome_attention_fused_op(
     if num_decodes > 0:
         decode_hidden_states = hidden_states[:num_decodes].clone()
         decode_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor_d[:num_decodes])
+            mome_metadata.state_indices_tensor_d[:num_decodes]
+        )
         decode_output = causal_conv1d_update(
             decode_hidden_states,
             conv_state,
@@ -360,9 +365,11 @@ def mome_attention_fused_op(
         query_start_loc = mome_metadata.query_start_loc_p
         assert query_start_loc is not None
         prefill_hidden_states = hidden_states[
-            num_decode_tokens:num_decode_tokens + mome_metadata.num_prefill_tokens]
+            num_decode_tokens : num_decode_tokens + mome_metadata.num_prefill_tokens
+        ]
         prefill_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor_p[:num_prefills])
+            mome_metadata.state_indices_tensor_p[:num_prefills]
+        )
         prefill_output = causal_conv1d_fn(
             prefill_hidden_states.transpose(0, 1),
             conv_weight,
