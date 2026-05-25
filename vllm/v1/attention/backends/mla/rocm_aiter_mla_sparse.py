@@ -375,10 +375,9 @@ class ROCMAiterMLASparseMetadataBuilder(
             (1, 1), dtype=torch.int32, device=self.device
         )
 
-        # Allocated zero-filled so the shrink-tail logic in `build()` only has
-        # to re-zero regions it previously wrote. A torch.empty allocation
-        # here would leak garbage into CUDA-graph-captured kernels that read
-        # padded positions beyond the active token range.
+        # zeros (not empty): build() only re-zeros the shrink-tail, and
+        # CUDA-graph-captured kernels may read padded positions beyond the
+        # active token range.
         self.req_id_per_token_buffer = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -462,13 +461,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
 
-        # ----- Per-step memo state -----
-        # Tracks the trailing extent of `req_id_per_token_buffer` and
-        # `paged_kv_indices` that was overwritten on the previous call so we
-        # only re-zero the shrink-tail (saves up to 3 `aten::fill_` launches
-        # per decode step when the batch shape is stable).
-        # Also caches the bytes of the inputs that drive `get_mla_metadata_v1`
-        # so we can skip that kernel when the schedule would be identical.
+        # Per-step memo state for the shrink-tail fills and the
+        # get_mla_metadata_v1 cache in build().
         self._prev_req_extent: int = 0
         self._prev_indices_extent: int = 0
         self._prev_metadata_key: tuple | None = None
@@ -485,19 +479,10 @@ class ROCMAiterMLASparseMetadataBuilder(
         req_id_per_token = np.repeat(
             np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
         )
-        # Zero only the shrink-tail of buffers that may still contain stale
-        # values from a previous larger step. `paged_kv_indptr` is fully
-        # rewritten by the cumsum + scalar broadcast below (lines further
-        # down), so it never needs a pre-zero (index 0 was zeroed once in
-        # `__init__` via the surrounding `torch.zeros` allocator).
-        #
-        # Safety invariant: `paged_kv_indices[:new_indices_extent]` is NOT
-        # re-zeroed here (only the shrink-tail is). The downstream sparse
-        # attention path reads `paged_kv_indices` only within the ranges
-        # defined by `paged_kv_indptr` (cumsum-built below), and the indexer
-        # kernel writes exactly those ranges before the attention kernel
-        # consumes them, so stale entries beyond the active range from a
-        # previous step are never observed.
+        # Only re-zero the shrink-tail. paged_kv_indptr is fully rewritten
+        # by the cumsum below. paged_kv_indices entries past new_indices_extent
+        # are never read (the attention kernel only touches the ranges
+        # defined by paged_kv_indptr).
         new_req_extent = int(req_id_per_token.shape[0])
         new_indices_extent = num_tokens * self.topk_tokens
         if self._prev_req_extent > new_req_extent:
@@ -542,28 +527,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
         #
-        # The metadata output (work_meta_data / work_info_set / work_indptr /
-        # reduce_*) is a deterministic function of the inputs
-        # `(qo_indptr, paged_kv_indptr, paged_kv_last_page_len, num_heads,
-        # page_size, kv_granularity, max_seqlen_qo, uni_seqlen_qo, fast_mode)`.
-        # In this sparse-decode call:
-        #  * `qo_indptr = arange(num_tokens+1)` — depends only on num_tokens
-        #  * `paged_kv_last_page_len` is the persistent ones-buffer (constant)
-        #  * `paged_kv_indptr` is `cumsum(min(seq_lens, topk_tokens))` — only
-        #    changes while any seq_len < topk_tokens; once every request is
-        #    past topk_tokens (typical steady-state decode for long contexts)
-        #    the schedule is fully shape-determined.
-        # We fingerprint the inputs CPU-side and skip the kernel when the
-        # schedule would be identical to the previous step.
-        #
-        # `common_attn_metadata.seq_lens_cpu` is a property that lazily
-        # materializes from `self.seq_lens.to("cpu")` and is guaranteed
-        # non-None on access (see CommonAttentionMetadata in
-        # vllm/v1/attention/backend.py). It is therefore safe to index
-        # directly without a None branch -- a None branch would produce a
-        # cache key that ignores actual schedule changes (stale-metadata
-        # correctness bug) and would only be reachable if that property
-        # contract were later broken.
+        # The output is a deterministic function of (num_tokens, max_query_len,
+        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
+        # and skip the launch when nothing changed.
         num_reqs = common_attn_metadata.num_reqs
         clamped_seq_lens = np.minimum(
             common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
