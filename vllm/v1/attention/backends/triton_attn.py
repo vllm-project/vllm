@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
@@ -18,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import async_tensor_h2d, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -29,7 +30,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -38,6 +42,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVQuantMode,
     get_kv_quant_mode,
     kv_cache_uses_per_token_head_scales,
 )
@@ -117,10 +122,9 @@ class TritonAttentionMetadata:
         for r in range_lists:
             padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
             padded.append(padded_r)
-        # Create tensor with efficient H2D transfer
-        return torch.tensor(padded, dtype=torch.int32, device=device).view(
-            num_seqs, max_ranges, 2
-        )
+        # Build on pinned CPU memory so the H2D transfer is non-blocking.
+        padded = async_tensor_h2d(padded, dtype=torch.int32, device=device)
+        return padded.view(num_seqs, max_ranges, 2)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -138,9 +142,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
@@ -503,6 +508,21 @@ class TritonAttentionImpl(AttentionImpl):
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
 
+        # Enable tensor descriptors for Q/K/V load/store on platforms that
+        # benefit from HW 2D block reads (Intel Xe2/Xe3).  The dead branch
+        # is eliminated at Triton compile time, so other platforms see
+        # zero cost when TD is off.
+        #
+        # ``VLLM_TRITON_ATTN_USE_TD`` is tri-state:
+        #   - unset (None): auto-select (TD on for XPU, off elsewhere),
+        #   - ``1``: force TD on regardless of platform,
+        #   - ``0``: force TD off regardless of platform (useful for A/B).
+        td_override = envs.VLLM_TRITON_ATTN_USE_TD
+        if td_override is None:
+            self.use_td = current_platform.is_xpu()
+        else:
+            self.use_td = td_override
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -570,6 +590,7 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
+            q_descale = None
             k_descale = None
             v_descale = None
             k_scale_cache = self._k_scale_cache
@@ -577,16 +598,23 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                if key_cache.dtype != self.fp8_dtype:
-                    key_cache = key_cache.view(self.fp8_dtype)
-                    value_cache = value_cache.view(self.fp8_dtype)
-                assert layer._q_scale_float == 1.0, (
-                    "A non 1.0 q_scale is not currently supported."
-                )
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and key_cache.dtype != self.fp8_dtype
+            ):
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
+            )
+            q_descale = (
+                layer._q_scale
+                if (
+                    self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                    and query.dtype == self.fp8_dtype
+                )
+                else None
             )
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
@@ -623,7 +651,7 @@ class TritonAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
-            q_descale=None,  # Not supported
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             seq_threshold_3D=seq_threshold_3D,
@@ -638,6 +666,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
+            use_td=self.use_td,
         )
 
         return output

@@ -60,9 +60,19 @@ the failure?
 
 ## Logs Wrangling
 
-Download the full log file from Buildkite locally.
+Download a job's log (no Buildkite login required):
 
-Strip timestamps and colorization:
+[.buildkite/scripts/ci-fetch-log.sh](../../../.buildkite/scripts/ci-fetch-log.sh)
+
+```bash
+# Find the failing job. Each row's URL is .../builds/<N>#<job_uuid>:
+gh pr checks <PR> --repo vllm-project/vllm
+
+# Download + strip timestamps/ANSI in one step:
+.buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>#<job_uuid>"
+```
+
+To clean an already-downloaded log:
 
 [.buildkite/scripts/ci-clean-log.sh](../../../.buildkite/scripts/ci-clean-log.sh)
 

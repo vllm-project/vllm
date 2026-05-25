@@ -128,6 +128,19 @@ async def init_weight_transfer_engine(raw_request: Request):
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
+@router.post("/start_weight_update")
+async def start_weight_update(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    is_checkpoint_format = body.get("is_checkpoint_format", True)
+    await engine_client(raw_request).start_weight_update(
+        is_checkpoint_format=is_checkpoint_format
+    )
+    return JSONResponse(content={"message": "Weight update started"})
+
+
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
     try:
@@ -144,6 +157,12 @@ async def update_weights(raw_request: Request):
         request=WeightTransferUpdateRequest(update_info=update_info)
     )
     return JSONResponse(content={"message": "Weights updated"})
+
+
+@router.post("/finish_weight_update")
+async def finish_weight_update(raw_request: Request):
+    await engine_client(raw_request).finish_weight_update()
+    return JSONResponse(content={"message": "Weight update finished"})
 
 
 @router.get("/get_world_size")
