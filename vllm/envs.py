@@ -1916,9 +1916,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
-    "VLLM_WEIGHTS_ONLY": lambda: bool(
-        int(os.getenv("VLLM_WEIGHTS_ONLY", "1"))
-    ),
+    "VLLM_WEIGHTS_ONLY": lambda: os.getenv("VLLM_WEIGHTS_ONLY", "1").strip().lower() in ("1", "true", "yes"),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
