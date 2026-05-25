@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from abc import ABC
-from vllm.utils.counter import Counter
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
-from typing_extensions import TypeVar
 
 from tqdm import tqdm
+from typing_extensions import TypeVar
 
 from vllm import (
     PoolingParams,
@@ -28,6 +30,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine.llm_engine import LLMEngine
