@@ -486,15 +486,8 @@ class SpeculativeConfig:
             )
 
         if (
-            hf_config.model_type == "step3p7"
-            or hf_config.architectures[0] == "Step3p7ForConditionalGeneration"
-        ):
-            # Promote VLM's text_config so step3p5_mtp detection below fires correctly
-            hf_config = hf_config.text_config
-
-        if (
-            hf_config.model_type == "step3p5"
-            or hf_config.architectures[0] == "Step3p5ForCausalLM"
+            hf_config.model_type in ("step3p5", "step3p7")
+            or hf_config.architectures[0] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration")
         ):
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)

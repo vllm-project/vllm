@@ -165,6 +165,7 @@ class Step3p5MTPProposer(EagleProposer):
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Step3.5 MTP draft layers may span multiple KV cache groups."""
+        return
 
     def initialize_attn_backend(
         self,
