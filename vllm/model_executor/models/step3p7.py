@@ -23,6 +23,8 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
             "model.vision_model.": "vision_model.",
             "model.vit_large_projector.": "vit_large_projector.",
             "model.vit_large_projector": "vit_large_projector",
+            "model.language_model.": "language_model.model.",
+            "model.language_model": "language_model.model",
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "lm_head": "language_model.lm_head",
