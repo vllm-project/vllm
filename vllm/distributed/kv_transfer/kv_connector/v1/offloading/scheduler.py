@@ -184,6 +184,13 @@ class RequestOffloadState:
             )
 
 
+def _create_req_context(req: Request) -> ReqContext:
+    return ReqContext(
+        req_id=req.request_id,
+        kv_transfer_params=req.kv_transfer_params,
+    )
+
+
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -477,10 +484,7 @@ class OffloadingConnectorScheduler:
                 group_state.block_ids.clear()
         else:
             is_new_request = True
-            req_context = ReqContext(
-                req_id=request.request_id,
-                kv_transfer_params=request.kv_transfer_params,
-            )
+            req_context = _create_req_context(request)
             offloading_context = self.manager.get_request_offloading_context(
                 req_context
             )
@@ -876,12 +880,7 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status.get(request.request_id)
 
         req_context = (
-            req_status.req_context
-            if req_status
-            else ReqContext(
-                req_id=request.request_id,
-                kv_transfer_params=request.kv_transfer_params,
-            )
+            req_status.req_context if req_status else _create_req_context(request)
         )
         self.manager.request_finished(req_context)
 
