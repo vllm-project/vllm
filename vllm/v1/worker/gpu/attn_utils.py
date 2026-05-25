@@ -59,7 +59,7 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig):
     }
 
 
-def create_attn_groups(
+def init_attn_backend(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     device: torch.device,
@@ -346,11 +346,16 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
-
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
+    kv_cache_raw_tensors = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device
+    )
+    # NOTE: To avoid exhausting the generator, there are 2 times the generator is
+    # iterated in hybrid models, use list comprehension to flatten attn_groups,
+    # instead of using a generator expression.
+    flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
-        attn_groups=(group for groups in attn_groups for group in groups),
+        attn_groups=flattened_attn_groups,
         kv_cache_raw_tensors=kv_cache_raw_tensors,
         kernel_block_sizes=kernel_block_sizes,
         cache_dtype=cache_dtype,
