@@ -1201,14 +1201,7 @@ class MooncakeStoreWorker:
             if load_spec is None or not load_spec.can_load:
                 continue
 
-            token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-                load_spec.kvpool_cached_tokens == token_len - 1
-            ):
-                token_len = load_spec.kvpool_cached_tokens + 1
-            else:
-                token_len = load_spec.kvpool_cached_tokens
-            load_spec.token_len = token_len
+            load_spec.token_len = load_spec.kvpool_cached_tokens
 
             assert self.kv_recv_thread is not None
             self.kv_recv_thread.add_request(request)
