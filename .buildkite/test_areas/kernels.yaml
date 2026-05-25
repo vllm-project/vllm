@@ -193,7 +193,7 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
-- label: Kernels (MI355) # TBD
+- label: Kernels (MI355)
   key: kernels-mi355
   timeout_in_minutes: 180
   device: mi355_1
@@ -269,7 +269,7 @@ steps:
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
 
-- label: Kernels FP4 MoE Test (MI355) # TBD
+- label: Kernels FP4 MoE Test (MI355)
   key: kernels-fp4-moe-test-mi355
   timeout_in_minutes: 180
   device: mi355_1
