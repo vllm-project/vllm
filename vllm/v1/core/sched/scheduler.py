@@ -359,9 +359,9 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # Previous step's worker has run by now; promote its eager cache
-        # registrations from uncommitted to committed.
-        self.kv_cache_manager.commit_step()
+        # Open this step's eager-registration bucket; the matching
+        # commit_step runs at the top of update_from_output.
+        self.kv_cache_manager.begin_step()
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
@@ -938,6 +938,8 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        # Worker hasn't run for this step yet; evict zombies before free.
+        self.kv_cache_manager.rollback_uncommitted(request.request_id)
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -1288,6 +1290,10 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # Worker has confirmed writes for this step; commit its eager
+        # registrations before any finish-triggered free() runs below.
+        self.kv_cache_manager.commit_step()
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2087,7 +2093,9 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
             else:
                 # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
+                # There may be a local cache hit on retry. KV load failed,
+                # so evict any zombies before releasing.
+                self.kv_cache_manager.rollback_uncommitted(request.request_id)
                 self.kv_cache_manager.free(request)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)

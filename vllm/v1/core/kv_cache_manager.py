@@ -434,10 +434,13 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        # Roll back uncommitted eager cache entries (no-op for cross-step
-        # free; cleans up zombies for preempt/abort mid-step).
-        self.block_pool.rollback_uncommitted(request.request_id)
         self.coordinator.free(request.request_id)
+
+    def rollback_uncommitted(self, request_id: str) -> int:
+        """Evict pending eager cache entries for ``request_id``. Call before
+        ``free`` on preempt/abort paths to avoid zombie hash entries.
+        """
+        return self.block_pool.rollback_uncommitted(request_id)
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
@@ -572,8 +575,12 @@ class KVCacheManager:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
 
+    def begin_step(self) -> None:
+        """Open a new eager-registration bucket at the top of ``schedule()``."""
+        self.block_pool.begin_step()
+
     def commit_step(self) -> None:
-        """Promote eager cache registrations from the previous scheduler step
-        to committed. Called at step boundaries. Idempotent.
+        """Pop the oldest pending bucket at the top of ``update_from_output``.
+        Idempotent.
         """
         self.block_pool.commit_step()

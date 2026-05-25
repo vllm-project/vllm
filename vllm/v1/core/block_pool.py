@@ -181,10 +181,8 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
-        # Blocks whose hashes were eagerly registered this scheduler step but
-        # whose K/V bytes are not yet worker-confirmed. ``commit_step`` clears
-        # at step boundaries; ``rollback_uncommitted`` evicts on early free.
-        self._uncommitted: dict[str, list[KVCacheBlock]] = {}
+        # FIFO queue of eager-registration buckets, one per in-flight step.
+        self._uncommitted: list[dict[str, list[KVCacheBlock]]] = []
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -288,9 +286,11 @@ class BlockPool:
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
-            # Track for commit_step / rollback_uncommitted. Lazy list alloc.
+            # Track in the current bucket; lazy-create if no step open.
             if uncommitted_for_req is None:
-                uncommitted_for_req = self._uncommitted.setdefault(
+                if not self._uncommitted:
+                    self._uncommitted.append({})
+                uncommitted_for_req = self._uncommitted[-1].setdefault(
                     request.request_id, []
                 )
             uncommitted_for_req.append(blk)
@@ -446,20 +446,24 @@ class BlockPool:
         )
 
     def rollback_uncommitted(self, request_id: str) -> int:
-        """Evict ``request_id``'s eager-registered-but-not-yet-worker-confirmed
-        cache entries. Returns the number evicted. Idempotent.
+        """Evict ``request_id``'s uncommitted cache entries across all buckets.
+        Called by preempt/abort paths. Returns the number evicted.
         """
-        blocks = self._uncommitted.pop(request_id, None)
-        if not blocks:
-            return 0
-        return sum(self._maybe_evict_cached_block(b) for b in blocks)
+        evicted = 0
+        for bucket in self._uncommitted:
+            blocks = bucket.pop(request_id, None)
+            if blocks:
+                evicted += sum(self._maybe_evict_cached_block(b) for b in blocks)
+        return evicted
+
+    def begin_step(self) -> None:
+        """Open a new eager-registration bucket for the current step."""
+        self._uncommitted.append({})
 
     def commit_step(self) -> None:
-        """Promote all pending eager registrations to committed. Called at
-        scheduler step boundaries. Idempotent.
-        """
+        """Promote the oldest pending bucket to committed. Idempotent."""
         if self._uncommitted:
-            self._uncommitted.clear()
+            self._uncommitted.pop(0)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

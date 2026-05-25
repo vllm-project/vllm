@@ -269,9 +269,6 @@ def test_prefill(hash_fn):
     free_block_queue = manager.block_pool.free_block_queue
     assert free_block_queue.num_free_blocks == 5
 
-    # Model successful worker execution before freeing so the eager-rollback
-    # path does not evict the committed cache entries.
-    manager.commit_step()
     manager.free(req0)
     manager.free(req1)
 
@@ -403,7 +400,6 @@ def test_prefill_hybrid_model():
                 assert block.ref_cnt == 2
 
     block_hashes = req1.block_hashes
-    manager.commit_step()
     manager.free(req0)
     manager.free(req1)
 
@@ -583,7 +579,6 @@ def test_prefill_hybrid_model_eagle():
                 assert block.ref_cnt == 2
 
     block_hashes = req1.block_hashes
-    manager.commit_step()
     manager.free(req0)
     manager.free(req1)
 
@@ -1227,7 +1222,6 @@ def test_evict():
     # 10 - (6 + 3) == 1
     assert manager.block_pool.free_block_queue.num_free_blocks == 1
 
-    manager.commit_step()
     manager.free(req0)
     manager.free(req1)
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
@@ -1327,7 +1321,6 @@ def test_computed_blocks_not_evicted():
     assert blocks.blocks[0][0].block_id == 2
 
     # Free the blocks.
-    manager.commit_step()
     manager.free(req0)
     manager.free(req1)
 
@@ -1761,7 +1754,6 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     ]
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
     # | Req1-5(F)| ... |
-    manager.commit_step()
     manager.free(req1)
     assert {block.ref_cnt for block in block_part1[:3]} == {1}
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
@@ -2353,7 +2345,6 @@ def test_eagle_enabled_removes_last_block():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    manager.commit_step()
     manager.free(req)
 
     # New request with same tokens + Eagle enabled
@@ -2386,7 +2377,6 @@ def test_eagle_with_partial_blocks():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    manager.commit_step()
     manager.free(req)
 
     # New request with Eagle enabled
@@ -2431,7 +2421,6 @@ def test_eagle_with_sliding_window():
     # record the block hash of the first block in the request for later use
     block_hash_first_block = req.block_hashes[0]
     assert block_hash_first_block is not None
-    manager.commit_step()
     manager.free(req)
 
     # New request with Eagle enabled

@@ -1,7 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for the eager-cache-registration zombie problem.
+Tests for the eager-cache-registration zombie protection.
+
+``KVCacheManager.allocate_slots`` registers block hashes into the cache map
+before the worker writes the K/V bytes. If a request is preempted/aborted
+before that write happens, those hash entries would otherwise become zombies
+that future requests could cache-hit, reading uninitialized memory.
+
+BlockPool tracks each in-flight scheduler step's eager registrations in a
+FIFO bucket queue (``_uncommitted``). The scheduler hooks them at two points:
+
+- ``schedule()`` top calls ``begin_step()`` to push a new bucket.
+- ``update_from_output()`` top calls ``commit_step()`` to pop the oldest
+  bucket once the matching worker batch has been confirmed.
+
+The preempt and abort paths call ``rollback_uncommitted(req_id)`` *before*
+``free(req)`` to evict that request's pending entries from every bucket.
+The normal-finish path calls only ``free(req)`` (no rollback), so worker-
+written entries that survived ``commit_step`` stay in the cache map.
 """
 
 from __future__ import annotations
@@ -31,18 +48,26 @@ def _init_hash():
     init_none_hash(sha256)
 
 
+def _uncommitted_blocks_for(manager: KVCacheManager, req_id: str) -> list:
+    """Flatten all uncommitted buckets and return req_id's tracked blocks."""
+    out: list = []
+    for bucket in manager.block_pool._uncommitted:
+        out.extend(bucket.get(req_id, []))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Test 1: full-attention single-group case
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_on_preempt_before_worker_write():
+def test_rollback_uncommitted_evicts_preempt_zombies():
     """
-    Schedule req_A then ``free`` it immediately (simulating preempt/abort
-    before the worker has executed). The eager-registered hash entries
-    must be evicted from the cache map and the blocks' ``block_hash``
-    must be reset, so that a later req_B with the same prefix does NOT
-    cache-hit on never-written blocks.
+    Schedule req_A, then explicitly invoke the preempt cleanup
+    (``rollback_uncommitted`` + ``free``). The eager-registered hash entries
+    must be evicted from the cache map and the blocks' ``block_hash`` must be
+    reset, so that a later req_B with the same prefix does NOT cache-hit on
+    never-written blocks.
     """
     block_size = 16
     manager = KVCacheManager(
@@ -60,52 +85,39 @@ def test_rollback_on_preempt_before_worker_write():
     blocks_a = manager.allocate_slots(req_a, 32, 0, computed_a)
     assert blocks_a is not None
 
-    # After allocate_slots: 2 hashes registered eagerly and both tracked
-    # in ``_uncommitted[req_a]``.
+    # After allocate_slots: 2 hashes registered eagerly, both tracked in the
+    # current step's bucket.
     cache_map = manager.block_pool.cached_block_hash_to_block._cache
-    assert len(cache_map) == 2, (
-        "Sanity: 2 full blocks should each register a hash on allocate_slots"
-    )
-    assert len(manager.block_pool._uncommitted["a"]) == 2, (
-        "Sanity: both eager registrations should be tracked as uncommitted "
-        "until commit_step or rollback runs."
-    )
+    assert len(cache_map) == 2
+    assert len(_uncommitted_blocks_for(manager, "a")) == 2
 
     block_ids_a = blocks_a.get_block_ids()[0]
     eager_blocks = [manager.block_pool.blocks[bid] for bid in block_ids_a]
 
-    # --- Simulate preempt/abort BEFORE worker writes K/V bytes -----------
-    # In real life the worker would normally run between allocate_slots and
-    # the next free(). Here we go directly from allocate_slots → free
-    # *without* an intervening ``commit_step``, mirroring the race window
-    # where the request is preempted while the worker has not yet executed
-    # for this step.
+    # --- Simulate preempt before worker write ----------------------------
+    # The preempt/abort code paths invoke ``rollback_uncommitted`` *before*
+    # ``free`` so that any hash entries the worker hasn't yet backed with
+    # K/V bytes are evicted from the cache map.
+    manager.rollback_uncommitted(req_a.request_id)
     manager.free(req_a)
 
-    # --- Rollback evicts the uncommitted entries -------------------------
     assert len(cache_map) == 0, (
-        "free(uncommitted req) must evict both eager hash entries; got "
-        f"{len(cache_map)} left in cache map."
+        f"rollback must evict both eager hash entries, got {len(cache_map)}."
     )
-    assert "a" not in manager.block_pool._uncommitted, (
-        "_uncommitted[req_a] must be cleared by rollback."
-    )
+    assert _uncommitted_blocks_for(manager, "a") == []
     for blk in eager_blocks:
         assert blk.ref_cnt == 0, "free() did decrement ref_cnt"
         assert blk.block_hash is None, (
             "block.block_hash must be reset by rollback path."
         )
 
-    # --- req_B: same prefix → cache MISS ---------------------------------
-    # 48 tokens: first 32 would match req_a's now-rolled-back hashes, last
-    # 16 are new. Without zombies, this is a full cold miss.
+    # --- req_B: superset prefix → cache MISS -----------------------------
     req_b_tokens = common_token_ids + [99] * block_size
     req_b = make_request("b", req_b_tokens, block_size, sha256)
     _, num_computed_b = manager.get_computed_blocks(req_b)
-
     assert num_computed_b == 0, (
         f"req_b must not cache-hit on rolled-back entries; got "
-        f"{num_computed_b} cached tokens, expected 0."
+        f"{num_computed_b} cached tokens."
     )
 
 
@@ -114,14 +126,13 @@ def test_rollback_on_preempt_before_worker_write():
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_on_preempt_for_mamba_hybrid():
+def test_rollback_uncommitted_covers_mamba_hybrid_groups():
     """
     Same race as test 1, but for full-attention + 2 Mamba groups. Confirms
     the rollback path covers every manager that calls ``cache_blocks``
     during ``allocate_slots``, not just full-attention.
     """
     block_size = 16
-    # 1 full-attention group + 2 Mamba groups (slice 0/1).
     manager = KVCacheManager(
         make_kv_cache_config_hybrid_model(
             block_size,
@@ -142,49 +153,33 @@ def test_rollback_on_preempt_for_mamba_hybrid():
 
     cache_map = manager.block_pool.cached_block_hash_to_block._cache
     eager_entry_count = len(cache_map)
-    assert eager_entry_count > 0, (
-        "Sanity: hybrid manager registers at least some eager entries on alloc"
-    )
-    assert len(manager.block_pool._uncommitted["a"]) == eager_entry_count, (
-        "Sanity: every eager registration across all groups should be tracked "
-        "as uncommitted."
-    )
+    assert eager_entry_count > 0
+    assert len(_uncommitted_blocks_for(manager, "a")) == eager_entry_count
 
     # Preempt before worker write.
+    manager.rollback_uncommitted(req_a.request_id)
     manager.free(req_a)
 
     assert len(cache_map) == 0, (
-        f"Rollback must clear all groups' eager entries; got "
-        f"{len(cache_map)} left in the cache map."
+        f"rollback must clear all groups' eager entries; got {len(cache_map)}."
     )
-    assert "a" not in manager.block_pool._uncommitted
+    assert _uncommitted_blocks_for(manager, "a") == []
 
-    # Future request cache MISS — no entries left to match.
     req_b = make_request("b", common_token_ids, block_size, sha256)
     _, num_computed_b = manager.get_computed_blocks(req_b)
-    assert num_computed_b == 0, (
-        f"req_b must not cache-hit on rolled-back entries; got "
-        f"{num_computed_b} cached tokens, expected 0."
-    )
+    assert num_computed_b == 0
 
 
 # ---------------------------------------------------------------------------
-# Test 3: control case — successful step + free should keep cache (no bug)
+# Test 3: normal-finish path keeps cache entries (no rollback called)
 # ---------------------------------------------------------------------------
 
 
-def test_commit_step_keeps_cache_across_normal_free():
+def test_finish_path_free_alone_preserves_cache_entries():
     """
-    Control: when a request runs the worker to completion (modelled here
-    by an explicit ``commit_step()`` call) and is then freed normally,
-    the cache entries SHOULD remain. ``commit_step`` clears
-    ``_uncommitted`` so the subsequent ``free`` does not roll anything
-    back.
-
-    Without the ``commit_step`` call, ``free`` would correctly roll the
-    entries back — that's exactly the eager-rollback behavior exercised
-    by tests 1 and 2 above. This test pins down the other side: the
-    commit hook is what preserves cache hits across normal completion.
+    Control: the normal-finish path calls only ``free()`` (no rollback).
+    Cache entries the worker has confirmed must remain hittable for future
+    requests, with or without an intervening ``commit_step``.
     """
     block_size = 16
     manager = KVCacheManager(
@@ -198,27 +193,27 @@ def test_commit_step_keeps_cache_across_normal_free():
     req_a = make_request("a", common_token_ids, block_size, sha256)
     computed_a, _ = manager.get_computed_blocks(req_a)
     manager.allocate_slots(req_a, 32, 0, computed_a)
-    assert len(manager.block_pool._uncommitted["a"]) == 2
+    assert len(_uncommitted_blocks_for(manager, "a")) == 2
 
-    # Simulate successful worker execution by committing the step.
-    # Scheduler.schedule() calls this at the start of every step; here we
-    # call it manually to model "previous step's worker has confirmed".
-    manager.commit_step()
-    assert manager.block_pool._uncommitted == {}, (
-        "commit_step should clear all pending uncommitted registrations."
-    )
-
+    # ``free`` on its own must not touch the cache map. The pending bucket
+    # entries get cleaned up later when the matching commit_step runs (or
+    # stay tracked but harmless until then).
     manager.free(req_a)
 
     cache_map = manager.block_pool.cached_block_hash_to_block._cache
     assert len(cache_map) == 2, (
-        "Normal completion (commit_step + free) should leave the cache "
-        f"entries intact, got {len(cache_map)} entries."
+        "Normal free should leave the cache entries intact for future hits."
     )
+
+    # commit_step pops the oldest bucket. After that, no rollback can affect
+    # these entries even if rollback_uncommitted were called.
+    manager.commit_step()
+    assert _uncommitted_blocks_for(manager, "a") == []
+    assert len(cache_map) == 2
 
 
 # ---------------------------------------------------------------------------
-# Test 4: scheduler-level preemption test
+# Test 4: scheduler-level preemption test (real Scheduler.schedule() path)
 # ---------------------------------------------------------------------------
 
 
@@ -226,27 +221,22 @@ def test_scheduler_preempt_rolls_back_target_step_eager_cache():
     """
     Exercise the rollback through a real ``Scheduler.schedule()`` call.
 
-    Setup seeds two RUNNING chunked-prefill requests with one already-committed
-    block each. In the target schedule call, req_A is scheduled first and
-    eagerly caches two new full blocks. req_B then cannot allocate, so priority
-    preemption removes req_A from the same scheduler output before any worker
-    can see or execute that work.
+    Setup seeds two RUNNING chunked-prefill requests with one already-
+    committed block each. In the target schedule call, req_A is scheduled
+    first and eagerly caches two new full blocks. req_B then cannot
+    allocate, so priority preemption removes req_A from the same scheduler
+    output before any worker can see or execute that work.
 
-    The two target-step entries must be evicted on preempt; the prior-step
-    seeded block remains in the cache map (it was promoted to committed when
-    ``schedule`` called ``commit_step`` at the start of this step). A future
-    req_C with req_A's first two blocks as prefix therefore hits exactly the
-    one seeded block.
+    The preempt path (`_preempt_request`) calls ``rollback_uncommitted``
+    before ``free``, evicting the two target-step entries. The prior-step
+    seeded block remains in the cache map. A future req_C with req_A's
+    first two blocks as prefix therefore hits exactly the one seeded block.
     """
     block_size = 16
     # Resource budget is intentionally tight to force the exact race:
     #   max_num_batched_tokens=48 = 32 (req_a's 2 remaining blocks)
     #                             + 16 (req_b's 1 remaining block).
-    #     Both requests *want* to advance fully in the target step.
-    #   num_blocks=5 = 1 null
-    #                + 1 seeded committed block for req_a
-    #                + 1 seeded committed block for req_b
-    #                + 2 free blocks.
+    #   num_blocks=5 = 1 null + 2 seeded committed + 2 free.
     #     The 2 free blocks are exactly enough for req_a's target-step
     #     allocation (2 new full blocks); req_b then has 0 free → triggers
     #     preempt of the lowest-priority running request, which is req_a.
@@ -283,9 +273,9 @@ def test_scheduler_preempt_rolls_back_target_step_eager_cache():
     req_b.arrival_time = 2.0
 
     # Plant both requests directly in RUNNING with their first block already
-    # computed. This bypasses the normal admission path so we start the test
-    # mid-chunked-prefill (the only state where this race opens) without
-    # having to drive multiple scheduler steps to set it up.
+    # computed. This bypasses the normal admission path so we start the
+    # test mid-chunked-prefill (the only state where this race opens)
+    # without having to drive multiple scheduler steps to set it up.
     manager = scheduler.kv_cache_manager
     for req in (req_a, req_b):
         seeded_blocks = manager.allocate_slots(req, block_size)
@@ -295,10 +285,15 @@ def test_scheduler_preempt_rolls_back_target_step_eager_cache():
         scheduler.requests[req.request_id] = req
     scheduler.running = [req_a, req_b]
 
+    # The seed allocations registered hashes in the BlockPool's first lazy
+    # bucket. Production puts seed entries in a *prior* committed step, not
+    # the current step. Commit here to model that.
+    manager.commit_step()
+
     # Sanity: post-seeding state matches the budget plan above.
     cache_map = manager.block_pool.cached_block_hash_to_block._cache
     assert len(cache_map) == 2  # one committed hash per seeded request.
-    assert manager.block_pool.get_num_free_blocks() == 2  # exactly the race window.
+    assert manager.block_pool.get_num_free_blocks() == 2  # the race window.
 
     output = scheduler.schedule()
 
@@ -312,8 +307,8 @@ def test_scheduler_preempt_rolls_back_target_step_eager_cache():
 
     # A future request with A's first two blocks as a prefix should hit
     # exactly one block: the prior-step seeded block (committed via
-    # commit_step at the start of this scheduler step). The target-step
-    # eager entry for the would-be second block was rolled back on preempt.
+    # commit_step before this scheduler step). The target-step eager entry
+    # for the would-be second block was rolled back on preempt.
     req_c = make_request(
         "c",
         tokens_a[: 2 * block_size] + [99] * block_size,
