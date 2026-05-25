@@ -359,9 +359,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
             draft_confidence = draft_confidence.view(-1, self.num_speculative_tokens)
 
             if self.dynamic_verifying_method == "auto":
-                # Per-request adaptive threshold: mean confidence capped
-                # at 0.8 so high-confidence requests still truncate.
-                threshold = draft_confidence.mean(dim=-1, keepdim=True).clamp(max=0.8).expand_as(draft_confidence)
+                # Per-request adaptive threshold: thr_i = clamp(mean(conf_i), 0.1, 0.8).
+                # Kepping high-confidence tokens and filtering out low-confidence ones.
+                threshold = draft_confidence.mean(dim=-1, keepdim=True)\
+                                            .clamp(min=0.1, max=0.8).expand_as(draft_confidence)
             else:
                 threshold = self.dynamic_verifying_method
 
