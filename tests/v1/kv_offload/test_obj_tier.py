@@ -34,11 +34,20 @@ def _make_vllm_config():
     return SimpleNamespace(
         model_config=SimpleNamespace(model="test/model"),
         cache_config=SimpleNamespace(block_size=16, cache_dtype="float16"),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1, pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            rank=0,
+        ),
     )
 
 
-_VLLM_CONFIG = _make_vllm_config()
+_OFFLOADING_SPEC = SimpleNamespace(
+    vllm_config=_make_vllm_config(),
+    kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+)
 
 # ---------------------------------------------------------------------------
 # S3 credentials — skip entire module if not configured
@@ -71,8 +80,9 @@ _STORE_CONFIG = {
 try:
     _probe_view = memoryview(torch.zeros(1, 1, dtype=torch.float32).numpy())
     _probe = ObjectStoreSecondaryTierManager(
-        vllm_config=_VLLM_CONFIG,
+        offloading_spec=_OFFLOADING_SPEC,
         primary_kv_view=_probe_view,
+        tier_type="obj",
         store_config=_STORE_CONFIG,
     )
     del _probe, _probe_view
@@ -120,8 +130,9 @@ def make_tier(
 ) -> ObjectStoreSecondaryTierManager:
     view = memoryview(torch.zeros(num_blocks, _BLOCK_ELEMENTS, dtype=_DTYPE).numpy())
     return ObjectStoreSecondaryTierManager(
-        vllm_config=_VLLM_CONFIG,
+        offloading_spec=_OFFLOADING_SPEC,
         primary_kv_view=view,
+        tier_type="obj",
         store_config=_STORE_CONFIG,
         prefix=key_prefix,
         **kwargs,
@@ -135,8 +146,9 @@ def make_tier_with_view(
 ) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
     tensor = torch.zeros((num_total_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
     tier = ObjectStoreSecondaryTierManager(
-        vllm_config=_VLLM_CONFIG,
+        offloading_spec=_OFFLOADING_SPEC,
         primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="obj",
         store_config=_STORE_CONFIG,
         prefix=key_prefix,
         **kwargs,
@@ -318,8 +330,9 @@ class TestObjTierE2EWithPrimary:
         )
 
         obj_tier = ObjectStoreSecondaryTierManager(
-            vllm_config=_VLLM_CONFIG,
+            offloading_spec=_OFFLOADING_SPEC,
             primary_kv_view=memoryview(cpu_tensor.numpy()),
+            tier_type="obj",
             store_config=_STORE_CONFIG,
             prefix=prefix,
         )

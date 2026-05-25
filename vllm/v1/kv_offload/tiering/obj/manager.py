@@ -16,7 +16,7 @@ from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTie
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
 
@@ -39,13 +39,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
+        tier_type: str,
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
     ):
-        super().__init__(vllm_config, primary_kv_view)
+        super().__init__(offloading_spec, primary_kv_view, tier_type)
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
@@ -57,7 +58,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._base_addr: int = 0
         self._stride: int = 0
         root_dir = f"{prefix}/" if prefix else ""
-        self._file_mapper = FileMapper(root_dir, vllm_config)
+        self._file_mapper = FileMapper.from_offloading_spec(root_dir, offloading_spec)
         self._next_obj_dev_id: int = 0  # unique devId for each OBJ registration
 
         self._probe_connectivity()
