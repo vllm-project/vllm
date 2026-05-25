@@ -578,6 +578,19 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif (
+            moe_config.swiglu_limit is not None
+            and moe_config.swiglu_limit > 0
+            and not cls.supports_swiglu_clamp_limit(moe_config.activation)
+        ):
+            return False, _make_reason("SwiGLU clamp limit")
+        elif (
+            moe_config.swiglu_limit is not None
+            and moe_config.swiglu_limit > 0
+            and moe_config.is_lora_enabled
+            and not cls.supports_swiglu_clamp_limit_with_lora(moe_config.activation)
+        ):
+            return False, _make_reason("SwiGLU clamp limit with LoRA")
         return True, None
 
     @staticmethod
@@ -757,6 +770,31 @@ class FusedMoEExperts(ABC):
         activation scales.
         """
         return False
+
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: "MoEActivation") -> bool:
+        """Return True if this expert impl threads `gemm1_clamp_limit`
+        through the SwiGLU activation path for the given `activation`.
+
+        Different SwiGLU variants (SILU, SWIGLUOAI, SWIGLUSTEP) often
+        take different code paths in `apply()` / `activation()`. A backend
+        that threads clamp in the SILU branch but skips it in the
+        SWIGLUOAI branch should declare True only for SILU.
+
+        Backends declaring False for the model's activation will be
+        skipped by the MoE oracle when the model config requires a
+        `swiglu_limit > 0`.
+        """
+        return False
+
+    @staticmethod
+    def supports_swiglu_clamp_limit_with_lora(activation: "MoEActivation") -> bool:
+        """Return True if this expert impl threads clamp through the
+        SwiGLU activation even when LoRA is enabled, for the given
+        `activation`. See `supports_swiglu_clamp_limit` for the
+        per-activation rationale.
+        """
+        return True
 
 
 class FusedMoEExpertsModular(FusedMoEExperts):

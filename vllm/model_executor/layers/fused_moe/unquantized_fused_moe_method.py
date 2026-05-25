@@ -273,13 +273,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        swiglu_limit = self.moe.swiglu_limit
+        # Only forward swiglu_limit when strictly > 0, matching the oracle
+        # filter in modular_kernel.py::is_supported_config and the kernel-side
+        # guard in utils.py:447 (`if swiglu_limit > 0` in swiglu_limit_func).
+        # Treating 0.0 as no-clamp avoids forwarding a value the oracle would
+        # skip but the kernel would silently honor as a degenerate clamp.
+        has_clamp = swiglu_limit is not None and swiglu_limit > 0
         if self.moe.has_bias:
-            return biased_moe_quant_config(
+            quant_config = biased_moe_quant_config(
                 layer.w13_bias,
                 layer.w2_bias,
             )
-        else:
-            return FUSED_MOE_UNQUANTIZED_CONFIG
+            if has_clamp:
+                quant_config.gemm1_clamp_limit = swiglu_limit
+            return quant_config
+        if has_clamp:
+            return FusedMoEQuantConfig.make(gemm1_clamp_limit=swiglu_limit)
+        return FUSED_MOE_UNQUANTIZED_CONFIG
 
     def apply(
         self,

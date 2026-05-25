@@ -186,6 +186,18 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     """
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` (a per-expert tensor
+        pre-folded by `process_weights_after_loading` so the TRTLLM
+        kernel receives the raw-GEMM-space clamp) to
+        `flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe` via the
+        `gemm1_clamp_limit` arg. `_supports_activation` restricts this
+        backend to SILU/RELU2_NO_MUL/GELU, so only SILU reaches a SwiGLU
+        clamp path.
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """The modular implementation supports all parallel configs."""
         return True
@@ -328,6 +340,18 @@ class TrtLlmNvFp4ExpertsMonolithic(
     """
     Monolithic version of the kernel (router + experts).
     """
+
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` (a per-expert tensor
+        pre-folded by `process_weights_after_loading` so the TRTLLM
+        kernel receives the raw-GEMM-space clamp) to
+        `flashinfer.fused_moe.trtllm_fp4_block_scale_moe` via the
+        `gemm1_clamp_limit` arg (see the call site in `apply`).
+        `_supports_activation` restricts this backend to SILU/
+        RELU2_NO_MUL/GELU, so only SILU reaches a SwiGLU clamp path.
+        """
+        return activation == MoEActivation.SILU
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

@@ -166,6 +166,18 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`HummingExpertsBase.apply_activation` runs `swiglu_limit_func`
+        with `self.quant_config.gemm1_clamp_limit` only on the SILU
+        branch. Other SwiGLU variants (SWIGLUOAI, SWIGLUSTEP) reach the
+        base activation path which does not consume a clamp. The three
+        concrete subclasses (Indexed, GroupedContiguous, Batched) all
+        reuse this callback, so the per-activation contract is the same
+        regardless of gemm type.
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         # Humming uses apply_moe_activation() callback for activation,
         # so any activation supported there can be used here.
@@ -419,6 +431,17 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
+        # First consult the base class filter (covers the SwiGLU clamp
+        # filter introduced by this PR plus LoRA/quant_scheme/device
+        # checks). Without this, humming's bespoke override silently
+        # bypasses every base-level support gate.
+        is_supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported:
+            return False, reason
+
+        # Then apply humming-specific format/gemm-type checks.
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             supported = cls.activation_format() == activation_format
             reason = "activation_format mismatched"
