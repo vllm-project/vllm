@@ -16,7 +16,7 @@ from .granite_speech import (
     GraniteSpeechMultiModalProcessor,
 )
 
-_ISO639_1_SUPPORTED_LANGS = {
+ISO639_1_SUPPORTED_LANGS = {
     "en": "English",
     "fr": "French",
     "de": "German",
@@ -28,6 +28,10 @@ _ISO639_1_SUPPORTED_LANGS = {
 class GraniteSpeechPlusCTCEncoder(GraniteSpeechCTCEncoder):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.input_linear(hidden_states)
+        # cat_hidden_layers selects non-negative layer indices (0 = encoder
+        # input, N = output of layer N) whose hidden states are concatenated
+        # along the feature dim *in addition to* the final hidden states,
+        # which are always appended last.
         cat_layers = set(self.config.cat_hidden_layers or [])
         exported_hidden_states = []
 
@@ -37,7 +41,9 @@ class GraniteSpeechPlusCTCEncoder(GraniteSpeechCTCEncoder):
         for idx, layer in enumerate(self.layers, start=1):
             hidden_states = layer(hidden_states, attention_dists=self.attention_dists)
 
-            if idx in cat_layers:
+            # Skip the final layer here since its output is always appended
+            # below; capturing it twice would double-append.
+            if idx in cat_layers and idx != self.num_layers:
                 exported_hidden_states.append(hidden_states)
 
             if idx == self.num_layers // 2:
@@ -58,7 +64,7 @@ class GraniteSpeechPlusCTCEncoder(GraniteSpeechCTCEncoder):
     dummy_inputs=GraniteSpeechDummyInputsBuilder,
 )
 class GraniteSpeechPlusForConditionalGeneration(GraniteSpeechForConditionalGeneration):
-    supported_languages = _ISO639_1_SUPPORTED_LANGS
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     def _build_encoder(
         self,
