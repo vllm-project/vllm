@@ -7,6 +7,7 @@ import logging
 import os
 import tempfile
 import uuid
+import warnings
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
@@ -49,6 +50,17 @@ def _default_dbo_comm_sms() -> int:
 
 def _tpu_pathways_default() -> bool:
     return "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
+
+
+def _warn_deprecated_env(name: str, removal_version: str, replacement: str) -> None:
+    """Emit a FutureWarning if an env var is explicitly set."""
+    if _env_set(name):
+        warnings.warn(
+            f"{name} is deprecated and will be removed in "
+            f"{removal_version}. {replacement}",
+            FutureWarning,
+            stacklevel=2,
+        )
 
 
 def _env_set(name: str) -> bool:
@@ -122,6 +134,12 @@ class BuildSettings(BaseSettings):
         description=(
             "Use precompiled binaries (.so) instead of building from source. "
             "Implicitly enabled when VLLM_PRECOMPILED_WHEEL_LOCATION is set."
+        ),
+    )
+    use_precompiled_rust: bool = Field(
+        default=False,
+        description=(
+            "If set, vllm will use the precompiled Rust frontend binary (vllm-rs)."
         ),
     )
     skip_precompiled_version_suffix: bool = Field(
@@ -222,7 +240,13 @@ class PathSettings(BaseSettings):
     )
     tuned_config_folder: str | None = Field(
         default=None,
-        description="Allows vllm to find tuned config under a customized folder.",
+        description=(
+            "User override folder for tuned Triton-kernel configs. Shared by "
+            "MoE, Mamba SSU, and LoRA. Filenames are distinct so one folder "
+            "can hold all. Each component first checks this folder, then the "
+            "configs shipped with vLLM (if any). If no JSON matches, it uses "
+            "a hard-coded heuristic."
+        ),
     )
     model_redirect_path: str | None = Field(
         default=None,
@@ -435,6 +459,23 @@ class ServerSettings(BaseSettings):
             "`/reset_prefix_cache`."
         ),
     )
+    use_rust_frontend: bool = Field(
+        default=False,
+        description=(
+            "If set, use the Rust frontend binary instead of the Python API "
+            "server process(es)."
+        ),
+    )
+    rust_frontend_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to the Rust frontend binary. Defaults to None unless "
+            "VLLM_USE_RUST_FRONTEND=1, in which case the value is resolved "
+            'from the env var (default "auto", which discovers the binary '
+            "installed with the vllm package). Only used when "
+            "VLLM_USE_RUST_FRONTEND=1."
+        ),
+    )
     allow_long_max_model_len: bool = Field(
         default=False,
         description=(
@@ -542,6 +583,43 @@ class ServerSettings(BaseSettings):
             "processes via zmq."
         ),
     )
+
+    @model_validator(mode="after")
+    def _resolve_rust_frontend_path(self) -> "ServerSettings":
+        # Mirrors the legacy `_resolve_rust_frontend_path` behavior: the
+        # path is only meaningful when the Rust frontend is enabled. When
+        # disabled, ignore (and warn about) any explicitly-set path. When
+        # enabled, an unset path or one of "auto"/"1"/"true" resolves to
+        # the bundled `vllm-rs` binary.
+        raw = self.rust_frontend_path
+        if not self.use_rust_frontend:
+            if _env_set("VLLM_RUST_FRONTEND_PATH"):
+                logger.warning(
+                    "VLLM_RUST_FRONTEND_PATH is set but VLLM_USE_RUST_FRONTEND "
+                    "is not enabled. The Rust frontend will not be used. "
+                    "Set VLLM_USE_RUST_FRONTEND=1 to enable it."
+                )
+            self.rust_frontend_path = None
+            return self
+
+        # Rust frontend enabled: if path env var is unset, default to "auto".
+        if raw is None:
+            raw = "auto"
+
+        if raw.lower() in ("auto", "1", "true"):
+            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            candidate = os.path.join(pkg_dir, "vllm-rs")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                self.rust_frontend_path = candidate
+                return self
+
+            raise FileNotFoundError(
+                "VLLM_RUST_FRONTEND_PATH=auto but the vllm-rs binary was "
+                f"not found at {candidate}. "
+                "Build with setuptools-rust or set the path explicitly."
+            )
+        self.rust_frontend_path = raw
+        return self
 
     @field_validator("port", mode="before")
     @classmethod
@@ -1339,6 +1417,24 @@ class RocmSettings(BaseSettings):
             "communication."
         ),
     )
+    rocm_quick_reduce_min_size_bytes_mb: int | None = Field(
+        default=None,
+        description=(
+            "Custom quick allreduce kernel for MI3* cards. Controls the "
+            "minimum allowed number of data bytes (MB) required to use "
+            "custom quick allreduce communication. If unset, use the "
+            "built-in threshold table."
+        ),
+    )
+    rocm_quick_reduce_quantization_min_size_kb: int | None = Field(
+        default=None,
+        description=(
+            "Controls the minimum tensor size (KB, where 1 KB = 1024 bytes) "
+            "required to use the configured QuickReduce codec. Smaller "
+            "tensors use FP QuickReduce. This does not affect QuickReduce "
+            "eligibility."
+        ),
+    )
     rocm_fp8_mfma_page_attn: bool = Field(
         default=False,
         description="If set, use the fp8 mfma in rocm paged attention.",
@@ -1514,6 +1610,38 @@ class FlashInferSettings(BaseSettings):
             return json.loads(v)
         return v
 
+    @model_validator(mode="after")
+    def _warn_deprecated_moe_backend_envs(self) -> "FlashInferSettings":
+        moe_backend_msg = (
+            "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass)."
+        )
+        for var in (
+            "VLLM_USE_FLASHINFER_MOE_FP16",
+            "VLLM_USE_FLASHINFER_MOE_FP8",
+            "VLLM_USE_FLASHINFER_MOE_FP4",
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+        ):
+            _warn_deprecated_env(var, "v0.23", moe_backend_msg)
+        _warn_deprecated_env(
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+            "v0.23",
+            "Use --moe-backend flashinfer_trtllm with "
+            "--quantization_config.moe.activation mxfp8.",
+        )
+        _warn_deprecated_env(
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
+            "v0.23",
+            "Use --moe-backend flashinfer_cutlass with "
+            "--quantization_config.moe.activation mxfp8.",
+        )
+        _warn_deprecated_env(
+            "VLLM_FLASHINFER_MOE_BACKEND",
+            "v0.23",
+            "Use --moe-backend flashinfer_trtllm, flashinfer_cutlass, or "
+            "flashinfer_cutedsl.",
+        )
+        return self
+
 
 class QuantSettings(BaseSettings):
     model_config = _SUB_CONFIG
@@ -1667,6 +1795,7 @@ class QuantSettings(BaseSettings):
     )
     nvfp4_gemm_backend: (
         Literal[
+            "flashinfer-b12x",
             "flashinfer-cudnn",
             "flashinfer-trtllm",
             "flashinfer-cutlass",
@@ -1678,12 +1807,13 @@ class QuantSettings(BaseSettings):
     ) = Field(
         default=None,
         description=(
-            'Supported options: "flashinfer-cudnn" -- use flashinfer cudnn '
-            'GEMM backend; "flashinfer-trtllm" -- use flashinfer trtllm '
-            'GEMM backend; "flashinfer-cutlass" -- use flashinfer cutlass '
-            'GEMM backend; "cutlass" -- use cutlass GEMM backend; "marlin" '
-            "-- use marlin GEMM backend (for GPUs without native FP4 "
-            'support); "emulation" -- use BF16/FP16 GEMM, dequantizing '
+            'Supported options: "flashinfer-b12x" -- use flashinfer b12x '
+            'GEMM backend (SM120/121); "flashinfer-cudnn" -- use flashinfer '
+            'cudnn GEMM backend; "flashinfer-trtllm" -- use flashinfer '
+            'trtllm GEMM backend; "flashinfer-cutlass" -- use flashinfer '
+            'cutlass GEMM backend; "cutlass" -- use cutlass GEMM backend; '
+            '"marlin" -- use marlin GEMM backend (for GPUs without native '
+            'FP4 support); "emulation" -- use BF16/FP16 GEMM, dequantizing '
             "weights and running QDQ on activations (only meant for "
             "research purposes to run on devices where NVFP4 GEMM kernels "
             "are not available); <none> -- automatically pick an available "
@@ -1850,6 +1980,30 @@ class QuantSettings(BaseSettings):
             return {"1": True, "0": False}.get(v.strip())
         return v
 
+    @model_validator(mode="after")
+    def _warn_deprecated_backend_envs(self) -> "QuantSettings":
+        _warn_deprecated_env(
+            "VLLM_MXFP4_USE_MARLIN",
+            "v0.23",
+            "Use --moe-backend marlin or --linear-backend marlin.",
+        )
+        _warn_deprecated_env(
+            "VLLM_USE_NVFP4_CT_EMULATIONS",
+            "v0.23",
+            "Use --linear-backend emulation.",
+        )
+        _warn_deprecated_env(
+            "VLLM_NVFP4_GEMM_BACKEND",
+            "v0.23",
+            "Use --linear-backend.",
+        )
+        _warn_deprecated_env(
+            "VLLM_USE_FBGEMM",
+            "v0.23",
+            "Use --linear-backend fbgemm.",
+        )
+        return self
+
 
 class ConnectorSettings(BaseSettings):
     model_config = _SUB_CONFIG
@@ -1902,30 +2056,6 @@ class ConnectorSettings(BaseSettings):
         alias="MOONCAKE_REQUESTER_LOCAL_HOSTNAME",
         description=(
             "Override the hostname the rank registers as a Mooncake requester."
-        ),
-    )
-    moriio_connector_read_mode: bool = Field(
-        default=False,
-        description="Controls the read mode for the Mori-IO connector.",
-    )
-    moriio_qp_per_transfer: int = Field(
-        default=1,
-        description=(
-            "Controls the QP (Queue Pair) per transfer configuration for "
-            "the Mori-IO connector."
-        ),
-    )
-    moriio_post_batch_size: int = Field(
-        default=-1,
-        description=(
-            "Controls the post-processing batch size for the Mori-IO connector."
-        ),
-    )
-    moriio_num_workers: int = Field(
-        default=1,
-        description=(
-            "Controls the number of workers for Mori operations for the "
-            "Mori-IO connector."
         ),
     )
     kv_events_use_int_block_hashes: bool = Field(
@@ -2071,6 +2201,17 @@ class UsageSettings(BaseSettings):
             "Face Hub. Note that the value is true or false, not numbers."
         ),
     )
+    use_fastokens: bool = Field(
+        default=False,
+        description=(
+            "If true, replace the Rust BPE backend that powers HF fast "
+            "tokenizers with the `fastokens` "
+            "(https://github.com/crusoecloud/fastokens) shim. Applies to any "
+            "tokenizer mode that loads an HF fast tokenizer (`hf`, "
+            "`deepseek_v32`, `deepseek_v4`, `qwen_vl`, ...). The `fastokens` "
+            "Python package must be installed."
+        ),
+    )
     s3_access_key_id: str | None = Field(
         default=None,
         alias="S3_ACCESS_KEY_ID",
@@ -2138,7 +2279,11 @@ class UsageSettings(BaseSettings):
     )
     lora_enable_dual_stream: bool = Field(
         default=False,
-        description="Whether to enable dual cuda streams for LoRA computation.",
+        description=(
+            "Whether to enable dual cuda streams for LoRA computation (used "
+            "by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to overlap "
+            "the base layer compute with the LoRA fast path)."
+        ),
     )
     enable_fla_packed_recurrent_decode: bool = Field(
         default=True,
@@ -2432,6 +2577,10 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
+        "VLLM_USE_RUST_FRONTEND",
+        "VLLM_RUST_FRONTEND_PATH",
+        "VLLM_USE_PRECOMPILED_RUST",
+        "VLLM_USE_FASTOKENS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
