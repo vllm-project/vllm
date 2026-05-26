@@ -7,9 +7,6 @@ import math
 from typing import TYPE_CHECKING, Any
 
 import torch
-from humming import dtypes
-from humming.config import GemmType as HummingGemmType
-from humming.layer import HummingLayerMeta, HummingMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -41,6 +38,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if has_humming():
+    from humming import dtypes
+    from humming.config import GemmType as HummingGemmType
+    from humming.layer import HummingLayerMeta, HummingMethod
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -127,7 +129,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return math.ceil(global_valid_shape_m * num_experts / global_num_experts)
 
     @staticmethod
-    def humming_gemm_type() -> HummingGemmType:
+    def humming_gemm_type() -> "HummingGemmType":
         raise NotImplementedError
 
     @classmethod
@@ -193,11 +195,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # Why?
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        return True
 
     def moe_problem_size(
         self,
@@ -434,7 +432,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def humming_gemm_type() -> HummingGemmType:
+    def humming_gemm_type() -> "HummingGemmType":
         return HummingGemmType.INDEXED
 
     def prepare_humming_moe_kwargs(
@@ -577,7 +575,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def humming_gemm_type() -> HummingGemmType:
+    def humming_gemm_type() -> "HummingGemmType":
         return HummingGemmType.GROUPED_CONTIGUOUS
 
     def apply(
@@ -691,7 +689,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod
-    def humming_gemm_type() -> HummingGemmType:
+    def humming_gemm_type() -> "HummingGemmType":
         return HummingGemmType.GROUPED_MASKED
 
     def apply(

@@ -16,20 +16,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
+from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+    BatchedHummingGroupedExperts,
+    HummingGroupedExperts,
+    HummingIndexedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
 )
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
-
-if has_humming() and current_platform.is_cuda():
-    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-        BatchedHummingGroupedExperts,
-        HummingGroupedExperts,
-        HummingIndexedExperts,
-    )
-
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -61,14 +57,13 @@ def _get_priority_backends(
 def backend_to_kernel_cls(
     backend: HummingBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
-    backend_map: dict[HummingBackend, list[type[mk.FusedMoEExperts]]] = {
-        HummingBackend.HUMMING: [
+    if backend == HummingBackend.HUMMING:
+        return [
             BatchedHummingGroupedExperts,
             HummingGroupedExperts,
             HummingIndexedExperts,
-        ],
-    }
-    return backend_map[backend]
+        ]
+    return []
 
 
 def map_humming_backend(runner_backend: MoEBackend) -> HummingBackend:
