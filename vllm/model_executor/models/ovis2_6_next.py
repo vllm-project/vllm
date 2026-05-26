@@ -31,7 +31,12 @@ visual token embedding — so :class:`AutoWeightsLoader` (inherited via
 ``Ovis2_5.load_weights``) maps them to the right submodules without
 modification.
 
-Tested with ``AIDC-AI/Ovis2.6-80B-A3B``.
+Tested with ``AIDC-AI/Ovis2.6-80B-A3B``::
+
+    vllm serve AIDC-AI/Ovis2.6-80B-A3B \
+        --trust-remote-code \
+        --tensor-parallel-size 4 \
+        --enforce-eager
 """
 
 from typing import TYPE_CHECKING
