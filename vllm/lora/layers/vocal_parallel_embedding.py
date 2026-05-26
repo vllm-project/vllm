@@ -46,6 +46,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.embeddings_slice = None
             self.embeddings_weights = None
 
+        lora_device = self.base_layer.weight.device
+        # when self.device == "tpu", it will report below error when doing transpose in set_lora
+        # AssertionError: torchax Tensors can only do math within the torchax environment.
+        # So create the stacked lora weight on "cpu"
+        if current_platform.is_tpu():
+            lora_device = "cpu"
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -53,7 +59,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=lora_device,
         )
         self.lora_b_stacked = torch.zeros(
             (
@@ -63,7 +69,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=lora_device,
         )
         self.lora_a_stacked_2d = self.lora_a_stacked.view(
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],

@@ -7,9 +7,11 @@ from enum import Enum
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.utils.math_utils import next_power_of_2
 
+logger = init_logger(__name__)
 
 class LoRAMappingType(Enum):
     LANGUAGE = 1
@@ -32,26 +34,40 @@ class LoRAMapping:
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
     """Returns the device for where to place the LoRA tensors."""
-    # unquantizedLinear
-    if hasattr(base_layer, "weight"):
-        return base_layer.weight.device
-    # Compressed Tensor
-    elif hasattr(base_layer, "weight_packed"):
-        return base_layer.weight_packed.device
-    # GPTQ/AWQ
-    elif hasattr(base_layer, "qweight"):
-        return base_layer.qweight.device
-    # MoE layer
-    elif hasattr(base_layer, "w2_weight"):
-        return base_layer.w2_weight.device
-    # MoE Compressed Tensor
-    elif hasattr(base_layer, "w2_weight_packed"):
-        return base_layer.w2_weight_packed.device
-    # MoE GPTQ/AWQ/GGUF
-    elif hasattr(base_layer, "w2_qweight"):
-        return base_layer.w2_qweight.device
-    else:
-        raise ValueError(f"Unsupported base layer: {base_layer}")
+
+    # In case some module wrap the Tensor in ParameterList
+    def get_dev(obj):
+        dev = None
+        if obj is not None:
+            if hasattr(obj, "device"):
+                dev = obj.device
+                logger.debug(f"get_dev type of obj = {type(obj)} dev = {dev}")
+            elif isinstance(obj, (nn.ParameterList, list, tuple)) and len(obj) > 0:
+                if hasattr(obj[0], "device"):
+                    dev = obj[0].device
+                    logger.debug(f"get_dev type of obj[0] = {type(obj[0])} dev = {dev}")
+        logger.debug(f"get_dev final return dev = {dev}")
+        return dev
+
+    attr_names = ["weight", # unquantizedLinear
+                  "weight_packed", # Compressed Tensor
+                  "qweight", # GPTQ/AWQ
+                  "w2_weight", # MoE layer
+                  "w2_weight_packed", # MoE Compressed Tensor
+                  "w2_qweight", # MoE GPTQ/AWQ/GGUF
+                 ]
+    for attr in attr_names:
+        logger.debug(f"lora base_layer = {base_layer} attr_name = {attr}")
+        target = getattr(base_layer, attr, None)
+        dev = get_dev(target)
+        if dev is not None:
+            return dev
+
+    try:
+        return next(base_layer.parameters()).device
+    except StopIteration:
+        logger.debug("lora base_layer = {base_layer} in except StopInteration return cpu")
+        return torch.device("cpu")
 
 
 def _not_fully_sharded_can_replace(can_replace):

@@ -90,6 +90,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         # TODO: Verify if this condition can be further relaxed
         if self.base_layer.vocab_size > 258048:
             raise ValueError("When using LoRA, vocab size must be <= 258048")
+        lora_device = self.device
+        # when self.device == "tpu", it will report below error when doing transpose in set_lora
+        # AssertionError: torchax Tensors can only do math within the torchax environment.
+        # So create the stacked lora weight on "cpu"
+        if current_platform.is_tpu():
+            lora_device = "cpu"
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -98,7 +104,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 self.hidden_size,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.device,
+            device=lora_device,
         )
         self.lora_b_stacked = torch.zeros(
             (
@@ -108,7 +114,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.device,
+            device=lora_device,
         )
 
         if self.sharded_to_full_mapping is not None:
