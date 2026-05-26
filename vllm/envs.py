@@ -262,6 +262,7 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_MAMBA_ALIGN_GRANULAR_PREFILL: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1896,6 +1897,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to control the v2 model runner. If unset, use config defaults.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+    ),
+    # In Mamba cache 'align' mode, materialize and cache the Mamba state at
+    # every aligned block boundary by capping each prefill step to one aligned
+    # block. This enables partial prefix-cache hits for requests that share an
+    # early prefix but diverge later (e.g. incremental multimodal / agentic
+    # multi-turn), at the cost of prefill throughput (one block per step).
+    # Without it, a single large prefill chunk only caches the chunk's final
+    # boundary, so such requests miss the shared prefix entirely (see #43587).
+    "VLLM_MAMBA_ALIGN_GRANULAR_PREFILL": lambda: (
+        os.getenv("VLLM_MAMBA_ALIGN_GRANULAR_PREFILL", "0").strip().lower()
+        in ("1", "true")
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model

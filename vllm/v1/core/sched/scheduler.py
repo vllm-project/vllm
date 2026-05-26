@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -324,6 +325,21 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+            # In 'align' mode the Mamba state is only materialized (and thus
+            # cached) at the final aligned boundary of each prefill chunk; the
+            # intermediate boundaries within a chunk are stored in null blocks
+            # and never cached. A single large prefill chunk therefore caches
+            # only one boundary, so a later request that shares an early prefix
+            # but diverges before that boundary gets zero Mamba hits (#43587).
+            # Capping each prefill step to one aligned block materializes and
+            # caches every boundary's state, enabling partial prefix-cache hits
+            # for incremental workloads, at the cost of prefill throughput.
+            if (
+                envs.VLLM_MAMBA_ALIGN_GRANULAR_PREFILL
+                and num_computed_tokens < last_cache_position
+                and num_new_tokens > block_size
+            ):
+                num_new_tokens = block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
