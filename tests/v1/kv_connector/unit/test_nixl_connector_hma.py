@@ -138,10 +138,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     """
     from unittest.mock import MagicMock
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
-
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
@@ -181,10 +177,10 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
-    mock_plan = MagicMock(spec=TPMapping)
-    mock_plan.all_source_ranks = ()
-    mock_plan.tp_mappings = ()
-    worker.tp_mappings = {remote_engine_id: mock_plan}
+    # Empty tp_mappings: no source ranks so no reads are issued.
+    num_groups = len(resolved_types)
+    worker.tp_mappings = {remote_engine_id: tuple({} for _ in range(num_groups))}
+    worker.source_ranks = {remote_engine_id: ()}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -347,9 +343,6 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         mamba_enabled=True,
     )
     worker._has_mamba = True
-    worker._group_spec_types = tuple(
-        type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
-    )
 
     local_block_ids = (local_fa_blocks, ssm_blocks)
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
