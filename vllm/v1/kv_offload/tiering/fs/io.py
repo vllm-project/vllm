@@ -46,11 +46,14 @@ def _file_write(tmp_path: str, view_slice: memoryview, with_odirect: bool) -> No
             flags,
             0o644,
         )
-        written = os.write(fd, view_slice)
-        if written < len(view_slice):
-            raise OSError(
-                f"Short write: expected {len(view_slice)} bytes, wrote {written}"
-            )
+        try:
+            written = os.write(fd, view_slice)
+            if written < len(view_slice):
+                raise OSError(
+                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
+                )
+        finally:
+            os.close(fd)
     except Exception:
         try:
             if fd is not None:
@@ -58,9 +61,6 @@ def _file_write(tmp_path: str, view_slice: memoryview, with_odirect: bool) -> No
         except OSError as cleanup_exc:
             logger.warning("Failed to remove temp file %s: %s", tmp_path, cleanup_exc)
         raise
-    finally:
-        if fd is not None:
-            os.close(fd)
 
 
 def _file_read(source_path: str, view_slice: memoryview, with_odirect: bool) -> None:
