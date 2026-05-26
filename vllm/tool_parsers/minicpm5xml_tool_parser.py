@@ -3,17 +3,15 @@
 
 import ast
 import json
-import logging
 import re
 from collections.abc import Sequence
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,12 +20,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
-    ToolParserManager,
 )
 from vllm.tool_parsers.utils import partial_tag_overlap
 from vllm.utils import random_uuid
@@ -43,10 +41,10 @@ except Exception:  # pragma: no cover
 
     _HAS_LXML = False
 
-_FUNC_NAME_V1_REGEX = re.compile(
-    r"<function\s+name=['\"]([^'\"]+)['\"][^>]*>")
+_FUNC_NAME_V1_REGEX = re.compile(r"<function\s+name=['\"]([^'\"]+)['\"][^>]*>")
 _PARAM_WITH_NAME_REGEX = re.compile(
-    r"<param\s+name=['\"]([^'\"]+)['\"]>([\s\S]*?)</param>", re.DOTALL)
+    r"<param\s+name=['\"]([^'\"]+)['\"]>([\s\S]*?)</param>", re.DOTALL
+)
 _PARAM_MISSING_NAME_REGEX = re.compile(r"<param(?![^>]*\bname=)[^>]*>", re.DOTALL)
 _FUNC_BLOCK_REGEX = re.compile(r"<function.*?</function>", re.DOTALL)
 
@@ -101,18 +99,18 @@ def _streaming_args_diff(
     if target == prev_args:
         return None
     if target.startswith(prev_args):
-        return target[len(prev_args):] or None
+        return target[len(prev_args) :] or None
 
     # Recover from a previously closed partial JSON snapshot.
     if prev_args.endswith("}"):
         prev_open = prev_args[:-1]
         if target.startswith(prev_open):
-            return target[len(prev_open):] or None
+            return target[len(prev_open) :] or None
 
     return None
 
 
-def _parse_arguments(json_value: str) -> Tuple[Any, bool]:
+def _parse_arguments(json_value: str) -> tuple[Any, bool]:
     try:
         try:
             parsed_value = json.loads(json_value)
@@ -126,8 +124,8 @@ def _parse_arguments(json_value: str) -> Tuple[Any, bool]:
 def _get_argument_type(
     func_name: str,
     arg_key: str,
-    name_to_tool: Dict[str, ChatCompletionToolsParam],
-) -> Optional[str]:
+    name_to_tool: dict[str, ChatCompletionToolsParam],
+) -> str | None:
     tool = name_to_tool.get(func_name)
     if tool is None or tool.function.parameters is None:
         return None
@@ -141,12 +139,13 @@ def _coerce_argument_value(
     func_name: str,
     arg_key: str,
     value: Any,
-    name_to_tool: Dict[str, ChatCompletionToolsParam],
+    name_to_tool: dict[str, ChatCompletionToolsParam],
 ) -> Any:
     arg_type = _get_argument_type(func_name, arg_key, name_to_tool)
     if arg_type == "string":
-        return value if isinstance(value, str) else json.dumps(
-            value, ensure_ascii=False)
+        return (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        )
     if isinstance(value, str):
         parsed_val, _ = _parse_arguments(value)
         return parsed_val
@@ -157,10 +156,10 @@ def _add_argument(
     func_name: str,
     key: str,
     val_text: str,
-    arguments: Dict[str, Any],
-    seen_keys: Set[str],
-    allowed_props: Set[str],
-    name_to_tool: Dict[str, ChatCompletionToolsParam],
+    arguments: dict[str, Any],
+    seen_keys: set[str],
+    allowed_props: set[str],
+    name_to_tool: dict[str, ChatCompletionToolsParam],
 ) -> bool:
     """Add one argument; return False if it violates the tool schema."""
     # MiniCPM5 can emit OpenAI-style wrappers, e.g.
@@ -182,7 +181,8 @@ def _add_argument(
                 return False
             seen_keys.add(wrapped_key)
             arguments[wrapped_key] = _coerce_argument_value(
-                func_name, wrapped_key, wrapped_value, name_to_tool)
+                func_name, wrapped_key, wrapped_value, name_to_tool
+            )
             added = True
         return added
 
@@ -191,16 +191,15 @@ def _add_argument(
     if key in seen_keys:
         return False
     seen_keys.add(key)
-    arguments[key] = _coerce_argument_value(
-        func_name, key, val_text, name_to_tool)
+    arguments[key] = _coerce_argument_value(func_name, key, val_text, name_to_tool)
     return True
 
 
 def _normalize_alias_tool_call(
     func_name: str,
-    arguments: Dict[str, Any],
-    tool_names: Set[str],
-) -> Tuple[str, Dict[str, Any]]:
+    arguments: dict[str, Any],
+    tool_names: set[str],
+) -> tuple[str, dict[str, Any]]:
     """Map common MiniCPM5 alias tool names to the exposed tool schema."""
     if func_name in tool_names:
         return func_name, arguments
@@ -222,11 +221,15 @@ def _normalize_alias_tool_call(
         if mapped:
             return "get_customer_by_name", mapped
 
-    if func_name in {
-        "get_line_details",
-        "get_line_status",
-        "get_roaming_status",
-    } and "get_details_by_id" in tool_names:
+    if (
+        func_name
+        in {
+            "get_line_details",
+            "get_line_status",
+            "get_roaming_status",
+        }
+        and "get_details_by_id" in tool_names
+    ):
         detail_id = arguments.get("line_id") or arguments.get("id")
         if detail_id is not None:
             return "get_details_by_id", {"id": detail_id}
@@ -271,16 +274,16 @@ def _normalize_alias_tool_call(
 
 
 def _build_tool_maps(
-    tools: Optional[List[ChatCompletionToolsParam]],
-) -> Tuple[
-    Set[str],
-    Dict[str, Set[str]],
-    Dict[str, Set[str]],
-    Dict[str, ChatCompletionToolsParam],
+    tools: list[ChatCompletionToolsParam] | None,
+) -> tuple[
+    set[str],
+    dict[str, set[str]],
+    dict[str, set[str]],
+    dict[str, ChatCompletionToolsParam],
 ]:
-    name_to_tool: Dict[str, ChatCompletionToolsParam] = {}
-    name_to_allowed_props: Dict[str, Set[str]] = {}
-    name_to_required: Dict[str, Set[str]] = {}
+    name_to_tool: dict[str, ChatCompletionToolsParam] = {}
+    name_to_allowed_props: dict[str, set[str]] = {}
+    name_to_required: dict[str, set[str]] = {}
 
     for tool in tools or []:
         name = tool.function.name
@@ -312,14 +315,14 @@ def _build_tool_maps(
 
 def _parse_function_block(
     block: str,
-    tool_names: Set[str],
-    name_to_allowed_props: Dict[str, Set[str]],
-    name_to_required: Dict[str, Set[str]],
-    name_to_tool: Dict[str, ChatCompletionToolsParam],
-) -> Optional[Dict[str, Any]]:
+    tool_names: set[str],
+    name_to_allowed_props: dict[str, set[str]],
+    name_to_required: dict[str, set[str]],
+    name_to_tool: dict[str, ChatCompletionToolsParam],
+) -> dict[str, Any] | None:
     """Return {name, parameters} if block is valid, else None."""
-    func_name: Optional[str] = None
-    arguments: Dict[str, Any] = {}
+    func_name: str | None = None
+    arguments: dict[str, Any] = {}
     parsed_ok = False
     param_invalid = False
 
@@ -342,14 +345,14 @@ def _parse_function_block(
             func_name = (func_node.attrib.get("name") or "").strip()
 
         args_node = func_node.find("arguments") if func_node is not None else None
-        param_nodes: List[Any] = []
+        param_nodes: list[Any] = []
         if func_node is not None:
             param_nodes = list(func_node.findall("param"))
             if args_node is not None and not param_nodes:
                 param_nodes = list(args_node.findall("param"))
 
         if func_node is not None:
-            seen_keys: Set[str] = set()
+            seen_keys: set[str] = set()
             allowed_props = name_to_allowed_props.get(func_name or "", set())
             has_invalid_param = False
             for param in param_nodes:
@@ -386,9 +389,9 @@ def _parse_function_block(
             allowed_props = name_to_allowed_props.get(func_name or "", set())
             for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
                 key = pm.group(1).strip()
-                val_text = (pm.group(2) or "")
+                val_text = pm.group(2) or ""
                 if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
-                    val_text = val_text[len("<![CDATA["):-len("]]>")]
+                    val_text = val_text[len("<![CDATA[") : -len("]]>")]
                 val_text = val_text.strip()
                 if not _add_argument(
                     func_name or "",
@@ -411,8 +414,7 @@ def _parse_function_block(
     if not func_name or param_invalid:
         return None
 
-    func_name, arguments = _normalize_alias_tool_call(
-        func_name, arguments, tool_names)
+    func_name, arguments = _normalize_alias_tool_call(func_name, arguments, tool_names)
 
     if func_name not in tool_names:
         return None
@@ -430,19 +432,19 @@ def _parse_function_block(
 def _parse_partial_params(
     block: str,
     func_name: str,
-    name_to_allowed_props: Dict[str, Set[str]],
-    name_to_tool: Dict[str, ChatCompletionToolsParam],
-) -> Dict[str, Any]:
-    arguments: Dict[str, Any] = {}
-    seen_keys: Set[str] = set()
+    name_to_allowed_props: dict[str, set[str]],
+    name_to_tool: dict[str, ChatCompletionToolsParam],
+) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    seen_keys: set[str] = set()
     allowed_props = name_to_allowed_props.get(func_name, set())
     for pm in _PARAM_WITH_NAME_REGEX.finditer(block):
         key = pm.group(1).strip()
         if not key or key in seen_keys:
             continue
-        val_text = (pm.group(2) or "")
+        val_text = pm.group(2) or ""
         if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
-            val_text = val_text[len("<![CDATA["):-len("]]>")]
+            val_text = val_text[len("<![CDATA[") : -len("]]>")]
         val_text = val_text.strip()
         _add_argument(
             func_name,
@@ -456,7 +458,6 @@ def _parse_partial_params(
     return arguments
 
 
-@ToolParserManager.register_module("minicpm5")
 class MiniCPM5XMLToolParser(ToolParser):
     """MiniCPM5 XML tool parser."""
 
@@ -502,16 +503,17 @@ class MiniCPM5XMLToolParser(ToolParser):
             )
 
         tool_names, name_to_allowed_props, name_to_required, name_to_tool = (
-            _build_tool_maps(request.tools))
+            _build_tool_maps(request.tools)
+        )
 
-        tool_calls: List[ToolCall] = []
-        normal_parts: List[str] = []
+        tool_calls: list[ToolCall] = []
+        normal_parts: list[str] = []
         last_end = 0
 
         try:
             for match in _FUNC_BLOCK_REGEX.finditer(model_output):
                 if match.start() > last_end:
-                    normal_parts.append(model_output[last_end:match.start()])
+                    normal_parts.append(model_output[last_end : match.start()])
 
                 block = match.group(0)
                 parsed = _parse_function_block(
@@ -533,7 +535,8 @@ class MiniCPM5XMLToolParser(ToolParser):
                                     ensure_ascii=False,
                                 ),
                             ),
-                        ))
+                        )
+                    )
                 else:
                     normal_parts.append(block)
 
@@ -623,7 +626,8 @@ class MiniCPM5XMLToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         tool_names, name_to_allowed_props, name_to_required, name_to_tool = (
-            _build_tool_maps(request.tools))
+            _build_tool_maps(request.tools)
+        )
         parsed = _parse_function_block(
             block,
             tool_names,
@@ -685,7 +689,8 @@ class MiniCPM5XMLToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         tool_names, name_to_allowed_props, _, name_to_tool = _build_tool_maps(
-            request.tools)
+            request.tools
+        )
         if _PARAM_MISSING_NAME_REGEX.search(block):
             return None
 
@@ -736,7 +741,7 @@ class MiniCPM5XMLToolParser(ToolParser):
 
             if self.tool_call_start_token not in current_text:
                 if self._processed_len < len(current_text):
-                    content = current_text[self._processed_len:]
+                    content = current_text[self._processed_len :]
                     self._processed_len = len(current_text)
                     return DeltaMessage(content=content) if content else None
                 return None
@@ -746,7 +751,7 @@ class MiniCPM5XMLToolParser(ToolParser):
                     continue
 
                 if match.start() > self._processed_len:
-                    gap = current_text[self._processed_len:match.start()]
+                    gap = current_text[self._processed_len : match.start()]
                     self._processed_len = match.start()
                     return DeltaMessage(content=gap) if gap else None
 
@@ -756,7 +761,7 @@ class MiniCPM5XMLToolParser(ToolParser):
                 if delta is not None:
                     return delta
 
-            remainder = current_text[self._processed_len:]
+            remainder = current_text[self._processed_len :]
             if not remainder:
                 if (
                     not delta_text
@@ -782,13 +787,14 @@ class MiniCPM5XMLToolParser(ToolParser):
             partial_block = remainder[func_idx:]
             if self.tool_call_end_token in partial_block:
                 end_idx = partial_block.rfind(self.tool_call_end_token)
-                complete_block = partial_block[:end_idx + len(self.tool_call_end_token)]
-                delta = self._process_complete_block_streaming(
-                    complete_block, request)
+                complete_block = partial_block[
+                    : end_idx + len(self.tool_call_end_token)
+                ]
+                delta = self._process_complete_block_streaming(complete_block, request)
                 self._processed_len += func_idx + len(complete_block)
                 if delta is not None:
                     return delta
-                partial_block = partial_block[end_idx + len(self.tool_call_end_token):]
+                partial_block = partial_block[end_idx + len(self.tool_call_end_token) :]
                 if not partial_block.strip():
                     return None
                 func_idx = partial_block.find(self.tool_call_start_token)
@@ -802,5 +808,6 @@ class MiniCPM5XMLToolParser(ToolParser):
             return self._process_partial_block_streaming(partial_block, request)
         except Exception:
             logger.exception(
-                "Error in MiniCPM5XMLToolParser.extract_tool_calls_streaming")
+                "Error in MiniCPM5XMLToolParser.extract_tool_calls_streaming"
+            )
             return None

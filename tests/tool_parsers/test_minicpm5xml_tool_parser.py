@@ -103,8 +103,7 @@ def assert_tool_calls(
     for act, exp in zip(actual, expected):
         assert act.type == "function"
         assert act.function.name == exp.function.name
-        assert json.loads(act.function.arguments) == json.loads(
-            exp.function.arguments)
+        assert json.loads(act.function.arguments) == json.loads(exp.function.arguments)
 
 
 @pytest.fixture
@@ -153,10 +152,15 @@ def test_single_call_with_surrounding_text(parser: ToolParser) -> None:
     assert out.tools_called
     assert_tool_calls(
         out.tool_calls,
-        [make_tool_call("get_weather", {
-            "city": "上海",
-            "date": "2024-06-27",
-        })],
+        [
+            make_tool_call(
+                "get_weather",
+                {
+                    "city": "上海",
+                    "date": "2024-06-27",
+                },
+            )
+        ],
     )
     assert out.content is None
 
@@ -188,10 +192,15 @@ def test_tokenizer_space_marker(parser: ToolParser) -> None:
     assert out.tools_called
     assert_tool_calls(
         out.tool_calls,
-        [make_tool_call("get_weather", {
-            "city": "上海",
-            "date": "2024-06-27",
-        })],
+        [
+            make_tool_call(
+                "get_weather",
+                {
+                    "city": "上海",
+                    "date": "2024-06-27",
+                },
+            )
+        ],
     )
 
 
@@ -207,10 +216,15 @@ def test_collapsed_function_and_param_tags(parser: ToolParser) -> None:
     assert out.tools_called
     assert_tool_calls(
         out.tool_calls,
-        [make_tool_call("get_weather", {
-            "city": "上海",
-            "date": "2024-06-27",
-        })],
+        [
+            make_tool_call(
+                "get_weather",
+                {
+                    "city": "上海",
+                    "date": "2024-06-27",
+                },
+            )
+        ],
     )
 
 
@@ -228,10 +242,15 @@ def test_collapsed_param_tags_with_tokenizer_space_function(
     assert out.tools_called
     assert_tool_calls(
         out.tool_calls,
-        [make_tool_call("get_weather", {
-            "city": "上海",
-            "date": "2024-06-27",
-        })],
+        [
+            make_tool_call(
+                "get_weather",
+                {
+                    "city": "上海",
+                    "date": "2024-06-27",
+                },
+            )
+        ],
     )
 
 
@@ -240,7 +259,7 @@ def test_extract_tool_calls_streaming_partial_chunks(parser: ToolParser) -> None
     chunks = [
         '<function name="get_weather">',
         '<param name="city">',
-        "上海</param><param name=\"date\">2024-06-27</param></function>\n",
+        '上海</param><param name="date">2024-06-27</param></function>\n',
     ]
     reconstructor = run_tool_extraction_streaming(
         parser,
@@ -263,7 +282,7 @@ def test_extract_tool_calls_streaming_tokenizer_space_marker(
     chunks = [
         '<function\u0120name="get_weather">',
         '<param\u0120name="city">',
-        "上海</param><param\u0120name=\"date\">2024-06-27</param></function>\n",
+        '上海</param><param\u0120name="date">2024-06-27</param></function>\n',
     ]
     reconstructor = run_tool_extraction_streaming(
         parser,
@@ -303,20 +322,22 @@ def test_extract_tool_calls_streaming_collapsed_tags_weather(
 
 
 def test_collapsed_tags_current_weather(parser: ToolParser) -> None:
-    request = make_request([
-        _tool(
-            "get_current_weather",
-            {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                    "state": {"type": "string"},
-                    "unit": {"type": "string"},
+    request = make_request(
+        [
+            _tool(
+                "get_current_weather",
+                {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["city", "state", "unit"],
                 },
-                "required": ["city", "state", "unit"],
-            },
-        )
-    ])
+            )
+        ]
+    )
     text = (
         '<functionname="get_current_weather">'
         '<paramname="city">Dallas</param>'
@@ -336,20 +357,22 @@ def test_collapsed_tags_current_weather(parser: ToolParser) -> None:
 def test_extract_tool_calls_streaming_incremental_arguments(
     parser: ToolParser,
 ) -> None:
-    request = make_request([
-        _tool(
-            "get_current_weather",
-            {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                    "state": {"type": "string"},
-                    "unit": {"type": "string"},
+    request = make_request(
+        [
+            _tool(
+                "get_current_weather",
+                {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["city", "state", "unit"],
                 },
-                "required": ["city", "state", "unit"],
-            },
-        )
-    ])
+            )
+        ]
+    )
     text = (
         '<function name="get_current_weather">'
         '<param name="city">Dallas</param>'
@@ -385,11 +408,7 @@ def test_extract_tool_calls_streaming_incremental_arguments(
 
 def test_unknown_tool_block_preserved(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
-    text = (
-        '<function name="unknown">'
-        '<param name="x">1</param>'
-        "</function>\n"
-    )
+    text = '<function name="unknown"><param name="x">1</param></function>\n'
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
     assert "unknown" in (out.content or "")
@@ -433,10 +452,7 @@ def test_multiple_calls_interleaved_text(parser: ToolParser) -> None:
 
 def test_incomplete_missing_function_end(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
-    text = (
-        '<function name="get_weather">'
-        '<param name="city">北京</param>'
-    )
+    text = '<function name="get_weather"><param name="city">北京</param>'
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
     assert "get_weather" in (out.content or "")
@@ -469,11 +485,7 @@ def test_duplicate_param_names_invalid(parser: ToolParser) -> None:
 
 def test_case_sensitive_param_name_invalid(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
-    text = (
-        '<function name="get_weather">'
-        '<param name="City">北京</param>'
-        "</function>\n"
-    )
+    text = '<function name="get_weather"><param name="City">北京</param></function>\n'
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
 
@@ -565,9 +577,7 @@ def test_extra_arguments_ignored_when_required_present(parser: ToolParser) -> No
 def test_extra_arguments_do_not_satisfy_required(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
-        '<function name="get_weather">'
-        '<param name="unknown">ignored</param>'
-        "</function>"
+        '<function name="get_weather"><param name="unknown">ignored</param></function>'
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
@@ -652,9 +662,7 @@ def test_alias_enable_roaming(parser: ToolParser) -> None:
     ]
     request = make_request(tools)
     text = (
-        '<function name="enable_roaming">'
-        '<param name="line_id">L1001</param>'
-        "</function>"
+        '<function name="enable_roaming"><param name="line_id">L1001</param></function>'
     )
     out = parser.extract_tool_calls(text, request)
     assert len(out.tool_calls) == 1
@@ -668,7 +676,7 @@ def _random_chunks(text: str, min_len: int, max_len: int) -> list[str]:
     index = 0
     while index < len(text):
         size = random.randint(min_len, max_len)
-        chunks.append(text[index:index + size])
+        chunks.append(text[index : index + size])
         index += size
     return chunks
 
