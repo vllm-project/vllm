@@ -244,6 +244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
+        self._deferred_kv_connector_scheduler_output: SchedulerOutput | None = None
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
@@ -1207,7 +1208,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
-        kv_connector_output = self.kv_connector.post_forward(scheduler_output)
+        kv_connector_output = None
+        self._deferred_kv_connector_scheduler_output = None
+        if self.is_last_pp_rank and self.speculator is not None and not dummy_run:
+            self._deferred_kv_connector_scheduler_output = scheduler_output
+        else:
+            kv_connector_output = self.kv_connector.post_forward(scheduler_output)
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
             attn_metadata=attn_metadata,
@@ -1343,6 +1349,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
+
+            if kv_connector_output is None:
+                assert self._deferred_kv_connector_scheduler_output is not None
+                # delay KV connector finalization until the drafter has written
+                # its KV cache.
+                kv_connector_output = self.kv_connector.post_forward(
+                    self._deferred_kv_connector_scheduler_output
+                )
+                async_output.model_runner_output.kv_connector_output = (
+                    kv_connector_output
+                )
+                self._deferred_kv_connector_scheduler_output = None
 
         if self.use_async_scheduling:
             return async_output
