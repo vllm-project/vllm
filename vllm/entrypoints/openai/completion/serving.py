@@ -709,7 +709,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         policy = self.usage_policy
         if policy is not None and policy.include_usage == "always":
-            in_chunks = policy.continuous_usage == "always"
+            if policy.continuous_usage is not None:
+                return (True, policy.continuous_usage == "always")
+            in_chunks = (
+                bool(include_usage and continuous_usage)
+                if include_usage is not None
+                else False
+            )
             return (True, in_chunks)
 
         if self.enable_force_include_usage:

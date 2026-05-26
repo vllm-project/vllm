@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-Unit tests: --enable-force-include-usage behavior across all entrypoints.
-
-Each test class covers one scenario with --enable-force-include-usage=True.
+Unit tests: --enable-force-include-usage behavior.
 """
 
 from tests.entrypoints.conftest import (
@@ -16,195 +14,77 @@ from tests.entrypoints.conftest import (
 )
 
 
-class TestForceNonStreaming:
+class TestNonStreaming:
     """Non-streaming with enable_force_include_usage=True."""
 
-    def test_base(self):
+    def test_openai_endpoints(self):
         """Usage in final response, never in chunks."""
-        s = make_base(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=False) == (True, False)
-
-    def test_chat(self):
-        """Usage in final response, never in chunks."""
-        s = make_chat(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=False) == (True, False)
-
-    def test_completion(self):
-        """Usage in final response, never in chunks."""
-        s = make_completion(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=False) == (True, False)
-
-    def test_disagg(self):
-        """Usage in final response, never in chunks."""
-        s = make_disagg(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=False) == (True, False)
+        for make in (make_base, make_chat, make_completion, make_disagg):
+            assert make(enable_force_include_usage=True).should_include_usage(
+                is_streaming=False
+            ) == (True, False)
 
     def test_anthropic(self):
         """Always (True, True) regardless."""
-        s = make_anthropic(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=False) == (True, True)
+        assert make_anthropic(enable_force_include_usage=True).should_include_usage(
+            is_streaming=False
+        ) == (True, True)
 
 
-class TestForceStreamingDefault:
-    """Streaming with enable_force_include_usage=True, no request-level params."""
+class TestStreaming:
+    """Streaming with enable_force_include_usage=True."""
 
     def test_base(self):
-        """Usage in last chunk only, not every chunk."""
+        """Force: usage in last chunk only (include_usage=always)."""
         s = make_base(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True) == (True, False)
+        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
+            True,
+            False,
+        )
+        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
+            True,
+            False,
+        )
 
-    def test_chat(self):
-        """Usage in last chunk, and every chunk."""
-        s = make_chat(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True) == (True, True)
-
-    def test_completion(self):
-        """Usage in last chunk, and every chunk."""
-        s = make_completion(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True) == (True, True)
+    def test_chat_completion(self):
+        """Force: (True, True) regardless of request params."""
+        for make in (make_chat, make_completion):
+            s = make(enable_force_include_usage=True)
+            assert s.should_include_usage(is_streaming=True) == (True, True)
+            assert s.should_include_usage(is_streaming=True, include_usage=False) == (
+                True,
+                True,
+            )
+            assert s.should_include_usage(is_streaming=True, include_usage=True) == (
+                True,
+                True,
+            )
+            assert s.should_include_usage(
+                is_streaming=True, include_usage=True, continuous_usage=True
+            ) == (True, True)
 
     def test_disagg(self):
-        """Disagg ignores enable_force_include_usage, stays at default."""
+        """Disagg ignores the flag, behaves as default."""
         s = make_disagg(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True) == (False, False)
+        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
+            False,
+            False,
+        )
+        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
+            True,
+            False,
+        )
+        assert s.should_include_usage(
+            is_streaming=True, include_usage=True, continuous_usage=True
+        ) == (True, True)
 
     def test_anthropic(self):
         """Always (True, True) regardless."""
         s = make_anthropic(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True) == (True, True)
-
-
-class TestForceOverridesRequestIncludeUsageFalse:
-    """
-    Streaming with enable_force_include_usage=True
-    and request-level include_usage=False.
-    """
-
-    def test_base(self):
-        """Force overrides to usage in last chunk only."""
-        s = make_base(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            True,
-            False,
-        )
-
-    def test_chat(self):
-        """Force overrides to usage in last chunk and every chunk."""
-        s = make_chat(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True, include_usage=False) == (
             True,
             True,
         )
-
-    def test_completion(self):
-        """Force overrides to usage in last chunk and every chunk."""
-        s = make_completion(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            True,
-            True,
-        )
-
-    def test_disagg(self):
-        """Disagg ignores enable_force_include_usage, respects request param."""
-        s = make_disagg(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            False,
-            False,
-        )
-
-    def test_anthropic(self):
-        """Always (True, True) regardless."""
-        s = make_anthropic(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            True,
-            True,
-        )
-
-
-class TestForceWithRequestIncludeUsageTrue:
-    """
-    Streaming with enable_force_include_usage=True
-    and request-level include_usage=True.
-    """
-
-    def test_base(self):
-        """Usage in last chunk only."""
-        s = make_base(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-    def test_chat(self):
-        """Usage in last chunk and every chunk."""
-        s = make_chat(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            True,
-        )
-
-    def test_completion(self):
-        """Usage in last chunk and every chunk."""
-        s = make_completion(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            True,
-        )
-
-    def test_disagg(self):
-        """Disagg ignores enable_force_include_usage, respects request param."""
-        s = make_disagg(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-    def test_anthropic(self):
-        """Always (True, True) regardless."""
-        s = make_anthropic(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            True,
-        )
-
-
-class TestForceWithRequestIncludeUsageAndContinuousTrue:
-    """
-    Streaming with enable_force_include_usage=True
-    and request-level include_usage=True + continuous_usage=True.
-    """
-
-    def test_base(self):
-        """Force short-circuits before reaching request-level continuous."""
-        s = make_base(enable_force_include_usage=True)
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, False)
-
-    def test_chat(self):
-        """Usage in last chunk and every chunk."""
-        s = make_chat(enable_force_include_usage=True)
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, True)
-
-    def test_completion(self):
-        """Usage in last chunk and every chunk."""
-        s = make_completion(enable_force_include_usage=True)
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, True)
-
-    def test_disagg(self):
-        """Usage in last chunk and every chunk."""
-        s = make_disagg(enable_force_include_usage=True)
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, True)
-
-    def test_anthropic(self):
-        """Always (True, True) regardless."""
-        s = make_anthropic(enable_force_include_usage=True)
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, True)

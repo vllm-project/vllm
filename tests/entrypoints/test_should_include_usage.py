@@ -18,131 +18,48 @@ from tests.entrypoints.conftest import (
 )
 
 
-class TestBaseClassShouldIncludeUsage:
-    """Base class (OpenAIServing) — used by Speech-to-Text endpoints."""
+class TestNonStreaming:
+    """Non-streaming: usage always in final response."""
 
-    def test_non_streaming(self):
+    def test_openai_endpoints(self):
         """Usage in final response, never in chunks."""
-        s = make_base()
-        assert s.should_include_usage(is_streaming=False) == (True, False)
+        for make in (make_base, make_chat, make_completion, make_disagg):
+            entryoint = make()
+            assert entryoint.should_include_usage(is_streaming=False) == (True, False)
 
-    def test_streaming_default(self):
-        """Usage in last chunk only, not every chunk."""
-        s = make_base()
-        assert s.should_include_usage(is_streaming=True) == (True, False)
-
-    def test_request_include_usage_true(self):
-        """include_usage=True → usage in last chunk only."""
-        s = make_base()
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-    def test_request_include_usage_false(self):
-        """include_usage=False → no usage."""
-        s = make_base()
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            False,
-            False,
-        )
-
-    def test_request_both_flags_true(self):
-        """include_usage=True + continuous_usage=True → usage in every chunk."""
-        s = make_base()
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
+    def test_anthropic(self):
+        """Anthropic always (True, True) regardless."""
+        entryoint = make_anthropic()
+        assert entryoint.should_include_usage(is_streaming=False) == (True, True)
+        assert entryoint.should_include_usage(
+            is_streaming=True, include_usage=False
         ) == (True, True)
 
 
-class TestChatShouldIncludeUsage:
-    """Chat Completions endpoint (OpenAIServingChat)."""
+class TestStreamingDefault:
+    """Default streaming behavior (no request params)."""
 
-    def test_non_streaming(self):
-        """Usage in final response, never in chunks."""
-        s = make_chat()
-        assert s.should_include_usage(is_streaming=False) == (True, False)
+    def test_base(self):
+        """Base: usage in last chunk only."""
+        entryoint = make_base()
+        assert entryoint.should_include_usage(is_streaming=True) == (True, False)
 
-    def test_streaming_default(self):
-        """No usage in streaming by default."""
-        s = make_chat()
-        assert s.should_include_usage(is_streaming=True) == (False, False)
+    def test_openai_endpoints(self):
+        """Chat/Completion/Disagg: no usage by default."""
+        for make in (make_chat, make_completion, make_disagg):
+            entryoint = make()
+            assert entryoint.should_include_usage(is_streaming=True) == (False, False)
+            assert entryoint.should_include_usage(
+                is_streaming=True, include_usage=False
+            ) == (False, False)
+            assert entryoint.should_include_usage(
+                is_streaming=True, include_usage=True
+            ) == (True, False)
+            assert entryoint.should_include_usage(
+                is_streaming=True, include_usage=True, continuous_usage=True
+            ) == (True, True)
 
-    def test_request_include_usage_true(self):
-        """include_usage=True → usage in last chunk only."""
-        s = make_chat()
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-    def test_request_include_usage_false(self):
-        """include_usage=False → no usage."""
-        s = make_chat()
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            False,
-            False,
-        )
-
-    def test_request_both_flags_true(self):
-        """include_usage=True + continuous_usage=True → usage in every chunk."""
-        s = make_chat()
-        assert s.should_include_usage(
-            is_streaming=True, include_usage=True, continuous_usage=True
-        ) == (True, True)
-
-
-class TestCompletionShouldIncludeUsage:
-    """Completions endpoint (OpenAIServingCompletion)."""
-
-    def test_streaming_default(self):
-        """No usage in streaming by default."""
-        s = make_completion()
-        assert s.should_include_usage(is_streaming=True) == (False, False)
-
-    def test_request_include_usage_true(self):
-        """include_usage=True → usage in last chunk only."""
-        s = make_completion()
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-
-class TestDisaggShouldIncludeUsage:
-    """Disaggregated serving endpoint (ServingTokens)."""
-
-    def test_streaming_default(self):
-        """No usage in streaming by default."""
-        s = make_disagg()
-        assert s.should_include_usage(is_streaming=True) == (False, False)
-
-    def test_request_include_usage_true(self):
-        """include_usage=True → usage in last chunk only."""
-        s = make_disagg()
-        assert s.should_include_usage(is_streaming=True, include_usage=True) == (
-            True,
-            False,
-        )
-
-
-class TestAnthropicShouldIncludeUsage:
-    """Anthropic Messages endpoint (AnthropicServingMessages)."""
-
-    def test_non_streaming(self):
-        """Always (True, True) — Anthropic API spec."""
-        s = make_anthropic()
-        assert s.should_include_usage(is_streaming=False) == (True, True)
-
-    def test_streaming_default(self):
-        """Always (True, True) regardless of parameters."""
-        s = make_anthropic()
-        assert s.should_include_usage(is_streaming=True) == (True, True)
-
-    def test_request_include_usage_false(self):
-        """Request include_usage=False is ignored."""
-        s = make_anthropic()
-        assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            True,
-            True,
-        )
+    def test_anthropic(self):
+        """Anthropic always (True, True)."""
+        entryoint = make_anthropic()
+        assert entryoint.should_include_usage(is_streaming=True) == (True, True)
