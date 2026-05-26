@@ -373,6 +373,9 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _check_scheme_supported(
         min_capability: int, error: bool = True, match_exact: bool = False
     ) -> bool:
+        if current_platform.is_xpu():
+            return True
+
         capability_tuple = current_platform.get_device_capability()
 
         if capability_tuple is not None:
