@@ -41,10 +41,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_tilelang
 
-from .model import (
-    DeepseekV4DecoderLayer,
-    make_deepseek_v4_expert_params_mapping,
-)
+from .model import DeepseekV4DecoderLayer
 
 logger = init_logger(__name__)
 
@@ -332,19 +329,13 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
-        first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
-            expert_mapping = make_deepseek_v4_expert_params_mapping(
-                self.config.n_routed_experts
-            )
-        else:
-            expert_mapping = FusedMoE.make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.n_routed_experts,
-            )
+        expert_mapping = FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.n_routed_experts,
+        )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
         # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
@@ -467,13 +458,8 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.model.layers.values():
-            layer.mtp_block.ffn.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
