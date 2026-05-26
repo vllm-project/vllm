@@ -23,13 +23,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
-    MoEActivation,
     RoutedExperts,
-    RoutingMethodType,
     SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -70,7 +67,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -93,7 +89,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1860,10 +1855,11 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         moe_config: FusedMoEConfig,
     ) -> None:
         super().__init__(moe_config)
+        self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_mxfp8_serialized
 
-        self.mxfp8_backend, _ = select_mxfp8_moe_backend(self.moe)
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
 
     def create_weights(
         self,
@@ -2059,12 +2055,41 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        # TODO(bnell): why is this required only for mxfp8?
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
+        layer._already_called_process_weights_after_loading = True
 
         self._check_weight_dtypes(layer)
-        self._shuffle_weights_for_trtllm(layer)
-        layer._already_called_process_weights_after_loading = True
+
+        layer.weight_block_size = self.weight_block_size
+
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.mxfp8_backend,
+            layer=layer,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.mxfp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -2088,12 +2113,14 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        # TRTLLM MXFP8 path is monolithic and does not use modular kernel config.
-        return None
-
-    @property
-    def is_monolithic(self) -> bool:
-        return self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        return make_fp8_moe_quant_config(
+            fp8_backend=self.mxfp8_backend,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=self.weight_block_size,
+        )
 
     def apply_monolithic(
         self,
@@ -2102,82 +2129,22 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from flashinfer.fused_moe.core import (
-            ActivationType,
-            Fp8QuantizationType,
-        )
-
-        assert self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-
-        if layer.eplb_state is not None:
-            raise NotImplementedError(
-                "EPLB is not supported for FlashInfer TRTLLM MXFP8 MoE backend."
-            )
-
-        supported_activations = [MoEActivation.SILU]
-        if layer.activation not in supported_activations:
-            raise NotImplementedError(
-                "FlashInfer TRTLLM MXFP8 MoE supports only "
-                f"{supported_activations}, got {layer.activation}."
-            )
-
-        # Map vLLM MoEActivation to FlashInfer ActivationType.
-        activation_map = {
-            MoEActivation.SILU: ActivationType.Swiglu,
-            MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
-        }
-        fi_activation_type: ActivationType = activation_map[layer.activation]
-
-        # DeepSeekV3 routing requires float32 logits; others expect bfloat16.
-        if layer.routing_method_type == RoutingMethodType.DeepSeekV3:
-            assert router_logits.dtype == torch.float32, (
-                "DeepSeekV3 routing requires float32 router_logits, "
-                f"got {router_logits.dtype}."
-            )
-        else:
-            router_logits = router_logits.to(torch.bfloat16)
-
-        # Treat 0 as "unset" for compatibility with ungrouped routing configs.
-        n_group = layer.num_expert_group or None
-        topk_group = layer.topk_group or None
-
-        hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
-            is_sf_swizzled_layout=False,
-        )
-
-        kwargs: dict = dict(
-            routing_logits=router_logits,
-            routing_bias=layer.e_score_correction_bias,
-            hidden_states=hidden_states_mxfp8,
-            hidden_states_scale=hidden_states_scale,
-            gemm1_weights=layer.w13_weight,
-            gemm1_weights_scale=layer.w13_weight_scale,
-            gemm2_weights=layer.w2_weight,
-            gemm2_weights_scale=layer.w2_weight_scale,
-            num_experts=layer.global_num_experts,
-            top_k=layer.top_k,
-            # Keep Optional semantics: FlashInfer expects None for non-grouped
-            # routing (e.g. Qwen3 Renormalize), not 0.
-            n_group=n_group,
-            topk_group=topk_group,
-            intermediate_size=layer.intermediate_size_per_partition,
-            local_expert_offset=layer.ep_rank * layer.local_num_experts,
-            local_num_experts=layer.local_num_experts,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
-            routing_method_type=layer.routing_method_type,
-            use_shuffled_weight=True,
-            weight_layout=0,
-            fp8_quantization_type=Fp8QuantizationType.MxFp8,
         )
-
-        if fi_activation_type != ActivationType.Swiglu:
-            raise NotImplementedError(
-                "FlashInfer TRTLLM MXFP8 MoE supports only Swiglu activation, "
-                f"got {fi_activation_type}."
-            )
-
-        return flashinfer_trtllm_fp8_block_scale_moe(**kwargs)
 
     def apply(
         self,
@@ -2189,8 +2156,19 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
-        raise NotImplementedError(
-            "Non-monolithic MXFP8 MoE path is not yet implemented."
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
 
 
@@ -2330,18 +2308,22 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         is not found.
         """
         # 1. Direct lookup
-        if prefix in self.quantized_layers:
-            return self.quantized_layers[prefix]["quant_algo"].upper()
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            if candidate in self.quantized_layers:
+                return self.quantized_layers[candidate]["quant_algo"].upper()
 
         # 2. Packed / fused layer lookup
         proj_name = prefix.rsplit(".", 1)[-1]
         if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
             algos: set[str] = set()
             base = prefix.rsplit(".", 1)[0]
-            for shard_name in self.packed_modules_mapping[proj_name]:
-                shard_prefix = f"{base}.{shard_name}"
-                if shard_prefix in self.quantized_layers:
-                    algos.add(self.quantized_layers[shard_prefix]["quant_algo"].upper())
+            for base_candidate in self._quantized_layer_prefix_candidates(base):
+                for shard_name in self.packed_modules_mapping[proj_name]:
+                    shard_prefix = f"{base_candidate}.{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algos.add(
+                            self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        )
             if len(algos) == 1:
                 return algos.pop()
             if len(algos) > 1:
@@ -2351,12 +2333,31 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 )
 
         # 3. Prefix-based lookup (for RoutedExperts / parent modules)
-        prefix_dot = prefix + "."
-        for key, info in self.quantized_layers.items():
-            if key.startswith(prefix_dot):
-                return info["quant_algo"].upper()
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            prefix_dot = candidate + "."
+            for key, info in self.quantized_layers.items():
+                if key.startswith(prefix_dot):
+                    return info["quant_algo"].upper()
 
         return None
+
+    @staticmethod
+    def _quantized_layer_prefix_candidates(prefix: str) -> tuple[str, ...]:
+        candidates = [prefix]
+
+        if prefix.endswith(".lm_head"):
+            candidates.append("lm_head")
+
+        if prefix.startswith("language_model.model."):
+            candidates.append(
+                "model.language_model." + prefix[len("language_model.model.") :]
+            )
+        elif prefix.startswith("model.language_model."):
+            candidates.append(
+                "language_model.model." + prefix[len("model.language_model.") :]
+            )
+
+        return tuple(dict.fromkeys(candidates))
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
