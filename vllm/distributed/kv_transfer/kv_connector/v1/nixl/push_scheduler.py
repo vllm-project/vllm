@@ -141,7 +141,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                         params,
                     )
             elif num_external_tokens > 0:
-                logger.info(
+                logger.debug(
                     "KV PUSH mode: D node storing registration for request %s",
                     request.request_id,
                 )

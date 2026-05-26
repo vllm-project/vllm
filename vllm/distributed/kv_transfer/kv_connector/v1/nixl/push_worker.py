@@ -94,10 +94,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.remote.block_ids),
             )
             self._recving_metadata[req_id] = meta
-            logger.info(
-                "Push mode: D node waiting for P to push blocks for request %s",
-                req_id,
-            )
 
         # --- D-side: send registration notifications to P via NIXL ---
         for req_id, reg_data in metadata.push_registrations.items():
@@ -111,9 +107,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # before P finished).
             matched_reg = self._pop_matching_registration(req_id)
             if matched_reg is not None:
-                logger.info(
-                    "Scenario 1: matched D registration with "
-                    "finished blocks for request %s, initiating WRITE",
+                logger.debug(
+                    "Matched D registration with finished blocks "
+                    "for request %s, initiating WRITE",
                     req_id,
                 )
                 self._push_finished_blocks.pop(req_id, None)
@@ -197,11 +193,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_rank=rank,
                 )
 
-        logger.info(
-            "Sent push registration notification for request %s to %d "
-            "P workers on engine %s",
+        logger.debug(
+            "Sent push registration notification for request %s to engine %s",
             req_id,
-            len(agents),
             remote_engine_id,
         )
 
@@ -217,11 +211,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         base_id = get_base_request_id(request_id)
         for reg_id in list(self._pending_d_registrations):
             if get_base_request_id(reg_id) == base_id:
-                logger.info(
-                    "Fuzzy-matched registration %s to finished blocks %s (base: %s)",
+                logger.debug(
+                    "Fuzzy-matched registration %s to finished blocks %s",
                     reg_id,
                     request_id,
-                    base_id,
                 )
                 return self._pending_d_registrations.pop(reg_id)
         return None
@@ -236,11 +229,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         base_id = get_base_request_id(request_id)
         for fin_id in list(self._push_finished_blocks):
             if get_base_request_id(fin_id) == base_id:
-                logger.info(
-                    "Fuzzy-matched finished blocks %s to registration %s (base: %s)",
+                logger.debug(
+                    "Fuzzy-matched finished blocks %s to registration %s",
                     fin_id,
                     request_id,
-                    base_id,
                 )
                 return fin_id, self._push_finished_blocks.pop(fin_id)
         return None
@@ -268,9 +260,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             return
 
-        logger.info(
-            "Processing kv push request %s to D node %s: "
-            "pushing %d local blocks to %d remote blocks",
+        logger.debug(
+            "Pushing KV for request %s to D node %s: "
+            "%d local blocks -> %d remote blocks",
             request_id,
             decode_engine_id,
             len(local_block_ids),
@@ -320,7 +312,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             remote_ids_grouped
         )
 
-        logger.info(
+        logger.debug(
             "start_push_kv block shapes: local_groups=%d local_blocks=%s, "
             "remote_groups=%d remote_blocks=%s",
             len(physical_block_ids),
@@ -534,10 +526,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     match = self._pop_matching_finished_blocks(p_request_id)
                     if match is not None:
                         fin_id, block_ids = match
-                        logger.info(
-                            "Scenario 2: matched finished blocks for "
-                            "request %s with D registration, "
-                            "initiating WRITE",
+                        logger.debug(
+                            "Matched finished blocks for request %s "
+                            "with D registration, initiating WRITE",
                             fin_id,
                         )
                         self.start_push_kv(fin_id, block_ids, reg_data)
@@ -563,7 +554,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
-                    logger.info(
+                    logger.debug(
                         "Received push completion notification for request %s",
                         req_id,
                     )
@@ -607,8 +598,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Check if outgoing WRITE transfers have completed.
         done_pushing = self._pop_done_transfers(self._sending_transfers)
         for req_id in done_pushing:
-            logger.info(
-                "Push WRITE transfer completed for request %s, freeing blocks on P",
+            logger.debug(
+                "Push WRITE transfer completed for request %s",
                 req_id,
             )
             self._reqs_to_send.pop(req_id, None)
