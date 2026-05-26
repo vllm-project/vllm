@@ -25,7 +25,7 @@ from torch import nn
 from vllm.config import PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from .bert import BertEmbeddingModel, BertModel
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
@@ -382,36 +382,15 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        for name, weight in weights_list:
-            stripped = name
-            # Strip "model." prefix added by the embedding adapter
-            if stripped.startswith("model."):
-                stripped = stripped[len("model.") :]
-            # Strip "roberta." prefix from checkpoint
-            if stripped.startswith("roberta."):
-                stripped = stripped[len("roberta.") :]
+        mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
 
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("pooler."):
-                # Skip HF pooler weights (not used in ColBERT)
-                continue
-            else:
-                model_side.append((stripped, weight))
+        # Skip HF pooler weights (model.pooler.*) as they not used in ColBERT
+        loader = AutoWeightsLoader(self, skip_prefixes=["model.pooler."])
 
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
