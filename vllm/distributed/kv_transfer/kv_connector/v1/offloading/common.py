@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -9,6 +10,49 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 ReqId = str
+
+
+class TransferMetricStats(NamedTuple):
+    bytes: int = 0
+    time: float = 0.0
+    sizes: list[int | float] = []
+
+    def aggregate(self, other: "TransferMetricStats") -> "TransferMetricStats":
+        return TransferMetricStats(
+            bytes=self.bytes + other.bytes,
+            time=self.time + other.time,
+            sizes=[*self.sizes, *other.sizes],
+        )
+
+    def record(self, num_bytes: int, time: float) -> "TransferMetricStats":
+        return TransferMetricStats(
+            bytes=self.bytes + num_bytes,
+            time=self.time + time,
+            sizes=[*self.sizes, num_bytes],
+        )
+
+    def is_empty(self) -> bool:
+        return self.bytes == 0 and self.time == 0.0 and not self.sizes
+
+
+class TransferStats(NamedTuple):
+    load: TransferMetricStats = TransferMetricStats()
+    store: TransferMetricStats = TransferMetricStats()
+
+    def aggregate(self, other: "TransferStats") -> "TransferStats":
+        return TransferStats(
+            load=self.load.aggregate(other.load),
+            store=self.store.aggregate(other.store),
+        )
+
+    def record_load(self, num_bytes: int, time: float) -> "TransferStats":
+        return TransferStats(load=self.load.record(num_bytes, time), store=self.store)
+
+    def record_store(self, num_bytes: int, time: float) -> "TransferStats":
+        return TransferStats(load=self.load, store=self.store.record(num_bytes, time))
+
+    def is_empty(self) -> bool:
+        return self.load.is_empty() and self.store.is_empty()
 
 
 @dataclass
@@ -43,27 +87,19 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     """
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
-    transfer_stats: dict[str, int | float | list[int | float]] = field(
-        default_factory=dict
-    )
+    transfer_stats: TransferStats = field(default_factory=TransferStats)
 
     def mark_completed(self, job_id: int) -> None:
         """Record a transfer job completion from this worker."""
         self.completed_jobs[job_id] = 1
 
-    def set_counter(self, counter_name: str, counter_value: int | float) -> None:
-        """Record a counter increment from this worker."""
-        existing = self.transfer_stats.get(counter_name, 0)
-        assert not isinstance(existing, list)
-        self.transfer_stats[counter_name] = existing + counter_value
+    def record_load(self, num_bytes: int, time: float) -> None:
+        """Record a load transfer from this worker."""
+        self.transfer_stats = self.transfer_stats.record_load(num_bytes, time)
 
-    def observe_histogram(
-        self, histogram_name: str, histogram_value: int | float
-    ) -> None:
-        """Record a histogram observation from this worker."""
-        values = self.transfer_stats.setdefault(histogram_name, [])
-        assert isinstance(values, list)
-        values.append(histogram_value)
+    def record_store(self, num_bytes: int, time: float) -> None:
+        """Record a store transfer from this worker."""
+        self.transfer_stats = self.transfer_stats.record_store(num_bytes, time)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -74,19 +110,7 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
         for job_id, v in other.completed_jobs.items():
             merged[job_id] = merged.get(job_id, 0) + v
 
-        transfer_stats = dict(self.transfer_stats)
-        for key, value in other.transfer_stats.items():
-            if isinstance(value, list):
-                if key not in transfer_stats:
-                    transfer_stats[key] = list(value)
-                else:
-                    assert isinstance(transfer_stats[key], list)
-                    transfer_stats[key].extend(value)
-            else:
-                existing = transfer_stats.get(key, 0)
-                assert not isinstance(existing, list)
-                transfer_stats[key] = existing + value
-
         return OffloadingWorkerMetadata(
-            completed_jobs=merged, transfer_stats=transfer_stats
+            completed_jobs=merged,
+            transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
         )

@@ -10,14 +10,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    LOAD_BYTES,
-    LOAD_SIZE,
-    LOAD_TIME,
-    STORE_BYTES,
-    STORE_SIZE,
-    STORE_TIME,
-)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
@@ -272,30 +264,21 @@ class OffloadingConnectorWorker:
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
+            is_load = job_id in self._load_jobs
             if (
-                transfer_result.transfer_time
+                transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
-                and transfer_result.transfer_type is not None
             ):
-                src, dst = transfer_result.transfer_type
-                if (src, dst) == ("CPU", "GPU"):
-                    bytes_key, time_key, size_key = LOAD_BYTES, LOAD_TIME, LOAD_SIZE
-                elif (src, dst) == ("GPU", "CPU"):
-                    bytes_key, time_key, size_key = STORE_BYTES, STORE_TIME, STORE_SIZE
-                else:
-                    raise AssertionError(
-                        "Unknown offloading transfer type: "
-                        f"{transfer_result.transfer_type}"
+                if is_load:
+                    self._connector_worker_meta.record_load(
+                        transfer_result.transfer_size,
+                        transfer_result.transfer_time,
                     )
-                self._connector_worker_meta.set_counter(
-                    bytes_key, transfer_result.transfer_size
-                )
-                self._connector_worker_meta.set_counter(
-                    time_key, transfer_result.transfer_time
-                )
-                self._connector_worker_meta.observe_histogram(
-                    size_key, transfer_result.transfer_size
-                )
+                else:
+                    self._connector_worker_meta.record_store(
+                        transfer_result.transfer_size,
+                        transfer_result.transfer_time,
+                    )
 
             self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)
@@ -306,10 +289,7 @@ class OffloadingConnectorWorker:
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
-        if (
-            not self._connector_worker_meta.completed_jobs
-            and not self._connector_worker_meta.transfer_stats
-        ):
+        if not self._connector_worker_meta.completed_jobs:
             return None
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()

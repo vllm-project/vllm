@@ -18,6 +18,8 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
+STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+
 
 def make_req_context(
     req_id: str = "", kv_transfer_params: dict | None = None
@@ -163,7 +165,7 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     )
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()["stores_skipped"] == 3
+    assert stats.reduce()[STORES_SKIPPED] == 3
     assert manager.get_stats() is None
 
 

@@ -16,6 +16,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _CONNECTOR_METRIC_DEFINITIONS,
+    LOAD_BYTES,
+    LOAD_SIZE,
+    LOAD_TIME,
+    STORE_BYTES,
+    STORE_SIZE,
+    STORE_TIME,
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
@@ -963,13 +969,21 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
-        if meta.transfer_stats:
-            self._connector_stats.aggregate(
-                OffloadingConnectorStats(
-                    data=meta.transfer_stats,
-                    metric_metadata=self._offloading_metric_metadata,
-                )
+        if not meta.transfer_stats.is_empty():
+            transfer_stats = OffloadingConnectorStats(
+                metric_metadata=self._offloading_metric_metadata
             )
+            if not meta.transfer_stats.load.is_empty():
+                transfer_stats.set_counter(LOAD_BYTES, meta.transfer_stats.load.bytes)
+                transfer_stats.set_counter(LOAD_TIME, meta.transfer_stats.load.time)
+                for size in meta.transfer_stats.load.sizes:
+                    transfer_stats.observe_histogram(LOAD_SIZE, size)
+            if not meta.transfer_stats.store.is_empty():
+                transfer_stats.set_counter(STORE_BYTES, meta.transfer_stats.store.bytes)
+                transfer_stats.set_counter(STORE_TIME, meta.transfer_stats.store.time)
+                for size in meta.transfer_stats.store.sizes:
+                    transfer_stats.observe_histogram(STORE_SIZE, size)
+            self._connector_stats.aggregate(transfer_stats)
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:

@@ -184,10 +184,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return True
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
-
-        return None
+        if self.connector_scheduler is None:
+            return None  # We only emit stats from the scheduler-side.
+        return self.connector_scheduler.get_stats()
 
     @classmethod
     def build_kv_connector_stats(

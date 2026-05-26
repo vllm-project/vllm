@@ -5,6 +5,8 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
+    TransferMetricStats,
+    TransferStats,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -34,24 +36,18 @@ def test_aggregate_multiple_workers():
 
 def test_aggregate_transfer_stats():
     meta1 = OffloadingWorkerMetadata(
-        transfer_stats={
-            "load_bytes": 10,
-            "load_time": 0.5,
-            "load_size": [10],
-        }
+        transfer_stats=TransferStats(
+            load=TransferMetricStats(bytes=10, time=0.5, sizes=[10])
+        )
     )
     meta2 = OffloadingWorkerMetadata(
-        transfer_stats={
-            "load_bytes": 20,
-            "load_time": 1.0,
-            "load_size": [20, 30],
-        }
+        transfer_stats=TransferStats(
+            load=TransferMetricStats(bytes=20, time=1.0, sizes=[20, 30])
+        )
     )
 
     result = meta1.aggregate(meta2)
 
-    assert result.transfer_stats == {
-        "load_bytes": 30,
-        "load_time": 1.5,
-        "load_size": [10, 20, 30],
-    }
+    assert result.transfer_stats.load.bytes == 30
+    assert result.transfer_stats.load.time == 1.5
+    assert result.transfer_stats.load.sizes == [10, 20, 30]

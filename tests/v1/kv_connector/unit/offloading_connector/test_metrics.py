@@ -23,7 +23,11 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
-from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+
+STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+PENDING_STORES = "vllm:kv_offload_pending_stores"
+LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"
 
 
 class _FakeMetric:
@@ -60,39 +64,30 @@ class _FakeVllmConfig:
 def _metric_metadata():
     return {
         LOAD_BYTES: OffloadingCounterMetadata(
-            name="vllm:kv_offload_load_bytes",
             documentation="load bytes",
         ),
         LOAD_TIME: OffloadingCounterMetadata(
-            name="vllm:kv_offload_load_time",
             documentation="load time",
         ),
         LOAD_SIZE: OffloadingHistogramMetadata(
-            name="vllm:kv_offload_load_size",
             documentation="load size",
         ),
         STORE_BYTES: OffloadingCounterMetadata(
-            name="vllm:kv_offload_store_bytes",
             documentation="store bytes",
         ),
         STORE_TIME: OffloadingCounterMetadata(
-            name="vllm:kv_offload_store_time",
             documentation="store time",
         ),
         STORE_SIZE: OffloadingHistogramMetadata(
-            name="vllm:kv_offload_store_size",
             documentation="store size",
         ),
-        "stores_skipped": OffloadingCounterMetadata(
-            name="vllm:kv_offload_stores_skipped",
+        STORES_SKIPPED: OffloadingCounterMetadata(
             documentation="stores skipped",
         ),
-        "pending_stores": OffloadingGaugeMetadata(
-            name="vllm:kv_offload_pending_stores",
+        PENDING_STORES: OffloadingGaugeMetadata(
             documentation="pending stores",
         ),
-        "lookup_latency": OffloadingHistogramMetadata(
-            name="vllm:kv_offload_lookup_latency_seconds",
+        LOOKUP_LATENCY: OffloadingHistogramMetadata(
             documentation="lookup latency",
         ),
     }
@@ -128,7 +123,7 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
         STORE_BYTES: 3,
         STORE_TIME: 0.3,
         STORE_SIZE: [1, 2],
-        "stores_skipped": 5,
+        STORES_SKIPPED: 5,
     }
 
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
@@ -141,7 +136,7 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     assert offload_connector_stats.data[STORE_BYTES] == 3
     assert offload_connector_stats.data[STORE_TIME] == 0.3
     assert offload_connector_stats.data[STORE_SIZE] == [1, 2]
-    assert offload_connector_stats.data["stores_skipped"] == 5
+    assert offload_connector_stats.data[STORES_SKIPPED] == 5
 
 
 def test_aggregate_same_connector():
@@ -154,9 +149,9 @@ def test_aggregate_same_connector():
             STORE_BYTES: 3,
             STORE_TIME: 0.3,
             STORE_SIZE: [1, 2],
-            "stores_skipped": 1,
-            "pending_stores": 3,
-            "lookup_latency": [0.1],
+            STORES_SKIPPED: 1,
+            PENDING_STORES: 3,
+            LOOKUP_LATENCY: [0.1],
         },
         metric_metadata=_metric_metadata(),
     )
@@ -169,9 +164,9 @@ def test_aggregate_same_connector():
             STORE_BYTES: 16,
             STORE_TIME: 2,
             STORE_SIZE: [16],
-            "stores_skipped": 3,
-            "pending_stores": 1,
-            "lookup_latency": [0.2, 0.3],
+            STORES_SKIPPED: 3,
+            PENDING_STORES: 1,
+            LOOKUP_LATENCY: [0.2, 0.3],
         },
         metric_metadata=_metric_metadata(),
     )
@@ -186,9 +181,25 @@ def test_aggregate_same_connector():
     assert offload_connector_stats.data[STORE_BYTES] == 19
     assert offload_connector_stats.data[STORE_TIME] == 2.3
     assert offload_connector_stats.data[STORE_SIZE] == [1, 2, 16]
-    assert offload_connector_stats.data["stores_skipped"] == 4
-    assert offload_connector_stats.data["pending_stores"] == 1
-    assert offload_connector_stats.data["lookup_latency"] == [0.1, 0.2, 0.3]
+    assert offload_connector_stats.data[STORES_SKIPPED] == 4
+    assert offload_connector_stats.data[PENDING_STORES] == 1
+    assert offload_connector_stats.data[LOOKUP_LATENCY] == [0.1, 0.2, 0.3]
+
+
+def test_aggregate_merges_metric_metadata():
+    stats1 = OffloadingConnectorStats(
+        data={LOAD_BYTES: 1},
+        metric_metadata={LOAD_BYTES: OffloadingCounterMetadata("load bytes")},
+    )
+    stats2 = OffloadingConnectorStats(
+        data={PENDING_STORES: 2},
+        metric_metadata={PENDING_STORES: OffloadingGaugeMetadata("pending stores")},
+    )
+
+    result = stats1.aggregate(stats2)
+
+    assert result.data[PENDING_STORES] == 2
+    assert PENDING_STORES in stats1.metric_metadata
 
 
 def test_reduce():
@@ -201,9 +212,9 @@ def test_reduce():
             STORE_BYTES: 19,
             STORE_TIME: 2.3,
             STORE_SIZE: [1, 2, 16],
-            "stores_skipped": 11,
-            "pending_stores": 2,
-            "lookup_latency": [0.1, 0.2, 0.3],
+            STORES_SKIPPED: 11,
+            PENDING_STORES: 2,
+            LOOKUP_LATENCY: [0.1, 0.2, 0.3],
         },
         metric_metadata=_metric_metadata(),
     )
@@ -220,10 +231,10 @@ def test_reduce():
     assert reduced[STORE_TIME] == 2.3
     assert reduced[f"{STORE_SIZE}_count"] == 3
     assert reduced[f"{STORE_SIZE}_sum"] == 19
-    assert reduced["stores_skipped"] == 11
-    assert reduced["pending_stores"] == 2
-    assert reduced["lookup_latency_count"] == 3
-    assert reduced["lookup_latency_sum"] == sum([0.1, 0.2, 0.3])
+    assert reduced[STORES_SKIPPED] == 11
+    assert reduced[PENDING_STORES] == 2
+    assert reduced[f"{LOOKUP_LATENCY}_count"] == 3
+    assert reduced[f"{LOOKUP_LATENCY}_sum"] == sum([0.1, 0.2, 0.3])
 
 
 def test_reset():
@@ -236,9 +247,9 @@ def test_reset():
             STORE_BYTES: 16,
             STORE_TIME: 2,
             STORE_SIZE: [16],
-            "stores_skipped": 4,
-            "pending_stores": 2,
-            "lookup_latency": [0.1],
+            STORES_SKIPPED: 4,
+            PENDING_STORES: 2,
+            LOOKUP_LATENCY: [0.1],
         }
     )
 
@@ -263,11 +274,11 @@ def test_prom_metrics_observes_manager_counter():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    prom_metrics.observe({"stores_skipped": 7})
+    prom_metrics.observe({STORES_SKIPPED: 7})
 
-    counter = prom_metrics.offloading_metrics[(0, "stores_skipped")]
+    counter = prom_metrics.offloading_metrics[(0, STORES_SKIPPED)]
     assert counter.increments == [7]
-    counter_def = prom_metrics._offloading_metric_defs["stores_skipped"]
+    counter_def = prom_metrics._offloading_metric_defs[STORES_SKIPPED]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
     assert counter.labelvalues == ("model", "0")
 
@@ -316,20 +327,16 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
 
 def test_prom_metrics_observes_manager_gauge_and_histogram():
     metric_definitions = {
-        "pending_stores": OffloadingGaugeMetadata(
-            name="vllm:kv_offload_pending_stores",
+        PENDING_STORES: OffloadingGaugeMetadata(
             documentation="Number of currently pending KV offload stores.",
         ),
-        "lookup_latency": OffloadingHistogramMetadata(
-            name="vllm:kv_offload_lookup_latency_seconds",
+        LOOKUP_LATENCY: OffloadingHistogramMetadata(
             documentation="KV offload lookup latency.",
             buckets=(0.1, 1.0),
         ),
     }
     with patch.object(
-        OffloadingSpecFactory,
-        "get_metric_definitions",
-        return_value=metric_definitions,
+        CPUOffloadingManager, "get_metric_definitions", return_value=metric_definitions
     ):
         prom_metrics = OffloadPromMetrics(
             vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
@@ -344,16 +351,16 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
 
     prom_metrics.observe(
         {
-            "pending_stores": 5,
-            "lookup_latency": [0.2, 0.4],
+            PENDING_STORES: 5,
+            LOOKUP_LATENCY: [0.2, 0.4],
         }
     )
 
-    gauge = prom_metrics.offloading_metrics[(0, "pending_stores")]
-    histogram = prom_metrics.offloading_metrics[(0, "lookup_latency")]
+    gauge = prom_metrics.offloading_metrics[(0, PENDING_STORES)]
+    histogram = prom_metrics.offloading_metrics[(0, LOOKUP_LATENCY)]
     assert gauge.set_values == [5]
     assert histogram.observed == [0.2, 0.4]
-    histogram_def = prom_metrics._offloading_metric_defs["lookup_latency"]
+    histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
 
 
@@ -369,4 +376,4 @@ def test_prom_metrics_uses_configured_manager_metrics():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    assert "stores_skipped" not in prom_metrics._offloading_metric_metadata
+    assert STORES_SKIPPED not in prom_metrics._offloading_metric_metadata

@@ -99,7 +99,6 @@ class OffloadingEvent:
 
 @dataclass(frozen=True)
 class OffloadingMetricMetadata:
-    name: str
     documentation: str
 
 

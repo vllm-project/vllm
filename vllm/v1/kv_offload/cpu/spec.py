@@ -13,7 +13,6 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
-    OffloadingMetricMetadata,
     OffloadingSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
@@ -28,18 +27,6 @@ class CPUOffloadingSpec(OffloadingSpec):
     @classmethod
     def get_manager_cls(cls) -> type[OffloadingManager]:
         return CPUOffloadingManager
-
-    @classmethod
-    def get_metric_definitions(
-        cls, vllm_config: VllmConfig
-    ) -> dict[str, OffloadingMetricMetadata]:
-        kv_transfer_config = vllm_config.kv_transfer_config
-        assert kv_transfer_config is not None
-        extra_config = kv_transfer_config.kv_connector_extra_config
-        store_threshold = int(extra_config.get("store_threshold", 0))
-        if store_threshold >= 2:
-            return cls.get_manager_cls().get_metric_definitions(vllm_config)
-        return {}
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
