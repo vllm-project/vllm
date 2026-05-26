@@ -1040,7 +1040,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.5.3
+transformers==5.8.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in
