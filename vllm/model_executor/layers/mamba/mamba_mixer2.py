@@ -743,23 +743,27 @@ class MambaMixer2(MambaBase, PluggableLayer):
             old_cumAdt = self.kv_cache[6]
             cache_buf_idx = self.kv_cache[7]
             prev_num_accepted_tokens = self.kv_cache[8]
+            old_x_src = old_x
+            old_B_src = old_B
+            old_dt_src = old_dt
+            old_cumAdt_src = old_cumAdt
             cache_buf_idx_src = cache_buf_idx
             prev_num_accepted_tokens_src = prev_num_accepted_tokens
             if not old_x.is_contiguous():
                 old_x = self._get_contiguous_checkpointing_buffer(
-                    old_x, "_checkpointing_old_x"
+                    old_x, "_checkpointing_old_x", copy_source=True
                 )
             if not old_B.is_contiguous():
                 old_B = self._get_contiguous_checkpointing_buffer(
-                    old_B, "_checkpointing_old_B"
+                    old_B, "_checkpointing_old_B", copy_source=True
                 )
             if not old_dt.is_contiguous():
                 old_dt = self._get_contiguous_checkpointing_buffer(
-                    old_dt, "_checkpointing_old_dt"
+                    old_dt, "_checkpointing_old_dt", copy_source=True
                 )
             if not old_cumAdt.is_contiguous():
                 old_cumAdt = self._get_contiguous_checkpointing_buffer(
-                    old_cumAdt, "_checkpointing_old_cumAdt"
+                    old_cumAdt, "_checkpointing_old_cumAdt", copy_source=True
                 )
             if not cache_buf_idx.is_contiguous():
                 cache_buf_idx = self._get_contiguous_checkpointing_buffer(
@@ -1165,6 +1169,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prev_num_accepted_tokens=prev_num_accepted_tokens,
                 state_scales=ssm_state_scales,
             )
+        if old_x is not old_x_src:
+            old_x_src.copy_(old_x)
+        if old_B is not old_B_src:
+            old_B_src.copy_(old_B)
+        if old_dt is not old_dt_src:
+            old_dt_src.copy_(old_dt)
+        if old_cumAdt is not old_cumAdt_src:
+            old_cumAdt_src.copy_(old_cumAdt)
         if cache_buf_idx is not cache_buf_idx_src:
             cache_buf_idx_src.copy_(cache_buf_idx)
         if prev_num_accepted_tokens is not prev_num_accepted_tokens_src:

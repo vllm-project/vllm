@@ -1001,7 +1001,7 @@ class GPUModelRunner(
         copy_funcs = self.model.get_mamba_state_copy_func()
         if (
             self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-            and len(copy_funcs) == 8
+            and len(copy_funcs) == 9
         ):
             return MambaStateCopyFuncCalculator.mamba2_checkpointing_state_copy_func()
         return copy_funcs

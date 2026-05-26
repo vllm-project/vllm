@@ -424,6 +424,7 @@ class MambaStateCopyFuncCalculator:
             get_stable_temporal_copy_spec,
             get_stable_temporal_copy_spec,
             get_stable_temporal_copy_spec,
+            get_stable_temporal_copy_spec,
         )
 
     @classmethod
