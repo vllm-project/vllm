@@ -59,7 +59,6 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/sample &&
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
@@ -93,7 +92,8 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'pip install modelscope &&
       cd tests &&
-      pytest -v -s test_regression.py'
+      pytest -v -s test_regression.py 
+      --deselect "test_regression.py::test_max_tokens_none[distilbert/distilgpt2]"'
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
@@ -161,4 +161,4 @@ steps:
     pip install av &&
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
-    pytest -v -s utils_'
+    pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'

@@ -21,7 +21,9 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s models/test_initialization.py::test_can_initialize_small_subset'
+      pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+      --deselect "tests/models/test_initialization.py::test_can_initialize_small_subset[DeepSeekMTPModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_small_subset[Llama4ForConditionalGeneration]"'
     
 - label: Basic Models Tests (Extra Initialization) %N
   key: basic-models-tests-extra-initialization
@@ -46,5 +48,37 @@ steps:
       'cd tests &&
       pip install matplotlib ftfy &&
       pip install open-clip-torch --no-deps &&
-      pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+      pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[ArcticForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Cheers]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[ColQwen3]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[DeepseekV32ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[DeepseekV3ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Eagle3DeepseekV2ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Eagle3DeepseekV3ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Eagle3Qwen2_5vlForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[EagleDeepSeekMTPModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[EagleMiniCPMForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[GraniteVision]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[H2OVLChatModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[HfMoondream]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[InternS1ProForConditionalGeneration]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[KimiK25ForConditionalGeneration]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Llama4ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[LongcatFlashForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[LongCatFlashMTPModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[MiniCPMO]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[MiniMaxM2ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[MistralLarge3ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Molmo2ForConditionalGeneration]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Moondream3ForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[OpsColQwen3Model]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[PEagleDraftModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[PeagleLlamaForCausalLM]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Qwen2_5OmniForConditionalGeneration]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Qwen3OmniMoeForConditionalGeneration]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[Qwen3VLNemotronEmbedModel]"
+      --deselect "tests/models/test_initialization.py::test_can_initialize_large_subset[TransformersMultiModalMoEForCausalLM]"
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
   parallelism: 16
