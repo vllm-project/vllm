@@ -1392,11 +1392,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # Select experts implementation.
+        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
+        # activation_key=None every W4A4 backend's _supports_quant_scheme
+        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
+        # exactly); only Marlin survives. Marlin's MoE path drops
+        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
+        # other change is needed.
+        self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=None if self.use_a16 else kNvfp4Dynamic,
         )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -2211,12 +2217,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         quantized_layers: dict[str, dict[str, Any]],
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
+        w4a16_nvfp4_config: ModelOptNvFp4Config,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
+        self.w4a16_nvfp4_config = w4a16_nvfp4_config
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2261,10 +2269,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 "'quantized_layers' mapping in the quantization config."
             )
 
-        # Determine group_size from the first NVFP4 entry if not provided.
+        # Determine group_size from the first NVFP4-family entry if not
+        # provided. Both NVFP4 (W4A4) and W4A16_NVFP4 share the same packing
+        # + group-size convention; either entry resolves the value.
         if group_size is None:
             for layer_info in quantized_layers.values():
-                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                if layer_info.get("quant_algo", "").upper() in (
+                    "NVFP4",
+                    "W4A16_NVFP4",
+                ):
                     group_size = layer_info.get("group_size", 16)
                     break
         if group_size is None:
@@ -2282,6 +2295,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=[],
             group_size=group_size,
         )
+        # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
+        # ModelOptNvFp4Config.__init__ keys LinearMethodCls off quant_method,
+        # so this instance auto-selects ModelOptNvFp4W4A16LinearMethod. The
+        # MoE side reads quant_config.quant_method == "W4A16_NVFP4" to set
+        # use_a16 → Marlin backend in ModelOptNvFp4FusedMoE.__init__.
+        w4a16_nvfp4_config = ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
 
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
@@ -2289,6 +2314,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             quantized_layers=quantized_layers,
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
+            w4a16_nvfp4_config=w4a16_nvfp4_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2304,18 +2330,22 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         is not found.
         """
         # 1. Direct lookup
-        if prefix in self.quantized_layers:
-            return self.quantized_layers[prefix]["quant_algo"].upper()
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            if candidate in self.quantized_layers:
+                return self.quantized_layers[candidate]["quant_algo"].upper()
 
         # 2. Packed / fused layer lookup
         proj_name = prefix.rsplit(".", 1)[-1]
         if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
             algos: set[str] = set()
             base = prefix.rsplit(".", 1)[0]
-            for shard_name in self.packed_modules_mapping[proj_name]:
-                shard_prefix = f"{base}.{shard_name}"
-                if shard_prefix in self.quantized_layers:
-                    algos.add(self.quantized_layers[shard_prefix]["quant_algo"].upper())
+            for base_candidate in self._quantized_layer_prefix_candidates(base):
+                for shard_name in self.packed_modules_mapping[proj_name]:
+                    shard_prefix = f"{base_candidate}.{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algos.add(
+                            self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        )
             if len(algos) == 1:
                 return algos.pop()
             if len(algos) > 1:
@@ -2325,12 +2355,31 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 )
 
         # 3. Prefix-based lookup (for RoutedExperts / parent modules)
-        prefix_dot = prefix + "."
-        for key, info in self.quantized_layers.items():
-            if key.startswith(prefix_dot):
-                return info["quant_algo"].upper()
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            prefix_dot = candidate + "."
+            for key, info in self.quantized_layers.items():
+                if key.startswith(prefix_dot):
+                    return info["quant_algo"].upper()
 
         return None
+
+    @staticmethod
+    def _quantized_layer_prefix_candidates(prefix: str) -> tuple[str, ...]:
+        candidates = [prefix]
+
+        if prefix.endswith(".lm_head"):
+            candidates.append("lm_head")
+
+        if prefix.startswith("language_model.model."):
+            candidates.append(
+                "model.language_model." + prefix[len("language_model.model.") :]
+            )
+        elif prefix.startswith("model.language_model."):
+            candidates.append(
+                "language_model.model." + prefix[len("model.language_model.") :]
+            )
+
+        return tuple(dict.fromkeys(candidates))
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -2355,6 +2404,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptFp8LinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
@@ -2367,6 +2418,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4FusedMoE(
+                    quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
                 )
             return None

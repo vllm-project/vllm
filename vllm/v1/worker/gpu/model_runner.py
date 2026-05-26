@@ -432,9 +432,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
-                self.model_state,
-                self.kv_cache_config,
-                self.block_tables,
+                self.model_state, self.kv_cache_config, self.block_tables
             )
 
         self.kv_caches: list[torch.Tensor] = []
@@ -446,6 +444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.cache_config.cache_dtype,
             kernel_block_sizes,
+            self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 

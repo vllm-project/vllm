@@ -8,8 +8,8 @@
 #include "quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
-#include "../../cub_helpers.h"
-#include "../../cuda_compat.h"
+#include "../../../cub_helpers.h"
+#include "../../../cuda_compat.h"
 
 namespace vllm {
 

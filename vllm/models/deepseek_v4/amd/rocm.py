@@ -8,14 +8,15 @@ import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.nvidia.flashmla import (
+    DeepseekV4FlashMLASparseBackend,
+    DeepseekV4SparseMLAAttentionImpl,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
-    AttentionLayer,
     CommonAttentionMetadata,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    DeepseekV4FlashMLASparseBackend,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
 )
@@ -31,7 +32,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.attention import DeepseekV4MLAAttention
+    from vllm.models.deepseek_v4.nvidia.ops.attention import (
+        DeepseekV4MLAAttention,
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -39,6 +42,127 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
+
+
+# ROCm sparse prefill keeps this dense combine local so AMD-specific SWA changes
+# do not touch the shared DeepSeek V4 cache utilities.
+_SPARSE_PREFILL_TOPK_ALIGNMENT = 128
+
+
+@triton.jit
+def _combine_topk_swa_indices_kernel(
+    combined_indices_ptr,
+    combined_indices_stride,
+    combined_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    gather_lens_ptr,
+    M,
+    N,
+    TOP_K: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+    TOPK_WIDTH: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    base = tl.load(query_start_loc_ptr)
+    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    gather_len = tl.load(gather_lens_ptr + batch_idx)
+    start_pos = seq_len - query_len
+    gather_start = seq_len - gather_len
+
+    for token_idx in range(query_start + worker_id, query_end, num_workers):
+        token_idx_in_query = token_idx - query_start
+        pos = start_pos + token_idx_in_query
+        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+
+        topk_offset = tl.arange(0, PADDED_TOP_K)
+        topk_mask = topk_offset < topk_len
+        safe_topk_offset = tl.where(topk_offset < TOPK_WIDTH, topk_offset, 0)
+        topk_indices = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + safe_topk_offset,
+            mask=topk_mask,
+            other=-1,
+        )
+        valid_topk = (topk_indices >= 0) & (topk_indices < N)
+        topk_indices = tl.where(valid_topk, topk_indices + M * batch_idx, -1)
+        tl.store(
+            combined_indices_ptr + token_idx * combined_indices_stride + topk_offset,
+            topk_indices,
+            mask=topk_mask,
+        )
+
+        swa_offset = tl.arange(0, WINDOW_SIZE)
+        tl.store(
+            combined_indices_ptr
+            + token_idx * combined_indices_stride
+            + topk_len
+            + swa_offset,
+            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
+            mask=swa_offset < swa_len,
+        )
+
+        tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
+
+
+def combine_topk_swa_indices(
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens = topk_indices.shape[0]
+    num_reqs = seq_lens.shape[0]
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+
+    num_workers = 128
+    _combine_topk_swa_indices_kernel[(num_reqs, num_workers)](
+        combined_indices,
+        combined_indices.stride(0),
+        combined_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        M,
+        N,
+        TOP_K=topk,
+        COMPRESS_RATIO=compress_ratio,
+        WINDOW_SIZE=window_size,
+        TOPK_WIDTH=topk_indices.shape[-1],
+        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+    )
+    return combined_indices, combined_lens
 
 
 @triton.jit
@@ -449,47 +573,27 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         )
 
 
-class DeepseekV4ROCMAiterMLASparseImpl(
-    SparseMLAAttentionImpl[DeepseekV4ROCMAiterMLASparseMetadata]
-):
+class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ROCM_V4_FLASHMLA_SPARSE"
+
+    @staticmethod
+    def get_builder_cls() -> type["DeepseekV4ROCMAiterMLASparseMetadataBuilder"]:
+        return DeepseekV4ROCMAiterMLASparseMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type["DeepseekV4SparseMLAAttentionImpl"]:
+        return DeepseekV4ROCMAiterMLASparseImpl
+
+
+class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     """ROCm sparse MLA implementation used by DeepSeek V4's custom MLA layer."""
 
-    _PREFILL_CHUNK_SIZE = 4
-
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        **_: object,
-    ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-
-    def forward_mqa(
-        self,
-        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata,
-        layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        raise NotImplementedError(
-            "DeepseekV4ROCMAiterMLASparseImpl is driven by "
-            "DeepseekV4MLAAttention.forward."
-        )
+    backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
     @classmethod
-    def forward(
+    def forward_mqa(  # type: ignore[override]
         cls,
         layer: "DeepseekV4MLAAttention",
         q: torch.Tensor,
@@ -506,6 +610,25 @@ class DeepseekV4ROCMAiterMLASparseImpl(
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+
+        if attn_metadata is None:
+            # Warmup dummy run: no real metadata. Reserve the same bf16
+            # gather workspace _forward_prefill would; the dequantize / topk
+            # / sparse_fwd kernels are skipped this step.
+            swa_only = layer.compress_ratio <= 1
+            N = (
+                0
+                if swa_only
+                else (layer.max_model_len + layer.compress_ratio - 1)
+                // layer.compress_ratio
+            )
+            M = N + layer.window_size + layer.max_num_batched_tokens
+            current_workspace_manager().get_simultaneous(
+                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            )
+            output.zero_()
+            return
+
         assert isinstance(attn_metadata, dict)
         rocm_metadata = cast(
             DeepseekV4ROCMAiterMLASparseMetadata | None,
@@ -658,17 +781,17 @@ class DeepseekV4ROCMAiterMLASparseImpl(
             N = 0
 
         M = N + layer.window_size + layer.max_num_batched_tokens
-        num_chunks = (num_prefills + cls._PREFILL_CHUNK_SIZE - 1) // (
-            cls._PREFILL_CHUNK_SIZE
+        num_chunks = (num_prefills + cls.PREFILL_CHUNK_SIZE - 1) // (
+            cls.PREFILL_CHUNK_SIZE
         )
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((cls._PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
         for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * cls._PREFILL_CHUNK_SIZE
-            chunk_end = min(chunk_start + cls._PREFILL_CHUNK_SIZE, num_prefills)
+            chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE
+            chunk_end = min(chunk_start + cls.PREFILL_CHUNK_SIZE, num_prefills)
             chunk_size = chunk_end - chunk_start
             if not swa_only:
                 assert attn_metadata is not None
@@ -702,31 +825,23 @@ class DeepseekV4ROCMAiterMLASparseImpl(
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            combined_ragged_indices, combined_ragged_indptr, combined_lens = (
-                combine_topk_swa_indices_ragged(
-                    topk_indices[query_start:query_end],
-                    query_start_loc[
-                        num_decodes + chunk_start : num_decodes + chunk_end + 1
-                    ],
-                    seq_lens[chunk_start:chunk_end],
-                    gather_lens[chunk_start:chunk_end],
-                    layer.window_size,
-                    layer.compress_ratio,
-                    top_k,
-                    M,
-                    N,
-                )
+            combined_indices, combined_lens = combine_topk_swa_indices(
+                topk_indices[query_start:query_end],
+                query_start_loc[
+                    num_decodes + chunk_start : num_decodes + chunk_end + 1
+                ],
+                seq_lens[chunk_start:chunk_end],
+                gather_lens[chunk_start:chunk_end],
+                layer.window_size,
+                layer.compress_ratio,
+                top_k,
+                M,
+                N,
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
-                indices=torch.empty(
-                    q[query_start:query_end].shape[0],
-                    1,
-                    0,
-                    dtype=torch.int32,
-                    device=q.device,
-                ),
+                indices=combined_indices,
                 topk_length=combined_lens,
                 scale=layer.scale,
                 head_dim=layer.head_dim,
@@ -734,20 +849,4 @@ class DeepseekV4ROCMAiterMLASparseImpl(
                 rope_head_dim=layer.rope_head_dim,
                 attn_sink=layer.attn_sink,
                 output=output[query_start:query_end],
-                ragged_indices=combined_ragged_indices,
-                ragged_indptr=combined_ragged_indptr,
             )
-
-
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLASparseBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ROCM_V4_FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_builder_cls() -> type["DeepseekV4ROCMAiterMLASparseMetadataBuilder"]:
-        return DeepseekV4ROCMAiterMLASparseMetadataBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type["DeepseekV4ROCMAiterMLASparseImpl"]:
-        return DeepseekV4ROCMAiterMLASparseImpl
