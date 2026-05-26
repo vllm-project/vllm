@@ -558,6 +558,10 @@ def stack_with_pad(
         return tensors
 
     assert len(tensors) > 0, "Cannot stack an empty tensor list"
+    first_shape = tensors[0].shape
+    if all(t.shape == first_shape for t in tensors):
+        return torch.stack(tensors)
+
     ndim = tensors[0].dim()
     assert all(t.dim() == ndim for t in tensors[1:]), (
         "All tensors must have the same number of dimensions"
