@@ -11,9 +11,13 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
+    _fused_kv_compress_norm_rope_insert_indexer_attn,
+    _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
+    _fused_kv_compress_norm_rope_insert_sparse_attn,
 )
+from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
@@ -22,14 +26,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
-)
-from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
-    _fused_kv_compress_norm_rope_insert_indexer_attn,
-    _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
-    _fused_kv_compress_norm_rope_insert_sparse_attn,
-)
-from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
-    MXFP4_BLOCK_SIZE,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
@@ -300,7 +296,11 @@ class DeepseekCompressor(nn.Module):
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
-        pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
+        pdl_kwargs = (
+            {}
+            if current_platform.is_rocm() or current_platform.is_xpu()
+            else {"launch_pdl": False}
+        )
 
         # Store the KV and score (with fused APE addition) in the state.
         # NOTE: PDL is disabled — both this kernel and _fused_kernel below
