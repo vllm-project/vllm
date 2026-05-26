@@ -45,6 +45,7 @@ class LoRAExpertsMixin:
         w2: torch.Tensor,
         num_tokens: int,
         top_k_num: int,
+        add_inputs: bool = True,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -70,6 +71,7 @@ class LoRAExpertsMixin:
             lora_context.w13_num_slices,
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
+            add_inputs=add_inputs,
             token_lora_mapping=lora_context.local_token_lora_mapping,
         )
 
@@ -88,6 +90,7 @@ class LoRAExpertsMixin:
         w1: torch.Tensor,
         w2: torch.Tensor,
         top_k_num: int,
+        add_inputs: bool = True,
     ) -> None:
         lora_context.punica_wrapper.add_lora_w2(
             y,
@@ -109,4 +112,5 @@ class LoRAExpertsMixin:
             lora_context.fully_sharded,
             lora_context.tp_rank,
             lora_context.use_tuned_config,
+            add_inputs=add_inputs,
         )
