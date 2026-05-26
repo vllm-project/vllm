@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
+
 import torch
 from einops import rearrange
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    divide,
-)
+from vllm.distributed import divide
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -38,6 +39,37 @@ from ..mamba_utils import (
 from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
 logger = init_logger(__name__)
+
+FLASHKDA_LOWER_BOUND = -5.0
+
+
+def resolve_kda_prefill_backend(backend: str, head_dim: int) -> str:
+    if backend == "flashkda":
+        is_installed = importlib.util.find_spec("flash_kda") is not None
+        capability = current_platform.get_device_capability()
+        capability_str = (
+            capability.as_version_str() if capability is not None else "unavailable"
+        )
+        is_cuda = current_platform.is_cuda()
+        platform_supported = is_cuda and current_platform.has_device_capability(90)
+        head_dim_supported = head_dim == 128
+
+        if is_installed and platform_supported and head_dim_supported:
+            logger.info_once("Using FlashKDA KDA prefill backend.")
+            return "flashkda"
+
+        logger.warning_once(
+            "KDA prefill backend 'flashkda' requires flash_kda installed, "
+            "CUDA >=SM90, and head_dim=128. Current state: "
+            "flash_kda_installed=%s, is_cuda=%s, capability=%s, head_dim=%d. "
+            "Falling back to Triton/FLA.",
+            is_installed,
+            is_cuda,
+            capability_str,
+            head_dim,
+        )
+
+    return "triton"
 
 
 def kda_attention(
@@ -225,6 +257,13 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.o_proj",
         )
 
+        additional_config = vllm_config.additional_config
+        assert isinstance(additional_config, dict)
+        prefill_backend = additional_config.get("kda_prefill_backend", "auto")
+        self.prefill_backend = resolve_kda_prefill_backend(
+            prefill_backend, self.head_dim
+        )
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -241,11 +280,15 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
 
-        beta = self.b_proj(hidden_states)[0].float().sigmoid()
+        beta = self.b_proj(hidden_states)[0]
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
-        g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
-        beta = beta.unsqueeze(0)
-        g1 = g1.unsqueeze(0)
+        if self.prefill_backend == "flashkda":
+            beta = beta.to(hidden_states.dtype).unsqueeze(0)
+            g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
+        else:
+            beta = beta.float().sigmoid().unsqueeze(0)
+            g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
+            g1 = g1.unsqueeze(0)
 
         g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
@@ -298,8 +341,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         q_proj_states = q_proj_states[:num_actual_tokens]
         k_proj_states = k_proj_states[:num_actual_tokens]
         v_proj_states = v_proj_states[:num_actual_tokens]
-        g1 = g1[:num_actual_tokens]
-        beta = beta[:num_actual_tokens]
+        g1 = g1[:, :num_actual_tokens]
+        beta = beta[:, :num_actual_tokens]
 
         (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
         # conv_state must be (..., dim, width-1) for the conv kernels.
@@ -398,24 +441,50 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             zero_idx = non_spec_state_indices_tensor[~has_initial_state]
             recurrent_state[zero_idx] = 0
             initial_state = recurrent_state[non_spec_state_indices_tensor].contiguous()
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_kda(
-                q=q,
-                k=k,
-                v=v,
-                g=g1,
-                beta=beta,
-                initial_state=initial_state,
-                output_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc,
-            )
+            if self.prefill_backend == "flashkda":
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self._flashkda_forward(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g1,
+                    beta=beta,
+                    initial_state=initial_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                )
+            else:
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = chunk_kda(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g1,
+                    beta=beta,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                )
             # Init cache
             recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
         else:
             assert non_spec_query_start_loc is not None
+            assert non_spec_state_indices_tensor is not None
+            cu_seqlens = non_spec_query_start_loc[
+                : attn_metadata_narrowed.num_decodes + 1
+            ]
+            if self.prefill_backend == "flashkda":
+                beta = beta.float().sigmoid()
+                g1 = fused_kda_gate(
+                    rearrange(g1, "1 n h d -> n (h d)"),
+                    self.A_log,
+                    self.head_dim,
+                    g_bias=self.dt_bias,
+                ).unsqueeze(0)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -427,11 +496,40 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta,
                 initial_state=recurrent_state,
                 use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc[
-                    : attn_metadata_narrowed.num_decodes + 1
-                ],
+                cu_seqlens=cu_seqlens,
                 ssm_state_indices=non_spec_state_indices_tensor,
             )
         core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
             0, :num_actual_tokens
         ]
+
+    def _flashkda_forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        import flash_kda
+
+        final_state = torch.empty_like(initial_state)
+        out = torch.empty_like(v)
+        flash_kda.fwd(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            g.contiguous(),
+            beta.contiguous(),
+            self.head_dim**-0.5,
+            out,
+            self.A_log.reshape(-1).contiguous(),
+            self.dt_bias.view(self.local_num_heads, self.head_dim).contiguous(),
+            FLASHKDA_LOWER_BOUND,
+            initial_state=initial_state.contiguous(),
+            final_state=final_state,
+            cu_seqlens=cu_seqlens,
+        )
+        return out, final_state
