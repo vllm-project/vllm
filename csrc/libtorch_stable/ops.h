@@ -167,6 +167,59 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);
 
+// Layernorm kernels (shared CUDA/ROCm)
+void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
+              torch::stable::Tensor& weight, double epsilon);
+
+void fused_add_rms_norm(torch::stable::Tensor& input,
+                        torch::stable::Tensor& residual,
+                        torch::stable::Tensor& weight, double epsilon);
+
+// Layernorm-quant kernels (shared CUDA/ROCm)
+void rms_norm_static_fp8_quant(torch::stable::Tensor& out,
+                               torch::stable::Tensor& input,
+                               torch::stable::Tensor& weight,
+                               torch::stable::Tensor& scale, double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(torch::stable::Tensor& out,
+                                         torch::stable::Tensor& input,
+                                         torch::stable::Tensor& residual,
+                                         torch::stable::Tensor& weight,
+                                         torch::stable::Tensor& scale,
+                                         double epsilon);
+
+// Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+void rms_norm_dynamic_per_token_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& weight, torch::stable::Tensor& scales,
+    double const var_epsilon, std::optional<torch::stable::Tensor> scale_ub,
+    std::optional<torch::stable::Tensor> residual);
+
+void rms_norm_per_block_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor const& weight,
+                              torch::stable::Tensor& scales,
+                              double const var_epsilon,
+                              std::optional<torch::stable::Tensor> scale_ub,
+                              std::optional<torch::stable::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed);
+
+// Positional encoding kernels (shared CUDA/ROCm)
+void rotary_embedding(torch::stable::Tensor& positions,
+                      torch::stable::Tensor& query,
+                      std::optional<torch::stable::Tensor> key,
+                      int64_t head_size, torch::stable::Tensor& cos_sin_cache,
+                      bool is_neox, int64_t rope_dim_offset, bool inverse);
+
+void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps,
+                        torch::stable::Tensor& q_weight,
+                        torch::stable::Tensor& k_weight,
+                        torch::stable::Tensor& cos_sin_cache, bool is_neox,
+                        torch::stable::Tensor& position_ids,
+                        int64_t forced_token_heads_per_warp);
+
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,
