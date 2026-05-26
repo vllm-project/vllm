@@ -27,15 +27,19 @@ WORKDIR /workspace
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
+ARG max_jobs=32
+ENV MAX_JOBS=${max_jobs}
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Compiler and linker environment
 ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -80,11 +84,47 @@ FROM base-${TARGETARCH} AS base
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
+######################### RUST BUILD IMAGE #########################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
+# stage doesn't need the rust toolchain or protoc. This stage runs in parallel
+# with the main vllm-build stage.
+FROM ubuntu:22.04 AS rust-build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY rust rust
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY build_rust.sh build_rust.sh
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+# Build the release binary. Cache cargo registry/git and target/, but copy the
+# binary out of the target/ cache mount so it persists into the image layer
+# for later COPY --from=rust-build.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
-
-ARG max_jobs=32
-ENV MAX_JOBS=${max_jobs}
 
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
@@ -113,6 +153,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/build/cpu.txt
 
 COPY . .
+
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
@@ -213,8 +257,7 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install dist/*.whl && \
-    uv pip install "vllm[audio]"
+    uv pip install "$(realpath dist/*.whl)[audio,triton-cpu]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
