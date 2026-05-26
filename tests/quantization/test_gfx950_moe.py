@@ -35,7 +35,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_mi3xx
+
+
+def on_mi3xx() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx as rocm_on_mi3xx
+
+        return rocm_on_mi3xx()
+    return False
+
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm() or not on_mi3xx(),
