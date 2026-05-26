@@ -39,6 +39,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -50,6 +51,7 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -2362,3 +2364,45 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def _make_kv_cache_config(spec: KVCacheSpec) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+    )
+
+
+def test_needs_kv_cache_zeroing():
+    """needs_kv_cache_zeroing must be True for Mamba and all FullAttentionSpec
+    subclasses, and False for attention types that don't use the zeroing pipeline."""
+    base_kwargs = dict(block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float32)
+
+    # FullAttentionSpec and every subclass must require zeroing.
+    assert _make_kv_cache_config(FullAttentionSpec(**base_kwargs)).needs_kv_cache_zeroing
+    assert _make_kv_cache_config(
+        TQFullAttentionSpec(**base_kwargs)
+    ).needs_kv_cache_zeroing
+    assert _make_kv_cache_config(
+        MLAAttentionSpec(**base_kwargs)
+    ).needs_kv_cache_zeroing
+    assert _make_kv_cache_config(
+        SinkFullAttentionSpec(**base_kwargs)
+    ).needs_kv_cache_zeroing
+
+    # MambaSpec must also require zeroing (original case).
+    mamba_spec = MambaSpec(
+        block_size=1,
+        shapes=((16, 64),),
+        dtypes=(torch.float32,),
+    )
+    assert _make_kv_cache_config(mamba_spec).needs_kv_cache_zeroing
+
+    # Attention types that don't share the recycled-block corruption risk.
+    assert not _make_kv_cache_config(
+        SlidingWindowSpec(**base_kwargs, sliding_window=4)
+    ).needs_kv_cache_zeroing
+    assert not _make_kv_cache_config(
+        CrossAttentionSpec(**base_kwargs)
+    ).needs_kv_cache_zeroing

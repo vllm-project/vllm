@@ -859,4 +859,6 @@ class KVCacheConfig:
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        return self.has_mamba_layers or any(
+            isinstance(g.kv_cache_spec, FullAttentionSpec)
+            for g in self.kv_cache_groups)

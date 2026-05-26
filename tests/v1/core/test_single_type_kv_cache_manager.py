@@ -14,9 +14,18 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     SlidingWindowManager,
+    get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowSpec,
+    TQFullAttentionSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -481,3 +490,61 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+def _make_full_attention_manager(spec, num_blocks=100):
+    block_pool = BlockPool(
+        num_gpu_blocks=num_blocks, enable_caching=False, hash_block_size=spec.block_size
+    )
+    return get_manager_for_kv_cache_spec(
+        spec,
+        max_num_batched_tokens=2048,
+        max_model_len=2048,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+    ), block_pool
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        FullAttentionSpec(block_size=4, num_kv_heads=2, head_size=64, dtype=torch.float32),
+        TQFullAttentionSpec(block_size=4, num_kv_heads=2, head_size=64, dtype=torch.float32),
+        MLAAttentionSpec(block_size=4, num_kv_heads=2, head_size=64, dtype=torch.float32),
+        SinkFullAttentionSpec(block_size=4, num_kv_heads=2, head_size=64, dtype=torch.float32, sink_len=4),
+    ],
+    ids=["FullAttentionSpec", "TQFullAttentionSpec", "MLAAttentionSpec", "SinkFullAttentionSpec"],
+)
+def test_new_block_ids_tracked_for_full_attention_subclasses(spec):
+    """allocate_new_blocks must populate new_block_ids for every FullAttentionSpec
+    subclass so the zeroing pipeline receives all recycled block IDs."""
+    manager, _ = _make_full_attention_manager(spec)
+
+    manager.allocate_new_blocks("req0", num_tokens=8, num_tokens_main_model=8)
+    ids = manager.take_new_block_ids()
+
+    assert len(ids) == 2, f"{type(spec).__name__}: expected 2 block IDs, got {ids}"
+    # take_new_block_ids drains the list — second call must be empty.
+    assert manager.take_new_block_ids() == []
+
+
+def test_new_block_ids_not_tracked_for_sliding_window():
+    """SlidingWindowManager must not populate new_block_ids — it does not use
+    the zeroing pipeline."""
+    spec = SlidingWindowSpec(
+        block_size=4, num_kv_heads=2, head_size=64, dtype=torch.float32, sliding_window=8
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=spec.block_size
+    )
+    manager = SlidingWindowManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        max_admission_blocks_per_request=10**9,
+    )
+
+    manager.allocate_new_blocks("req0", num_tokens=8, num_tokens_main_model=8)
+    assert manager.take_new_block_ids() == []
