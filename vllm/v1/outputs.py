@@ -202,9 +202,7 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # latest EPLB balancedness samples per model (main + drafter), populated
-    # by the worker after eplb_step()
-    eplb_stats: EplbMetrics | None = None
+    eplb_metrics: EplbMetrics | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

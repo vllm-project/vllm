@@ -529,7 +529,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # EPLB load balancing
         #
-        gauge_eplb_balancedness = self._gauge_cls(
+        # Labeled by ``eplb_model`` (in addition to model_name/engine) so the
+        # main model and any drafter expose distinct series. Not wrapped via
+        # create_metric_per_engine because the ``eplb_model`` value is only
+        # known at record() time.
+        self.gauge_eplb_balancedness = self._gauge_cls(
             name="vllm:eplb_balancedness",
             documentation=(
                 "EPLB balancedness ratio: avg tokens-per-rank / max "
@@ -537,10 +541,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "balanced expert load across EP ranks."
             ),
             multiprocess_mode="mostrecent",
-            labelnames=labelnames,
-        )
-        self.gauge_eplb_balancedness = create_metric_per_engine(
-            gauge_eplb_balancedness, per_engine_labelvalues
+            labelnames=labelnames + ["eplb_model"],
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1125,11 +1126,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
 
-            if scheduler_stats.eplb_stats is not None:
+            if scheduler_stats.eplb_metrics is not None:
+                model_name, engine = self.per_engine_labelvalues[engine_idx]
                 for (
-                    balancedness
-                ) in scheduler_stats.eplb_stats.balancedness_per_model.values():
-                    self.gauge_eplb_balancedness[engine_idx].set(balancedness)
+                    eplb_model,
+                    balancedness,
+                ) in scheduler_stats.eplb_metrics.balancedness_per_model.items():
+                    self.gauge_eplb_balancedness.labels(
+                        model_name=model_name,
+                        engine=engine,
+                        eplb_model=eplb_model,
+                    ).set(balancedness)
 
             if (
                 self.kv_cache_metrics_enabled

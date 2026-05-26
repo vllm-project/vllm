@@ -1317,7 +1317,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        eplb_stats = model_runner_output.eplb_stats
+        eplb_metrics = model_runner_output.eplb_metrics
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1560,7 +1560,7 @@ class Scheduler(SchedulerInterface):
                 kv_connector_stats,
                 cudagraph_stats,
                 perf_stats,
-                eplb_stats,
+                eplb_metrics,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1951,7 +1951,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
-        eplb_stats: EplbMetrics | None = None,
+        eplb_metrics: EplbMetrics | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1982,7 +1982,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
-            eplb_stats=eplb_stats,
+            eplb_metrics=eplb_metrics,
         )
 
     def make_spec_decoding_stats(

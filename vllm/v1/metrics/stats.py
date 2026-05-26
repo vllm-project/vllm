@@ -169,10 +169,9 @@ class KVCacheEvictionEvent:
 
 @dataclass
 class EplbMetrics:
-    """Latest balancedness samples from the EPLB load balancer.
-
-    One entry per model in the worker's EplbState (typically the main model;
-    a drafter is added when speculative decoding is enabled).
+    """
+    Stores EPLB metrics
+    - `balancedness_per_model`: Per-model balancedness score
     """
 
     balancedness_per_model: dict[str, float] = field(default_factory=dict)
@@ -208,7 +207,7 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
-    eplb_stats: EplbMetrics | None = None
+    eplb_metrics: EplbMetrics | None = None
 
 
 @dataclass

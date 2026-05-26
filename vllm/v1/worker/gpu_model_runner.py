@@ -4325,11 +4325,13 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
 
-        eplb_stats: EplbMetrics | None = None
+        eplb_metrics: EplbMetrics | None = None
         if self.eplb_state is not None:
             balancedness_per_model = self.eplb_state.get_latest_balancedness()
             if balancedness_per_model:
-                eplb_stats = EplbMetrics(balancedness_per_model=balancedness_per_model)
+                eplb_metrics = EplbMetrics(
+                    balancedness_per_model=balancedness_per_model
+                )
 
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
@@ -4355,7 +4357,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                eplb_stats=eplb_stats,
+                eplb_metrics=eplb_metrics,
             )
 
         if not self.use_async_scheduling:

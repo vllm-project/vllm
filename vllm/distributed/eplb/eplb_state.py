@@ -206,28 +206,11 @@ class EplbModelState:
     the async worker.
     """
 
-    balancedness_pinned_buffer: torch.Tensor | None = None
-    """
-    Pinned host tensor of shape (2,) holding [avg_tokens, max_tokens] from the
-    most recent in-flight balancedness D2H copy. Used to expose balancedness as
-    a Prometheus gauge without forcing a synchronous D2H on the main thread.
-    """
-    balancedness_event: "torch.cuda.Event | None" = None
-    """
-    CUDA event recorded after the non-blocking D2H copy into
-    balancedness_pinned_buffer. Queried (non-blocking) on a subsequent step to
-    learn when the host buffer is safe to read.
-    """
-    balancedness_event_pending: bool = False
-    """
-    True between recording balancedness_event and consuming the buffer. While
-    True we skip enqueuing another copy to avoid racing the in-flight one.
-    """
     latest_balancedness: float | None = None
     """
-    Most recent balancedness ratio (avg_tokens / max_tokens) read from the
-    pinned host buffer. None until the first deferred read completes. Read by
-    the worker each step to populate ModelRunnerOutput.
+    Most recent balancedness ratio (avg_tokens / max_tokens), updated every
+    ``log_balancedness_interval`` steps. None until the first sample is taken.
+    Read by the worker each step to populate ModelRunnerOutput.
     """
 
 
@@ -477,14 +460,6 @@ class EplbState:
             expert_weights=model.expert_weights[0],
         )
 
-        balancedness_pinned_buffer: torch.Tensor | None = None
-        balancedness_event: torch.cuda.Event | None = None
-        if self.device.type == "cuda":
-            balancedness_pinned_buffer = torch.empty(
-                (2,), dtype=torch.float32, pin_memory=True
-            )
-            balancedness_event = torch.cuda.Event()
-
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
             logical_to_physical_map=logical_to_physical_map,
@@ -498,8 +473,6 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
-            balancedness_pinned_buffer=balancedness_pinned_buffer,
-            balancedness_event=balancedness_event,
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
@@ -534,13 +507,6 @@ class EplbState:
             self.rearrange(is_profile=True)
             return
 
-        # Consume any in-flight deferred D2H copies of [avg_tokens, max_tokens]
-        # from the previous balancedness sample. The copy is enqueued with
-        # non_blocking=True into a pinned host buffer; we publish the value
-        # once the recorded event has completed so the main thread never
-        # blocks on a D2H sync.
-        self._consume_balancedness_events(ep_group)
-
         if is_dummy:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
@@ -574,20 +540,27 @@ class EplbState:
                 avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
                 max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
 
-                # Enqueue a non-blocking D2H copy of [avg, max] into a pinned
-                # host buffer and record an event. The values will be picked
-                # up on a subsequent step() once the event has completed.
-                buffer = eplb_model_state.balancedness_pinned_buffer
-                event = eplb_model_state.balancedness_event
-                if (
-                    buffer is not None
-                    and event is not None
-                    and not eplb_model_state.balancedness_event_pending
-                ):
-                    stacked = torch.stack([avg_tokens_tensor, max_tokens_tensor])
-                    buffer.copy_(stacked, non_blocking=True)
-                    event.record()
-                    eplb_model_state.balancedness_event_pending = True
+                # Just to make type checker happy
+                tokens_tensors: list[float] = torch.stack(
+                    [avg_tokens_tensor, max_tokens_tensor]
+                ).tolist()
+                avg_tokens, max_tokens = tokens_tensors
+                balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+                eplb_model_state.latest_balancedness = balancedness
+
+                if ep_group.rank() == 0:
+                    logger.info(
+                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                        "max_tokens=%d, balancedness=%.4f, "
+                        "steps until the next rearrangement: %d",
+                        self.expert_rearrangement_step,
+                        eplb_model_state.model_name,
+                        avg_tokens,
+                        max_tokens,
+                        balancedness,
+                        self.expert_rearrangement_step_interval
+                        - self.expert_rearrangement_step,
+                    )
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -668,49 +641,8 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def _consume_balancedness_events(self, ep_group: ProcessGroup) -> None:
-        """Publish balancedness from any completed deferred D2H copies.
-
-        Called at the top of every step(). For each model state with an
-        in-flight ``balancedness_event``, query the event without blocking;
-        if it has completed, read the pinned host buffer (a CPU read, which
-        is free), update ``latest_balancedness``, and emit the same log line
-        the synchronous path used to emit. The values are at most one
-        forward pass old.
-        """
-        for eplb_model_state in self.model_states.values():
-            if not eplb_model_state.balancedness_event_pending:
-                continue
-            event = eplb_model_state.balancedness_event
-            buffer = eplb_model_state.balancedness_pinned_buffer
-            if event is None or buffer is None or not event.query():
-                continue
-            avg_tokens, max_tokens = buffer.tolist()
-            balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-            eplb_model_state.latest_balancedness = balancedness
-            eplb_model_state.balancedness_event_pending = False
-
-            if ep_group.rank() == 0:
-                logger.info(
-                    "EPLB step: %d for model %s: avg_tokens=%.2f, "
-                    "max_tokens=%d, balancedness=%.4f, "
-                    "steps until the next rearrangement: %d",
-                    self.expert_rearrangement_step,
-                    eplb_model_state.model_name,
-                    avg_tokens,
-                    max_tokens,
-                    balancedness,
-                    self.expert_rearrangement_step_interval
-                    - self.expert_rearrangement_step,
-                )
-
     def get_latest_balancedness(self) -> dict[str, float]:
-        """Return the latest balancedness ratio per model.
-
-        Values are read from a host-side cache populated by
-        :meth:`_consume_balancedness_events`; this method does not touch the
-        GPU. Models without a balancedness sample yet are omitted.
-        """
+        """Return the latest balancedness ratio per model."""
         return {
             state.model_name: state.latest_balancedness
             for state in self.model_states.values()
