@@ -117,17 +117,34 @@ class Ovis2_6_Next(Ovis2_5, IsHybrid):
     # parameters and populate cache_config.mamba_block_size. The Ovis
     # wrapper has no Mamba layers of its own — only the inner Qwen3-Next
     # backbone does — so we delegate to that class's existing impl.
+    #
+    # Qwen3NextForCausalLM's classmethods read
+    # ``vllm_config.model_config.hf_text_config`` for the LLM-side
+    # config (linear_num_key_heads, linear_conv_kernel_dim, etc.). For
+    # Ovis 2.6 Next, that inner config lives at
+    # ``hf_config.llm_config``. We substitute it explicitly via
+    # ``vllm_config.with_hf_config(...)`` before delegating, mirroring
+    # the pattern this class uses in ``__init__`` for
+    # ``init_vllm_registered_model``.
+    @classmethod
+    def _vllm_config_with_llm(cls, vllm_config: VllmConfig) -> VllmConfig:
+        return vllm_config.with_hf_config(vllm_config.model_config.hf_config.llm_config)
+
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        return Qwen3NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+        return Qwen3NextForCausalLM.get_mamba_state_shape_from_config(
+            cls._vllm_config_with_llm(vllm_config)
+        )
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, torch.dtype]:
-        return Qwen3NextForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
+        return Qwen3NextForCausalLM.get_mamba_state_dtype_from_config(
+            cls._vllm_config_with_llm(vllm_config)
+        )
 
     @classmethod
     def get_mamba_state_copy_func(
