@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
 from collections.abc import Iterable, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -182,7 +184,12 @@ class BlockPool:
         self.metrics_collector = metrics_collector
 
         # FIFO queue of eager-registration buckets, one per in-flight step.
-        self._uncommitted: list[dict[str, list[KVCacheBlock]]] = []
+        self._uncommitted: deque[dict[str, list[KVCacheBlock]]] = deque()
+        # When True, cache_full_blocks skips _uncommitted tracking. Used by
+        # post-worker-confirmed paths (AsyncScheduler post-output, KV connector
+        # load completion) where the bytes are already valid and the entry
+        # must not be evictable by a later rollback_uncommitted call.
+        self._suppress_uncommitted_tracking: bool = False
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -267,7 +274,19 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
-        uncommitted_for_req: list[KVCacheBlock] | None = None
+
+        # Where to record this request's new registrations for later
+        # rollback_uncommitted. ``None`` means skip tracking (the caller
+        # passed committed=True, signalling worker-confirmed bytes).
+        if self._suppress_uncommitted_tracking:
+            uncommitted_bucket: list[KVCacheBlock] | None = None
+        else:
+            if not self._uncommitted:
+                self._uncommitted.append({})
+            uncommitted_bucket = self._uncommitted[-1].setdefault(
+                request.request_id, []
+            )
+
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -286,14 +305,8 @@ class BlockPool:
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
-            # Track in the current bucket; lazy-create if no step open.
-            if uncommitted_for_req is None:
-                if not self._uncommitted:
-                    self._uncommitted.append({})
-                uncommitted_for_req = self._uncommitted[-1].setdefault(
-                    request.request_id, []
-                )
-            uncommitted_for_req.append(blk)
+            if uncommitted_bucket is not None:
+                uncommitted_bucket.append(blk)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -460,10 +473,23 @@ class BlockPool:
         """Open a new eager-registration bucket for the current step."""
         self._uncommitted.append({})
 
+    @contextmanager
+    def suppress_uncommitted_tracking(self):
+        """Skip ``_uncommitted`` tracking within this context. Used by paths
+        that register cache entries whose K/V bytes are already worker-
+        confirmed (AsyncScheduler post-output, KV connector load completion).
+        """
+        prev = self._suppress_uncommitted_tracking
+        self._suppress_uncommitted_tracking = True
+        try:
+            yield
+        finally:
+            self._suppress_uncommitted_tracking = prev
+
     def commit_step(self) -> None:
         """Promote the oldest pending bucket to committed. Idempotent."""
         if self._uncommitted:
-            self._uncommitted.pop(0)
+            self._uncommitted.popleft()
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

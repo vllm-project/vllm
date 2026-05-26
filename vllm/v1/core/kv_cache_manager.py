@@ -547,15 +547,31 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        *,
+        committed: bool = False,
+    ) -> None:
         """Cache the blocks for the request, if enabled.
 
         Args:
             request: The request to cache the blocks.
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
+            committed: Pass True when the worker has already confirmed writing
+                the bytes for these blocks (e.g. AsyncScheduler post-output
+                cache update, KV connector load completion). Skips
+                ``_uncommitted`` tracking so the entries are not evictable by
+                a subsequent ``rollback_uncommitted`` call.
         """
-        if self.enable_caching:
+        if not self.enable_caching:
+            return
+        if committed:
+            with self.block_pool.suppress_uncommitted_tracking():
+                self.coordinator.cache_blocks(request, num_computed_tokens)
+        else:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(

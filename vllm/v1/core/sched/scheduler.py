@@ -2089,8 +2089,12 @@ class Scheduler(SchedulerInterface):
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+                # Cache any valid computed tokens. These bytes are
+                # connector-loaded (valid by construction), so register as
+                # committed to keep them safe from later rollback_uncommitted.
+                self.kv_cache_manager.cache_blocks(
+                    request, request.num_computed_tokens, committed=True
+                )
             else:
                 # No valid computed tokens, release allocated blocks.
                 # There may be a local cache hit on retry. KV load failed,
@@ -2100,9 +2104,11 @@ class Scheduler(SchedulerInterface):
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
-            # Now that the blocks are ready, actually cache them.
-            # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            # Now that the blocks are ready, actually cache them. Bytes are
+            # connector-loaded and worker-confirmed, so register as committed.
+            self.kv_cache_manager.cache_blocks(
+                request, request.num_computed_tokens, committed=True
+            )
 
             # on a full prompt hit, we need to re-compute the last token
             # in order to be able to sample the next token

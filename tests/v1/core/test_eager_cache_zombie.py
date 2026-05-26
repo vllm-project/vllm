@@ -2,23 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests for the eager-cache-registration zombie protection.
-
-``KVCacheManager.allocate_slots`` registers block hashes into the cache map
-before the worker writes the K/V bytes. If a request is preempted/aborted
-before that write happens, those hash entries would otherwise become zombies
-that future requests could cache-hit, reading uninitialized memory.
-
-BlockPool tracks each in-flight scheduler step's eager registrations in a
-FIFO bucket queue (``_uncommitted``). The scheduler hooks them at two points:
-
-- ``schedule()`` top calls ``begin_step()`` to push a new bucket.
-- ``update_from_output()`` top calls ``commit_step()`` to pop the oldest
-  bucket once the matching worker batch has been confirmed.
-
-The preempt and abort paths call ``rollback_uncommitted(req_id)`` *before*
-``free(req)`` to evict that request's pending entries from every bucket.
-The normal-finish path calls only ``free(req)`` (no rollback), so worker-
-written entries that survived ``commit_step`` stay in the cache map.
 """
 
 from __future__ import annotations
@@ -30,7 +13,7 @@ from tests.v1.core.test_prefix_caching import (
     make_kv_cache_config_hybrid_model,
     make_request,
 )
-from tests.v1.core.utils import create_scheduler
+from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import init_none_hash
@@ -38,6 +21,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.cpu_test
@@ -213,7 +197,223 @@ def test_finish_path_free_alone_preserves_cache_entries():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: scheduler-level preemption test (real Scheduler.schedule() path)
+# Test 4: committed=True kwarg skips _uncommitted tracking
+# ---------------------------------------------------------------------------
+
+
+def test_cache_blocks_committed_kwarg_skips_uncommitted_tracking():
+    """
+    When ``cache_blocks(committed=True)`` is called from a path that knows the
+    worker has already confirmed the K/V writes (AsyncScheduler post-output,
+    KV connector load completion), the new cache entries must NOT be tracked
+    in ``_uncommitted``. A subsequent ``rollback_uncommitted`` for the same
+    request must leave those entries intact in ``cached_block_hash_to_block``.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    tokens = [i for i in range(2) for _ in range(block_size)]
+    req = make_request("a", tokens, block_size, sha256)
+    computed, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(req, 32, 0, computed)
+    assert blocks is not None
+
+    cache_map = manager.block_pool.cached_block_hash_to_block._cache
+    assert len(cache_map) == 2
+    # The eager (default) path tracks the 2 new registrations.
+    assert len(_uncommitted_blocks_for(manager, "a")) == 2
+
+    # Now drop the eager tracking by committing the step, then invoke a
+    # committed-mode cache_blocks call (mimicking the AsyncScheduler/connector
+    # post-confirm paths). It must register into cache_map but NOT add to
+    # _uncommitted.
+    manager.commit_step()
+    assert _uncommitted_blocks_for(manager, "a") == []
+
+    # Construct a longer prompt request with the same first 32 tokens; calling
+    # cache_blocks(committed=True) for those tokens should be a no-op (already
+    # cached) but importantly must not poison _uncommitted.
+    tokens_longer = tokens + [99] * block_size
+    req_longer = make_request("b", tokens_longer, block_size, sha256)
+    computed_longer, num_computed_longer = manager.get_computed_blocks(req_longer)
+    assert num_computed_longer == 32  # hits the two committed blocks
+    manager.allocate_slots(req_longer, 16, 32, computed_longer)
+
+    # Now simulate a committed-path registration for req_longer (the bytes are
+    # already worker-confirmed for the suffix). This should NOT add to
+    # _uncommitted["b"].
+    before = len(_uncommitted_blocks_for(manager, "b"))
+    manager.cache_blocks(req_longer, 48, committed=True)
+    after = len(_uncommitted_blocks_for(manager, "b"))
+    assert after == before, (
+        f"committed=True must not grow _uncommitted; before={before}, after={after}"
+    )
+
+    # And subsequent rollback for req_longer must not evict any of the
+    # committed entries from cache_map.
+    cache_map_before_rollback = dict(cache_map)
+    manager.rollback_uncommitted(req_longer.request_id)
+    # The cache_map should still contain at least the two original committed
+    # entries (req_a's prefix). The eager block(s) for req_longer's suffix
+    # would be evicted by rollback, which is expected.
+    for key, blk in cache_map_before_rollback.items():
+        if blk in [manager.block_pool.blocks[bid] for bid in blocks.get_block_ids()[0]]:
+            assert key in cache_map, "rollback evicted a committed entry from cache_map"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: reset_prefix_cache also clears _uncommitted
+# ---------------------------------------------------------------------------
+
+
+def test_reset_prefix_cache_clears_uncommitted():
+    """
+    ``reset_prefix_cache`` wipes ``cached_block_hash_to_block`` and resets every
+    block's ``block_hash``. ``_uncommitted`` would dangle if not cleared
+    alongside — pointing at blocks whose hashes have been reset to None — so
+    a subsequent ``rollback_uncommitted`` call would walk stale entries and
+    potentially evict blocks that have been re-allocated to other requests.
+
+    Confirm reset zeroes ``_uncommitted`` too.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    tokens = [i for i in range(2) for _ in range(block_size)]
+    req = make_request("a", tokens, block_size, sha256)
+    computed, _ = manager.get_computed_blocks(req)
+    manager.allocate_slots(req, 32, 0, computed)
+
+    # Sanity: eager registration populated _uncommitted.
+    assert len(_uncommitted_blocks_for(manager, "a")) == 2
+    assert len(manager.block_pool._uncommitted) == 1
+
+    # Free the request so reset_prefix_cache succeeds (it requires zero
+    # outstanding blocks except the null block).
+    manager.free(req)
+    assert manager.reset_prefix_cache()
+
+    # Both the cache map and the uncommitted queue must be empty.
+    assert len(manager.block_pool.cached_block_hash_to_block) == 0
+    assert len(manager.block_pool._uncommitted) == 0, (
+        "reset_prefix_cache must clear _uncommitted; otherwise stale entries "
+        "point at blocks whose hashes have been reset and a subsequent "
+        "rollback_uncommitted could touch the wrong physical blocks."
+    )
+
+    # Sanity follow-through: a fresh request after reset goes through the
+    # normal eager-registration path without surprises.
+    req2 = make_request("b", tokens, block_size, sha256)
+    computed2, _ = manager.get_computed_blocks(req2)
+    assert _ == 0  # cache was cleared by reset
+    manager.allocate_slots(req2, 32, 0, computed2)
+    assert len(_uncommitted_blocks_for(manager, "b")) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 6: FIFO bucket discipline across multiple in-flight scheduler steps
+# ---------------------------------------------------------------------------
+
+
+def test_fifo_bucket_discipline_under_multi_in_flight_steps():
+    """
+    Drive ``Scheduler.schedule()`` twice without an intervening
+    ``update_from_output``, simulating the async batch-queue path. Each
+    schedule must push a bucket via ``begin_step``; ``update_from_output``
+    for the OLDEST step must pop only that bucket via ``commit_step``,
+    leaving the newer in-flight bucket intact and its entries available for
+    ``rollback_uncommitted`` if that newer step's request is later aborted.
+    """
+    # async_scheduling + PP>=2 lets the scheduler keep multiple in-flight
+    # schedule() calls outstanding before any update_from_output fires —
+    # the precise condition that exposes the FIFO discipline.
+    # enable_prefix_caching is needed for cache_blocks (and therefore the
+    # eager registrations we want to track) to fire at all.
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        pipeline_parallel_size=2,
+        enable_prefix_caching=True,
+    )
+    manager = scheduler.kv_cache_manager
+    cache_map = manager.block_pool.cached_block_hash_to_block._cache
+
+    # Two requests with full-block prompts so each schedule() actually
+    # registers eager cache entries (block_size=16 default → 32 tokens =
+    # 2 full blocks per request).
+    reqs = create_requests(num_requests=2, num_tokens=32)
+
+    assert len(manager.block_pool._uncommitted) == 0
+
+    # --- Step N: admit and schedule req_a --------------------------------
+    scheduler.add_request(reqs[0])
+    output_n = scheduler.schedule()
+    assert len(manager.block_pool._uncommitted) == 1, (
+        "schedule() must push a bucket via begin_step"
+    )
+    assert reqs[0].request_id in manager.block_pool._uncommitted[0]
+    entries_after_n = len(cache_map)
+    assert entries_after_n > 0
+
+    # --- Step N+1: admit and schedule req_b WITHOUT update_from_output ---
+    scheduler.add_request(reqs[1])
+    scheduler.schedule()
+    assert len(manager.block_pool._uncommitted) == 2, (
+        "second schedule() must push another bucket while the first remains"
+    )
+    # Newer bucket carries req_b's eager registrations.
+    assert reqs[1].request_id in manager.block_pool._uncommitted[-1]
+    # Older bucket still carries req_a's, unchanged.
+    assert reqs[0].request_id in manager.block_pool._uncommitted[0]
+
+    # --- Worker N completes; update_from_output(N) commits oldest bucket -
+    req_ids_n = list(output_n.num_scheduled_tokens.keys())
+    scheduler.update_from_output(
+        output_n,
+        ModelRunnerOutput(
+            req_ids=req_ids_n,
+            req_id_to_index={r: i for i, r in enumerate(req_ids_n)},
+            sampled_token_ids=[[] for _ in req_ids_n],  # still prefilling
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert len(manager.block_pool._uncommitted) == 1, (
+        "update_from_output must commit only the oldest bucket via commit_step"
+    )
+    assert reqs[0].request_id not in manager.block_pool._uncommitted[0], (
+        "commit_step must remove req_a's tracking; req_a's entries stay in "
+        "cache_map as committed."
+    )
+    assert reqs[1].request_id in manager.block_pool._uncommitted[0]
+
+    # --- Abort req_b mid-flight (its worker batch has NOT confirmed) -----
+    # rollback must reach into the still-pending bucket and evict req_b's
+    # entries; req_a's committed entries are untouched.
+    manager.rollback_uncommitted(reqs[1].request_id)
+    manager.free(reqs[1])
+    assert _uncommitted_blocks_for(manager, reqs[1].request_id) == []
+    assert len(cache_map) < entries_after_n + 1, (
+        "rollback must evict req_b's eager entries from cache_map"
+    )
+    # req_a's entries (committed) still hittable.
+    assert _uncommitted_blocks_for(manager, reqs[0].request_id) == []
+    rollback_a = manager.rollback_uncommitted(reqs[0].request_id)
+    assert rollback_a == 0, "rollback after commit must be a no-op for req_a"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: scheduler-level preemption test (real Scheduler.schedule() path)
 # ---------------------------------------------------------------------------
 
 
