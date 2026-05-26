@@ -1021,6 +1021,15 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        # Clear stale async scheduling / speculative decode state so that the
+        # rebuilt session is not scheduled with spec tokens from the prior
+        # chunk.  Without this, the worker's prev_req_id_to_index will not
+        # contain the rebuilt request, but the scheduler will still emit
+        # scheduled_spec_decode_tokens for it, causing a KeyError crash.
+        # See: https://github.com/vllm-project/vllm/issues/42655
+        session.spec_token_ids = []
+        session.async_tokens_to_discard += session.num_output_placeholders
+        session.num_output_placeholders = 0
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
@@ -1638,10 +1647,17 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
+            # _update_request_as_session clears spec/async state internally.
             self._update_request_as_session(request, update)
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
+            # Clear stale async/spec state so it doesn't leak into the
+            # next session chunk when the streaming update arrives later.
+            if request.spec_token_ids:
+                request.spec_token_ids = []
+            request.async_tokens_to_discard += request.num_output_placeholders
+            request.num_output_placeholders = 0
 
         self._enqueue_waiting_request(request)
         return False
