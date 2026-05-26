@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from dataclasses import dataclass
 
 from vllm.inputs import (
@@ -149,8 +150,15 @@ def get_beam_search_score(
     seq_len = len(tokens)
     if tokens[-1] == eos_token_id:
         seq_len -= 1
+    seq_len = max(seq_len, 1)
 
-    return cumulative_logprob / (seq_len**length_penalty)
+    # Schema fuzzing can generate very negative length penalties. In that
+    # case, the denominator may underflow to 0.0 for longer sequences.
+    denominator = seq_len**length_penalty
+    if denominator == 0.0:
+        denominator = sys.float_info.min
+
+    return cumulative_logprob / denominator
 
 
 def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
