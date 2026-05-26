@@ -93,10 +93,9 @@ def test_transfer(
         cpu_page_size = gpu_page_size_bytes * num_tensors * block_size_factor
         mmap_region = SharedOffloadRegion(
             instance_id=str(uuid.uuid4()),
-            total_size_bytes=num_cpu_blocks * cpu_page_size,
             num_blocks=num_cpu_blocks,
             rank=0,
-            num_workers=1,
+            kv_bytes_per_block=cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
 
