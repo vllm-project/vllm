@@ -485,10 +485,11 @@ def resolve_token_id_placeholder(
     This is the inverse of format_token_id_placeholder / _get_decoded_token
     when return_as_token_id=True.
     """
-    if not token.startswith("token_id:"):
+    suffix = token.removeprefix("token_id:")
+    if suffix == token:
         return token, None
     try:
-        token_id = int(token[len("token_id:") :])
+        token_id = int(suffix)
     except ValueError:
         return token, None
     token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]

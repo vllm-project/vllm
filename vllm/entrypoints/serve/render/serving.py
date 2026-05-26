@@ -570,7 +570,7 @@ class OpenAIServingRender:
             total_tokens=prompt_tokens + completion_tokens,
         )
 
-        logger.info(
+        logger.debug(
             "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
             gen.request_id,
             request.model,
@@ -659,7 +659,7 @@ class OpenAIServingRender:
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
-        logger.info(
+        logger.debug(
             "derender_completion request_id=%s model=%s choices=%d"
             " completion_tokens=%d",
             first.request_id,
