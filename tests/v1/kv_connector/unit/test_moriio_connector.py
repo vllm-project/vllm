@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-import os
 import subprocess
 import uuid
 from unittest.mock import MagicMock, patch
@@ -202,6 +201,7 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     enable_permute_local_kv: bool = False,
     role="kv_consumer",
+    read_mode: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig for testing."""
     scheduler_config = SchedulerConfig(
@@ -228,6 +228,7 @@ def create_vllm_config(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
+        kv_connector_extra_config={"read_mode": read_mode},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -236,15 +237,6 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
     )
-
-
-@pytest.fixture
-def moriio_read_mode():
-    """Force the connector into read mode via env for tests."""
-    os.environ["VLLM_MORIIO_CONNECTOR_READ_MODE"] = "True"
-    yield
-    # Cleanup after test
-    os.environ.pop("VLLM_MORIIO_CONNECTOR_READ_MODE", None)
 
 
 def test_write_mode_saves_local_block_ids():
@@ -358,11 +350,11 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
-def test_read_mode_loads_remote_block_ids(moriio_read_mode):
+def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
 
     # Setup Scheduler and Request
-    vllm_config = create_vllm_config(role="kv_consumer")
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
 
     # 2 Full Blocks and 1 Half Block.
