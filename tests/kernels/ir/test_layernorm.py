@@ -141,6 +141,29 @@ def test_aiter_rejects_unsupported_dtypes():
         assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c RMSNorm needs explicit ND input handling",
+)
+def test_vllm_c_rms_norm_accepts_nd_input():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    base = torch.randn(3, 8, 192, dtype=torch.float16)
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16)
+    epsilon = 1e-5
+
+    output = impl.impl_fn(x, weight, epsilon)
+    ref_output = rms_norm_native(x, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert_close(ir.ops.rms_norm, output, ref_output)
+
+
 fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
 
@@ -165,6 +188,34 @@ def test_fused_add_rms_norm_registration():
     }
 
     assert actual == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c fused_add_rms_norm needs explicit ND input handling",
+)
+def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
+    torch.set_default_device(current_platform.device_type)
+    impl = ir.ops.fused_add_rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    base = torch.randn(3, 8, 192, dtype=torch.float16)
+    residual_base = torch.randn(3, 8, 192, dtype=torch.float16)
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    x_residual = residual_base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    assert not x_residual.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16)
+    epsilon = 1e-5
+
+    output, residual = impl.impl_fn(x.clone(), x_residual.clone(), weight, epsilon)
+    ref_output, ref_residual = fused_add_rms_norm_native(x, x_residual, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert residual.shape == x_residual.shape
+    assert_close(ir.ops.fused_add_rms_norm, output, ref_output)
+    assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
