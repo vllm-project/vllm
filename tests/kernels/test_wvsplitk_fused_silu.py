@@ -8,8 +8,6 @@ This test verifies that the new fused kernels produce numerically correct result
 compared to the unfused baseline implementation.
 """
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -21,10 +19,6 @@ if not current_platform.is_rocm():
         "wvSplitK kernels are ROCm-specific",
         allow_module_level=True,
     )
-
-# Enable the skinny GEMM path for ROCm
-os.environ.setdefault("VLLM_ROCM_USE_SKINNY_GEMM", "1")
-os.environ.setdefault("VLLM_BF16_WVSPLITK_FUSED_SILU", "1")
 
 from vllm import _custom_ops as ops  # noqa: E402
 from vllm.utils.platform_utils import num_compute_units  # noqa: E402
