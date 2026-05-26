@@ -368,6 +368,63 @@ def _process_single_sublayer(
     return current_weight_schema, current_input_schema
 
 
+def _process_all_sublayers(
+    layer: "RoutedExperts",
+    sublayer_configs: dict[str, Any],
+    weight_schema: Any,
+    input_schema: Any,
+    has_bias: bool,
+    num_experts: int,
+    param_dtype: torch.dtype,
+    force_weight_schema: Any | None = None,
+) -> None:
+    """
+    Process all sublayers of an MoE layer: convert, requant, prepare, and transform.
+
+    This is the common implementation for both convert_to_humming_moe_kernel_format
+    and prepare_humming_moe_layer.
+
+    Args:
+        layer: The RoutedExperts layer containing weights to process
+        sublayer_configs: Configuration dict for each sublayer (w13, w2)
+                         Each config must have "shape_n" and "shape_k" keys
+        weight_schema: Initial weight quantization schema
+        input_schema: Initial input quantization schema
+        has_bias: Whether the layer has bias terms
+        num_experts: Number of experts in the layer
+        param_dtype: Parameter data type
+        force_weight_schema: Optional schema to force requantization to
+
+    Side effects:
+        - Modifies layer parameters in place
+        - Sets layer.weight_schemas and layer.input_schemas
+    """
+    layer.weight_schemas = {}
+    layer.input_schemas = {}
+
+    for sublayer_name, configs in sublayer_configs.items():
+        final_weight_schema, final_input_schema = _process_single_sublayer(
+            layer=layer,
+            sublayer_name=sublayer_name,
+            shape_n=configs["shape_n"],
+            shape_k=configs["shape_k"],
+            weight_schema=weight_schema,
+            input_schema=input_schema,
+            has_bias=has_bias,
+            num_experts=num_experts,
+            param_dtype=param_dtype,
+            force_weight_schema=force_weight_schema,
+        )
+
+        layer.weight_schemas[sublayer_name] = final_weight_schema
+        layer.input_schemas[sublayer_name] = final_input_schema
+
+    if not hasattr(layer, "locks"):
+        device = layer.w13_weight.device
+        locks = torch.zeros(1024, dtype=torch.int32, device=device)
+        layer.register_buffer("locks", locks)
+
+
 def convert_to_humming_moe_kernel_format(
     layer: "RoutedExperts",
     sublayer_configs: dict[str, Any],
@@ -397,25 +454,16 @@ def convert_to_humming_moe_kernel_format(
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
     """
-    layer.weight_schemas = {}
-    layer.input_schemas = {}
-
-    for sublayer_name, configs in sublayer_configs.items():
-        final_weight_schema, final_input_schema = _process_single_sublayer(
-            layer=layer,
-            sublayer_name=sublayer_name,
-            shape_n=configs["shape_n"],
-            shape_k=configs["shape_k"],
-            weight_schema=weight_schema,
-            input_schema=input_schema,
-            has_bias=has_bias,
-            num_experts=layer.num_experts,
-            param_dtype=layer.param_dtype,
-            force_weight_schema=force_weight_schema,
-        )
-
-        layer.weight_schemas[sublayer_name] = final_weight_schema
-        layer.input_schemas[sublayer_name] = final_input_schema
+    _process_all_sublayers(
+        layer=layer,
+        sublayer_configs=sublayer_configs,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
+        has_bias=has_bias,
+        num_experts=layer.num_experts,
+        param_dtype=layer.param_dtype,
+        force_weight_schema=force_weight_schema,
+    )
 
 
 def make_humming_moe_quant_config(

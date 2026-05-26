@@ -9,7 +9,7 @@ from humming.schema import BaseWeightSchema
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe.oracle.humming import (
-    _process_single_sublayer,
+    _process_all_sublayers,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
@@ -90,40 +90,25 @@ def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
         input_schema = HummingInputSchema.from_config(input_quant_config)
 
     is_gated = layer.moe_config.activation.is_gated
-    shape_config = {
-        "w13": (
-            layer.moe_config.intermediate_size_per_partition * 2,
-            layer.moe_config.hidden_dim,
-        ),
-        "w2": (
-            layer.moe_config.hidden_dim,
-            layer.moe_config.intermediate_size_per_partition * (1 if is_gated else 2),
-        ),
+    sublayer_configs = {
+        "w13": {
+            "shape_n": layer.moe_config.intermediate_size_per_partition * 2,
+            "shape_k": layer.moe_config.hidden_dim,
+        },
+        "w2": {
+            "shape_n": layer.moe_config.hidden_dim,
+            "shape_k": layer.moe_config.intermediate_size_per_partition
+            * (1 if is_gated else 2),
+        },
     }
 
-    layer.weight_schemas = {}
-    layer.input_schemas = {}
-
-    for sublayer_name in shape_config:
-        shape_n, shape_k = shape_config[sublayer_name]
-
-        final_weight_schema, final_input_schema = _process_single_sublayer(
-            layer=layer,
-            sublayer_name=sublayer_name,
-            shape_n=shape_n,
-            shape_k=shape_k,
-            weight_schema=weight_schema,
-            input_schema=input_schema,
-            has_bias=layer.moe_config.has_bias,
-            num_experts=layer.local_num_experts,
-            param_dtype=layer.params_dtype,
-            force_weight_schema=None,  # No force requant in this code path
-        )
-
-        layer.weight_schemas[sublayer_name] = final_weight_schema
-        layer.input_schemas[sublayer_name] = final_input_schema
-
-    if not hasattr(layer, "locks"):
-        device = layer.w13_weight.device
-        locks = torch.zeros(1024, dtype=torch.int32, device=device)
-        layer.register_buffer("locks", locks)
+    _process_all_sublayers(
+        layer=layer,
+        sublayer_configs=sublayer_configs,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
+        has_bias=layer.moe_config.has_bias,
+        num_experts=layer.local_num_experts,
+        param_dtype=layer.params_dtype,
+        force_weight_schema=None,  # No force requant in this code path
+    )
