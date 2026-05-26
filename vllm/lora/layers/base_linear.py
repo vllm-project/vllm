@@ -27,43 +27,48 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
-if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
+def lora_linear_async(
+    layer_name: str,
+    output_size: int,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    return self._apply_async_impl(x, bias)
 
-    def lora_linear_async(
-        layer_name: str,
-        output_size: int,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        forward_context: ForwardContext = get_forward_context()
-        self = forward_context.no_compile_layers[layer_name]
-        return self._apply_async_impl(x, bias)
 
-    def lora_linear_async_fake(
-        layer_name: str,
-        output_size: int,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # The real function reshapes output back to the original 3D shape
-        # when the input has an extra batch dimension (transformers backend).
-        if x.ndim == 3:
-            return torch.empty(
-                (x.size(0), x.size(1), output_size),
-                device=x.device,
-                dtype=x.dtype,
-            )
+def lora_linear_async_fake(
+    layer_name: str,
+    output_size: int,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # The real function reshapes output back to the original 3D shape
+    # when the input has an extra batch dimension (transformers backend).
+    if x.ndim == 3:
         return torch.empty(
-            (x.size(0), output_size),
+            (x.size(0), x.size(1), output_size),
             device=x.device,
             dtype=x.dtype,
         )
-
-    direct_register_custom_op(
-        op_name="lora_linear_async",
-        op_func=lora_linear_async,
-        fake_impl=lora_linear_async_fake,
+    return torch.empty(
+        (x.size(0), output_size),
+        device=x.device,
+        dtype=x.dtype,
     )
+
+
+# Registered unconditionally so the op is always available regardless of the
+# VLLM_LORA_ENABLE_DUAL_STREAM env var value at module import time. The
+# async path is still gated at runtime by self._enable_aux_cuda_stream
+# (set per-instance in BaseLinearLayerWithLoRA.__init__), so this only
+# changes whether the op exists in torch.ops, not whether it runs.
+direct_register_custom_op(
+    op_name="lora_linear_async",
+    op_func=lora_linear_async,
+    fake_impl=lora_linear_async_fake,
+)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
