@@ -1086,7 +1086,7 @@ class SparseAttnNormRopeStoreKernel:
         )
 
 
-def _compress_kv_sparse_attn_cutedsl(
+def compress_kv_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     positions: torch.Tensor,
@@ -1118,7 +1118,7 @@ def _compress_kv_sparse_attn_cutedsl(
     )
 
 
-def _norm_rope_insert_sparse_attn_cutedsl(
+def norm_rope_insert_sparse_attn_cutedsl(
     compressed_kv: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -1174,7 +1174,7 @@ def _norm_rope_insert_sparse_attn_cutedsl(
     )
 
 
-def _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
+def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     positions: torch.Tensor,
