@@ -754,7 +754,7 @@ class Glm4vVisionTransformer(nn.Module):
         in one call, which prevented preparing position embeddings as static metadata
         required by CUDA graph capture / replay. This method decouples the two by
         feeding an all-zero token tensor to `self.embeddings`. The module therefore only
-        performs bilinear interpolation based on the coordinates and returns pure
+        performs bicubic interpolation based on the coordinates and returns pure
         position embeddings. These are cached in `prepare_encoder_metadata` and later
         added to the patch tokens in `forward` via `x = x + pos_embeds`, keeping the
         forward graph compatible with CUDA graph replay. Coordinate generation matches
