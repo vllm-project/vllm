@@ -515,19 +515,18 @@ fn expand_prompt_token_ids(
         }
 
         let replacement_len = replacement.tokens.len();
-        let replacement_tokens =
-            replacement.tokens.into_iter().map(|token| token as u32).collect::<Vec<_>>();
         let is_embed = {
-            let mask = replacement_tokens
+            let mask = replacement
+                .tokens
                 .iter()
-                .map(|token| *token == placeholder_embed_token_id)
+                .map(|&token| token as u32 == placeholder_embed_token_id)
                 .collect::<Vec<_>>();
             WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
         };
 
         expanded.extend_from_slice(&prompt_token_ids[cursor..offset]);
         let expanded_offset = expanded.len();
-        expanded.extend_from_slice(&replacement_tokens);
+        expanded.extend(replacement.tokens.into_iter().map(|token| token as u32));
         ranges.push(PlaceholderRange {
             offset: expanded_offset,
             length: replacement_len,
