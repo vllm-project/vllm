@@ -59,7 +59,12 @@ def _get_server_args(attention_config):
 
 
 @pytest.fixture(
-    scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
+    scope="module",
+    params=[
+        "openai/whisper-small",
+        "google/gemma-3n-E2B-it",
+        "google/gemma-4-E2B-it",
+    ],
 )
 def server(request):
     # Parametrize over model name
@@ -261,8 +266,8 @@ async def test_stream_options(foscolo, server):
 @pytest.mark.asyncio
 async def test_long_audio_request(foscolo, client_and_model):
     client, model_name = client_and_model
-    if model_name == "google/gemma-3n-E2B-it":
-        pytest.skip("Gemma3n does not support long audio requests")
+    if model_name in ("google/gemma-3n-E2B-it", "google/gemma-4-E2B-it"):
+        pytest.skip(f"{model_name} does not support audio chunking in vLLM yet")
     foscolo.seek(0)
     audio, sr = load_audio(foscolo)
     repeated_audio = np.tile(audio, 2)

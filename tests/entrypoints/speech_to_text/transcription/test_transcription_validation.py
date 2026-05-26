@@ -131,7 +131,8 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["google/gemma-3n-E2B-it", "Qwen/Qwen3-ASR-0.6B"]
+    "model_name",
+    ["google/gemma-3n-E2B-it", "google/gemma-4-E2B-it", "Qwen/Qwen3-ASR-0.6B"],
 )
 async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
