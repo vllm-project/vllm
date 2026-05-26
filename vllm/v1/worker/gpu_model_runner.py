@@ -148,9 +148,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowMomeSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
-    SlidingWindowMomeSpec,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -7006,7 +7006,9 @@ class GPUModelRunner(
 
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
-            if not isinstance(kv_cache_spec, AttentionSpec):
+            if not isinstance(kv_cache_spec, AttentionSpec) or isinstance(
+                kv_cache_spec, SlidingWindowMomeSpec
+            ):
                 continue
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_block_sizes[group.kv_cache_group_id],

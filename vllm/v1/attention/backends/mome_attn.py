@@ -3,6 +3,8 @@
 
 import torch
 
+from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
@@ -12,8 +14,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     SlidingWindowMomeSpec,
 )
-from vllm.config import VllmConfig
-from vllm.utils.math_utils import cdiv
 
 
 class MomeAttentionMetadata(BaseMambaAttentionMetadata):
@@ -40,7 +40,8 @@ class MomeAttentionMetadataBuilder(BaseMambaAttentionMetadataBuilder):
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
 
-        # FIXME(runze): this is the only difference from the parent class, think of a better way
+        # FIXME(runze): this is the only difference from the parent class.
+        # Find a better way to share the parent implementation.
         assert isinstance(kv_cache_spec, SlidingWindowMomeSpec)
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
@@ -51,11 +52,9 @@ class MomeAttentionMetadataBuilder(BaseMambaAttentionMetadataBuilder):
             )
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            max_num_blocks = (
-                cdiv(
-                    self.vllm_config.model_config.max_model_len,
-                    kv_cache_spec.block_size,
-                )
+            max_num_blocks = cdiv(
+                self.vllm_config.model_config.max_model_len,
+                kv_cache_spec.block_size,
             )
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
