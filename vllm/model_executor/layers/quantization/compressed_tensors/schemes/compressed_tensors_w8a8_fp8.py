@@ -146,11 +146,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
-        if (
-            self.is_static_input_scheme
-            and self.activation_quant_key == kFp8StaticTensorSym
-        ):
-            layer.input_quant_key = kFp8StaticTensorSym
+        if (key := self.fp8_linear.input_quant_key()) is not None:
+            layer.input_quant_key = key
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:

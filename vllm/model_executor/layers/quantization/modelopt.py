@@ -1115,7 +1115,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.marlin_input_dtype = None
         self.kernel = init_nvfp4_linear_kernel()
-        self.input_quant_key = self.kernel.input_quant_key()
 
     def create_weights(
         self,
@@ -1190,6 +1189,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         layer.register_parameter("weight_scale", weight_scale)
+
+        if (key := self.kernel.input_quant_key()) is not None:
+            layer.input_quant_key = key
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if (

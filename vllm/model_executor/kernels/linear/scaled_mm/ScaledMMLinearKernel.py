@@ -108,6 +108,16 @@ class FP8ScaledMMLinearKernel(
         self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
 
+    def input_quant_key(self) -> QuantKey | None:
+        """Activation quant key this kernel can consume pre-quantized.
+
+        Manual fusion uses this to decide whether to hoist activation quant
+        out of ``apply_weights`` into a fused (AR +) RMSNorm + quant kernel.
+        Return ``None`` when the kernel needs in-kernel quantization (custom
+        padding/swizzling, dynamic scales, etc.).
+        """
+        return None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
