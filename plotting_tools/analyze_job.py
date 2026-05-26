@@ -30,56 +30,476 @@ from plotting_tools.plots import (  # noqa: E402
     build_traffic_matrix,
     collect_nccl_ops,
     comm_delta,
-    comm_operation_breakdown,
+    gpu_idle_windows_ms,
     merge_comm_operation_breakdowns,
     merge_rank_traffic_matrices,
     nocomm_windows,
+    plot_active_segments_timeline,
+    plot_active_window_detection,
     plot_average_duty_pct,
     plot_classification_histogram,
     plot_classic_timeline,
     plot_collective_ops_breakdown_stats,
     plot_comm_timeline,
     plot_data_movement_breakdown,
-    plot_fabric_comm_breakdown,
     plot_decomposed_timeline,
-    plot_multi_node_decomposed,
     plot_duty_by_node,
     plot_expert_traffic_by_node,
     plot_expert_traffic_volume,
+    plot_fabric_comm_breakdown,
+    plot_fabric_comm_timeline,
+    plot_fabric_comm_timeline_active,
+    plot_fabric_comm_timeline_trimmed,
     plot_idle_context,
     plot_idle_transition_heatmap,
+    plot_key_value_table,
+    plot_message_size_cdf,
     plot_message_stats,
+    plot_multi_node_decomposed,
     plot_multi_window_cdf,
+    plot_request_timeline,
+    plot_time_breakdown_bar,
+    plot_single_layer_breakdown,
+    extract_single_layer_events,
     plot_traffic_heatmap,
     plot_traffic_volume_pct,
     plot_window_cdf,
-    gpu_idle_windows_ms,
+    _map_events_to_bar_categories,
     summarize_idle_transitions,
     write_collective_ops_table,
     write_comm_nvtx_table,
     write_summary_json,
 )
 from plotting_tools.trace_io import (  # noqa: E402
+    adjust_duty_with_pp_balance,
     clock_offset_ms,
     duty_by_sub,
+    duty_by_sub_windows,
     global_align_t0,
-    sync_capture_t0,
-    adjust_duty_with_pp_balance,
+    infer_active_segments_us,
     infer_device_id,
     infer_global_rank,
     infer_local_rank,
     infer_node_name,
+    load_chrome_trace,
+    load_trace,
+    merge_intervals,
+    parse_duration_events,
+    parse_iteration_log,
+    parse_job_metadata,
+    parse_nvtx_ranges,
     pp_comm_reference_per_rank_us,
     pp_rank_order,
     pp_sendrecv_duration_us,
-    load_chrome_trace,
-    load_trace,
-    parse_duration_events,
-    parse_job_metadata,
-    parse_nvtx_ranges,
+    sync_capture_t0,
     tag_phase,
+    trim_events_to_windows,
     trace_t0_us,
 )
+
+
+def _top_kernels_by_duration(
+    events: list[dict[str, Any]], *, top_n: int = 50
+) -> list[dict[str, Any]]:
+    """Aggregate kernel durations by name, return top-N sorted by total time."""
+    from collections import defaultdict
+
+    dur_by_name: dict[str, float] = defaultdict(float)
+    cnt_by_name: dict[str, int] = defaultdict(int)
+    kind_by_name: dict[str, str] = {}
+    sub_by_name: dict[str, str] = {}
+    for e in events:
+        name = e.get("name", "")
+        dur_by_name[name] += e["dur"]
+        cnt_by_name[name] += 1
+        kind_by_name.setdefault(name, e.get("kind", ""))
+        sub_by_name.setdefault(name, e.get("sub", ""))
+
+    ranked = sorted(dur_by_name.items(), key=lambda x: -x[1])[:top_n]
+    return [
+        {
+            "name": name,
+            "total_dur_us": round(dur, 1),
+            "total_dur_s": round(dur / 1e6, 4),
+            "count": cnt_by_name[name],
+            "avg_dur_us": round(dur / cnt_by_name[name], 1),
+            "kind": kind_by_name[name],
+            "sub": sub_by_name[name],
+        }
+        for name, dur in ranked
+    ]
+
+
+def _host_transfer_breakdown(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Break down host_transfer events by direction and size bucket."""
+    ht_events = [e for e in events if e.get("sub") == "host_transfer"]
+    if not ht_events:
+        return {"total_count": 0}
+
+    by_direction: dict[str, dict[str, float | int]] = {}
+    size_buckets = {"<1KB": 0, "1KB-1MB": 0, "1MB-100MB": 0, ">100MB": 0}
+    size_bucket_dur: dict[str, float] = {
+        "<1KB": 0,
+        "1KB-1MB": 0,
+        "1MB-100MB": 0,
+        ">100MB": 0,
+    }
+
+    for e in ht_events:
+        name = e.get("name", "").lower()
+        if "htod" in name or "h2d" in name:
+            direction = "HtoD"
+        elif "dtoh" in name or "d2h" in name:
+            direction = "DtoH"
+        elif "dtod" in name or "d2d" in name:
+            direction = "DtoD"
+        elif "cudamemcpyasync" in name or "cudamemcpy" in name:
+            direction = "async_api_cpu_time"
+        else:
+            direction = "other"
+
+        if direction not in by_direction:
+            by_direction[direction] = {"count": 0, "dur_us": 0.0, "bytes": 0}
+        by_direction[direction]["count"] += 1
+        by_direction[direction]["dur_us"] += e["dur"]
+        nbytes = e.get("bytes", 0) or 0
+        by_direction[direction]["bytes"] += nbytes
+
+        if nbytes < 1024:
+            size_buckets["<1KB"] += 1
+            size_bucket_dur["<1KB"] += e["dur"]
+        elif nbytes < 1024 * 1024:
+            size_buckets["1KB-1MB"] += 1
+            size_bucket_dur["1KB-1MB"] += e["dur"]
+        elif nbytes < 100 * 1024 * 1024:
+            size_buckets["1MB-100MB"] += 1
+            size_bucket_dur["1MB-100MB"] += e["dur"]
+        else:
+            size_buckets[">100MB"] += 1
+            size_bucket_dur[">100MB"] += e["dur"]
+
+    for d in by_direction.values():
+        d["dur_s"] = round(d["dur_us"] / 1e6, 4)
+        d["bytes_gb"] = round(d["bytes"] / (1024**3), 4)
+    size_bucket_dur_s = {k: round(v / 1e6, 4) for k, v in size_bucket_dur.items()}
+
+    return {
+        "total_count": len(ht_events),
+        "total_dur_s": round(sum(e["dur"] for e in ht_events) / 1e6, 4),
+        "by_direction": by_direction,
+        "by_size_bucket_count": size_buckets,
+        "by_size_bucket_dur_s": size_bucket_dur_s,
+    }
+
+
+ACTIVE_DENSITY_THRESHOLD = 50
+ACTIVE_BIN_SIZE_US = 1_000_000
+
+
+def _active_window_envelope(
+    segments: list[tuple[int, int]],
+) -> tuple[int, int] | None:
+    if not segments:
+        return None
+    return (min(s for s, _ in segments), max(e for _, e in segments))
+
+
+def _active_segments_summary(
+    events: list[dict[str, Any]],
+    segments: list[tuple[int, int]],
+) -> dict[str, Any]:
+    if not events:
+        return {"segment_count": 0}
+    capture_start = min(e["ts"] for e in events)
+    capture_end = max(e["end"] for e in events)
+    active_us = sum(end - start for start, end in segments)
+    capture_us = max(capture_end - capture_start, 1)
+    return {
+        "segment_count": len(segments),
+        "segments_us": [list(s) for s in segments],
+        "segments_from_trace_start_ms": [
+            [
+                round((start - capture_start) / 1000.0, 3),
+                round((end - capture_start) / 1000.0, 3),
+            ]
+            for start, end in segments
+        ],
+        "active_duration_s": round(active_us / 1e6, 3),
+        "capture_duration_s": round(capture_us / 1e6, 3),
+        "active_capture_fraction": round(active_us / capture_us, 6),
+        "density_threshold_events_per_bin": ACTIVE_DENSITY_THRESHOLD,
+        "bin_size_us": ACTIVE_BIN_SIZE_US,
+    }
+
+
+def _matrix_locality_summary(
+    matrix: np.ndarray,
+    rank_node_names: dict[int, str] | None,
+) -> dict[str, Any]:
+    """Summarize inferred rank traffic as intra-node vs inter-node proxy."""
+    if matrix.size == 0:
+        return {}
+    intra = 0.0
+    inter = 0.0
+    unknown = 0.0
+    for src in range(matrix.shape[0]):
+        for dst in range(matrix.shape[1]):
+            val = float(matrix[src, dst])
+            if val <= 0:
+                continue
+            src_node = (rank_node_names or {}).get(src)
+            dst_node = (rank_node_names or {}).get(dst)
+            if src_node is None or dst_node is None:
+                unknown += val
+            elif src_node == dst_node:
+                intra += val
+            else:
+                inter += val
+    total = intra + inter + unknown
+    return {
+        "metric": "rank traffic matrix bytes-or-duration proxy",
+        "intra_node": intra,
+        "inter_node": inter,
+        "unknown_node": unknown,
+        "total": total,
+        "inter_node_fraction": (inter / total) if total else 0.0,
+    }
+
+
+def _flat_sanity_rows(sanity: dict[str, Any]) -> list[tuple[str, Any]]:
+    parallel = sanity.get("parallelism", {})
+    benchmark = sanity.get("benchmark_params", {})
+    results = sanity.get("results", {})
+    traces = sanity.get("traces", {})
+    perf = sanity.get("performance", {})
+    quality = sanity.get("trace_quality", {})
+    return [
+        ("job_id", sanity.get("job_id")),
+        ("model", sanity.get("model")),
+        ("TP / PP / EP / DP", (
+            f"{parallel.get('TP')} / {parallel.get('PP')} / "
+            f"{parallel.get('EP')} / {parallel.get('DP')}"
+        )),
+        ("nodes", ", ".join(sanity.get("nodes", []))),
+        ("workers expected", traces.get("expected_workers")),
+        ("workers found", traces.get("found_workers")),
+        ("SP", benchmark.get("SP")),
+        ("SD", benchmark.get("SD")),
+        ("NUM_PROMPTS", benchmark.get("NUM_PROMPTS")),
+        ("REQUEST_RATE", benchmark.get("REQUEST_RATE")),
+        ("burstiness", benchmark.get("burstiness")),
+        ("max_num_seqs", benchmark.get("max_num_seqs")),
+        ("max_num_batched_tokens", benchmark.get("max_num_batched_tokens")),
+        ("custom_output_len", benchmark.get("custom_output_len")),
+        ("ignore_eos", benchmark.get("ignore_eos")),
+        ("successful requests", results.get("successful_requests")),
+        ("failed requests", results.get("failed_requests")),
+        ("mean TTFT ms", perf.get("mean_ttft_ms")),
+        ("mean TPOT ms", perf.get("mean_tpot_ms")),
+        ("output tok/s", perf.get("output_token_throughput_tps")),
+        ("trace files readable", traces.get("trace_files_readable")),
+        ("active duration s", quality.get("active_duration_s")),
+        ("active segments", quality.get("segment_count")),
+        ("trace quality grade", quality.get("paper_figure_quality")),
+    ]
+
+
+def _traffic_class_rows(
+    job_meta: dict[str, Any],
+    summary_meta: dict[str, Any],
+    quality: dict[str, Any],
+) -> list[dict[str, Any]]:
+    fabric = summary_meta.get("merged_fabric_comm_ops", {})
+    movement = summary_meta.get("merged_data_movement_ops", {})
+    avg_duty = quality.get("avg_duty_pct", {})
+    tp_count = sum(
+        int((fabric.get(op) or {}).get("count", 0))
+        for op in ("all_reduce", "all_gather", "reduce_scatter")
+    )
+    tp_dur_us = sum(
+        int((fabric.get(op) or {}).get("dur_us", 0))
+        for op in ("all_reduce", "all_gather", "reduce_scatter")
+    )
+    p2p_count = int((fabric.get("point_to_point") or {}).get("count", 0))
+    p2p_dur_us = int((fabric.get("point_to_point") or {}).get("dur_us", 0))
+    return [
+        {
+            "traffic_class": "TP collective",
+            "frequency": f"{tp_count} events",
+            "message_size": (
+                "logical bytes unavailable"
+                if quality.get("nccl_bytes_total", 0) == 0
+                else "CUPTI bytes available"
+            ),
+            "synchronization_sensitivity": "high",
+            "locality": "TP rank group",
+            "burstiness": "see comm_start_delta_cdf and active timeline",
+            "candidate_plane": "low-latency collective plane",
+            "evidence": {
+                "duration_s": round(tp_dur_us / 1e6, 4),
+                "network_collective_duty_pct": (
+                    avg_duty.get("network_collective")
+                ),
+            },
+        },
+        {
+            "traffic_class": "PP activation",
+            "frequency": f"{p2p_count} events",
+            "message_size": "logical NVTX bytes when PP markers are present",
+            "synchronization_sensitivity": "medium",
+            "locality": "pipeline stage boundary",
+            "burstiness": "stage-aligned bursts",
+            "candidate_plane": "bandwidth-oriented P2P plane",
+            "evidence": {
+                "duration_s": round(p2p_dur_us / 1e6, 4),
+                "pipeline_parallel": job_meta.get("pipeline_parallel", 1),
+                "network_p2p_duty_pct": avg_duty.get("network_p2p"),
+            },
+        },
+        {
+            "traffic_class": "Host/control",
+            "frequency": (
+                f"{int((movement.get('host_transfer') or {}).get('count', 0))} "
+                "host-transfer/runtime events"
+            ),
+            "message_size": "inspect host_device_transfer_size_histogram",
+            "synchronization_sensitivity": "control path",
+            "locality": "CPU/GPU runtime",
+            "burstiness": "runtime dependent",
+            "candidate_plane": "separate control/management plane",
+            "evidence": {
+                "host_transfer_duty_pct": avg_duty.get("host_transfer"),
+                "control_duty_pct": avg_duty.get("control"),
+            },
+        },
+    ]
+
+
+def _missing_data_report(
+    job_meta: dict[str, Any],
+    per_node_summaries: dict[str, dict[str, Any]],
+    quality: dict[str, Any],
+) -> list[dict[str, Any]]:
+    any_message_bytes = any(
+        (s.get("message_size_cdf") or {}).get("bytes_available")
+        for s in per_node_summaries.values()
+    )
+    p2p_duty = (quality.get("avg_duty_pct") or {}).get("network_p2p", 0.0) or 0.0
+    pp = int(job_meta.get("pipeline_parallel", 1))
+    return [
+        {
+            "item": "NCCL bytes unavailable",
+            "status": (
+                "missing" if quality.get("nccl_bytes_total", 0) == 0
+                else "available"
+            ),
+            "impact": "Use NVTX logical bytes or theoretical estimates.",
+        },
+        {
+            "item": "Comm NVTX logical bytes",
+            "status": "available" if any_message_bytes else "missing",
+            "impact": "Required for message_size_cdf without estimation.",
+        },
+        {
+            "item": "PP markers",
+            "status": (
+                "not_applicable" if pp <= 1
+                else ("visible" if p2p_duty > 0 else "missing")
+            ),
+            "impact": "Required for PP activation message-size claims.",
+        },
+        {
+            "item": "Active segments",
+            "status": (
+                "available"
+                if any(s.get("active_segments_us")
+                       for s in per_node_summaries.values())
+                else "missing"
+            ),
+            "impact": "Needed to exclude startup, idle, and teardown.",
+        },
+        {
+            "item": "Worker reports",
+            "status": (
+                "ok"
+                if quality.get("trace_count") == quality.get("expected_workers")
+                else "mismatch"
+            ),
+            "impact": "Rank-level plots are incomplete if reports are missing.",
+        },
+    ]
+
+
+def _run_active_window_summary(
+    per_node_summaries: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    segments = merge_intervals([
+        (int(start), int(end))
+        for s in per_node_summaries.values()
+        for start, end in s.get("active_segments_us", [])
+    ])
+    active_union_ms = sum(end - start for start, end in segments) / 1000.0
+
+    capture_start_us: int | None = None
+    capture_end_us: int | None = None
+    for summary in per_node_summaries.values():
+        events = summary.get("events") or []
+        if events:
+            local_start = min(e["ts"] for e in events)
+            local_end = max(e["end"] for e in events)
+            capture_start_us = (
+                local_start if capture_start_us is None
+                else min(capture_start_us, local_start)
+            )
+            capture_end_us = (
+                local_end if capture_end_us is None
+                else max(capture_end_us, local_end)
+            )
+
+    if capture_start_us is not None and capture_end_us is not None:
+        full_capture_span_ms = (capture_end_us - capture_start_us) / 1000.0
+    else:
+        full_capture_span_ms = max(
+            (float(s.get("trace_span_s", 0.0)) * 1000.0)
+            for s in per_node_summaries.values()
+        )
+
+    compact_gap_ms = 10.0 if len(segments) > 1 else 0.0
+    compact_x_max_ms = active_union_ms + compact_gap_ms * max(
+        len(segments) - 1, 0
+    )
+    return {
+        "segment_count": len(segments),
+        "segments_us": [list(s) for s in segments],
+        "active_union_ms": round(active_union_ms, 3),
+        "full_capture_span_ms": round(full_capture_span_ms, 3),
+        "active_fraction": (
+            round(active_union_ms / full_capture_span_ms, 6)
+            if full_capture_span_ms else None
+        ),
+        "axis_report": {
+            "fabric_comm_timeline_active": {
+                "mode": "active segments compacted; idle gaps removed",
+                "plotted_x_min_ms": 0.0,
+                "plotted_x_max_ms": round(compact_x_max_ms, 3),
+                "expected_span_ms": round(compact_x_max_ms, 3),
+            },
+            "fabric_comm_timeline_trimmed": {
+                "mode": "active event envelope; full capture preamble removed",
+                "plotted_x_min_ms": 0.0,
+                "expected_span_ms": round(active_union_ms, 3),
+                "note": (
+                    "Actual x_max is first-to-last active fabric event; "
+                    "it should be close to active_union_ms and far below "
+                    "full_capture_span_ms."
+                ),
+            },
+            "active_window_detection": {
+                "mode": "full capture axis with active segment overlays",
+                "expected_span_ms": round(full_capture_span_ms, 3),
+            },
+        },
+    }
 
 
 def _find_traces(job_dir: Path) -> list[Path]:
@@ -126,7 +546,15 @@ def _build_rank_node_names(
     job_meta: dict[str, Any],
     n_ranks: int,
     tp: int,
-    loaded: list[tuple[Path, str, list[dict[str, Any]], ClassificationReport]],
+    loaded: list[
+        tuple[
+            Path,
+            str,
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            ClassificationReport,
+        ]
+    ],
 ) -> dict[int, str]:
     names: dict[int, str] = {}
     for path, _, events, _, _ in loaded:
@@ -227,11 +655,34 @@ def analyze_trace(
     if pp_comm_split:
         decomp_title += " [PP vs local comm]"
 
-    duty = duty_by_sub(events)
+    active_segments = infer_active_segments_us(
+        events,
+        density_threshold=ACTIVE_DENSITY_THRESHOLD,
+        bin_size_us=ACTIVE_BIN_SIZE_US,
+    )
+    active_window = _active_window_envelope(active_segments)
+    if active_window is not None:
+        active_s = sum(end - start for start, end in active_segments) / 1e6
+        offset_s = (
+            active_window[0] - (time_origin_us or min(e["ts"] for e in events))
+        ) / 1e6
+        print(
+            f"  Active inference segments: {len(active_segments)} segment(s), "
+            f"{active_s:.1f}s total (+{offset_s:.1f}s)"
+        )
+    active_events = (
+        trim_events_to_windows(events, active_segments)
+        if active_segments else events
+    )
+
+    duty = (
+        duty_by_sub_windows(active_events, active_segments)
+        if active_segments else duty_by_sub(events)
+    )
     if pp > 1 and pp_reference_us_per_rank > 0:
         duty = adjust_duty_with_pp_balance(
             duty,
-            events,
+            active_events,
             pp_reference_us_per_rank=pp_reference_us_per_rank,
         )
 
@@ -243,12 +694,58 @@ def analyze_trace(
         time_origin_us=time_origin_us,
         pp_comm_split=pp_comm_split,
     )
+    if active_window is not None:
+        plot_decomposed_timeline(
+            active_events,
+            trace_out / f"decomposed_timeline_active{PLOT_EXT}",
+            title=f"{decomp_title} [active window only]",
+            max_ms=max_plot_ms,
+            time_origin_us=active_window[0],
+            pp_comm_split=pp_comm_split,
+        )
+        plot_active_window_detection(
+            events,
+            active_segments,
+            trace_out / f"active_window_detection{PLOT_EXT}",
+            title=f"{node} (rank {global_rank}): active-window detection",
+            density_threshold=ACTIVE_DENSITY_THRESHOLD,
+            bin_size_us=ACTIVE_BIN_SIZE_US,
+            time_origin_us=time_origin_us,
+        )
+        plot_active_segments_timeline(
+            active_segments,
+            trace_out / f"active_segments_timeline{PLOT_EXT}",
+            title=f"{node} (rank {global_rank}): active segments",
+            time_origin_us=time_origin_us or min(e["ts"] for e in events),
+        )
     plot_comm_timeline(
         events,
         trace_out / f"comm_timeline{PLOT_EXT}",
         title=f"{node} (rank {global_rank}): communication-only timeline",
         max_ms=max_plot_ms,
         time_origin_us=time_origin_us,
+    )
+    plot_fabric_comm_timeline(
+        events,
+        trace_out / f"fabric_comm_timeline{PLOT_EXT}",
+        title=f"{node} (rank {global_rank}): collective communication timeline",
+        max_ms=max_plot_ms,
+        time_origin_us=time_origin_us,
+    )
+    plot_fabric_comm_timeline_trimmed(
+        active_events,
+        trace_out / f"fabric_comm_timeline_trimmed{PLOT_EXT}",
+        title=(
+            f"{node} (rank {global_rank}): fabric comm "
+            "(active envelope, gaps retained)"
+        ),
+    )
+    plot_fabric_comm_timeline_active(
+        events,
+        active_segments,
+        trace_out / f"fabric_comm_timeline_active{PLOT_EXT}",
+        title=f"{node} (rank {global_rank}): fabric comm (active segments)",
+        max_ms=max_plot_ms,
     )
     plot_traffic_volume_pct(
         events,
@@ -318,6 +815,11 @@ def analyze_trace(
         write_comm_nvtx_table(
             comm_nvtx_records, trace_out / "comm_nvtx_messages.json"
         )
+    message_size_summary = plot_message_size_cdf(
+        comm_nvtx_records,
+        trace_out / f"message_size_cdf{PLOT_EXT}",
+        title=f"{node}: logical message size CDF",
+    )
 
     fabric_breakdown, fabric_unclassified = plot_fabric_comm_breakdown(
         events,
@@ -367,7 +869,7 @@ def analyze_trace(
     nccl_ops = collect_nccl_ops(events, comm_nvtx_records=comm_nvtx_records)
     write_collective_ops_table(nccl_ops, trace_out / "collective_ops.json")
 
-    nocomm = nocomm_windows(events)
+    nocomm = nocomm_windows(active_events)
     if nocomm:
         plot_window_cdf(
             nocomm,
@@ -375,7 +877,7 @@ def analyze_trace(
             xlabel="No-comm window (ms)",
             title=f"{node}: CDF of gaps without communication",
         )
-    deltas = comm_delta(events)
+    deltas = comm_delta(active_events)
     if deltas:
         plot_window_cdf(
             deltas,
@@ -384,19 +886,19 @@ def analyze_trace(
             title=f"{node}: CDF of comm start deltas",
         )
 
-    idle = gpu_idle_windows_ms(events)
+    idle = gpu_idle_windows_ms(active_events)
     if idle:
         plot_window_cdf(
             idle,
             trace_out / f"gpu_idle_windows_cdf{PLOT_EXT}",
             xlabel="GPU idle window (ms)",
-            title=f"{node}: CDF of GPU idle gaps",
+            title=f"{node}: CDF of GPU idle gaps (active window)",
         )
 
-    idle_ctx = plot_idle_context(events, trace_out, prefix=node, min_gap_us=1000)
+    idle_ctx = plot_idle_context(active_events, trace_out, prefix=node, min_gap_us=1000)
     if idle_ctx.get("gap_count", 0):
         print(
-            f"  [{node}] idle context: {idle_ctx['gap_count']} gaps, "
+            f"  [{node}] idle context (active window): {idle_ctx['gap_count']} gaps, "
             f"top transition: {idle_ctx.get('top_transitions_by_ms', [])[:1]}"
         )
 
@@ -413,6 +915,11 @@ def analyze_trace(
             if local_t0_us is not None
             else None
         )
+    trace_span_s = (max(e["end"] for e in events) - min(e["ts"] for e in events)) / 1e6
+    active_window_s = (
+        sum(end - start for start, end in active_segments) / 1e6
+        if active_segments else trace_span_s
+    )
     summary = {
         "trace": str(trace_path),
         "node": node,
@@ -423,10 +930,17 @@ def analyze_trace(
         "trim_capture_skew": trim_capture_skew,
         "pp_comm_split": pp_comm_split,
         "timing": timing,
+        "trace_span_s": round(trace_span_s, 2),
+        "active_window_s": round(active_window_s, 2),
+        "active_window_us": list(active_window) if active_window else None,
+        "active_segments_us": [list(s) for s in active_segments],
+        "active_segments": _active_segments_summary(events, active_segments),
         "event_count": len(events),
+        "active_event_count": len(active_events),
         "duty_by_subcategory": duty,
         "expert_traffic_gb_heuristic": expert_gb,
         "message_stats": msg_stats,
+        "message_size_cdf": message_size_summary,
         "fabric_ops_breakdown": fabric_breakdown,
         "movement_ops_breakdown": movement_breakdown,
         "comm_ops_breakdown": fabric_breakdown,
@@ -478,6 +992,12 @@ def build_summary_plots(
         title=f"{job_label}: mean category duty across nodes",
         parallel_label=parallel_label,
     )
+    plot_average_duty_pct(
+        node_duty,
+        summary_dir / f"category_duty_by_run{PLOT_EXT}",
+        title=f"{job_label}: category duty by run",
+        parallel_label=parallel_label,
+    )
 
     if align_global and time_origin_us is not None and len(node_data) > 1:
         node_events = {
@@ -504,14 +1024,63 @@ def build_summary_plots(
     }
     if node_events:
         all_comm_events: list[dict[str, Any]] = []
-        for evs in node_events.values():
+        all_active_comm_events: list[dict[str, Any]] = []
+        all_active_segments: list[tuple[int, int]] = []
+        for n, evs in node_events.items():
             all_comm_events.extend(evs)
+            segments = [
+                (int(start), int(end))
+                for start, end in node_data[n].get("active_segments_us", [])
+            ]
+            if segments:
+                all_active_segments.extend(segments)
+                all_active_comm_events.extend(trim_events_to_windows(evs, segments))
+            else:
+                all_active_comm_events.extend(evs)
+        merged_active_segments = merge_intervals(all_active_segments)
         plot_comm_timeline(
             all_comm_events,
             summary_dir / f"comm_timeline{PLOT_EXT}",
             title=f"{job_label}: communication-only timeline (all ranks)",
             max_ms=max_plot_ms,
             time_origin_us=time_origin_us,
+        )
+        plot_fabric_comm_timeline(
+            all_comm_events,
+            summary_dir / f"fabric_comm_timeline{PLOT_EXT}",
+            title=f"{job_label}: collective communication timeline (all ranks)",
+            max_ms=max_plot_ms,
+            time_origin_us=time_origin_us,
+        )
+        plot_fabric_comm_timeline_trimmed(
+            all_active_comm_events,
+            summary_dir / f"fabric_comm_timeline_trimmed{PLOT_EXT}",
+            title=f"{job_label}: fabric comm (active envelope, gaps retained)",
+        )
+        plot_fabric_comm_timeline_active(
+            all_comm_events,
+            merged_active_segments,
+            summary_dir / f"fabric_comm_timeline_active{PLOT_EXT}",
+            title=f"{job_label}: fabric comm (active segments, all ranks)",
+            max_ms=max_plot_ms,
+        )
+        plot_active_window_detection(
+            all_comm_events,
+            merged_active_segments,
+            summary_dir / f"active_window_detection{PLOT_EXT}",
+            title=f"{job_label}: active-window detection (all ranks)",
+            density_threshold=ACTIVE_DENSITY_THRESHOLD,
+            bin_size_us=ACTIVE_BIN_SIZE_US,
+            time_origin_us=time_origin_us,
+        )
+        plot_active_segments_timeline(
+            merged_active_segments,
+            summary_dir / f"active_segments_timeline{PLOT_EXT}",
+            title=f"{job_label}: active segments (all ranks)",
+            time_origin_us=time_origin_us or (
+                min(e["ts"] for e in all_comm_events)
+                if all_comm_events else None
+            ),
         )
 
     expert_gb = {n: d["expert_traffic_gb_heuristic"] for n, d in node_data.items()}
@@ -604,11 +1173,32 @@ def build_summary_plots(
             pp=pp,
             rank_node_names=rank_node_names,
         )
+        locality = _matrix_locality_summary(merged, rank_node_names)
+        if locality:
+            write_summary_json(
+                summary_dir / "intra_vs_inter_node_comm.json",
+                locality,
+            )
+            plot_key_value_table(
+                [
+                    ("metric", locality.get("metric")),
+                    ("intra_node", round(locality.get("intra_node", 0.0), 3)),
+                    ("inter_node", round(locality.get("inter_node", 0.0), 3)),
+                    ("unknown_node", round(locality.get("unknown_node", 0.0), 3)),
+                    (
+                        "inter_node_fraction",
+                        round(locality.get("inter_node_fraction", 0.0), 6),
+                    ),
+                ],
+                summary_dir / f"intra_vs_inter_node_comm{PLOT_EXT}",
+                title=f"{job_label}: intra-node vs inter-node comm proxy",
+            )
         rank_summary = {
             "n_ranks": n_ranks_use,
             "ranks_seen": ranks_seen,
             "nodes": sorted(node_data),
             "matrix_sum": float(merged.sum()),
+            "locality": locality,
         }
 
     cdf_series: dict[str, list[float]] = {}
@@ -622,37 +1212,60 @@ def build_summary_plots(
         events = data.get("events") or []
         if not events:
             continue
-        deltas = comm_delta(events)
+        segments = [
+            (int(start), int(end))
+            for start, end in data.get("active_segments_us", [])
+        ]
+        node_active = trim_events_to_windows(events, segments) if segments else events
+        deltas = comm_delta(node_active)
         if deltas:
             cdf_series[f"{node} comm Δ"] = deltas
             pooled["comm_delta"].extend(deltas)
-        nocomm = nocomm_windows(events)
+        nocomm = nocomm_windows(node_active)
         if nocomm:
             cdf_series[f"{node} no-comm"] = nocomm
             pooled["nocomm"].extend(nocomm)
-        idle = gpu_idle_windows_ms(events)
+        idle = gpu_idle_windows_ms(node_active)
         if idle:
             cdf_series[f"{node} GPU idle"] = idle
             pooled["gpu_idle"].extend(idle)
-        all_gaps.extend(analyze_idle_gaps(events, min_gap_us=1000))
+        all_gaps.extend(analyze_idle_gaps(node_active, min_gap_us=1000))
 
     if pooled["comm_delta"]:
         plot_multi_window_cdf(
-            {"pooled": pooled["comm_delta"], **{k: v for k, v in cdf_series.items() if "comm Δ" in k}},
+            {
+                "pooled": pooled["comm_delta"],
+                **{
+                    k: v for k, v in cdf_series.items()
+                    if "comm Δ" in k
+                },
+            },
             summary_dir / f"comm_start_delta_cdf{PLOT_EXT}",
             xlabel="Δt between comm starts (ms)",
             title=f"{job_label}: comm start delta CDF (per node + pooled)",
         )
     if pooled["nocomm"]:
         plot_multi_window_cdf(
-            {"pooled": pooled["nocomm"], **{k: v for k, v in cdf_series.items() if "no-comm" in k}},
+            {
+                "pooled": pooled["nocomm"],
+                **{
+                    k: v for k, v in cdf_series.items()
+                    if "no-comm" in k
+                },
+            },
             summary_dir / f"nocomm_windows_cdf{PLOT_EXT}",
             xlabel="No-comm window (ms)",
             title=f"{job_label}: no-comm window CDF (per node + pooled)",
         )
     if pooled["gpu_idle"]:
         plot_multi_window_cdf(
-            {"pooled": pooled["gpu_idle"], **{k: v for k, v in cdf_series.items() if "GPU idle" in k}},
+            {
+                "pooled": pooled["gpu_idle"],
+                **{
+                    k: v for k, v in cdf_series.items()
+                    if "GPU idle" in k
+                },
+            },
             summary_dir / f"gpu_idle_windows_cdf{PLOT_EXT}",
             xlabel="GPU idle window (ms)",
             title=f"{job_label}: GPU idle gap CDF (per node + pooled)",
@@ -706,6 +1319,247 @@ def build_summary_plots(
     }
     write_summary_json(summary_dir / "summary.json", out)
     return out
+
+
+def evaluate_trace_quality(
+    per_node_summaries: dict[str, dict[str, Any]],
+    job_meta: dict[str, Any],
+    *,
+    job_dir: Path,
+) -> dict[str, Any]:
+    """Run quality gate checks and return a quality report with warnings."""
+    warnings: list[str] = []
+    grades: dict[str, str] = {}
+
+    # Aggregate duty across ranks
+    all_duty: list[dict[str, float]] = [
+        s["duty_by_subcategory"] for s in per_node_summaries.values()
+        if "duty_by_subcategory" in s
+    ]
+    if not all_duty:
+        warnings.append("No duty data available")
+        grades["overall"] = "unusable"
+        return {"warnings": warnings, "grades": grades}
+
+    avg_duty: dict[str, float] = {}
+    for d in all_duty:
+        for k, v in d.items():
+            avg_duty[k] = avg_duty.get(k, 0.0) + v / len(all_duty)
+
+    compute_subs = [
+        "matmul_gemm",
+        "attention_comp",
+        "moe_expert",
+        "moe_routing",
+        "add_norm_comp",
+        "gate_comp",
+        "rotary_embedding",
+        "kv_cache_write",
+        "sampling_overhead",
+        "other_compute",
+    ]
+    total_compute_duty = sum(avg_duty.get(s, 0.0) for s in compute_subs)
+    nccl_duty = (
+        avg_duty.get("network_collective", 0.0)
+        + avg_duty.get("network_p2p", 0.0)
+    )
+
+    # Check 1: compute duty
+    if total_compute_duty < 0.01:
+        warnings.append(
+            f"Compute duty extremely low ({total_compute_duty*100:.2f}%) "
+            "— model kernels may be missing or window not trimmed"
+        )
+        grades["compute_breakdown"] = "not_usable"
+    elif total_compute_duty < 0.05:
+        warnings.append(
+            f"Compute duty low ({total_compute_duty*100:.1f}%) — "
+            "verify decode batch size"
+        )
+        grades["compute_breakdown"] = "marginal"
+    else:
+        grades["compute_breakdown"] = "usable"
+
+    # Check 2: NCCL bytes
+    nccl_bytes_total = 0
+    for s in per_node_summaries.values():
+        fb = s.get("fabric_ops_breakdown", {})
+        for op_name, op_data in fb.items():
+            if isinstance(op_data, dict):
+                nccl_bytes_total += op_data.get("bytes", 0)
+    if nccl_bytes_total == 0 and nccl_duty > 0:
+        warnings.append(
+            "NCCL bytes = 0 for all collectives — "
+            "byte volume analysis not available"
+        )
+        grades["byte_volume"] = "not_usable"
+    else:
+        grades["byte_volume"] = "usable"
+
+    # Check 3: idle dominance
+    idle_duty = avg_duty.get("idle", 0.0) + avg_duty.get("none", 0.0)
+    if idle_duty > 0.5:
+        warnings.append(
+            f"Idle/none duty is {idle_duty*100:.1f}% — "
+            "trace may include significant startup or capture skew"
+        )
+        grades["idle_analysis"] = "not_usable"
+    else:
+        grades["idle_analysis"] = "usable"
+
+    # Check 4: active window vs trace span
+    for s in per_node_summaries.values():
+        trace_span = s.get("trace_span_s", 0)
+        active_span = s.get("active_window_s", trace_span)
+        if trace_span > 0 and active_span / trace_span < 0.1:
+            warnings.append(
+                f"Active window ({active_span:.1f}s) is <10% of trace span "
+                f"({trace_span:.1f}s) "
+                "— large startup/teardown overhead captured"
+            )
+            break
+
+    # Check 5: worker count
+    expected_workers = (
+        job_meta.get("tensor_parallel", 1)
+        * job_meta.get("pipeline_parallel", 1)
+    )
+    actual_workers = len(per_node_summaries)
+    if actual_workers != expected_workers:
+        warnings.append(
+            f"Expected {expected_workers} workers "
+            f"(TP={job_meta.get('tensor_parallel', 1)} "
+            f"× PP={job_meta.get('pipeline_parallel', 1)}), "
+            f"found {actual_workers} traces"
+        )
+        grades["worker_count"] = "mismatch"
+    else:
+        grades["worker_count"] = "ok"
+
+    # Check 6: TP collective visibility
+    if nccl_duty > 0.001:
+        grades["tp_collective_visibility"] = "usable"
+    else:
+        grades["tp_collective_visibility"] = "not_usable"
+
+    # Overall
+    if all(v in ("usable", "ok") for v in grades.values()):
+        grades["paper_figure_quality"] = "ready"
+    elif (
+        grades.get("compute_breakdown") == "usable"
+        and grades.get("idle_analysis") == "usable"
+    ):
+        grades["paper_figure_quality"] = "partial"
+    else:
+        grades["paper_figure_quality"] = "not_yet"
+
+    quality_report = {
+        "warnings": warnings,
+        "grades": grades,
+        "avg_duty_pct": {k: round(v * 100, 2) for k, v in avg_duty.items()},
+        "total_compute_duty_pct": round(total_compute_duty * 100, 2),
+        "nccl_duty_pct": round(nccl_duty * 100, 2),
+        "nccl_bytes_total": nccl_bytes_total,
+        "trace_count": actual_workers,
+        "expected_workers": expected_workers,
+    }
+    return quality_report
+
+
+def generate_run_sanity(
+    job_dir: Path,
+    job_meta: dict[str, Any],
+    per_node_summaries: dict[str, dict[str, Any]],
+    quality: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Generate run_sanity.json with experiment metadata and basic validation."""
+    tp = job_meta.get("tensor_parallel", 1)
+    pp = job_meta.get("pipeline_parallel", 1)
+    ep = job_meta.get("expert_parallel", 1)
+    nodes = sorted({
+        str(s.get("node") or prefix).split("_")[0]
+        for prefix, s in per_node_summaries.items()
+    })
+    trace_files = [s.get("trace") for s in per_node_summaries.values()]
+    merged_active_segments = merge_intervals([
+        (int(start), int(end))
+        for s in per_node_summaries.values()
+        for start, end in s.get("active_segments_us", [])
+    ])
+    active_duration_s = sum(
+        end - start for start, end in merged_active_segments
+    ) / 1e6
+    segment_count = len(merged_active_segments)
+
+    sanity: dict[str, Any] = {
+        "job_id": job_meta.get("job_id") or job_dir.name,
+        "job_dir": str(job_dir),
+        "model": job_meta.get("model_id", "unknown"),
+        "nodes": nodes,
+        "parallelism": {
+            "TP": tp,
+            "PP": pp,
+            "EP": ep,
+            "DP": job_meta.get("data_parallel", 1),
+        },
+        "benchmark_params": {
+            "NUM_PROMPTS": job_meta.get("num_prompts"),
+            "REQUEST_RATE": job_meta.get("request_rate"),
+            "SP": job_meta.get("sp") or job_meta.get("max_model_len"),
+            "SD": job_meta.get("sd") or job_meta.get("custom_output_len"),
+            "burstiness": job_meta.get("burstiness"),
+            "max_num_seqs": job_meta.get("max_num_seqs"),
+            "max_num_batched_tokens": job_meta.get("max_num_batched_tokens"),
+            "custom_output_len": job_meta.get("custom_output_len"),
+            "ignore_eos": job_meta.get("ignore_eos"),
+        },
+        "results": {
+            "successful_requests": job_meta.get("successful_requests"),
+            "failed_requests": job_meta.get("failed_requests"),
+        },
+        "performance": {
+            "mean_ttft_ms": job_meta.get("mean_ttft_ms"),
+            "median_ttft_ms": job_meta.get("median_ttft_ms"),
+            "p99_ttft_ms": job_meta.get("p99_ttft_ms"),
+            "mean_tpot_ms": job_meta.get("mean_tpot_ms"),
+            "median_tpot_ms": job_meta.get("median_tpot_ms"),
+            "p99_tpot_ms": job_meta.get("p99_tpot_ms"),
+            "request_throughput_rps": job_meta.get("request_throughput_rps"),
+            "output_token_throughput_tps": (
+                job_meta.get("output_token_throughput_tps")
+            ),
+            "total_token_throughput_tps": (
+                job_meta.get("total_token_throughput_tps")
+            ),
+        },
+        "traces": {
+            "expected_workers": tp * pp,
+            "found_workers": len(per_node_summaries),
+            "trace_files": trace_files,
+            "trace_files_readable": all(
+                bool(path) and Path(str(path)).is_file()
+                for path in trace_files
+            ),
+        },
+        "trace_quality": {
+            "active_duration_s": round(active_duration_s, 3),
+            "segment_count": segment_count,
+            "segments_us": [list(s) for s in merged_active_segments],
+            "paper_figure_quality": (
+                (quality or {}).get("grades", {}).get("paper_figure_quality")
+            ),
+            "warnings": (quality or {}).get("warnings", []),
+        },
+    }
+
+    # Check nsys-rep readability
+    nsys_reps = list(job_dir.rglob("*.nsys-rep"))
+    sanity["nsys_rep_files"] = {
+        "count": len(nsys_reps),
+        "paths": [str(p.relative_to(job_dir)) for p in nsys_reps[:20]],
+    }
+
+    return sanity
 
 
 def main() -> None:
@@ -909,6 +1763,58 @@ def main() -> None:
 
     write_summary_json(out_dir / "job_summary.json", all_summaries)
 
+    # Request arrival timeline (parsed from EngineCore iteration log)
+    iterations = parse_iteration_log(slurm)
+    if iterations:
+        plot_request_timeline(
+            iterations,
+            out_dir / f"request_timeline{PLOT_EXT}",
+            title=f"{job_dir.name}: request arrival & active batch",
+        )
+
+    # Time breakdown stacked bar (like the parallelism decomposition figure)
+    if per_node_summaries:
+        all_active_for_bar: list[dict[str, Any]] = []
+        for prefix_key, s in per_node_summaries.items():
+            evts = s.get("events", [])
+            w = s.get("active_window_us")
+            if w:
+                evts = trim_events_to_window(evts, tuple(w))
+            all_active_for_bar.extend(evts)
+        cat_seconds = _map_events_to_bar_categories(all_active_for_bar)
+        # Average across ranks (events from all ranks were summed)
+        n_ranks = len(per_node_summaries)
+        cat_seconds_per_rank = {k: v / n_ranks for k, v in cat_seconds.items()}
+
+        config_label = f"T{tp}-P{pp}"
+        if int(job_meta.get("expert_parallel", 1)) > 1:
+            config_label = f"E{job_meta['expert_parallel']}-{config_label}"
+
+        plot_time_breakdown_bar(
+            [{"label": config_label, "category_seconds": cat_seconds_per_rank}],
+            out_dir / f"time_breakdown_bar{PLOT_EXT}",
+            title=f"{job_meta.get('model_id', job_dir.name)}: time breakdown (active window, per rank)",
+        )
+
+        # Single-layer breakdown (average across all ranks)
+        all_layer_groups: list[list[dict[str, Any]]] = []
+        for prefix_key, s in per_node_summaries.items():
+            evts = s.get("events", [])
+            w = s.get("active_window_us")
+            if w:
+                evts = trim_events_to_window(evts, tuple(w))
+            rank_layers = extract_single_layer_events(evts, n_layers=48)
+            all_layer_groups.extend(rank_layers)
+        if all_layer_groups:
+            layer_stats = plot_single_layer_breakdown(
+                all_layer_groups,
+                out_dir / f"single_layer_breakdown{PLOT_EXT}",
+                title=f"{job_meta.get('model_id', job_dir.name)} ({config_label}): "
+                      f"single layer breakdown (decode, batch={job_meta.get('num_prompts', '?')}, "
+                      f"avg across {n_ranks} ranks)",
+            )
+            write_summary_json(out_dir / "single_layer_stats.json", layer_stats)
+
     merged_amb: dict[str, int] = {}
     merged_skip: dict[str, int] = {}
     for rep in classification_reports:
@@ -967,11 +1873,27 @@ def main() -> None:
         merged_data_movement=merged_movement_for_log,
         job_inventory=job_inventory,
     )
+    all_active_events: list[dict[str, Any]] = []
+    for _prefix_key, s in per_node_summaries.items():
+        evts = s.get("events", [])
+        segments = [
+            (int(start), int(end))
+            for start, end in s.get("active_segments_us", [])
+        ]
+        if segments:
+            evts = trim_events_to_windows(evts, segments)
+        all_active_events.extend(evts)
+
+    top_kernels = _top_kernels_by_duration(all_active_events, top_n=50)
+    host_transfer_breakdown = _host_transfer_breakdown(all_active_events)
+
     inv_path = out_dir / "classification_inventory.json"
     write_summary_json(
         inv_path,
         {
             "job_inventory": job_inventory,
+            "top_kernels_by_duration": top_kernels,
+            "host_transfer_breakdown": host_transfer_breakdown,
             "per_trace": {
                 Path(r.trace_path).name: r.inventory_dict()
                 for r in classification_reports
@@ -979,7 +1901,127 @@ def main() -> None:
         },
     )
     print(
-        f"Wrote plotting_log.txt, plotting_log.json, and {inv_path.name} under {out_dir}"
+        f"Wrote plotting_log.txt, plotting_log.json, and {inv_path.name} "
+        f"under {out_dir}"
+    )
+
+    # Quality gate
+    quality = evaluate_trace_quality(per_node_summaries, job_meta, job_dir=job_dir)
+    write_summary_json(out_dir / "trace_quality.json", quality)
+    if quality.get("warnings"):
+        print("\n=== TRACE QUALITY WARNINGS ===")
+        for w in quality["warnings"]:
+            print(f"  ⚠ {w}")
+        print(f"  Grades: {quality.get('grades', {})}")
+        print()
+
+    # Run sanity
+    sanity = generate_run_sanity(
+        job_dir, job_meta, per_node_summaries, quality=quality
+    )
+    write_summary_json(out_dir / "run_sanity.json", sanity)
+    write_summary_json(out_dir / "run_sanity_summary.json", sanity)
+    plot_key_value_table(
+        _flat_sanity_rows(sanity),
+        out_dir / f"run_sanity_summary{PLOT_EXT}",
+        title=f"{job_dir.name}: run sanity summary",
+    )
+
+    summary_meta = all_summaries.get("summary_plots") or {}
+    traffic_rows = _traffic_class_rows(job_meta, summary_meta, quality)
+    write_summary_json(
+        out_dir / "traffic_class_summary.json",
+        {"rows": traffic_rows},
+    )
+    plot_key_value_table(
+        [
+            (
+                row["traffic_class"],
+                (
+                    f"{row['frequency']}; {row['candidate_plane']}; "
+                    f"evidence={row['evidence']}"
+                ),
+            )
+            for row in traffic_rows
+        ],
+        out_dir / f"traffic_class_summary{PLOT_EXT}",
+        title=f"{job_dir.name}: traffic class summary",
+    )
+
+    implications = [
+        {
+            "observed_pattern": "High-frequency TP collectives",
+            "evidence_plot": "fabric_comm_breakdown, comm_start_delta_cdf",
+            "topology_implication": "low-latency local collective support",
+            "glass_design_implication": "place TP groups near each other",
+        },
+        {
+            "observed_pattern": "Stage-to-stage PP traffic",
+            "evidence_plot": "pipeline_p2p_timeline, pp_activation_message_size_cdf",
+            "topology_implication": "predictable P2P bandwidth",
+            "glass_design_implication": "dedicated switched or reconfigurable plane",
+        },
+        {
+            "observed_pattern": "Tiny host/runtime transfers",
+            "evidence_plot": "data_movement_breakdown, transfer_size_histogram",
+            "topology_implication": "do not mix control with fabric claims",
+            "glass_design_implication": "separate control/management plane",
+        },
+    ]
+    write_summary_json(
+        out_dir / "topology_implications.json",
+        {"rows": implications},
+    )
+
+    missing_rows = _missing_data_report(job_meta, per_node_summaries, quality)
+    write_summary_json(
+        out_dir / "missing_data_report.json",
+        {"rows": missing_rows},
+    )
+    plot_key_value_table(
+        [(row["item"], f"{row['status']}: {row['impact']}") for row in missing_rows],
+        out_dir / f"missing_data_report{PLOT_EXT}",
+        title=f"{job_dir.name}: missing data report",
+    )
+    write_summary_json(out_dir / "trace_quality_dashboard.json", quality)
+    active_window_summary = _run_active_window_summary(per_node_summaries)
+    write_summary_json(
+        out_dir / "plot_axis_report.json",
+        active_window_summary["axis_report"],
+    )
+
+    generated = [
+        "run_sanity_summary",
+        "active_window_detection",
+        "active_segments_timeline",
+        "fabric_comm_breakdown",
+        "category_duty_by_run",
+        "decomposed_timeline_active",
+        "rank_traffic_heatmap",
+        "comm_start_delta_cdf",
+        "nocomm_windows_cdf",
+        "idle_transition_heatmap",
+        "message_size_cdf",
+        "traffic_class_summary",
+        "missing_data_report",
+    ]
+    write_summary_json(
+        out_dir / "communication_signature_suite.json",
+        {
+            "schema_version": 1,
+            "generated_targets": generated,
+            "active_window": active_window_summary,
+            "traffic_class_summary": traffic_rows,
+            "topology_implications": implications,
+            "missing_data": missing_rows,
+            "missing_data_report": {"rows": missing_rows},
+            "trace_quality_dashboard": quality,
+            "plot_axis_report": active_window_summary["axis_report"],
+            "notes": [
+                "fabric_comm_timeline_trimmed keeps active-envelope gaps",
+                "fabric_comm_timeline_active compacts detected active segments",
+            ],
+        },
     )
 
     print(f"Wrote per-node plots under {out_dir}")

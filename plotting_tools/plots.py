@@ -244,6 +244,8 @@ def plot_comm_timeline(
                 intervals.append(iv)
         if not intervals:
             continue
+        min_w = _min_visible_width_ms(intervals)
+        intervals = [(s, max(w, min_w)) for s, w in intervals]
         y = y_positions[sub]
         ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
 
@@ -256,6 +258,296 @@ def plot_comm_timeline(
         ax.set_xlim(0, max_ms)
     else:
         ax.set_xlim(left=0)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+FABRIC_COMM_TIMELINE_LAYERS = (
+    ("network_collective", "Network Collective", "#e45756"),
+    ("network_p2p", "Network P2P", "#d62728"),
+)
+
+
+def _min_visible_width_ms(
+    intervals: list[tuple[float, float]],
+    fig_width_in: float = 18.0,
+) -> float:
+    """Minimum bar width so events are at least ~1.5px wide on screen."""
+    if not intervals:
+        return 0.0
+    max_t = max(start + width for start, width in intervals)
+    min_t = min(start for start, _ in intervals)
+    span = max_t - min_t
+    if span <= 0:
+        return 0.0
+    dpi = 200
+    pixels = fig_width_in * dpi
+    return span / pixels * 1.5
+
+
+def plot_fabric_comm_timeline(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Collective communication timeline",
+    max_ms: float | None = None,
+    time_origin_us: int | None = None,
+) -> None:
+    """Timeline showing only fabric communication (collectives + P2P, no memcpy)."""
+    comm_events = [
+        e for e in events
+        if e.get("sub") in ("network_collective", "network_p2p")
+    ]
+    if not comm_events:
+        return
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
+    fig, ax = plt.subplots(figsize=(18, 2.5))
+    layers = FABRIC_COMM_TIMELINE_LAYERS
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
+
+    for sub, _label, color in layers:
+        intervals: list[tuple[float, float]] = []
+        for e in comm_events:
+            if e.get("sub") != sub:
+                continue
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                intervals.append(iv)
+        if not intervals:
+            continue
+        min_w = _min_visible_width_ms(intervals)
+        intervals = [(s, max(w, min_w)) for s, w in intervals]
+        y = y_positions[sub]
+        ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+
+    ax.set_yticks([i + 0.4 for i in range(len(layers))])
+    ax.set_yticklabels([spec[1] for spec in layers])
+    ax.set_xlabel("Time (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    if max_ms is not None:
+        ax.set_xlim(0, max_ms)
+    else:
+        ax.set_xlim(left=0)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_fabric_comm_timeline_trimmed(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Collective communication timeline (trimmed)",
+    max_ms: float | None = None,
+    time_origin_us: int | None = None,
+) -> None:
+    """Like plot_fabric_comm_timeline but x-axis trimmed to first/last comm event."""
+    comm_events = [
+        e for e in events
+        if e.get("sub") in ("network_collective", "network_p2p")
+    ]
+    if not comm_events:
+        return
+    first_ts = min(e["ts"] for e in comm_events)
+    last_end = max(e["end"] for e in comm_events)
+    t0 = first_ts
+    span_ms = (last_end - first_ts) / 1000.0
+
+    fig, ax = plt.subplots(figsize=(18, 2.5))
+    layers = FABRIC_COMM_TIMELINE_LAYERS
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
+
+    for sub, _label, color in layers:
+        intervals: list[tuple[float, float]] = []
+        for e in comm_events:
+            if e.get("sub") != sub:
+                continue
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                intervals.append(iv)
+        if not intervals:
+            continue
+        min_w = _min_visible_width_ms(intervals)
+        intervals = [(s, max(w, min_w)) for s, w in intervals]
+        y = y_positions[sub]
+        ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+
+    ax.set_yticks([i + 0.4 for i in range(len(layers))])
+    ax.set_yticklabels([spec[1] for spec in layers])
+    ax.set_xlabel("Time (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    if max_ms is not None and max_ms < span_ms:
+        ax.set_xlim(0, max_ms)
+    else:
+        ax.set_xlim(0, span_ms * 1.02)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_fabric_comm_timeline_active(
+    events: list[dict[str, Any]],
+    active_segments_us: list[tuple[int, int]],
+    out_path: Path,
+    *,
+    title: str = "Fabric communication timeline (active segments)",
+    max_ms: float | None = None,
+) -> None:
+    """Fabric timeline with active segments concatenated on the x-axis."""
+    if not events or not active_segments_us:
+        return
+    comm_events = [
+        e for e in events
+        if e.get("sub") in ("network_collective", "network_p2p")
+    ]
+    if not comm_events:
+        return
+
+    gap_ms = 10.0
+    offsets: list[tuple[int, int, float, float]] = []
+    cursor_ms = 0.0
+    for start_us, end_us in active_segments_us:
+        seg_ms = max((end_us - start_us) / 1000.0, 0.0)
+        offsets.append((start_us, end_us, cursor_ms, seg_ms))
+        cursor_ms += seg_ms + gap_ms
+    total_ms = max(cursor_ms - gap_ms, 0.0)
+    if total_ms <= 0:
+        return
+
+    fig, ax = plt.subplots(figsize=(18, 2.7))
+    layers = FABRIC_COMM_TIMELINE_LAYERS
+    y_positions = {spec[0]: i for i, spec in enumerate(layers)}
+
+    for sub, _label, color in layers:
+        intervals: list[tuple[float, float]] = []
+        for e in comm_events:
+            if e.get("sub") != sub:
+                continue
+            for start_us, end_us, offset_ms, _seg_ms in offsets:
+                if e["end"] <= start_us or e["ts"] >= end_us:
+                    continue
+                clipped_start = max(e["ts"], start_us)
+                clipped_end = min(e["end"], end_us)
+                intervals.append((
+                    offset_ms + (clipped_start - start_us) / 1000.0,
+                    max((clipped_end - clipped_start) / 1000.0, 0.0),
+                ))
+        if not intervals:
+            continue
+        min_w = _min_visible_width_ms(intervals)
+        intervals = [(s, max(w, min_w)) for s, w in intervals]
+        y = y_positions[sub]
+        ax.broken_barh(intervals, (y, 0.85), facecolors=color, edgecolors="none")
+
+    for idx, (_start_us, _end_us, offset_ms, seg_ms) in enumerate(offsets):
+        if idx > 0:
+            ax.axvline(offset_ms - gap_ms / 2.0, color="0.5",
+                       linestyle=":", linewidth=0.8)
+        ax.text(
+            offset_ms + seg_ms / 2.0,
+            len(layers) + 0.05,
+            f"segment {idx}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    ax.set_yticks([i + 0.4 for i in range(len(layers))])
+    ax.set_yticklabels([spec[1] for spec in layers])
+    ax.set_xlabel("Active-segment time, gaps removed (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    ax.set_xlim(0, min(total_ms, max_ms) if max_ms is not None else total_ms)
+    ax.set_ylim(-0.2, len(layers) + 0.45)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_active_window_detection(
+    events: list[dict[str, Any]],
+    active_segments_us: list[tuple[int, int]],
+    out_path: Path,
+    *,
+    title: str = "Active-window detection",
+    density_threshold: int = 50,
+    bin_size_us: int = 1_000_000,
+    time_origin_us: int | None = None,
+) -> None:
+    """Plot fabric event density over the full capture with active overlays."""
+    if not events:
+        return
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
+    t1 = max(e["end"] for e in events)
+    if t1 <= t0:
+        return
+    bin_count = int(np.ceil((t1 - t0) / bin_size_us))
+    if bin_count <= 0:
+        return
+
+    counts = np.zeros(bin_count, dtype=np.float64)
+    for e in events:
+        if e.get("sub") not in ("network_collective", "network_p2p"):
+            continue
+        if e["ts"] < t0:
+            continue
+        idx = int((e["ts"] - t0) // bin_size_us)
+        if 0 <= idx < bin_count:
+            counts[idx] += 1.0
+
+    bin_s = bin_size_us / 1e6
+    density = counts / bin_s
+    x_ms = (np.arange(bin_count) * bin_size_us) / 1000.0
+    width_ms = bin_size_us / 1000.0
+    threshold_per_s = density_threshold / bin_s
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.bar(x_ms, density, width=width_ms, align="edge",
+           color="#4c78a8", alpha=0.75, label="fabric events/s")
+    ax.axhline(threshold_per_s, color="#e45756", linestyle="--",
+               linewidth=1.2, label=f"threshold ({threshold_per_s:.0f}/s)")
+    for idx, (start_us, end_us) in enumerate(active_segments_us):
+        start_ms = max(0.0, (start_us - t0) / 1000.0)
+        end_ms = max(start_ms, (end_us - t0) / 1000.0)
+        ax.axvspan(start_ms, end_ms, color="#54a24b", alpha=0.18,
+                   label="active segment" if idx == 0 else None)
+    ax.set_xlabel("Time from trace start (ms)")
+    ax.set_ylabel("Fabric events per second")
+    ax.set_title(title)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="upper right")
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_active_segments_timeline(
+    active_segments_us: list[tuple[int, int]],
+    out_path: Path,
+    *,
+    title: str = "Active segments",
+    time_origin_us: int | None = None,
+) -> None:
+    """Show detected active segments on the full capture axis."""
+    if not active_segments_us:
+        return
+    t0 = time_origin_us if time_origin_us is not None else min(
+        start for start, _ in active_segments_us
+    )
+    intervals = [
+        ((start - t0) / 1000.0, max((end - start) / 1000.0, 0.0))
+        for start, end in active_segments_us
+    ]
+    fig, ax = plt.subplots(figsize=(14, 1.8))
+    ax.broken_barh(intervals, (0, 0.8), facecolors="#54a24b",
+                   edgecolors="#2f6f35", linewidth=0.8)
+    for idx, (start_ms, width_ms) in enumerate(intervals):
+        ax.text(start_ms + width_ms / 2.0, 0.4, str(idx),
+                ha="center", va="center", fontsize=9)
+    ax.set_yticks([0.4])
+    ax.set_yticklabels(["active"])
+    ax.set_xlabel("Time from trace start (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    ax.set_xlim(left=0)
     plt.tight_layout()
     save_figure(fig, out_path)
 
@@ -346,12 +638,21 @@ def analyze_idle_gaps(
     busy = merge_intervals(_gpu_active_intervals(events))
     gaps: list[dict[str, Any]] = []
 
-    def record(gap_start: int, gap_end: int, before_win: tuple[int, int], after_win: tuple[int, int]):
+    def record(
+        gap_start: int,
+        gap_end: int,
+        before_win: tuple[int, int],
+        after_win: tuple[int, int],
+    ):
         gap_us = gap_end - gap_start
         if gap_us < min_gap_us:
             return
         bk, bs, bn = _dominant_sub_in_window(events, *before_win)
         ak, a_sub, an = _dominant_sub_in_window(events, *after_win)
+        transition = (
+            f"{SUBCATEGORY_LABELS.get(bs, bs)} → idle → "
+            f"{SUBCATEGORY_LABELS.get(a_sub, a_sub)}"
+        )
         gaps.append(
             {
                 "gap_start_us": gap_start,
@@ -365,7 +666,7 @@ def analyze_idle_gaps(
                 "after_sub": a_sub,
                 "after_label": SUBCATEGORY_LABELS.get(a_sub, a_sub),
                 "after_name": an,
-                "transition": f"{SUBCATEGORY_LABELS.get(bs, bs)} → idle → {SUBCATEGORY_LABELS.get(a_sub, a_sub)}",
+                "transition": transition,
             }
         )
 
@@ -413,8 +714,12 @@ def summarize_idle_transitions(
         "top_transitions_by_ms": sorted(
             time_by_transition.items(), key=lambda x: x[1], reverse=True
         )[:20],
-        "idle_ms_after": sorted(time_by_before.items(), key=lambda x: x[1], reverse=True)[:15],
-        "idle_ms_before": sorted(time_by_after.items(), key=lambda x: x[1], reverse=True)[:15],
+        "idle_ms_after": sorted(
+            time_by_before.items(), key=lambda x: x[1], reverse=True
+        )[:15],
+        "idle_ms_before": sorted(
+            time_by_after.items(), key=lambda x: x[1], reverse=True
+        )[:15],
         "longest_gaps": longest,
     }
 
@@ -467,7 +772,7 @@ def plot_idle_transition_heatmap(
     *,
     title: str,
 ) -> None:
-    """Heatmap: rows = activity before idle, cols = activity after idle (total idle ms)."""
+    """Heatmap of idle time by before/after activity."""
     matrix: dict[tuple[str, str], float] = defaultdict(float)
     rows: set[str] = set()
     cols: set[str] = set()
@@ -487,7 +792,10 @@ def plot_idle_transition_heatmap(
         for j, a in enumerate(col_labels):
             data[i, j] = matrix.get((b, a), 0.0)
 
-    fig, ax = plt.subplots(figsize=(max(8, len(col_labels) * 0.9), max(6, len(row_labels) * 0.5)))
+    fig, ax = plt.subplots(
+        figsize=(max(8, len(col_labels) * 0.9),
+                 max(6, len(row_labels) * 0.5))
+    )
     vmax = data.max() if data.size else 1.0
     im = ax.imshow(data, cmap=TRAFFIC_CMAP, vmin=0, vmax=max(vmax, 1e-6), aspect="auto")
     ax.set_xticks(range(len(col_labels)))
@@ -529,7 +837,10 @@ def plot_idle_context(
         {
             "summary": summary,
             "gaps_sample": summary.get("longest_gaps", []),
-            "note": "Full per-gap list omitted if >500 gaps; see longest_gaps in summary.",
+            "note": (
+                "Full per-gap list omitted if >500 gaps; "
+                "see longest_gaps in summary."
+            ),
         },
     )
     return summary
@@ -543,7 +854,7 @@ def plot_traffic_volume_pct(
     parallel_label: str,
     duty: dict[str, float] | None = None,
 ) -> None:
-    """Bar chart of duty-cycle % per decomposed category (may exceed 100% if events overlap)."""
+    """Bar chart of duty-cycle percent per decomposed category."""
     if duty is None:
         duty = duty_by_sub(events)
     labels: list[str] = []
@@ -692,6 +1003,102 @@ def write_comm_nvtx_table(
     """Write authoritative inner comm NVTX message records."""
     with out_path.open("w") as f:
         json.dump(records, f, indent=2)
+
+
+def plot_message_size_cdf(
+    comm_nvtx_records: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Logical message size CDF",
+) -> dict[str, Any]:
+    """CDF of logical message bytes from inner communication NVTX records."""
+    series: dict[str, list[int]] = defaultdict(list)
+    for r in comm_nvtx_records:
+        nbytes = r.get("logical_tensor_bytes")
+        if nbytes is None:
+            continue
+        n = int(nbytes)
+        if n <= 0:
+            continue
+        op = str(r.get("op") or "unknown")
+        phase = str(r.get("phase") or "unknown")
+        series[f"{op}:{phase}"].append(n)
+
+    summary = {
+        key: {
+            "count": len(vals),
+            "min_bytes": int(min(vals)),
+            "median_bytes": float(np.median(vals)),
+            "p95_bytes": float(np.percentile(vals, 95)),
+            "max_bytes": int(max(vals)),
+            "total_bytes": int(sum(vals)),
+        }
+        for key, vals in sorted(series.items())
+    }
+    if not series:
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.axis("off")
+        ax.text(
+            0.5,
+            0.5,
+            "Logical message bytes unavailable\n"
+            "Use comm NVTX markers or theoretical estimates.",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
+        ax.set_title(title)
+        plt.tight_layout()
+        save_figure(fig, out_path)
+        return {"series": {}, "bytes_available": False}
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for key, vals in sorted(series.items()):
+        xs = np.sort(np.asarray(vals, dtype=np.float64))
+        ys = np.arange(1, len(xs) + 1) / len(xs)
+        ax.step(xs, ys, where="post", label=f"{key} (n={len(xs)})")
+    ax.set_xscale("log")
+    ax.set_xlabel("Logical message bytes")
+    ax.set_ylabel("CDF")
+    ax.set_title(title)
+    ax.grid(True, which="both", linestyle="--", alpha=0.3)
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+    return {"series": summary, "bytes_available": True}
+
+
+def plot_key_value_table(
+    rows: list[tuple[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    """Write a compact two-column table figure."""
+    if not rows:
+        return
+    height = max(2.0, 0.32 * len(rows) + 0.8)
+    fig, ax = plt.subplots(figsize=(9, height))
+    ax.axis("off")
+    cell_text = [[k, "" if v is None else str(v)] for k, v in rows]
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=["Field", "Value"],
+        loc="center",
+        cellLoc="left",
+        colWidths=[0.42, 0.58],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.2)
+    for (row_idx, _col_idx), cell in table.get_celld().items():
+        if row_idx == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#f0f0f0")
+        cell.set_edgecolor("#dddddd")
+    ax.set_title(title, pad=12)
+    plt.tight_layout()
+    save_figure(fig, out_path)
 
 
 def _peer_from_nccl_name(name: str) -> int | None:
@@ -939,7 +1346,10 @@ def build_gpu_traffic_matrix(
         lower = name.lower()
         if peer_dev is not None and 0 <= peer_dev < n_gpus and peer_dev != src:
             mat[src, peer_dev] += vol
-        elif any(k in lower for k in ("allreduce", "allgather", "reducescatter", "broadcast")):
+        elif any(
+            k in lower
+            for k in ("allreduce", "allgather", "reducescatter", "broadcast")
+        ):
             for dst in range(n_gpus):
                 if dst != src:
                     mat[src, dst] += vol / max(n_gpus - 1, 1)
@@ -965,7 +1375,10 @@ def plot_traffic_heatmap(
     pp: int = 1,
     rank_node_names: dict[int, str] | None = None,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(max(6, matrix.shape[1] * 0.9), max(5, matrix.shape[0] * 0.8)))
+    fig, ax = plt.subplots(
+        figsize=(max(6, matrix.shape[1] * 0.9),
+                 max(5, matrix.shape[0] * 0.8))
+    )
     fig.patch.set_facecolor(HEATMAP_BG)
     ax.set_facecolor(HEATMAP_BG)
 
@@ -1017,7 +1430,14 @@ def plot_traffic_heatmap(
                     txt = f"{val:.2e}" if val >= 1e4 else f"{val:.1f}"
                     color = "white" if val > 0.55 * vmax else "#1a1a1a"
                     ax.text(
-                        j, i, txt, ha="center", va="center", fontsize=8, color=color, zorder=2
+                        j,
+                        i,
+                        txt,
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color=color,
+                        zorder=2,
                     )
 
     cbar = fig.colorbar(im, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
@@ -1056,7 +1476,15 @@ def plot_expert_traffic_volume(
         if e["sub"] == "gate_comp":
             gate_dur += e["dur"]
         if e["kind"] == "comm" and any(
-            k in s for k in ("expert", "moe", "dispatch", "combine", "all2all", "all_to_all")
+            k in s
+            for k in (
+                "expert",
+                "moe",
+                "dispatch",
+                "combine",
+                "all2all",
+                "all_to_all",
+            )
         ):
             expert_bytes += _extract_comm_bytes(e) or 0
     # Heuristic: gate duration correlates with routing metadata volume
@@ -1183,7 +1611,7 @@ def plot_fabric_comm_breakdown(
     *,
     title: str,
 ) -> tuple[dict[str, dict[str, float | int]], Counter[str]]:
-    """Bar chart: fabric NCCL/custom-AR ops only (excludes device_copy, host_transfer)."""
+    """Bar chart: fabric NCCL/custom-AR ops only."""
     stats, unclassified = comm_operation_breakdown(events, scope="fabric")
     plot_comm_breakdown_stats(stats, out_path, title=title)
     return stats, unclassified
@@ -1321,7 +1749,10 @@ def comm_delta(events: list[dict[str, Any]]) -> list[float]:
     )
     if len(comms) < 2:
         return []
-    return [(comms[i + 1]["ts"] - comms[i]["ts"]) / 1000.0 for i in range(len(comms) - 1)]
+    return [
+        (comms[i + 1]["ts"] - comms[i]["ts"]) / 1000.0
+        for i in range(len(comms) - 1)
+    ]
 
 
 def plot_comm_breakdown_stats(
@@ -1594,6 +2025,334 @@ def plot_classification_histogram(
     ax.set_title(title)
     plt.tight_layout()
     save_figure(fig, out_path)
+
+
+def plot_request_timeline(
+    iterations: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Request arrival & active batch over time",
+) -> None:
+    """Plot request arrivals and active batch size from EngineCore iteration log.
+
+    Shows:
+    - Cumulative request arrivals (step function)
+    - Active batch size (context + generation requests per iteration)
+    - Prefill vs decode breakdown stacked
+    """
+    if not iterations:
+        return
+
+    # Compute cumulative arrivals using elapsed_ms for sub-second precision
+    cumulative_t_s: list[float] = []
+    cumulative_arrivals: list[int] = []
+    active_t_s: list[float] = []
+    ctx_reqs: list[int] = []
+    gen_reqs: list[int] = []
+
+    running_t_ms = 0.0
+    total_arrivals = 0
+    for it in iterations:
+        t_s = running_t_ms / 1000.0
+        active_t_s.append(t_s)
+        ctx_reqs.append(it["context_requests"])
+        gen_reqs.append(it["generation_requests"])
+
+        if it["context_requests"] > 0:
+            total_arrivals += it["context_requests"]
+            cumulative_t_s.append(t_s)
+            cumulative_arrivals.append(total_arrivals)
+
+        running_t_ms += it["elapsed_ms"]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+
+    # Top: cumulative arrivals
+    if cumulative_t_s:
+        ax1.step(cumulative_t_s, cumulative_arrivals, where="post",
+                 color="#1f77b4", linewidth=1.5)
+        ax1.set_ylabel("Cumulative requests arrived")
+        ax1.set_title(title)
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(total_arrivals, color="gray", linestyle="--", alpha=0.5,
+                    label=f"total={total_arrivals}")
+        ax1.legend(loc="lower right")
+
+    # Bottom: active batch size (stacked)
+    total_active = [c + g for c, g in zip(ctx_reqs, gen_reqs)]
+    ax2.fill_between(active_t_s, 0, gen_reqs, alpha=0.6,
+                     color="#2ca02c", label="Generation (decode)")
+    ax2.fill_between(active_t_s, gen_reqs, total_active, alpha=0.6,
+                     color="#ff7f0e", label="Context (prefill)")
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("Active requests")
+    ax2.legend(loc="upper right")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+VERBOSE_BAR_CATEGORIES = [
+    ("AllReduce", "#c44e52"),
+    ("AllGather", "#dd8452"),
+    ("ReduceScatter", "#e8875a"),
+    ("SendRecv (PP)", "#937860"),
+    ("MoE Expert", "#4c72b0"),
+    ("Attention", "#55a868"),
+    ("MatMul/Projection", "#8172b2"),
+    ("MoE Routing", "#64b5cd"),
+    ("Gate", "#76b7b2"),
+    ("Add/Norm (RMSNorm)", "#ccb974"),
+    ("Rotary Embedding", "#c49c94"),
+    ("KV Cache Write", "#f7b6d2"),
+    ("Sampling", "#aec7e8"),
+    ("Masking/Indexing", "#dbdb8d"),
+    ("Other Compute", "#9edae5"),
+    ("Device Memcpy (D2D)", "#d5bbcd"),
+    ("Host Transfer (API)", "#e0c8a8"),
+    ("Control (Kernel Launch)", "#b0b0b0"),
+    ("Idle/Unaccounted", "#e8e8e8"),
+]
+
+_SUB_TO_VERBOSE_CAT: dict[str, str] = {
+    "network_collective": "_split_by_name",
+    "network_p2p": "SendRecv (PP)",
+    "moe_expert": "MoE Expert",
+    "attention_comp": "Attention",
+    "matmul_gemm": "MatMul/Projection",
+    "moe_routing": "MoE Routing",
+    "gate_comp": "Gate",
+    "add_norm_comp": "Add/Norm (RMSNorm)",
+    "rotary_embedding": "Rotary Embedding",
+    "kv_cache_write": "KV Cache Write",
+    "sampling_overhead": "Sampling",
+    "masking_indexing": "Masking/Indexing",
+    "other_compute": "Other Compute",
+    "device_copy": "Device Memcpy (D2D)",
+    "host_transfer": "Host Transfer (API)",
+    "control": "Control (Kernel Launch)",
+}
+
+
+def _map_events_to_bar_categories(
+    events: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Map classified events to verbose stacked-bar categories (seconds)."""
+    cat_dur: dict[str, float] = {name: 0.0 for name, _ in VERBOSE_BAR_CATEGORIES}
+
+    for e in events:
+        dur_s = e["dur"] / 1e6
+        sub = e.get("sub", "")
+        name_lower = e.get("name", "").lower()
+
+        mapping = _SUB_TO_VERBOSE_CAT.get(sub)
+        if mapping == "_split_by_name":
+            if "all_gather" in name_lower or "allgather" in name_lower:
+                cat_dur["AllGather"] += dur_s
+            elif "reduce_scatter" in name_lower or "reducescatter" in name_lower:
+                cat_dur["ReduceScatter"] += dur_s
+            else:
+                cat_dur["AllReduce"] += dur_s
+        elif mapping:
+            cat_dur[mapping] += dur_s
+        else:
+            cat_dur["Idle/Unaccounted"] += dur_s
+
+    return cat_dur
+
+
+def plot_time_breakdown_bar(
+    configs: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Time breakdown by operation category",
+    ylabel: str = "Time (seconds)",
+) -> None:
+    """Stacked bar chart of time decomposition per parallelism configuration.
+
+    Each entry in `configs` should have:
+        - "label": str (x-axis label, e.g. "T4-P1")
+        - "category_seconds": dict mapping category name -> seconds
+    """
+    if not configs:
+        return
+
+    n = len(configs)
+    fig, ax = plt.subplots(figsize=(max(6, 2.5 * n + 3), 6))
+
+    x = np.arange(n)
+    bar_width = 0.6 if n <= 4 else 0.8
+    bottoms = np.zeros(n)
+
+    for cat_name, color in VERBOSE_BAR_CATEGORIES:
+        vals = np.array([c["category_seconds"].get(cat_name, 0.0) for c in configs])
+        if vals.sum() == 0:
+            continue
+        ax.bar(x, vals, bar_width, bottom=bottoms, label=cat_name, color=color,
+               edgecolor="white", linewidth=0.3)
+        bottoms += vals
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([c["label"] for c in configs], fontsize=9)
+    ax.set_xlabel("Parallelism Configuration")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.set_ylim(0, None)
+
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def extract_single_layer_events(
+    active_events: list[dict[str, Any]],
+    *,
+    n_layers: int = 48,
+    min_nccl_dur_us: int = 100,
+) -> list[list[dict[str, Any]]]:
+    """Extract individual transformer layer event groups from steady-state decode.
+
+    Uses the alternating all-reduce pattern (2 per layer: after attention, after MoE)
+    to segment events into per-layer groups. Targets non-CUDA-Graph iterations where
+    kernel durations are accurately reported by the profiler.
+
+    Each layer spans from one NCCL event start to the next-but-one NCCL event start,
+    capturing both the attention and MoE/FFN sub-blocks plus their respective all-reduces.
+    """
+    nccl_all = sorted(
+        [e for e in active_events if e.get("sub") == "network_collective"],
+        key=lambda e: e["ts"],
+    )
+    if len(nccl_all) < n_layers * 2 + 10:
+        return []
+
+    # Find the longest run of consecutive non-graphed NCCL events (dur > threshold)
+    # These have accurate timing visible to the profiler.
+    best_run_start = 0
+    best_run_len = 0
+    cur_start = 0
+    cur_len = 0
+    for i, e in enumerate(nccl_all):
+        if e["dur"] >= min_nccl_dur_us:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+            if cur_len > best_run_len:
+                best_run_len = cur_len
+                best_run_start = cur_start
+        else:
+            cur_len = 0
+
+    if best_run_len < n_layers * 2 + 4:
+        # Fall back: use all events regardless of duration
+        nccl_run = nccl_all
+        offset = min(10, len(nccl_run) // 4)
+    else:
+        nccl_run = nccl_all[best_run_start:best_run_start + best_run_len]
+        offset = 4
+
+    layers: list[list[dict[str, Any]]] = []
+    for i in range(offset, min(offset + n_layers * 2, len(nccl_run) - 2), 2):
+        l_start = nccl_run[i]["ts"]
+        l_end = nccl_run[i + 2]["ts"]
+        layer_events = [
+            e for e in active_events
+            if e["ts"] >= l_start and e["end"] <= l_end
+        ]
+        if layer_events:
+            layers.append(layer_events)
+
+    return layers
+
+
+def plot_single_layer_breakdown(
+    layer_events_list: list[list[dict[str, Any]]],
+    out_path: Path,
+    *,
+    title: str = "Single transformer layer breakdown (decode)",
+) -> dict[str, Any]:
+    """Plot time breakdown for one representative transformer layer.
+
+    Shows a horizontal stacked bar with comm/compute/other breakdown,
+    annotated with the per-category microsecond values.
+    Returns the average layer stats dict.
+    """
+    if not layer_events_list:
+        return {}
+
+    from collections import defaultdict
+
+    all_dur_by_cat: dict[str, float] = defaultdict(float)
+    all_wall_us: float = 0.0
+    n = len(layer_events_list)
+
+    for layer in layer_events_list:
+        lt0 = min(e["ts"] for e in layer)
+        lt1 = max(e["end"] for e in layer)
+        all_wall_us += (lt1 - lt0)
+        for e in layer:
+            sub = e.get("sub", "other")
+            all_dur_by_cat[sub] += e["dur"]
+
+    avg_wall_us = all_wall_us / n
+    avg_dur: dict[str, float] = {k: v / n for k, v in all_dur_by_cat.items()}
+
+    # Map to display categories
+    LAYER_CATEGORIES = [
+        ("AllReduce", "#f4a460", ["network_collective", "network_p2p"]),
+        ("Attention", "#4878a8", ["attention_comp"]),
+        ("MoE Expert", "#7ec8c8", ["moe_expert"]),
+        ("MatMul/Proj", "#5a9e5a", ["matmul_gemm"]),
+        ("Norm/Gate/Routing", "#e8d860", ["add_norm_comp", "gate_comp", "moe_routing",
+                                           "rotary_embedding", "kv_cache_write"]),
+        ("Memory", "#c5b0d5", ["host_transfer", "device_copy"]),
+        ("Other/Control", "#a08060", ["control", "sampling_overhead", "other_compute",
+                                       "masking_indexing"]),
+    ]
+
+    cat_vals: list[tuple[str, str, float]] = []
+    for cat_name, color, subs in LAYER_CATEGORIES:
+        val = sum(avg_dur.get(s, 0.0) for s in subs)
+        if val > 0:
+            cat_vals.append((cat_name, color, val))
+
+    idle_us = avg_wall_us - sum(v for _, _, v in cat_vals)
+    if idle_us > 0:
+        cat_vals.append(("Idle/Gap", "#e0e0e0", idle_us))
+
+    fig, ax = plt.subplots(figsize=(12, 3))
+
+    left = 0.0
+    for cat_name, color, val in cat_vals:
+        width = val / avg_wall_us
+        ax.barh(0, width, left=left, color=color, edgecolor="white", linewidth=0.5,
+                label=f"{cat_name} ({val:.0f}μs, {val/avg_wall_us*100:.1f}%)")
+        if width > 0.04:
+            ax.text(left + width / 2, 0, f"{val:.0f}μs",
+                    ha="center", va="center", fontsize=7, fontweight="bold")
+        left += width
+
+    ax.set_xlim(0, 1)
+    ax.set_yticks([])
+    ax.set_xlabel(f"Fraction of layer wall time ({avg_wall_us:.0f} μs)")
+    ax.set_title(title)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), ncol=4, fontsize=8)
+
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+    stats = {
+        "avg_layer_wall_us": round(avg_wall_us, 1),
+        "avg_layer_wall_ms": round(avg_wall_us / 1000, 3),
+        "n_layers_sampled": n,
+        "category_us": {name: round(val, 1) for name, _, val in cat_vals},
+        "category_pct": {name: round(val / avg_wall_us * 100, 1) for name, _, val in cat_vals},
+        "utilization_pct": round((avg_wall_us - idle_us) / avg_wall_us * 100, 1)
+                          if idle_us > 0 else 100.0,
+    }
+    return stats
 
 
 def write_summary_json(

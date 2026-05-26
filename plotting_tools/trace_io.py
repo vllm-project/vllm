@@ -238,7 +238,111 @@ def parse_job_metadata(slurm_out: Path | None) -> dict[str, Any]:
     m = re.search(r"SLURM_JOB_NODELIST=(\S+)", text)
     if m:
         meta["slurm_nodelist"] = m.group(1)
+    m = re.search(r"SLURM_JOB_ID=(\S+)", text)
+    if m:
+        meta["job_id"] = m.group(1)
+
+    # Benchmark and scheduler parameters. These are echoed by the local
+    # serving scripts before the benchmark starts.
+    for env_key, meta_key, caster in (
+        ("NUM_PROMPTS", "num_prompts", int),
+        ("SP", "sp", int),
+        ("SD", "sd", int),
+        ("MAX_MODEL_LEN", "max_model_len", int),
+        ("MAX_NUM_SEQS", "max_num_seqs", int),
+        ("MAX_NUM_BATCHED_TOKENS", "max_num_batched_tokens", int),
+        ("BURSTINESS", "burstiness", float),
+        ("REQUEST_RATE", "request_rate", float),
+    ):
+        m = re.search(rf"\b{env_key}=([0-9.]+)\b", text)
+        if m:
+            meta[meta_key] = caster(m.group(1))
+    m = re.search(r"--custom-output-len\s+(\d+)", text)
+    if m:
+        meta["custom_output_len"] = int(m.group(1))
+    m = re.search(r"--ignore-eos", text)
+    if m:
+        meta["ignore_eos"] = True
+
+    # Model ID from script name or env
+    if "model_id" not in meta:
+        m = re.search(r"MODEL_ID=(\S+)", text)
+        if m:
+            meta["model_id"] = m.group(1)
+        else:
+            m = re.search(r"--model\s+(\S+)", text)
+            if m:
+                meta["model_id"] = m.group(1)
+
+    # Failed requests
+    m = re.search(r"Failed requests:\s+(\d+)", text)
+    if m:
+        meta["failed_requests"] = int(m.group(1))
+    for label, meta_key in (
+        ("Request throughput \\(req/s\\)", "request_throughput_rps"),
+        ("Output token throughput \\(tok/s\\)", "output_token_throughput_tps"),
+        ("Peak output token throughput \\(tok/s\\)",
+         "peak_output_token_throughput_tps"),
+        ("Total token throughput \\(tok/s\\)", "total_token_throughput_tps"),
+        ("Total input tokens", "total_input_tokens"),
+        ("Total generated tokens", "total_generated_tokens"),
+        ("Peak concurrent requests", "peak_concurrent_requests"),
+        ("Median TTFT \\(ms\\)", "median_ttft_ms"),
+        ("P99 TTFT \\(ms\\)", "p99_ttft_ms"),
+        ("Median TPOT \\(ms\\)", "median_tpot_ms"),
+        ("P99 TPOT \\(ms\\)", "p99_tpot_ms"),
+    ):
+        m = re.search(rf"{label}:\s+([\d.]+)", text)
+        if m:
+            val = float(m.group(1))
+            meta[meta_key] = int(val) if val.is_integer() else val
+
     return meta
+
+
+def parse_iteration_log(slurm_out: Path | None) -> list[dict[str, Any]]:
+    """Parse EngineCore iteration log lines from Slurm output.
+
+    Returns a list of dicts with keys:
+        iteration, timestamp_s, context_requests, context_tokens,
+        generation_requests, generation_tokens, elapsed_ms
+    """
+    if slurm_out is None or not slurm_out.is_file():
+        return []
+
+    pattern = re.compile(
+        r"INFO (\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[core\.py:\d+\] "
+        r"Iteration\((\d+)\): "
+        r"(\d+) context requests, (\d+) context tokens, "
+        r"(\d+) generation requests, (\d+) generation tokens, "
+        r"iteration elapsed time: ([\d.]+) ms"
+    )
+
+    iterations: list[dict[str, Any]] = []
+    t0_s: float | None = None
+
+    for line in slurm_out.open(errors="replace"):
+        m = pattern.search(line)
+        if not m:
+            continue
+        ts_str = m.group(1)
+        parts = ts_str.split()
+        h, mi, s = parts[1].split(":")
+        time_of_day_s = int(h) * 3600 + int(mi) * 60 + int(s)
+        if t0_s is None:
+            t0_s = time_of_day_s
+
+        iterations.append({
+            "iteration": int(m.group(2)),
+            "timestamp_s": time_of_day_s - t0_s,
+            "context_requests": int(m.group(3)),
+            "context_tokens": int(m.group(4)),
+            "generation_requests": int(m.group(5)),
+            "generation_tokens": int(m.group(6)),
+            "elapsed_ms": float(m.group(7)),
+        })
+
+    return iterations
 
 
 def pp_rank_order(job_meta: dict[str, Any]) -> list[str]:
@@ -372,7 +476,11 @@ def sync_capture_t0(event_lists: list[list[dict[str, Any]]]) -> int | None:
     return max(starts) if starts else None
 
 
-def clock_offset_ms(events: list[dict[str, Any]], *, time_origin_us: int) -> float | None:
+def clock_offset_ms(
+    events: list[dict[str, Any]],
+    *,
+    time_origin_us: int,
+) -> float | None:
     """Milliseconds from global origin to this trace's first event."""
     local = trace_t0_us(events)
     if local is None:
@@ -380,13 +488,160 @@ def clock_offset_ms(events: list[dict[str, Any]], *, time_origin_us: int) -> flo
     return (local - time_origin_us) / 1000.0
 
 
-def duty_by_sub(events: list[dict[str, Any]]) -> dict[str, float]:
+def infer_active_segments_us(
+    events: list[dict[str, Any]],
+    *,
+    density_threshold: int = 50,
+    bin_size_us: int = 1_000_000,
+    margin_bins: int = 1,
+    max_gap_bins: int = 1,
+) -> list[tuple[int, int]]:
+    """Infer one or more active inference segments from event density.
+
+    Uses network_collective events as the primary signal for "model is actively
+    doing inference" since TP all-reduce only fires during forward passes.
+    Falls back to compute density if no collectives are found.
+
+    Returns a list of (start_us, end_us) dense inference islands. Keeping
+    multiple segments is important when traces contain benchmark gaps between
+    bursts, startup, shutdown, or Nsight finalization artifacts.
+    """
+    nccl_events = [
+        e for e in events
+        if e.get("sub") in ("network_collective", "network_p2p")
+    ]
+
+    anchor_events = nccl_events
+    threshold = density_threshold
+    if not nccl_events:
+        anchor_events = [e for e in events if e.get("kind") == "compute"]
+        threshold = max(density_threshold, 100)
+    if not anchor_events:
+        return []
+
+    t0 = min(e["ts"] for e in events)
+
+    bins: dict[int, int] = {}
+    for e in anchor_events:
+        b = (e["ts"] - t0) // bin_size_us
+        bins[b] = bins.get(b, 0) + 1
+
+    active_bins = [b for b, cnt in bins.items() if cnt >= threshold]
+    if not active_bins:
+        return []
+
+    segments: list[tuple[int, int]] = []
+    sorted_bins = sorted(active_bins)
+    seg_start = sorted_bins[0]
+    prev = sorted_bins[0]
+    for b in sorted_bins[1:]:
+        if b - prev <= max_gap_bins + 1:
+            prev = b
+            continue
+        first_bin = max(0, seg_start - margin_bins)
+        last_bin = prev + margin_bins
+        segments.append((
+            t0 + first_bin * bin_size_us,
+            t0 + (last_bin + 1) * bin_size_us,
+        ))
+        seg_start = b
+        prev = b
+
+    first_bin = max(0, seg_start - margin_bins)
+    last_bin = prev + margin_bins
+    segments.append((
+        t0 + first_bin * bin_size_us,
+        t0 + (last_bin + 1) * bin_size_us,
+    ))
+    return segments
+
+
+def infer_active_window_us(
+    events: list[dict[str, Any]],
+    *,
+    density_threshold: int = 50,
+    bin_size_us: int = 1_000_000,
+    margin_bins: int = 1,
+) -> tuple[int, int] | None:
+    """Infer the outer active inference window from event density.
+
+    This compatibility helper returns the envelope around all detected active
+    segments. Prefer infer_active_segments_us for plots and quality gates.
+    """
+    segments = infer_active_segments_us(
+        events,
+        density_threshold=density_threshold,
+        bin_size_us=bin_size_us,
+        margin_bins=margin_bins,
+    )
+    if not segments:
+        return None
+    return (min(s for s, _ in segments), max(e for _, e in segments))
+
+
+def trim_events_to_window(
+    events: list[dict[str, Any]],
+    window_us: tuple[int, int] | None,
+) -> list[dict[str, Any]]:
+    """Keep only events that overlap with the given (start_us, end_us) window."""
+    if window_us is None:
+        return list(events)
+    start, end = window_us
+    return [e for e in events if e["end"] > start and e["ts"] < end]
+
+
+def trim_events_to_windows(
+    events: list[dict[str, Any]],
+    windows_us: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+) -> list[dict[str, Any]]:
+    """Keep events that overlap any active segment."""
+    if not windows_us:
+        return list(events)
+    return [
+        e for e in events
+        if any(
+            e["end"] > start and e["ts"] < end
+            for start, end in windows_us
+        )
+    ]
+
+
+def duty_by_sub(
+    events: list[dict[str, Any]],
+    *,
+    window_us: tuple[int, int] | None = None,
+) -> dict[str, float]:
     if not events:
         return {}
-    t0 = min(e["ts"] for e in events)
-    t1 = max(e["end"] for e in events)
-    span = max(t1 - t0, 1)
+    if window_us is not None:
+        span = max(window_us[1] - window_us[0], 1)
+    else:
+        t0 = min(e["ts"] for e in events)
+        t1 = max(e["end"] for e in events)
+        span = max(t1 - t0, 1)
     totals: dict[str, int] = {}
     for e in events:
-        totals[e["sub"]] = totals.get(e["sub"], 0) + e["dur"]
+        dur = e["dur"]
+        if window_us is not None:
+            start, end = window_us
+            dur = max(0, min(e["end"], end) - max(e["ts"], start))
+        totals[e["sub"]] = totals.get(e["sub"], 0) + dur
+    return {k: v / span for k, v in totals.items()}
+
+
+def duty_by_sub_windows(
+    events: list[dict[str, Any]],
+    windows_us: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+) -> dict[str, float]:
+    """Duty by subcategory over concatenated active windows."""
+    if not events or not windows_us:
+        return duty_by_sub(events)
+    span = max(sum(end - start for start, end in windows_us), 1)
+    totals: dict[str, int] = {}
+    for e in events:
+        dur = 0
+        for start, end in windows_us:
+            dur += max(0, min(e["end"], end) - max(e["ts"], start))
+        if dur:
+            totals[e["sub"]] = totals.get(e["sub"], 0) + dur
     return {k: v / span for k, v in totals.items()}
