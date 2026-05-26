@@ -620,6 +620,37 @@ class MomeSpec(MambaSpec):
 
 
 @dataclass(frozen=True)
+class SlidingWindowMomeSpec(SlidingWindowMLASpec):
+    component_dims: tuple[int, ...] = ()
+
+    @property
+    def shapes(self) -> tuple[tuple[int, ...], ...]:
+        return tuple((self.block_size, dim) for dim in self.component_dims)
+
+    @property
+    def dtypes(self) -> tuple[torch.dtype, ...]:
+        return (self.dtype,) * len(self.component_dims)
+
+    @property
+    def num_speculative_blocks(self) -> int:
+        # for compatibility with mamba metadata builder
+        return 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if len(self.component_dims) != 3:
+            raise ValueError(
+                "SlidingWindowMomeSpec expects three component dims "
+                f"(q, compressed-kv, output), got {self.component_dims}."
+            )
+        if any(dim <= 0 for dim in self.component_dims):
+            raise ValueError(
+                "SlidingWindowMomeSpec component dims must be positive, "
+                f"got {self.component_dims}."
+            )
+
+
+@dataclass(frozen=True)
 class EncoderOnlyAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # Encoder-only layers do not need KV cache

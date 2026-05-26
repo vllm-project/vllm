@@ -108,7 +108,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMomeSpec
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -242,12 +242,12 @@ class MomeAttention(MambaBase, CustomOp):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return (self.qa_conv.weight.dtype,) * 3
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMLASpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMomeSpec:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
         # FIXME(runze): block_size and sliding_window are hardcoded to be 8 now; make it general later
-        return SlidingWindowMLASpec(
+        return SlidingWindowMomeSpec(
             block_size=8,
             num_kv_heads=1,
             head_size=self.cache_head_size,
@@ -255,6 +255,7 @@ class MomeAttention(MambaBase, CustomOp):
             sliding_window=8,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
             alignment=576,
+            component_dims=(self.q_lora_rank, self.kv_lora_rank, self.cache_o_dim)
         )
 
     def get_attn_backend(self) -> type:
