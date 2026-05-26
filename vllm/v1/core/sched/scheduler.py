@@ -2023,10 +2023,12 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        logger.info_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+        logger.info_once("[shutdown] Scheduler: complete")
 
     ########################################################################
     # KV Connector Related Methods

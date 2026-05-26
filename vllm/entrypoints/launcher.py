@@ -95,6 +95,9 @@ async def serve_http(
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:
+        if shutdown_event.is_set():
+            return
+        logger.info_once("[shutdown] API server: shutdown triggered")
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
@@ -108,12 +111,21 @@ async def serve_http(
 
         engine_client = app.state.engine_client
         timeout = engine_client.vllm_config.shutdown_timeout
+        mode = "abort" if timeout == 0 else "drain"
+
+        logger.info(
+            "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
+            mode,
+            timeout,
+        )
 
         await loop.run_in_executor(
             None, partial(engine_client.shutdown, timeout=timeout)
         )
+        logger.info_once("[shutdown] API server: engine client stopped")
 
         server.should_exit = True
+        logger.info_once("[shutdown] API server: signalling HTTP server shutdown")
         server_task.cancel()
         watchdog_task.cancel()
         if ssl_cert_refresher:
@@ -134,7 +146,7 @@ async def serve_http(
                 process,
                 " ".join(process.cmdline()),
             )
-        logger.info("Shutting down FastAPI HTTP server.")
+        logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
         return server.shutdown()
     finally:
         shutdown_task.cancel()

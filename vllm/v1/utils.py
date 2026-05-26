@@ -357,6 +357,12 @@ def _shutdown_subprocesses(
         timeout = 0.0
     timeout = max(timeout, 5.0)
 
+    logger.info(
+        "[shutdown] Subprocess manager: start process_count=%d timeout=%ss",
+        len(procs),
+        timeout,
+    )
+
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
@@ -369,9 +375,18 @@ def _shutdown_subprocesses(
         if proc.is_alive():
             proc.join(remaining)
 
-    for proc in procs:
-        if proc.is_alive() and (pid := proc.pid) is not None:
-            kill_process_tree(pid)
+    remaining_pids = [
+        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_pids:
+        logger.warning(
+            "[shutdown] Subprocess manager: force killing remaining processes count=%d",
+            len(remaining_pids),
+        )
+    for pid in remaining_pids:
+        kill_process_tree(pid)
+
+    logger.info_once("[shutdown] Subprocess manager: complete")
 
 
 def run_api_server_worker_proc(
@@ -478,6 +493,12 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         # have a user-configured shutdown timeout.
         timeout = 5.0
 
+    logger.info(
+        "[shutdown] Process manager: start process_count=%d timeout=%ss",
+        len(procs),
+        timeout,
+    )
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
@@ -492,9 +513,18 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         if proc.is_alive():
             proc.join(remaining)
 
-    for proc in procs:
-        if proc.is_alive() and (pid := proc.pid) is not None:
-            kill_process_tree(pid)
+    remaining_pids = [
+        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_pids:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining processes count=%d",
+            len(remaining_pids),
+        )
+    for pid in remaining_pids:
+        kill_process_tree(pid)
+
+    logger.info_once("[shutdown] Process manager: complete")
 
 
 def copy_slice(

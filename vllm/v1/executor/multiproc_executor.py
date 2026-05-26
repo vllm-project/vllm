@@ -421,27 +421,45 @@ class MultiprocExecutor(Executor):
             return False
 
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        initial_count = len(active_procs())
+
         # Give processes time to clean themselves up properly first
-        logger.debug("Worker Termination: allow workers to gracefully shutdown")
+        logger.info(
+            "[shutdown] Executor: waiting for worker exit count=%d",
+            initial_count,
+        )
         if wait_for_termination(active_procs(), 4):
+            logger.info_once("[shutdown] Executor: all workers exited gracefully")
             return
 
         # Send SIGTERM if still running
-        logger.debug("Worker Termination: workers still running sending SIGTERM")
-        for p in active_procs():
+        remaining = active_procs()
+        logger.warning(
+            "[shutdown] Executor: workers still running after grace period; "
+            "sending SIGTERM count=%d",
+            len(remaining),
+        )
+        for p in remaining:
             p.terminate()
         if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            logger.debug(
-                "Worker Termination: resorting to SIGKILL to take down workers"
+            remaining = active_procs()
+            logger.warning(
+                "[shutdown] Executor: workers still running after SIGTERM; "
+                "sending SIGKILL count=%d",
+                len(remaining),
             )
-            for p in active_procs():
+            for p in remaining:
                 p.kill()
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, "shutting_down", False):
-            logger.debug("Triggering shutdown of workers")
+            worker_count = len(getattr(self, "workers", None) or [])
+            logger.info(
+                "[shutdown] Executor: start worker_count=%d",
+                worker_count,
+            )
             self.shutting_down = True
 
             # Make sure all the worker processes are terminated first.
@@ -466,6 +484,8 @@ class MultiprocExecutor(Executor):
             for mq in response_mqs:
                 mq.shutdown()
             self.response_mqs = []
+
+        logger.info_once("[shutdown] Executor: complete")
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
@@ -869,7 +889,9 @@ class WorkerProc:
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_requested.is_set():
-                logger.info("WorkerProc shutting down.")
+                logger.debug_once(
+                    "[shutdown] WorkerProc: exiting after shutdown request"
+                )
             else:
                 logger.exception("WorkerProc failed.")
 
@@ -881,7 +903,12 @@ class WorkerProc:
         except SystemExit as e:
             # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
             # the graceful shutdown process did not succeed
-            logger.warning("WorkerProc was terminated")
+            if shutdown_requested.is_set():
+                logger.debug_once(
+                    "[shutdown] WorkerProc: terminated by shutdown signal"
+                )
+            else:
+                logger.warning("WorkerProc was terminated")
             # SystemExit must never be ignored
             raise e
 

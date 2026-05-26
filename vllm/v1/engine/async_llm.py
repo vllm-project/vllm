@@ -199,6 +199,8 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
+        self._shutdown_started = False
+
     @classmethod
     def from_vllm_config(
         cls,
@@ -258,17 +260,28 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
+        if getattr(self, "_shutdown_started", False):
+            return
+        self._shutdown_started = True
+
+        timeout_str = "default" if timeout is None else f"{timeout}s"
+        logger.info("[shutdown] AsyncLLM: start timeout=%s", timeout_str)
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
+            logger.info_once("[shutdown] AsyncLLM: renderer stopped")
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown(timeout=timeout)
+            logger.info_once("[shutdown] AsyncLLM: engine core client stopped")
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:
             cancel_task_threadsafe(handler)
+            logger.info_once("[shutdown] AsyncLLM: output handler stopped")
+
+        logger.info_once("[shutdown] AsyncLLM: complete")
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -700,6 +713,15 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+            except EngineDeadError as e:
+                if self._shutdown_started:
+                    logger.info_once(
+                        "[shutdown] AsyncLLM: output handler exiting after "
+                        "engine shutdown"
+                    )
+                    return
+                logger.exception("AsyncLLM output_handler failed.")
+                output_processor.propagate_error(e)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
@@ -894,6 +916,8 @@ class AsyncLLM(EngineClient):
         return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(self) -> None:
+        if self._shutdown_started:
+            return
         if self.logger_manager:
             self.logger_manager.log()
 

@@ -390,6 +390,7 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        logger.info_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
             self.engine_manager.shutdown()
@@ -443,6 +444,8 @@ class BackgroundResources:
                     shutdown_sender.connect(self.shutdown_path)
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
+
+        logger.info_once("[shutdown] MPClient: background resource cleanup complete")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
@@ -613,9 +616,15 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            timeout_str = "default" if timeout is None else f"{timeout}s"
+            logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
+                logger.info_once("[shutdown] MPClient: stopping engine manager")
                 self.resources.engine_manager.shutdown(timeout=timeout)
+                logger.info_once("[shutdown] MPClient: engine manager stopped")
+            logger.info_once("[shutdown] MPClient: cleaning up background resources")
             self.resources()
+            logger.info_once("[shutdown] MPClient: complete")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -655,6 +664,9 @@ class MPClient(EngineCoreClient):
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
+            logger.warning_once(
+                "[shutdown] MPClient: engine core exited unexpectedly; starting cleanup"
+            )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
