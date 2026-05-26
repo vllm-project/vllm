@@ -58,18 +58,22 @@ impl ToolState {
         }
 
         let mut output = ToolParserOutput::default();
-        let parse_status = self.parser.parse_into(&delta, &mut output);
+        let parse_result = self.parser.parse_into(&delta, &mut output);
 
-        match parse_status {
+        match parse_result {
             Ok(()) => self.process_parser_output(kind, output, &mut events)?,
             Err(error) => {
-                if !self.parser_failed {
-                    warn!(
-                        error = %error.as_report(),
-                        "tool parser failed; falling back to plain text deltas"
-                    );
-                    self.parser_failed = true;
-                }
+                warn!(
+                    error = %error.as_report(),
+                    "tool parser failed; falling back to plain text deltas"
+                );
+                // Permanently mark this parser as failed.
+                // TODO: we may consider recovering from parsing errors in the future.
+                self.parser_failed = true;
+
+                // On parsing failure, we still apply the partial parser output if any, but we close
+                // any open tool calls and emit the remaining buffered text as a plain-text delta to
+                // preserve as much of the output as possible.
                 self.process_parser_output(kind, output, &mut events)?;
                 self.open_call_index = None;
                 push_text_delta(&mut events, kind, self.parser.reset());

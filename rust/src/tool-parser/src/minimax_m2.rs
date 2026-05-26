@@ -94,10 +94,9 @@ impl MinimaxM2ToolParser {
     }
 
     fn reset(&mut self) -> String {
-        let buffered = std::mem::take(&mut self.buffer);
         self.mode = MinimaxM2Mode::Text;
         self.emitted_tool_count = 0;
-        buffered
+        std::mem::take(&mut self.buffer)
     }
 }
 

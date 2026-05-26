@@ -121,10 +121,9 @@ impl KimiK2ToolParser {
     }
 
     fn reset(&mut self) -> String {
-        let buffered = std::mem::take(&mut self.buffer);
         self.mode = KimiK2Mode::Text;
         self.active_tool_index = None;
-        buffered
+        std::mem::take(&mut self.buffer)
     }
 }
 

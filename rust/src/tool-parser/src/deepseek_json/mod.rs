@@ -169,11 +169,10 @@ impl DeepSeekJsonToolParser {
     }
 
     fn reset(&mut self) -> String {
-        let buffered = std::mem::take(&mut self.buffer);
         self.mode = DeepSeekJsonMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        buffered
+        std::mem::take(&mut self.buffer)
     }
 }
 

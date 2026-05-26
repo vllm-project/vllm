@@ -101,10 +101,9 @@ impl GlmXmlToolParser {
     }
 
     fn reset(&mut self) -> String {
-        let buffered = std::mem::take(&mut self.buffer);
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
-        buffered
+        std::mem::take(&mut self.buffer)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

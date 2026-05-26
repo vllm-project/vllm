@@ -82,6 +82,8 @@ pub fn test_tools() -> Vec<Tool> {
 }
 
 /// Push chunks through a streaming parser and coalesce its tool-call deltas.
+///
+/// Panics if there are any parsing errors along the way.
 pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -> ToolParserOutput {
     let mut output = ToolParserOutput::default();
     for chunk in chunks {

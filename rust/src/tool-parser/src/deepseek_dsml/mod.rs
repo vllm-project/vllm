@@ -126,10 +126,9 @@ impl DeepSeekDsmlToolParser {
     }
 
     fn reset(&mut self) -> String {
-        let buffered = std::mem::take(&mut self.buffer);
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
-        buffered
+        std::mem::take(&mut self.buffer)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
