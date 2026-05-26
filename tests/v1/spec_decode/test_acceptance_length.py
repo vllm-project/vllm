@@ -40,8 +40,6 @@ class Eagle3ModelConfig:
     # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
     rtol: float | None = None
     # ROCm-specific test configuration
-    rocm_tp_sizes: set[int] | None = None
-    rocm_expert_parallel_tp_sizes: set[int] = field(default_factory=set)
     rocm_expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
 
 
@@ -85,8 +83,6 @@ EAGLE3_MODEL_CONFIGS = [
             pytest.mark.slow_test,
         ],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
-        rocm_tp_sizes={4},
-        rocm_expert_parallel_tp_sizes={4},
     ),
 ]
 
@@ -240,13 +236,6 @@ def test_eagle3_acceptance_length(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # Skip if this backend is incompatible with the model
-    if (
-        current_platform.is_rocm()
-        and model_config.rocm_tp_sizes is not None
-        and tp_size not in model_config.rocm_tp_sizes
-    ):
-        tp_ids = ", ".join(f"tp{tp}" for tp in sorted(model_config.rocm_tp_sizes))
-        pytest.skip(f"{model_config.id} is validated with {tp_ids} on ROCm")
     attention_config = None
     if attention_backend != "auto":
         backend_enum = AttentionBackendEnum[attention_backend]
@@ -269,9 +258,10 @@ def test_eagle3_acceptance_length(
             gpu_memory_utilization=0.7,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
+            # Qwen/Qwen3-30B-A3B-FP8 with TP=4 needs EP
+            # https://github.com/vllm-project/vllm/issues/25292
             enable_expert_parallel=(
-                current_platform.is_rocm()
-                and tp_size in model_config.rocm_expert_parallel_tp_sizes
+                tp_size == 4 and "Qwen3-VL" in model_config.verifier
             ),
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
