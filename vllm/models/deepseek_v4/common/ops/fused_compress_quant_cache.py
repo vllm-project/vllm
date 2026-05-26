@@ -11,6 +11,12 @@ Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn:
         head=128, MXFP4 (block=32), 4 ue8m0 bytes
 
+Additional cutedsl kernels:
+  - _compress_kv_sparse_attn_cutedsl / _norm_rope_insert_sparse_attn_cutedsl:
+        CuTe DSL split kernels for C128
+  - _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl:
+        CuTe DSL fused kernels for C4
+
 RoPE is register-based via tl.reshape -> tl.split -> tl.interleave (or the
 even/odd halves are consumed directly for MXFP4, no interleave needed).
 FP8 UE8M0 quant uses tl.reshape to tile [N_QUANT_BLOCKS, QUANT_BLOCK] for
@@ -19,9 +25,41 @@ even/odd halves, producing (N_QUANT_BLOCKS, MXFP4_BLOCK/2) packed nibbles
 and N_QUANT_BLOCKS ue8m0 bytes.
 """
 
+from functools import cache
+
 from vllm.triton_utils import tl, triton
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
+
+
+@cache
+def _get_sparse_attn_cutedsl_impls():
+    from .sparse_attn_compress_cutedsl import (
+        _compress_kv_sparse_attn_cutedsl,
+        _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
+        _norm_rope_insert_sparse_attn_cutedsl,
+    )
+
+    return (
+        _compress_kv_sparse_attn_cutedsl,
+        _norm_rope_insert_sparse_attn_cutedsl,
+        _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
+    )
+
+
+def _compress_kv_sparse_attn_cutedsl(*args, **kwargs):
+    """CuTe DSL sparse-attention compress wrapper."""
+    return _get_sparse_attn_cutedsl_impls()[0](*args, **kwargs)
+
+
+def _norm_rope_insert_sparse_attn_cutedsl(*args, **kwargs):
+    """CuTe DSL RMSNorm/RoPE/FP8-store wrapper."""
+    return _get_sparse_attn_cutedsl_impls()[1](*args, **kwargs)
+
+
+def _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(*args, **kwargs):
+    """CuTe DSL fused C4 sparse-attention compressor wrapper."""
+    return _get_sparse_attn_cutedsl_impls()[2](*args, **kwargs)
 
 
 # =============================================================================
