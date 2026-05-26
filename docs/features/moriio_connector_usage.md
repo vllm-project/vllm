@@ -89,7 +89,7 @@ docker run \
   vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
-  --vllm-discovery-address "0.0.0.0:36367" \
+  --vllm-discovery-address "0.0.0.0:36367"
 ```
 
 **Manual install:**
@@ -99,7 +99,7 @@ pip install vllm-router
 vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
-  --vllm-discovery-address "0.0.0.0:36367" \
+  --vllm-discovery-address "0.0.0.0:36367"
 ```
 
 Alternatively, you can use the reference implementation proxy shipped with vLLM:
