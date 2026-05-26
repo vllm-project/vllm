@@ -249,19 +249,3 @@ def minimax_moe_topk_sigmoid_quant(
         top_k,
         block_k,
     )
-
-
-def minimax_moe_topk_sigmoid_quant_triton(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    e_score_correction_bias: torch.Tensor,
-    top_k: int,
-    block_k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _minimax_moe_topk_sigmoid_quant_triton_impl(
-        hidden_states,
-        router_logits,
-        e_score_correction_bias,
-        top_k,
-        block_k,
-    )
