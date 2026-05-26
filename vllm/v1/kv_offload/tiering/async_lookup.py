@@ -90,9 +90,8 @@ class AsyncLookupWorker:
                 state = self._async_results[slot]
                 if state is _IN_FLIGHT:
                     return None
-                del self._async_results[slot]
                 if state == FOUND:
-                    return self._result_tier.pop(slot)
+                    return self._result_tier[slot]
                 return NOT_FOUND  # state == NOT_FOUND
             # New key — queue for async lookup.
             self._evict_if_full()
@@ -173,7 +172,7 @@ class AsyncLookupWorker:
         while not self._shutdown_event.is_set():
             # Wait for end-of-step signal; fall back to timeout so the
             # worker doesn't stall indefinitely if take_events() is skipped.
-            self._step_event.wait(timeout=1.0)
+            self._step_event.wait(timeout=0.1)
             # Clear BEFORE draining so a signal that arrives during
             # processing is not lost.
             self._step_event.clear()
