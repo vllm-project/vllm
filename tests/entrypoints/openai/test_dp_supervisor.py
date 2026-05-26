@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.dp_supervisor import (
     DPSupervisor,
     _build_vllm_dp_server_args,
     infer_multi_port_external_lb_start_rank,
+    validate_multi_port_external_lb_args,
 )
 from vllm.logger import init_logger
 
@@ -75,6 +76,8 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "ssl_keyfile": None,
         "ssl_certfile": None,
         "ssl_ca_certs": None,
+        "ssl_cert_reqs": 0,
+        "ssl_ciphers": None,
         "node_rank": 1,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -108,6 +111,8 @@ def _make_args(**overrides) -> argparse.Namespace:
         ssl_keyfile=None,
         ssl_certfile=None,
         ssl_ca_certs=None,
+        ssl_cert_reqs=0,
+        ssl_ciphers=None,
         node_rank=0,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
@@ -139,6 +144,15 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.data_parallel_hybrid_lb is False
     assert child_args.data_parallel_multi_port_external_lb is False
     assert child_args.api_server_count == 1
+
+
+def test_validate_multi_port_external_lb_args_allows_ssl():
+    args = _make_unit_args(
+        ssl_keyfile="/tmp/server.key",
+        ssl_certfile="/tmp/server.crt",
+        ssl_ca_certs="/tmp/ca.crt",
+    )
+    validate_multi_port_external_lb_args(args)
 
 
 def test_aggregates_health():

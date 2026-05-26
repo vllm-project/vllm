@@ -55,10 +55,6 @@ def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "Error: --data-parallel-multi-port-external-lb does not support --uds"
         )
-    if any((args.ssl_keyfile, args.ssl_certfile, args.ssl_ca_certs)):
-        raise ValueError(
-            "Error: --data-parallel-multi-port-external-lb does not support HTTPS yet"
-        )
     if args.api_server_count not in (None, 1):
         raise ValueError(
             "Error: --data-parallel-multi-port-external-lb currently requires "
@@ -151,7 +147,8 @@ def _child_base_url(args: argparse.Namespace, port: int) -> str:
         host = "127.0.0.1"
     elif host == "::":
         host = "::1"
-    return f"http://{host}:{port}"
+    scheme = "https" if args.ssl_keyfile and args.ssl_certfile else "http"
+    return f"{scheme}://{host}:{port}"
 
 
 def _join_processes_with_timeout(processes: list[BaseProcess], timeout: float) -> None:
@@ -178,7 +175,15 @@ async def _probe_endpoint(
     """
     for iteration in range(conn_err_failure_threshold):
         try:
-            async with session.get(_child_base_url(args, port) + path) as response:
+            probe_ssl = None
+            if args.ssl_keyfile and args.ssl_certfile:
+                # Probes target node-local child servers over loopback, so skip
+                # certificate verification to avoid SAN/hostname mismatches for
+                # localhost/127.0.0.1 deployments.
+                probe_ssl = False
+            async with session.get(
+                _child_base_url(args, port) + path, ssl=probe_ssl
+            ) as response:
                 # vLLM returns 503 on EngineDeadError, so we should return
                 # immediately if vLLM responds with a non-200 status code.
                 return response.status == HTTPStatus.OK
@@ -272,6 +277,11 @@ class DPSupervisor:
             host=host,
             port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
+            ssl_keyfile=self.args.ssl_keyfile,
+            ssl_certfile=self.args.ssl_certfile,
+            ssl_ca_certs=self.args.ssl_ca_certs,
+            ssl_cert_reqs=self.args.ssl_cert_reqs,
+            ssl_ciphers=self.args.ssl_ciphers,
         )
         supervisor_server = uvicorn.Server(config)
         supervisor_server_task = asyncio.create_task(
