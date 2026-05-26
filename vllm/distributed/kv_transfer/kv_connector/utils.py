@@ -270,9 +270,8 @@ def kv_postprocess_layout_on_receive(cache, indices):
     blocks_to_update = cache.index_select(0, indices)
     target_shape = list(blocks_to_update.shape)
     target_shape[0] = -1
-    inv_order = [0, 2, 1, 3]
+    inv_order =  [0, 1, 3, 2, 4]  if cache.dim() == 5 else [0, 2, 1, 3] 
     src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
@@ -364,6 +363,44 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
+def infer_split_k_and_v(
+    attn_backend_name: str,
+    is_mamba: bool,
+    is_mla: bool,
+    cross_layers_blocks: bool,
+) -> bool:
+    """Infer if K and V registed as separate regions from attention backend name.
+
+    Args:
+        attn_backend_name: Name of the attention backend.
+        is_mamba: Whether the model uses Mamba (SSM) layers.
+        is_mla: Whether the model uses Multi-head Latent Attention.
+        cross_layers_blocks: Whether cross-layer block caching is used.
+
+    Returns:
+        True if K and V are registered as separate regions.
+    """
+    if is_mamba:
+        return False
+
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attn_backend = AttentionBackendEnum[attn_backend_name].get_class()
+    _MOCK_BLOCK_SIZE = 16
+    kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
+        num_blocks=1,
+        block_size=_MOCK_BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=1,
+    )
+    is_kv_layout_blocks_first = (
+        len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+    )
+
+    # Whether to register regions for K and V separately (when present).
+    return not (cross_layers_blocks or is_mla or is_kv_layout_blocks_first)
+
+
 # ---- Per-engine transfer info ----
 
 
@@ -384,6 +421,9 @@ class EngineTransferInfo:
 
     remote_physical_blocks_per_logical: int
     """Physical blocks per logical block."""
+
+    remote_split_k_and_v: bool = False
+    """Whether the remote agent splits K and V into separate regions."""
 
 
 # ---- Transfer topology ----
@@ -490,6 +530,73 @@ class TransferTopology:
         return not (
             self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
         )
+
+    # ============================================================
+    # Heterogeneous K/V split alignment
+    # ============================================================
+
+    def is_heterogeneous_split_k_and_v(
+        self, remote_engine_id: EngineId
+    ) -> bool:
+        """Whether local and remote use different K/V split configurations."""
+        info = self._engines[remote_engine_id]
+        return self.split_k_and_v != info.remote_split_k_and_v
+
+    def align_remote_layer(
+        self,
+        remote_engine_id: EngineId,
+        remote_layer_idx: int,
+    ) -> tuple[int, bool, int]:
+        """Align remote layer index to local in heterogeneous 
+        disaggregated serving scenarios where local and remote 
+        attention backends use different K/V splitting configurations. 
+        
+        For example, local worker uses TRITON_ATTN or FLASHINFER 
+        which combines K and V into a single tensor while 
+        remote worker uses FLASH_ATTN which registers K and V separately.
+
+        Returns:
+            (local_layer_idx, add_v_descriptors, v_layer_idx)
+        """
+        info = self._engines[remote_engine_id]
+        local_split = self.split_k_and_v
+        remote_split = info.remote_split_k_and_v
+
+        if local_split == remote_split:
+            # Homogeneous: no remapping needed.
+            return (
+                remote_layer_idx,
+                self.is_kv_layout_blocks_first,
+                remote_layer_idx,
+            )
+        elif remote_split:
+            # LOCAL_JOINT_REMOTE_SPLIT: remote has 2x regions (K, V separate).
+            # Two remote regions map to one local joint region.
+            return (remote_layer_idx // 2, False, remote_layer_idx // 2)
+        else:
+            # LOCAL_SPLIT_REMOTE_JOINT: local has 2x regions (K, V separate).
+            # One remote joint region maps to two local regions.
+            local_k_idx = remote_layer_idx * 2
+            return (local_k_idx, True, local_k_idx + 1)
+
+    def rescale_by_split_k_and_v_ratio(
+        self,
+        remote_engine_id: EngineId,
+        value: int,
+    ) -> int:
+        """Rescale local region sizes to the remote's K/V region size."""
+        info = self._engines[remote_engine_id]
+        local_split = self.split_k_and_v
+        remote_split = info.remote_split_k_and_v
+
+        if local_split == remote_split:
+            return value
+        elif remote_split:
+            # Remote has 2x regions; halve local value.
+            return value // 2
+        else:
+            # Local has 2x regions; double local value.
+            return value * 2
 
     # ============================================================
     # Common methods
