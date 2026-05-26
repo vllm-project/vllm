@@ -6,7 +6,7 @@
 
 ### Installation
 
-**Docker:** MoRI is shipped with the official ROCm vLLM image: `vllm/vllm-openai-rocm:v0.21.0` (and later).
+**Docker:** MoRI is shipped with the official ROCm vLLM image: `vllm/vllm-openai-rocm:nightly`.
 
 **Manual installation:** MoRI wheel can be installed with
 
