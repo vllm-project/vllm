@@ -47,4 +47,4 @@ steps:
       pip install matplotlib ftfy &&
       pip install open-clip-torch --no-deps &&
       pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
-  parallelism: 14
+  parallelism: 16
