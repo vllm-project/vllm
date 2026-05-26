@@ -368,45 +368,48 @@ def _process_single_sublayer(
     return current_weight_schema, current_input_schema
 
 
-def _process_all_sublayers(
+def convert_to_humming_moe_kernel_format(
     layer: "RoutedExperts",
-    has_bias: bool,
-    num_experts: int,
-    param_dtype: torch.dtype,
+    quant_config: dict | None = None,
+    sublayer_configs: dict[str, Any] | None = None,
     weight_schema: Any | None = None,
     input_schema: Any | None = None,
-    quant_config: dict[str, Any] | None = None,
-    sublayer_configs: dict[str, Any] | None = None,
     force_weight_schema: Any | None = None,
 ) -> None:
     """
-    Process all sublayers of an MoE layer: convert, requant, prepare, and transform.
+    Convert MoE weights from checkpoint format to Humming kernel format.
 
-    This is the common implementation for both convert_to_humming_moe_kernel_format
-    and prepare_humming_moe_layer.
+    This function processes weights for each sublayer (w13, w2) by:
+    1. Converting from checkpoint format to humming format if needed
+    2. Force requanting if a different quantization schema is specified
+    3. Preparing layer metadata for the Humming kernel
+    4. Transforming weights for inference
 
     Args:
+    Args:
         layer: The RoutedExperts layer containing weights to process
-        has_bias: Whether the layer has bias terms
-        num_experts: Number of experts in the layer
-        param_dtype: Parameter data type
-        weight_schema: Optional initial weight quantization schema.
-                      If None, built from quant_config.
-        input_schema: Optional initial input quantization schema.
-                     If None, built from quant_config or env vars.
         quant_config: Optional quantization config dict. Required if weight_schema
                      or input_schema are None. Used to build schemas via
                      BaseWeightSchema.from_config().
         sublayer_configs: Optional configuration dict for each sublayer (w13, w2).
                          Each config must have "shape_n" and "shape_k" keys.
                          If None, configs are built from layer.moe_config properties.
+        weight_schema: Optional initial weight quantization schema.
+                      If None, built from quant_config.
+        input_schema: Optional initial input quantization schema.
+                     If None, built from quant_config or env vars.
         force_weight_schema: Optional schema to force requantization to
 
     Side effects:
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
     """
+
     # Build schemas from quant_config if not provided
+    has_bias = layer.moe_config.has_bias
+    num_experts = layer.moe_config.num_experts
+    param_dtype = layer.param_dtype
+
     if weight_schema is None or input_schema is None:
         if quant_config is None:
             raise ValueError(
@@ -467,46 +470,10 @@ def _process_all_sublayers(
         layer.weight_schemas[sublayer_name] = final_weight_schema
         layer.input_schemas[sublayer_name] = final_input_schema
 
-
-def convert_to_humming_moe_kernel_format(
-    layer: "RoutedExperts",
-    sublayer_configs: dict[str, Any],
-    weight_schema: Any,
-    input_schema: Any,
-    force_weight_schema: Any | None,
-    has_bias: bool,
-) -> None:
-    """
-    Convert MoE weights from checkpoint format to Humming kernel format.
-
-    This function processes weights for each sublayer (w13, w2) by:
-    1. Converting from checkpoint format to humming format if needed
-    2. Force requanting if a different quantization schema is specified
-    3. Preparing layer metadata for the Humming kernel
-    4. Transforming weights for inference
-
-    Args:
-        layer: The RoutedExperts layer containing weights to process
-        sublayer_configs: Configuration dict for each sublayer (w13, w2)
-        weight_schema: Initial weight quantization schema
-        input_schema: Initial input quantization schema
-        force_weight_schema: Optional schema to force requantization to
-        has_bias: Whether the layer has bias terms
-
-    Side effects:
-        - Modifies layer parameters in place
-        - Sets layer.weight_schemas and layer.input_schemas
-    """
-    _process_all_sublayers(
-        layer=layer,
-        has_bias=has_bias,
-        num_experts=layer.num_experts,
-        param_dtype=layer.param_dtype,
-        weight_schema=weight_schema,
-        input_schema=input_schema,
-        sublayer_configs=sublayer_configs,
-        force_weight_schema=force_weight_schema,
-    )
+    if not hasattr(layer, "locks"):
+        device = layer.w13_weight.device
+        locks = torch.zeros(1024, dtype=torch.int32, device=device)
+        layer.register_buffer("locks", locks)
 
 
 def make_humming_moe_quant_config(

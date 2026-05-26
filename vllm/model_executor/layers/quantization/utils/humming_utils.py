@@ -7,10 +7,6 @@ import torch
 from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
-from vllm.model_executor.layers.fused_moe.oracle.humming import (
-    _process_all_sublayers,
-)
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 
 
@@ -77,17 +73,3 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     )
 
     HummingMethod.transform_humming_layer(layer)
-
-
-def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
-    _process_all_sublayers(
-        layer=layer,
-        has_bias=layer.moe_config.has_bias,
-        num_experts=layer.local_num_experts,
-        param_dtype=layer.params_dtype,
-        quant_config=quant_config,
-        weight_schema=None,
-        input_schema=None,
-        sublayer_configs=None,
-        force_weight_schema=None,
-    )

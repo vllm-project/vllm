@@ -778,7 +778,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             weight_schema=self.weight_schema,
             input_schema=self.input_schema,
             force_weight_schema=self.force_weight_schema,
-            has_bias=self.moe.has_bias,
         )
 
         # Build the MoE kernel

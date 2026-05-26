@@ -730,11 +730,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     sf_block_size = 32  # mxfp4 block size
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            convert_to_humming_moe_kernel_format,
         )
 
-        prepare_humming_moe_layer(layer, {"quant_method": "gpt_oss_mxfp4"})
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config={"quant_method": "gpt_oss_mxfp4"}
+        )
         return (
             layer.w13_weight,
             layer.w2_weight,
@@ -1269,11 +1271,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
+            convert_to_humming_moe_kernel_format,
         )
 
-        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config={"quant_method": "mxfp4"}
+        )
         return (
             layer.w13_weight,
             layer.w2_weight,
