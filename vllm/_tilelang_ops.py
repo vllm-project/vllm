@@ -11,10 +11,6 @@ from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
 
 
-def _is_tilelang_platform() -> bool:
-    return current_platform.is_cuda() or current_platform.is_rocm()
-
-
 def _is_pdl_supported() -> bool:
     is_arch_support_pdl = getattr(current_platform, "is_arch_support_pdl", None)
     if not callable(is_arch_support_pdl):
@@ -24,7 +20,7 @@ def _is_pdl_supported() -> bool:
 
 # TileLang is used for MHC on CUDA and ROCm. Keep non-GPU imports cheap so
 # registering the Python wrapper modules does not require TileLang everywhere.
-if TYPE_CHECKING or _is_tilelang_platform():
+if TYPE_CHECKING or current_platform.is_cuda_alike():
     if not has_tilelang():
         raise ImportError(
             "tilelang is required for mhc but is not installed. Install it with "
