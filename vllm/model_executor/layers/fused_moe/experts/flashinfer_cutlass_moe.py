@@ -97,6 +97,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
+        self.gemm1_clamp_limit: torch.Tensor | None = None
+        if quant_config.gemm1_clamp_limit is not None:
+            self.gemm1_clamp_limit = torch.tensor(
+                [quant_config.gemm1_clamp_limit] * self.num_experts,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
@@ -107,9 +114,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             self.gemm1_beta = torch.tensor(
                 [1.0] * self.num_experts, dtype=torch.float32, device=self.device
             )
-            self.gemm1_clamp_limit = torch.tensor(
-                [7.0] * self.num_experts, dtype=torch.float32, device=self.device
-            )
+            if self.gemm1_clamp_limit is None:
+                self.gemm1_clamp_limit = torch.tensor(
+                    [7.0] * self.num_experts,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             if quant_config.quant_dtype == "mxfp8":
                 self.fake_input_scale = torch.ones(
                     self.num_experts,
@@ -277,7 +287,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         fc2_expert_biases = None
         swiglu_alpha = None
         swiglu_beta = None
-        swiglu_limit = None
+        swiglu_limit = (
+            self.gemm1_clamp_limit if activation == MoEActivation.SILU else None
+        )
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
         # Select quantization metadata based on FP8 format/path

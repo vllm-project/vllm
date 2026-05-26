@@ -9,6 +9,7 @@ from argparse import Namespace
 from http import HTTPStatus
 from logging import Logger
 from string import Template
+from typing import Any
 
 import regex as re
 from fastapi import Request
@@ -210,7 +211,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Namespace | EngineArgs):
+def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
     from vllm.entrypoints.openai.cli_args import make_arg_parser
 
     non_default_args = {}
@@ -237,6 +238,43 @@ def log_non_default_args(args: Namespace | EngineArgs):
             "Unsupported argument type. Must be Namespace or EngineArgs instance."
         )
 
+    return non_default_args
+
+
+def _jsonify_arg_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            key: _jsonify_arg_value(val)
+            for key, val in dataclasses.asdict(value).items()
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonify_arg_value(val) for key, val in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonify_arg_value(item) for item in value]
+    if (model_dump := getattr(value, "model_dump", None)) is not None:
+        return _jsonify_arg_value(model_dump(mode="json"))
+    if (to_dict := getattr(value, "dict", None)) is not None:
+        return _jsonify_arg_value(to_dict())
+    return repr(value)
+
+
+def jsonify_non_default_args(
+    args: Namespace | EngineArgs,
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
+    non_default_args = get_non_default_args(args)
+    if exclude is not None:
+        for key in exclude:
+            non_default_args.pop(key, None)
+
+    return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
+
+
+def log_non_default_args(args: Namespace | EngineArgs):
+    non_default_args = get_non_default_args(args)
     logger.info("non-default args: %s", non_default_args)
 
 

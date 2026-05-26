@@ -68,7 +68,7 @@ class GenerateRequest(BaseModel):
             "through out the inference process and return in response."
         ),
     )
-    token_ids: list[int]
+    token_ids: list[int] = Field(min_length=1)
     """The token ids to generate text from."""
 
     @field_validator("token_ids")
