@@ -47,6 +47,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.silu_quant_fusion import (
+    silu_mul_input_quant,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -116,7 +119,7 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        x = silu_mul_input_quant(x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 

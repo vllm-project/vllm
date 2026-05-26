@@ -29,6 +29,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.quantization.utils.silu_quant_fusion import (
+    silu_mul_input_quant,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import (
     HCHeadOp,
@@ -104,6 +107,7 @@ class DeepseekV4MLP(nn.Module):
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
+        self.swiglu_limit = swiglu_limit
         if swiglu_limit is not None:
             self.act_fn = SiluAndMulWithClamp(swiglu_limit)
         else:
@@ -111,7 +115,11 @@ class DeepseekV4MLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        x = silu_mul_input_quant(
+            gate_up,
+            self.down_proj,
+            activation_clamp=self.swiglu_limit,
+        )
         x, _ = self.down_proj(x)
         return x
 
