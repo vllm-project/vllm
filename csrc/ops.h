@@ -211,4 +211,10 @@ std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
     torch::Tensor const& norm_weight_k, torch::Tensor workspace,
     int64_t const q_size, int64_t const kv_size, int64_t const rank,
     int64_t const nranks, double const eps);
+std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk_rope(
+    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
+    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
+    int64_t const q_size, int64_t const kv_size, int64_t const rank,
+    int64_t const nranks, double const eps,
+    torch::Tensor const& cos_sin_cache, torch::Tensor const& position_ids);
 #endif

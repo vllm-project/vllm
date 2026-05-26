@@ -43,6 +43,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .matcher_utils import MatcherRotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -110,10 +111,83 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
     )
     _MINIMAX_QK_NORM_FUSED_OP = torch.ops.vllm.minimax_qk_norm_fused.default
 
+_MINIMAX_QK_NORM_ROPE_FUSED_OP = None
+if hasattr(torch.ops._C, "minimax_allreduce_rms_qk_rope"):
+
+    def _minimax_qk_norm_rope_fused(
+        qkv: torch.Tensor,
+        norm_weight_q: torch.Tensor,
+        norm_weight_k: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+        rank: int,
+        nranks: int,
+        eps: float,
+        cos_sin_cache: torch.Tensor,
+        position_ids: torch.Tensor,
+        max_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.distributed.parallel_state import get_tp_group
+        from vllm.model_executor.layers.mamba.lamport_workspace import (
+            get_allreduce_workspace,
+        )
+
+        workspace = get_allreduce_workspace(
+            rank=rank,
+            world_size=nranks,
+            max_tokens=max_tokens,
+            process_group=get_tp_group().cpu_group,
+        )
+        # The CUDA kernel reads cos_sin_cache as float*; ensure float32.
+        if cos_sin_cache.dtype != torch.float32:
+            cos_sin_cache = cos_sin_cache.float()
+        return torch.ops._C.minimax_allreduce_rms_qk_rope(
+            qkv,
+            norm_weight_q,
+            norm_weight_k,
+            workspace,
+            q_size,
+            kv_size,
+            rank,
+            nranks,
+            eps,
+            cos_sin_cache,
+            position_ids,
+        )
+
+    def _minimax_qk_norm_rope_fused_fake(
+        qkv: torch.Tensor,
+        norm_weight_q: torch.Tensor,
+        norm_weight_k: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+        rank: int,
+        nranks: int,
+        eps: float,
+        cos_sin_cache: torch.Tensor,
+        position_ids: torch.Tensor,
+        max_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        T = qkv.shape[0]
+        return (
+            torch.empty([T, q_size], dtype=qkv.dtype, device=qkv.device),
+            torch.empty([T, kv_size], dtype=qkv.dtype, device=qkv.device),
+        )
+
+    direct_register_custom_op(
+        op_name="minimax_qk_norm_rope_fused",
+        op_func=_minimax_qk_norm_rope_fused,
+        fake_impl=_minimax_qk_norm_rope_fused_fake,
+        mutates_args=[],
+    )
+    _MINIMAX_QK_NORM_ROPE_FUSED_OP = torch.ops.vllm.minimax_qk_norm_rope_fused.default
+
 
 class MiniMaxQKNormPattern:
     """
     Match the forward_qk allreduce+rms pattern and replace with Lamport kernel.
+    Also supports matching combined forward_qk + RoPE pattern when the
+    minimax_allreduce_rms_qk_rope op is available.
     """
 
     def __init__(
@@ -126,6 +200,10 @@ class MiniMaxQKNormPattern:
         max_tokens: int,
         dtype: torch.dtype,
         device: str | None,
+        num_heads: int = 0,
+        num_kv_heads: int = 0,
+        head_dim: int = 0,
+        is_neox: bool = True,
     ) -> None:
         self.q_size = q_size
         self.kv_size = kv_size
@@ -135,6 +213,18 @@ class MiniMaxQKNormPattern:
         self.max_tokens = max_tokens
         self.dtype = dtype
         self.device = device
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        if num_heads > 0 and num_kv_heads > 0 and head_dim > 0:
+            self.rope_matcher = MatcherRotaryEmbedding(
+                is_neox=is_neox,
+                head_size=head_dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+            )
+        else:
+            self.rope_matcher = None
 
     def get_inputs(self) -> list[torch.Tensor]:
         T = 4
@@ -224,6 +314,104 @@ class MiniMaxQKNormPattern:
             pattern_split3, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+    def register_rope_pattern(self, pm_pass: PatternMatcherPass) -> None:
+        """Register pattern that matches forward_qk + RoPE together."""
+        if _MINIMAX_QK_NORM_ROPE_FUSED_OP is None:
+            return
+        if self.rope_matcher is None:
+            return
+
+        q_size = self.q_size
+        kv_size = self.kv_size
+        eps = self.eps
+        tp_world = self.tp_world
+        max_tokens = self.max_tokens
+        tp_rank = self.tp_rank
+        dtype = self.dtype
+        rope_matcher = self.rope_matcher
+
+        def pattern_rope(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            q_fp32 = q.to(torch.float32)
+            k_fp32 = k.to(torch.float32)
+            q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+            k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+            q_normed = (q_fp32 * torch.rsqrt(q_var + eps) * q_weight).to(dtype)
+            k_normed = (k_fp32 * torch.rsqrt(k_var + eps) * k_weight).to(dtype)
+            q_rope, k_rope = rope_matcher(positions, q_normed, k_normed, cos_sin_cache)
+            return q_rope, k_rope, v
+
+        def replacement_rope(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q_out, k_out = torch.ops.vllm.minimax_qk_norm_rope_fused(
+                qkv,
+                q_weight,
+                k_weight,
+                q_size,
+                kv_size,
+                tp_rank,
+                tp_world,
+                eps,
+                cos_sin_cache,
+                positions.view(-1),
+                max_tokens,
+            )
+            _, _, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            return q_out, k_out, v
+
+        rope_inputs = self.get_inputs() + [
+            rope_matcher.inputs()[0],   # positions: int64 [T]
+            rope_matcher.inputs()[-1],  # cos_sin_cache
+        ]
+        pm.register_replacement(
+            pattern_rope, replacement_rope, rope_inputs, pm.fwd_only, pm_pass
+        )
+
+        # Also register the split3 variant with RoPE
+        def pattern_split3_rope(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q = qkv.split([q_size, kv_size, kv_size], dim=-1)[0]
+            k = qkv.split([q_size, kv_size, kv_size], dim=-1)[1]
+            v = qkv.split([q_size, kv_size, kv_size], dim=-1)[2]
+            q_fp32 = q.to(torch.float32)
+            k_fp32 = k.to(torch.float32)
+            q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+            k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+            q_normed = (q_fp32 * torch.rsqrt(q_var + eps) * q_weight).to(dtype)
+            k_normed = (k_fp32 * torch.rsqrt(k_var + eps) * k_weight).to(dtype)
+            q_rope, k_rope = rope_matcher(positions, q_normed, k_normed, cos_sin_cache)
+            return q_rope, k_rope, v
+
+        pm.register_replacement(
+            pattern_split3_rope,
+            replacement_rope,
+            rope_inputs,
+            pm.fwd_only,
+            pm_pass,
+        )
+
 
 class MiniMaxQKNormPass(VllmPatternMatcherPass):
     """
@@ -273,6 +461,11 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
             )
             return
 
+        logger.info_once(
+            "MiniMaxQKNormPass enabled: num_attention_heads=%d, "
+            "num_key_value_heads=%d, hidden_size=%d, head_dim=%d, tp_world=%d.",
+            num_attention_heads, num_key_value_heads, hidden_size, head_dim, tp_world)
+
         num_heads_per_rank = num_attention_heads // tp_world
         num_kv_heads_per_rank = max(1, num_key_value_heads // tp_world)
         q_size = num_heads_per_rank * head_dim
@@ -299,7 +492,10 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="minimax_qk_norm_pass"
         )
-        self._register_patterns(q_size, kv_size, eps, tp_world, tp_rank)
+        self._register_patterns(
+            q_size, kv_size, eps, tp_world, tp_rank,
+            num_heads_per_rank, num_kv_heads_per_rank, head_dim,
+        )
         self.dump_patterns(config, self.patterns)
         self.disabled = False
 
@@ -311,8 +507,11 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
         eps: float,
         tp_world: int,
         tp_rank: int,
+        num_heads_per_rank: int,
+        num_kv_heads_per_rank: int,
+        head_dim: int,
     ) -> None:
-        MiniMaxQKNormPattern(
+        pattern = MiniMaxQKNormPattern(
             q_size=q_size,
             kv_size=kv_size,
             eps=eps,
@@ -321,12 +520,23 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
             max_tokens=self.max_token_num,
             dtype=self.model_dtype,
             device=self.device,
-        ).register(self.patterns)
+            num_heads=num_heads_per_rank,
+            num_kv_heads=num_kv_heads_per_rank,
+            head_dim=head_dim,
+            is_neox=True,
+        )
+        # Register RoPE pattern FIRST so the larger combined pattern
+        # (QK norm + RoPE) is tried before the smaller QK-norm-only pattern.
+        pattern.register_rope_pattern(self.patterns)
+        pattern.register(self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
             return False
 
+        # Both the QK-norm-only and the QK-norm+RoPE kernels use the
+        # Lamport workspace, which is pre-allocated for max_token_num.
+        # Restrict to compile ranges that fit within the workspace.
         return bool(compile_range.end <= self.max_token_num)
 
     @VllmInductorPass.time_and_log

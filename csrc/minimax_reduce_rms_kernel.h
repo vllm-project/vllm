@@ -71,6 +71,12 @@ struct MiniMaxReduceRMSParams {
   void* rms_gamma_k{};
   float rms_eps{};
   cudaStream_t stream{};
+  // RoPE parameters (optional — when cos_sin_cache is set, RoPE is applied
+  // inline after QK norm)
+  void* cos_sin_cache{};    // [max_position, rotary_dim] float32
+  int64_t* position_ids{};  // [num_tokens]
+  int rotary_dim{};         // rotary embedding dimension (used from cos_sin_cache)
+  int head_dim{};           // head dimension for rotary region identification
 };
 
 void minimax_reduce_rms_op(MiniMaxReduceRMSParams const& params);
