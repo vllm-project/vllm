@@ -164,6 +164,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 }
 
                 # Track the request as needing recv (waiting for push).
+                # Set remote_block_ids to empty — in push mode D doesn't
+                # know P's blocks; P determines them from the registration.
+                params["remote_block_ids"] = ()
                 self._reqs_need_recv[request.request_id] = (
                     request,
                     local_block_ids,
