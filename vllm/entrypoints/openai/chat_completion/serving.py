@@ -50,6 +50,7 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -1408,7 +1409,7 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
-                    token = f"token_id:{token_id}"
+                    token = format_token_id_placeholder(token_id)
                 else:
                     if tokenizer is None:
                         raise ValueError(

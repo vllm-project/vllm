@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import re
 import time
 from collections.abc import Sequence
 from http import HTTPStatus
@@ -30,6 +29,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
+from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     build_harmony_preamble,
@@ -77,28 +77,6 @@ from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
 
-_PLACEHOLDER_RE = re.compile(r"^token_id:(\d+)$")
-
-
-def _resolve_token_placeholder(
-    token: str, tokenizer: TokenizerLike
-) -> tuple[str, list[int] | None]:
-    """Resolve a token_id:N logprob placeholder to a real token string and bytes."""
-    m = _PLACEHOLDER_RE.match(token)
-    if m is None:
-        return token, None
-    token_id = int(m.group(1))
-    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
-    if token_repr is None:
-        return token, None
-    # Decode the tokenizer internal symbols to text
-    token_str = tokenizer.convert_tokens_to_string([token_repr])
-    try:
-        token_bytes: list[int] | None = list(token_str.encode("utf-8"))
-    except (UnicodeEncodeError, AttributeError):
-        token_bytes = None
-    return token_str, token_bytes
-
 
 def _resolve_logprobs(
     logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
@@ -108,10 +86,10 @@ def _resolve_logprobs(
         return logprobs
     resolved_content = []
     for entry in logprobs.content:
-        token_str, token_bytes = _resolve_token_placeholder(entry.token, tokenizer)
+        token_str, token_bytes = resolve_token_id_placeholder(entry.token, tokenizer)
         resolved_top = []
         for top in entry.top_logprobs:
-            top_str, top_bytes = _resolve_token_placeholder(top.token, tokenizer)
+            top_str, top_bytes = resolve_token_id_placeholder(top.token, tokenizer)
             resolved_top.append(
                 top.model_copy(update={"token": top_str, "bytes": top_bytes})
             )
