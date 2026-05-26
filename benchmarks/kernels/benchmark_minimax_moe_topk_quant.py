@@ -6,7 +6,7 @@ Example:
     python3 benchmarks/kernels/benchmark_minimax_moe_topk_quant.py \
         --m-values 1 2 4 8 16 32 64 128 256 512 1024 \
         --modes eager cudagraph \
-        --providers triton cuda
+        --providers auto triton
 """
 
 import argparse
@@ -22,7 +22,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.minimax_m2_kernels import (
     minimax_moe_topk_sigmoid_quant,
-    minimax_moe_topk_sigmoid_quant_cuda,
     minimax_moe_topk_sigmoid_quant_triton,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -239,8 +238,6 @@ def _run_one(
 def _get_provider_fn(provider: str):
     if provider == "auto":
         return minimax_moe_topk_sigmoid_quant
-    if provider == "cuda":
-        return minimax_moe_topk_sigmoid_quant_cuda
     if provider == "triton":
         return minimax_moe_topk_sigmoid_quant_triton
     raise ValueError(f"Unknown provider: {provider}")
@@ -337,12 +334,13 @@ def parse_args():
     )
     parser.add_argument(
         "--providers",
-        choices=["auto", "cuda", "triton"],
+        choices=["auto", "triton"],
         nargs="+",
-        default=["triton", "cuda"],
+        default=["auto", "triton"],
         help=(
             "Fused implementations to benchmark. 'auto' is the production "
-            "wrapper, which uses CUDA when the extension op is available."
+            "custom-op wrapper and 'triton' calls the Triton implementation "
+            "directly."
         ),
     )
     parser.add_argument(

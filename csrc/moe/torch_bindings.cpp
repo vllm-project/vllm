@@ -16,16 +16,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "bias) -> ()");
   m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
-#ifndef USE_ROCM
-  m.def(
-      "minimax_m2_topk_sigmoid_quant(Tensor hidden_states, Tensor "
-      "router_logits, Tensor e_score_correction_bias, Tensor! topk_weights, "
-      "Tensor! topk_ids, Tensor! a1q, Tensor! a1q_scale, int top_k, "
-      "int block_k) -> ()");
-  m.impl("minimax_m2_topk_sigmoid_quant", torch::kCUDA,
-         &minimax_m2_topk_sigmoid_quant);
-#endif
-
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "

@@ -12,14 +12,6 @@ void topk_sigmoid(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& gating_output, bool renormalize,
                   std::optional<torch::Tensor> bias);
 
-#ifndef USE_ROCM
-void minimax_m2_topk_sigmoid_quant(
-    const torch::Tensor& hidden_states, const torch::Tensor& router_logits,
-    const torch::Tensor& e_score_correction_bias, torch::Tensor& topk_weights,
-    torch::Tensor& topk_ids, torch::Tensor& a1q, torch::Tensor& a1q_scale,
-    int64_t top_k, int64_t block_k);
-#endif
-
 void topk_softplus_sqrt(torch::Tensor& topk_weights,
                         torch::Tensor& topk_indices,
                         torch::Tensor& token_expert_indices,

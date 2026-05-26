@@ -83,7 +83,6 @@ class MiniMaxM2MoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        fuse_minimax_moe_topk_quant: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -135,11 +134,13 @@ class MiniMaxM2MoE(nn.Module):
         self._prepared_moe_fp8_dtype = (
             current_platform.fp8_dtype() if current_platform.is_cuda() else None
         )
+        is_hopper_or_blackwell = current_platform.is_device_capability(
+            (9, 0)
+        ) or current_platform.is_device_capability_family(100)
         self._prepared_moe_static_ok = (
-            fuse_minimax_moe_topk_quant
-            and config.hidden_size == 3072
+            config.hidden_size == 3072
             and current_platform.is_cuda()
-            and current_platform.is_device_capability(90)
+            and is_hopper_or_blackwell
             and not self.experts.apply_router_weight_on_input
         )
         self._minimax_fused_topk_quant_static_ok = (
@@ -150,7 +151,7 @@ class MiniMaxM2MoE(nn.Module):
             and config.scoring_func == "sigmoid"
         )
         # The current Triton fusion wins for small captured decode batches but
-        # loses for prefill/large-M. Keep larger M on the existing CUDA kernels.
+        # loses for prefill/large-M. Keep larger M on the existing unfused path.
         self._minimax_fused_topk_quant_max_tokens = 128
 
     @staticmethod
@@ -366,7 +367,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        fuse_minimax_moe_topk_quant: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -398,7 +398,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
         self.block_sparse_moe = MiniMaxM2MoE(
             config=config,
             quant_config=quant_config,
-            fuse_minimax_moe_topk_quant=fuse_minimax_moe_topk_quant,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -442,9 +441,6 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        fuse_minimax_moe_topk_quant = bool(
-            vllm_config.compilation_config.pass_config.fuse_minimax_moe_topk_quant
-        )
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -467,7 +463,6 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                fuse_minimax_moe_topk_quant=fuse_minimax_moe_topk_quant,
             ),
             prefix=f"{prefix}.layers",
         )
