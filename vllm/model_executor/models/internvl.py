@@ -10,7 +10,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias, TypeVar
+from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -552,7 +552,6 @@ class InternVLChatModel(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_tp_data = True
-    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -958,11 +957,6 @@ class InternVLChatModel(
             return "image"
         return "video"
 
-    def get_max_frames_per_video(self) -> int:
-        # InternVL has no attention-metadata buffers that depend on frame
-        # count (buffer_keys=[]), so any value is safe. Return 1.
-        return 1
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -988,25 +982,19 @@ class InternVLChatModel(
             return patches.tolist()
         return [int(n) for n in patches]
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_internvl_patches_list(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         return [
-            n * self.num_image_token for n in self._get_internvl_patches_list(mm_kwargs)
+            EncoderItemSpec(
+                input_size=n,
+                output_tokens=n * self.num_image_token,
+            )
+            for n in self._get_internvl_patches_list(mm_kwargs)
         ]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        return self._get_internvl_patches_list(mm_kwargs)
 
     def select_encoder_cudagraph_items(
         self,
