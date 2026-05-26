@@ -54,7 +54,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.nvidia.ops.attention import (
+from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
