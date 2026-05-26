@@ -70,7 +70,10 @@ def load_coverage_files(files: list[Path]) -> dict[str, list[str]]:
         for fpath, fdata in data.get("files", {}).items():
             # Skip files with zero executed lines — coverage.py reports
             # all files in the source tree, not just those actually run.
-            if fdata.get("summary", {}).get("covered_lines", 0) == 0:
+            # Supports both full format (summary.covered_lines) and
+            # stripped format (covered_lines directly).
+            covered = fdata.get("covered_lines") or fdata.get("summary", {}).get("covered_lines", 0)
+            if covered == 0:
                 continue
             # Normalize paths to be relative to the vllm package root.
             # coverage.py may report absolute paths or paths relative to
