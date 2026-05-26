@@ -37,7 +37,9 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     group_id = tl.program_id(1)
 
     hidden_offsets = group_id * GROUP_SIZE + tl.arange(0, BLOCK_H)
-    hidden_mask = hidden_offsets < HIDDEN_SIZE
+    hidden_mask = (hidden_offsets < HIDDEN_SIZE) & (
+        hidden_offsets < (group_id + 1) * GROUP_SIZE
+    )
     x = tl.load(
         hidden_states_ptr + token_id * hidden_stride_m + hidden_offsets,
         mask=hidden_mask,
@@ -110,12 +112,12 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     assert hidden_states.shape[0] == router_logits.shape[0]
     assert hidden_states.stride(-1) == 1
     assert router_logits.stride(-1) == 1
-    assert hidden_states.shape[-1] % block_k == 0
+    assert block_k > 0
     assert router_logits.shape[-1] == e_score_correction_bias.shape[0]
 
     num_tokens, hidden_size = hidden_states.shape
     num_experts = router_logits.shape[-1]
-    num_groups = hidden_size // block_k
+    num_groups = triton.cdiv(hidden_size, block_k)
 
     topk_weights = torch.empty(
         (num_tokens, top_k), dtype=torch.float32, device=hidden_states.device

@@ -55,9 +55,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -86,6 +83,7 @@ class MiniMaxM2MoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        fuse_minimax_moe_topk_quant: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -138,7 +136,8 @@ class MiniMaxM2MoE(nn.Module):
             current_platform.fp8_dtype() if current_platform.is_cuda() else None
         )
         self._prepared_moe_static_ok = (
-            config.hidden_size == 3072
+            fuse_minimax_moe_topk_quant
+            and config.hidden_size == 3072
             and current_platform.is_cuda()
             and current_platform.is_device_capability(90)
             and not self.experts.apply_router_weight_on_input
@@ -215,10 +214,7 @@ class MiniMaxM2MoE(nn.Module):
             )
             return topk_weights, topk_ids, a1q, a1q_scale
 
-        a1q, a1q_scale = per_token_group_quant_fp8(
-            hidden_states, block_k, use_ue8m0=False
-        )
-        return None, None, a1q, a1q_scale
+        return None, None, None, None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -366,6 +362,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        fuse_minimax_moe_topk_quant: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -397,6 +394,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         self.block_sparse_moe = MiniMaxM2MoE(
             config=config,
             quant_config=quant_config,
+            fuse_minimax_moe_topk_quant=fuse_minimax_moe_topk_quant,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -440,6 +438,9 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        fuse_minimax_moe_topk_quant = bool(
+            vllm_config.compilation_config.pass_config.fuse_minimax_moe_topk_quant
+        )
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -462,6 +463,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                fuse_minimax_moe_topk_quant=fuse_minimax_moe_topk_quant,
             ),
             prefix=f"{prefix}.layers",
         )
