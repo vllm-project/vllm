@@ -57,8 +57,17 @@ def eagle_step_slot_mapping_metadata_kernel(
         tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
         return
 
-    # Load current position and increment
-    position = tl.load(positions_ptr + req_idx)
+    # CUDA-graph padded positions (beyond the actual request count) have
+    # seq_lens == 0 and block_table entries of -1.  Incrementing their
+    # seq_lens from 0 to 1 would cause the attention kernel to read
+    # block_table[-1], triggering an illegal memory access.
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    if seq_len == 0:
+        tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
+        tl.store(out_clamped_positions_ptr + req_idx, 0)
+        return
+
+    position = tl.load(positions_ptr + req_idx)  # Load current position
     new_position = position + 1
 
     # Check bounds and compute clamped position
@@ -75,7 +84,6 @@ def eagle_step_slot_mapping_metadata_kernel(
     slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
 
     # Update seq_lens: +1 normally, or 1 if exceeded
-    seq_len = tl.load(seq_lens_ptr + req_idx)
     new_seq_len = tl.where(exceeds_max, 1, seq_len + 1)
     new_seq_len = tl.minimum(new_seq_len, max_model_len)
 
