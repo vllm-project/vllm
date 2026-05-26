@@ -149,6 +149,9 @@ class MiniMaxM2MoE(nn.Module):
             and config.num_experts_per_tok == 8
             and config.scoring_func == "sigmoid"
         )
+        # The current Triton fusion wins for small captured decode batches but
+        # loses for prefill/large-M. Keep larger M on the existing CUDA kernels.
+        self._minimax_fused_topk_quant_max_tokens = 128
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
@@ -202,6 +205,7 @@ class MiniMaxM2MoE(nn.Module):
         if (
             self._minimax_fused_topk_quant_static_ok
             and self.e_score_correction_bias is not None
+            and hidden_states.shape[0] <= self._minimax_fused_topk_quant_max_tokens
         ):
             topk_weights, topk_ids, a1q, a1q_scale = (
                 minimax_moe_topk_sigmoid_quant(
