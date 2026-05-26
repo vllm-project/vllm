@@ -275,7 +275,12 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+    ) -> None:
         """
         Cache the blocks for the request.
 
@@ -283,6 +288,12 @@ class SingleTypeKVCacheManager(ABC):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            alignment_tokens: The cache-hit alignment (in tokens) used by the
+                coordinator's ``find_longest_cache_hit``. When greater than
+                this group's ``block_size``, managers whose hit logic only
+                returns a subset of blocks per alignment-aligned segment
+                (SWA) skip the rest since they can never participate in a
+                future cache hit.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -290,6 +301,13 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
+        # Fast path: when the coordinator imposes no alignment constraint
+        if alignment_tokens is None or alignment_tokens <= self.block_size:
+            block_mask = None
+        else:
+            block_mask = self._cache_block_mask(
+                num_cached_blocks, num_full_blocks, alignment_tokens
+            )
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -297,9 +315,25 @@ class SingleTypeKVCacheManager(ABC):
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
+            block_mask=block_mask,
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+    def _cache_block_mask(
+        self,
+        num_cached_blocks: int,
+        num_full_blocks: int,
+        alignment_tokens: int,
+    ) -> list[bool] | None:
+        """Per-block mask for ``cache_full_blocks``. ``None`` means cache
+        every (non-null) block — the default for full attention.
+
+        Subclasses with sparse hit semantics (SWA) override this to skip
+        blocks that can never serve a hit at any alignment-aligned prefix
+        length.
+        """
+        return None
 
     def free(self, request_id: str) -> None:
         """
@@ -603,6 +637,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 for computed in computed_blocks:
                     computed.pop()
         return computed_blocks
+
+    def _cache_block_mask(
+        self, num_cached_blocks: int, num_full_blocks: int, alignment_tokens: int
+    ) -> list[bool] | None:
+        assert alignment_tokens > self.block_size
+        per_segment = alignment_tokens // self.block_size
+        tail = cdiv(self.sliding_window - 1, self.block_size)
+        if tail >= per_segment:
+            return None
+        skip = per_segment - tail
+        return [
+            i % per_segment >= skip for i in range(num_cached_blocks, num_full_blocks)
+        ]
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -1050,9 +1097,14 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+    ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens)
+        super().cache_blocks(request, num_tokens, alignment_tokens=alignment_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if num_cached_blocks_after > num_cached_blocks_before:
             for block in self.req_to_blocks[request.request_id][
@@ -1081,7 +1133,12 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+    ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")

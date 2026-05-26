@@ -1057,8 +1057,8 @@ class NixlConnectorWorker:
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (x, B, C, ssm) per layer for
-        the 3-read transfer.  For hetero-TP, each D rank reads only its
+        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
+        for the 3-read transfer.  For hetero-TP, each D rank reads only its
         sub-projection slice from the P rank."""
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
@@ -1067,20 +1067,10 @@ class NixlConnectorWorker:
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
+        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
         if tp_ratio >= 1:
-            # D_TP >= P_TP: P page is larger, D reads its slice.
-            conv_offsets = self._conv_decomp.remote_conv_offsets(
-                local_offset, effective_ratio
-            )
             ssm_read_size = self._mamba_ssm_size[1]
         else:
-            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
-            # are smaller than D's. self._conv_decomp has D-sized dimensions,
-            # but we need P-sized offsets. Scale down by |tp_ratio|.
-            abs_ratio = -tp_ratio
-            xb_p = self._conv_decomp.x_bytes // abs_ratio
-            bb_p = self._conv_decomp.b_bytes // abs_ratio
-            conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical

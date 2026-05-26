@@ -135,7 +135,9 @@ class PassConfig:
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
-    """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
+    """Deprecated. The MiniMax QK norm fusion is now applied automatically at
+    runtime (see `MiniMaxText01RMSNormTP.forward_qkv`). This flag is kept for
+    backward compatibility and has no effect; it will be removed in v0.23."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -294,6 +296,13 @@ class PassConfig:
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache_cat_mla = False
+        if self.fuse_minimax_qk_norm is not None:
+            logger.warning_once(
+                "`fuse_minimax_qk_norm` is deprecated and has no effect; "
+                "the MiniMax QK norm fusion is now applied automatically at "
+                "runtime when its conditions are met. This flag will be "
+                "removed in v0.23."
+            )
 
     def log_enabled_passes(self) -> None:
         """
@@ -752,7 +761,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention_core",
+        "vllm::qwen_gdn_attention_core",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
@@ -1012,6 +1021,14 @@ class CompilationConfig:
             raise ValueError(
                 "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (None = auto-infer)"
+            )
+
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
             )
 
         if self.backend == "":

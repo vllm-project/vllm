@@ -96,10 +96,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         if role == KVConnectorRole.SCHEDULER:
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+
+            assert kv_cache_config is not None
+            scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
             self.scheduler_manager = SimpleCPUOffloadScheduler(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
+                scheduler_block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
             )
         elif role == KVConnectorRole.WORKER:
