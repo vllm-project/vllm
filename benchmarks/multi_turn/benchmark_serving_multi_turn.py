@@ -282,24 +282,28 @@ async def send_request(
                     data = json.loads(chunk)
                     message = data["choices"][0]["message"]
                     assert message["role"] == "assistant"
-                    generated_text += message["content"]
+                    if message.get("reasoning", None):
+                        generated_text += message["reasoning"]
+                    if message.get("content", None):
+                        generated_text += message["content"]
                 else:
                     timestamp: int = time.perf_counter_ns()
                     data = json.loads(chunk)
 
                     # Delta is the new content/text/data
                     delta = data["choices"][0]["delta"]
-                    if delta.get("content", None):
-                        if ttft is None:
-                            # First token
-                            first_token_time = time.perf_counter_ns()
-                            ttft = first_token_time - start_time
-                            first_chunk = delta["content"]
-                        else:
-                            # Decoding phase
-                            chunk_delay.append(timestamp - most_recent_timestamp)
+                    for field in ("reasoning", "content"):
+                        if delta.get(field, None):
+                            if ttft is None:
+                                # First token
+                                first_token_time = time.perf_counter_ns()
+                                ttft = first_token_time - start_time
+                                first_chunk = delta[field]
+                            else:
+                                # Decoding phase
+                                chunk_delay.append(timestamp - most_recent_timestamp)
 
-                        generated_text += delta["content"]
+                            generated_text += delta[field]
 
                     most_recent_timestamp = timestamp
         else:
