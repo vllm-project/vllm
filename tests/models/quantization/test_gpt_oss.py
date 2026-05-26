@@ -30,6 +30,7 @@ except Exception:
     def on_gfx950() -> bool:
         return False
 
+
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
     "amd/gpt-oss-20b-WFP8-AFP8-KVFP8": 0.89,
