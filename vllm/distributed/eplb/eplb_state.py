@@ -513,7 +513,8 @@ class EplbState:
                 eplb_model_state.expert_load_pass.zero_()
 
         if (
-            log_stats
+            not is_dummy
+            and log_stats
             and self.expert_rearrangement_step
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
