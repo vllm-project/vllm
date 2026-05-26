@@ -5017,11 +5017,9 @@ class GPUModelRunner(
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
             )
-            # Cache valid draft counts for scheduler-side trimming.
-            self._num_valid_draft_tokens = self.drafter.num_valid_draft_tokens
-
-            # Async D2H copy on a dedicated stream.
+            # Cache valid draft counts and async D2H copy on a dedicated stream.
             if spec_config.dynamic_verifying:
+                self._num_valid_draft_tokens = self.drafter.num_valid_draft_tokens
                 copy_num_valid_draft_tokens(
                     self._num_valid_draft_tokens_cpu,
                     self._num_valid_draft_tokens_copy_stream,
