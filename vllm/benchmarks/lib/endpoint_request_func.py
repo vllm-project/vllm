@@ -66,7 +66,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str | list[str]
+    prompt: str | list[str] | list[dict[str, Any]]
     api_url: str
     prompt_len: int
     output_len: int
@@ -268,8 +268,6 @@ def _get_chat_content(
     request_func_input: RequestFuncInput,
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
-    text_contents = [{"type": "text", "text": request_func_input.prompt}]
-
     mm_contents = []
     if request_func_input.multi_modal_content:
         mm_content = request_func_input.multi_modal_content
@@ -281,6 +279,22 @@ def _get_chat_content(
             raise TypeError(
                 "multi_modal_content must be a dict or list[dict] for openai-chat"
             )
+
+    prompt = request_func_input.prompt
+    if (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict) and isinstance(item.get("type"), str)
+            for item in prompt
+        )
+    ):
+        if mm_position == "first":
+            return mm_contents + prompt
+
+        return prompt + mm_contents
+
+    text_contents = [{"type": "text", "text": prompt}]
 
     if mm_position == "first":
         return mm_contents + text_contents
