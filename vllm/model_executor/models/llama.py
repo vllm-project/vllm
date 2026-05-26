@@ -39,6 +39,9 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.ar_rms_quant import (
+    fused_ar_rms_norm_quant,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -47,9 +50,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    fused_ar_rms_norm_quant,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,

@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -26,9 +29,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
-)
-from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    QuantizedActivation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,

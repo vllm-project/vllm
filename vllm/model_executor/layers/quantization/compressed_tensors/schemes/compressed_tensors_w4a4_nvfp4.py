@@ -10,10 +10,6 @@ from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    QuantizedActivation,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -29,6 +25,7 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.kernel = init_nvfp4_linear_kernel()
+        self.input_quant_key = self.kernel.input_quant_key()
         self.group_size = 16
 
     @classmethod
@@ -89,8 +86,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
         layer.register_parameter("input_global_scale", input_global_scale)
 
-        layer.input_quant_key = kNvfp4Dynamic
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed
@@ -132,7 +127,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | QuantizedActivation,
+        x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

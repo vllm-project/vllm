@@ -8,10 +8,10 @@ from typing import Generic, TypeVar
 
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )

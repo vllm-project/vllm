@@ -62,6 +62,19 @@ steps:
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi300_1
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/model_executor/layers/quantization
+      - tests/kernels/quantization
+      - tests/kernels/quantization/test_rocm_skinny_gemms.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/kernels/
+      depends_on:
+      - image-build-amd
 
 - label: Kernels MoE Test %N
   key: kernels-moe-test
