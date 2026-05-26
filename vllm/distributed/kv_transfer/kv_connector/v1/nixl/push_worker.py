@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Push-specific (WRITE) worker-side logic for the NIXL connector.
 
-All P2P communication uses NIXL notifications as the sole inter-node
-channel.  D workers send registration notifications to P workers, and
-P workers initiate WRITE transfers when matched with finished blocks
-received from the P scheduler via ``build_connector_meta``.
+P2P communication uses NIXL notifications as the sole inter-node channel.
+D workers send registration notifications to P workers, and P workers
+initiate WRITE transfers when matched with finished blocks received from
+the P scheduler via ``build_connector_meta``.
+
+The P engine is kept stepping by the ``has_pending_push_work`` scheduler
+hook, so notifications are always polled on the main thread.
 """
 
 from collections import defaultdict
@@ -67,9 +70,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_finished_blocks: dict[ReqId, BlockIds] = {}
         # P-side: D registrations awaiting matching finished blocks.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
-
-        # D-side: registrations queued while handshake is in progress.
-        self._pending_reg_notifs: list[tuple[str, dict[str, Any]]] = []
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Process metadata from the scheduler.
@@ -142,7 +142,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_engine_id = reg_data["remote_engine_id"]
         remote_host = reg_data["remote_host"]
         remote_port = reg_data["remote_port"]
-        remote_tp_size = reg_data.get("decode_tp_size", self.world_size)
+        remote_tp_size = reg_data["remote_tp_size"]
 
         fut = self._ensure_handshake(
             remote_engine_id, remote_host, remote_port, remote_tp_size

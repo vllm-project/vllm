@@ -261,6 +261,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
 
+    def has_pending_push_work(self) -> bool:
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.has_pending_push_work()
+        return False
+
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()

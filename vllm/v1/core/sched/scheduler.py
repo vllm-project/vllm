@@ -1881,6 +1881,18 @@ class Scheduler(SchedulerInterface):
         )
         return num_waiting + len(self.running)
 
+    def has_requests(self) -> bool:
+        # TODO: replace with a more general mechanism for connectors
+        # to keep the scheduler alive.
+        return (
+            self.has_unfinished_requests()
+            or self.has_finished_requests()
+            or (
+                self.connector is not None
+                and self.connector.has_pending_push_work()
+            )
+        )
+
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 

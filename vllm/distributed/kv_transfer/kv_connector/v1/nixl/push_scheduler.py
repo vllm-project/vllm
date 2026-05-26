@@ -160,6 +160,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                     "remote_engine_id": params["remote_engine_id"],
                     "remote_host": params["remote_host"],
                     "remote_port": params["remote_port"],
+                    "remote_tp_size": params["tp_size"],
                 }
 
                 # Track the request as needing recv (waiting for push).
@@ -264,6 +265,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._newly_finished_push_blocks.clear()
 
         return meta
+
+    def has_pending_push_work(self) -> bool:
+        return bool(self._finished_request_blocks)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""
