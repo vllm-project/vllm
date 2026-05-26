@@ -60,7 +60,8 @@ def _swiglustep_and_mul(
 def _relu2_and_mul(
     x: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.square(F.relu(x))
+    d = x.shape[-1] // 2
+    return torch.square(F.relu(x[..., :d])) * x[..., d:]
 
 
 # Map activation names to their native forward functions.
