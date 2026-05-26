@@ -37,10 +37,8 @@ export HIP_VISIBLE_DEVICES=0,1,2,3
  
 vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
-  --enable-expert-parallel \
   --port 20005 \
   --gpu-memory-utilization 0.9 \
-  --max-model-len 16384 \
   --kv-transfer-config '{
     "kv_connector": "MoRIIOConnector",
     "kv_role": "kv_producer",
@@ -66,10 +64,8 @@ export HIP_VISIBLE_DEVICES=4,5,6,7
 
 vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
-  --enable-expert-parallel \
   --port 40005 \
   --gpu-memory-utilization 0.9 \
-  --max-model-len 16384 \
   --kv-transfer-config '{
     "kv_connector": "MoRIIOConnector",
     "kv_role": "kv_consumer",
@@ -95,26 +91,18 @@ vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
   --vllm-discovery-address "0.0.0.0:36367" \
-  --policy consistent_hash \
-  --prefill-policy consistent_hash \
-  --decode-policy consistent_hash
 ```
 
 **Docker:**
 
 ```bash
 docker run \
-  --name vllm-router \
   --network host \
-  --rm \
   vllm/vllm-router:nightly \
   vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
   --vllm-discovery-address "0.0.0.0:36367" \
-  --policy consistent_hash \
-  --prefill-policy consistent_hash \
-  --decode-policy consistent_hash
 ```
 
 Alternatively, you can use the reference implementation proxy shipped with vLLM:
@@ -203,7 +191,6 @@ Proxy:
 
 ```bash
 docker run \
-  --name vllm-router \
   --network host \
   --rm \
   vllm/vllm-router:nightly \
@@ -211,37 +198,27 @@ docker run \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
   --vllm-discovery-address "0.0.0.0:36367" \
-  --policy consistent_hash \
-  --prefill-policy consistent_hash \
-  --decode-policy consistent_hash
 ```
 
 Prefill instance:
 
 ```bash
 docker run \
-  --rm \
   --name moriio-prefill \
   --init --network host --ipc host --privileged \
-  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --security-opt seccomp=unconfined \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   --shm-size 256G \
   --group-add video --group-add render \
   --device /dev/kfd --device /dev/dri --device /dev/infiniband \
   -v /sys:/sys \
-  -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
-  -e HF_HOME=/root/.cache/huggingface \
-  -e HF_HUB_ENABLE_HF_TRANSFER=0 \
-  -e NCCL_MIN_NCHANNELS=112 \
   -e VLLM_ROCM_USE_AITER=1 \
   $VLLM_IMAGE \
   deepseek-ai/DeepSeek-R1-0528 \
     --port 8100 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
-    --kv-cache-dtype fp8 \
     --gpu-memory-utilization 0.8 \
-    --max-model-len 16384 \
     --trust-remote-code \
     --kv-transfer-config '{
       "kv_connector": "MoRIIOConnector",
@@ -262,27 +239,20 @@ Decode instance:
 
 ```bash
 docker run \
-  --rm \
   --name moriio-decode \
   --init --network host --ipc host --privileged \
-  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --security-opt seccomp=unconfined \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   --shm-size 256G \
   --group-add video --group-add render \
   --device /dev/kfd --device /dev/dri --device /dev/infiniband \
   -v /sys:/sys \
-  -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
-  -e HF_HOME=/root/.cache/huggingface \
-  -e HF_HUB_ENABLE_HF_TRANSFER=0 \
-  -e NCCL_MIN_NCHANNELS=112 \
   -e VLLM_ROCM_USE_AITER=1 \
   $VLLM_IMAGE \
   deepseek-ai/DeepSeek-R1-0528 \
     --port 8200 \
     --tensor-parallel-size 8 \
-    --kv-cache-dtype fp8 \
     --gpu-memory-utilization 0.8 \
-    --max-model-len 16384 \
     --trust-remote-code \
     --enable-expert-parallel \
     --kv-transfer-config '{
