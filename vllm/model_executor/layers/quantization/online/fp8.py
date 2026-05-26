@@ -153,6 +153,8 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
 
@@ -376,6 +378,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
         self._maybe_inject_biases(quant_config, layer)

@@ -75,6 +75,7 @@ class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
     dp_stats_address: str | None
+    dtype: str | None = None
 
 
 class EngineCoreRequest(

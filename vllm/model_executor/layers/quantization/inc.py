@@ -356,13 +356,13 @@ class INCConfig(QuantizationConfig):
         else:
             use_marlin = False
         if use_marlin:
-            from vllm.model_executor.layers.quantization.gptq_marlin import (
-                GPTQMarlinConfig,
-                GPTQMarlinLinearMethod,
-                GPTQMarlinMoEMethod,
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQConfig,
+                AutoGPTQLinearMethod,
+                AutoGPTQMoEMethod,
             )
 
-            quant_args_marlin = GPTQMarlinConfig(
+            quant_args_marlin = AutoGPTQConfig(
                 weight_bits=weight_bits,
                 group_size=group_size,
                 is_sym=sym,
@@ -371,23 +371,10 @@ class INCConfig(QuantizationConfig):
                 dynamic={},
                 full_config={},
             )
-        else:
-            from vllm.model_executor.layers.quantization.gptq import (
-                GPTQConfig,
-                GPTQLinearMethod,
-            )
-
-            quant_args = GPTQConfig(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                lm_head_quantized=False,
-                desc_act=False,
-                dynamic={},
-            )
 
         if isinstance(layer, RoutedExperts):
             if use_marlin:
-                return GPTQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
+                return AutoGPTQMoEMethod(quant_args_marlin, layer.moe_config)
             else:
                 from vllm.model_executor.layers.quantization.moe_wna16 import (
                     MoeWNA16Config,
@@ -406,9 +393,13 @@ class INCConfig(QuantizationConfig):
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if use_marlin:
-                return GPTQMarlinLinearMethod(quant_args_marlin)
+                return AutoGPTQLinearMethod(quant_args_marlin)
             else:
-                return GPTQLinearMethod(quant_args)
+                raise NotImplementedError(
+                    f"INC quantization with bits={weight_bits}, sym={sym} "
+                    "is not supported. Only 4-bit and 8-bit symmetric "
+                    "quantization is supported with Marlin kernels."
+                )
 
         return None
 
