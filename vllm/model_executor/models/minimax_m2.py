@@ -553,6 +553,22 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        # EAGLE-3 layer indices in the draft config refer to the activation
+        # entering layer i (i.e. the OUTPUT of layer i-1). vLLM's
+        # `MiniMaxM2Model.forward` captures aux state AFTER each decoder layer
+        # via `_maybe_add_hidden_state(idx + 1, ...)`, which means a request
+        # for layer k actually captures the output of layer k-1 -- an
+        # off-by-one vs the SGLang reference implementation the draft head
+        # was trained against (see sglang/srt/models/minimax_m2.py::
+        # set_eagle3_layers_to_capture, which adds +1 to every config index
+        # before storing it in `layers_to_capture`).
+        #
+        # Without this shift the EAGLE-3 draft head sees the wrong hidden
+        # states and position-0 acceptance collapses to ~10% (vs ~45% with
+        # the shift) on MiniMax-M2.5 + thoughtworks/MiniMax-M2.5-Eagle3.
+        self.model._set_aux_hidden_state_layers(tuple(v + 1 for v in layers))
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
