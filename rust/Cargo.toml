@@ -79,7 +79,7 @@ tekken = { package = "tekken-rs", version = "0.1.1", default-features = false }
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
-tikv-jemallocator = "0.6.1"
+mimalloc = "0.1.52"
 tiktoken-rs = "0.9.1"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
 tokenizers = "0.22.0"
