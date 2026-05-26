@@ -638,8 +638,6 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
 
-    args = EngineArgs(
-        model="s3://bucket/model", tokenizer="s3://bucket/tokenizer"
-    )
+    args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
     assert args.model == "s3://bucket/model"
     assert args.tokenizer == "s3://bucket/tokenizer"

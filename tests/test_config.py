@@ -764,9 +764,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     tokenizer_url = "s3://bucket/tokenizer/"
 
     config = MockConfig(model=model_url, tokenizer=tokenizer_url)
-    ModelConfig.maybe_pull_model_tokenizer_for_runai(
-        config, model_url, tokenizer_url
-    )
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
 
     # pull_files should be called twice: once for model, once for tokenizer
     assert mock_pull_files.call_count == 2

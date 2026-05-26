@@ -760,9 +760,7 @@ class EngineArgs:
                         model_id,
                         self.model,
                     )
-            if self.tokenizer is not None and not is_cloud_storage(
-                self.tokenizer
-            ):
+            if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:
