@@ -173,9 +173,7 @@ def mhc_pre_tilelang(
         # these numbers are from deepgemm kernel impl
         block_k = 64
         block_m = 64
-        n_splits = compute_num_split(
-            block_k, hc_hidden_size, cdiv(num_tokens, block_m)
-        )
+        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
     else:
         n_splits = 1
 

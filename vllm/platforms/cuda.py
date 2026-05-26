@@ -601,6 +601,7 @@ class CudaPlatformBase(Platform):
             return False
         return major >= 9
 
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.

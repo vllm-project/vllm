@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
+
 
 def _is_tilelang_platform() -> bool:
     return current_platform.is_cuda() or current_platform.is_rocm()
@@ -37,6 +38,7 @@ else:
 
 ENABLE_PDL = _is_pdl_supported()
 
+
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     device_props = torch.cuda.get_device_properties(0)
@@ -50,7 +52,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
-pass_configs = {
+pass_configs: dict[tilelang.PassConfigKey, Any] = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
 }

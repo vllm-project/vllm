@@ -9,8 +9,8 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
 from vllm.utils.import_utils import has_tilelang
+from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
 
@@ -175,12 +175,8 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
 
     hc_mult = 4
     hc_mult3 = 2 * hc_mult + hc_mult * hc_mult
-    x = torch.randn(
-        (num_tokens, hc_mult * hidden_size), dtype=torch.bfloat16
-    )
-    fn = torch.randn(
-        (hc_mult3, hc_mult * hidden_size), dtype=torch.float32
-    ) * 1e-4
+    x = torch.randn((num_tokens, hc_mult * hidden_size), dtype=torch.bfloat16)
+    fn = torch.randn((hc_mult3, hc_mult * hidden_size), dtype=torch.float32) * 1e-4
     out_ref = torch.empty((1, num_tokens, hc_mult3), dtype=torch.float32)
     sqrsum_ref = torch.empty((1, num_tokens), dtype=torch.float32)
     out = torch.empty_like(out_ref)

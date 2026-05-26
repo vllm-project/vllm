@@ -61,6 +61,7 @@ from vllm.models.deepseek_v4.nvidia.ops.attention import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_tilelang
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -1074,6 +1075,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
+        self.has_tilelang = has_tilelang()
 
     def hc_pre(
         self,
@@ -1104,7 +1106,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         return self.mhc_post(x, residual, post, comb)
 
-    def _forward_cuda(
+    def _forward_fused_post_pre(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1156,7 +1158,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
-    def _forward_rocm(
+    def _forward_unfused_post_pre(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1195,12 +1197,13 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        # if current_platform.is_rocm():
-        #     return self._forward_rocm(
-        #         x, positions, input_ids, post_mix, res_mix, residual
-        #     )
-
-        return self._forward_cuda(x, positions, input_ids, post_mix, res_mix, residual)
+        if not self.has_tilelang:
+            return self._forward_unfused_post_pre(
+                x, positions, input_ids, post_mix, res_mix, residual
+            )
+        return self._forward_fused_post_pre(
+            x, positions, input_ids, post_mix, res_mix, residual
+        )
 
 
 @support_torch_compile
@@ -1361,9 +1364,7 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        if layer is not None and (
-            current_platform.is_cuda() or current_platform.is_rocm()
-        ):
+        if layer is not None and self.has_tilelang:
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
