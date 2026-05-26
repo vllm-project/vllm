@@ -156,18 +156,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.head_dim = head_dim
         self.scale = scale
 
-        # FlashMLA sparse kernel only supports 64 or 128 heads; pad up to the
-        # next supported size. Must match DeepseekV4MLAAttention.padded_heads.
-        if num_heads <= 64:
-            self.padded_heads = 64
-        elif num_heads <= 128:
-            self.padded_heads = 128
-        else:
-            raise ValueError(
-                f"DeepseekV4 attention does not support {num_heads} heads "
-                "(must be <= 128)."
-            )
-
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.window_size = window_size
@@ -263,6 +251,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer=self.indexer,
             topk_indices_buffer=self.topk_indices_buffer,
         )
+        # Mirror the inner layer's padded head count (single source of truth).
+        self.padded_heads = self.mla_attn.padded_heads
+
         # Register this layer in the compilation config's static forward context
         # This allows the custom op to retrieve the layer during execution
         compilation_config = mla_modules.vllm_config.compilation_config
@@ -442,33 +433,38 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
         if self.indexer is not None:
-            aux_stream = (
-                self.aux_stream_list[0] if self.aux_stream_list is not None else None
-            )
+            aux_streams = self.aux_stream_list
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
             assert self.compressor is not None
             compressor = self.compressor
 
-            def wq_b_kv_insert_and_compress() -> torch.Tensor:
+            def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                compressor(kv_score, positions, self.rotary_emb)
+                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
                 return q
 
-            q, _ = maybe_execute_in_parallel(
-                wq_b_kv_insert_and_compress,
-                lambda: indexer(
-                    hidden_states,
-                    qr,
-                    indexer_kv_score,
-                    indexer_weights,
-                    positions,
-                    self.indexer_rotary_emb,
-                ),
+            # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
+            # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
+            # MLA compressor. Slot [2] is reserved for the indexer's inner
+            # overlap. ROCm (aux_streams is None) falls back to sequential.
+            q, _ = execute_in_parallel(
+                wq_b_kv_insert,
+                [
+                    lambda: indexer(
+                        hidden_states,
+                        qr,
+                        indexer_kv_score,
+                        indexer_weights,
+                        positions,
+                        self.indexer_rotary_emb,
+                    ),
+                    lambda: compressor(kv_score, positions, self.rotary_emb),
+                ],
                 self.ln_events[0],
-                self.ln_events[1],
-                aux_stream,
+                [self.ln_events[1], self.ln_events[2]],
+                [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
+                enable=aux_streams is not None,
             )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
@@ -479,7 +475,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
             def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
                 return q
 
             q, _ = maybe_execute_in_parallel(
@@ -492,12 +488,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         else:
             # SWA-only layer: no compressor, no overlap.
             q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-            self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-
-        # Pad q to FlashMLA-required head count (64 or 128)
-        if self.n_local_heads < self.padded_heads:
-            pad_size = self.padded_heads - self.n_local_heads
-            q = F.pad(q, (0, 0, 0, pad_size), value=0.0)
+            q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
@@ -511,9 +502,17 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         attn_metadata: (
             dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
         ),
-    ) -> None:
+    ) -> torch.Tensor:
         if not isinstance(attn_metadata, dict):
-            return
+            # Profile run: kernel doesn't fire; produce a padded tensor so
+            # downstream FlashMLA gets the right shape.
+            if self.n_local_heads < self.padded_heads:
+                return F.pad(
+                    q,
+                    (0, 0, 0, self.padded_heads - self.n_local_heads),
+                    value=0.0,
+                )
+            return q
 
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -525,16 +524,19 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
 
         # Horizontally fused:
-        #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
+        #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE,
+        #            with zero-fill for the padding head slots.  The kernel
+        #            allocates and returns the padded q tensor.
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q,
             kv,
             swa_kv_cache_2d,
             swa_metadata.slot_mapping,
             positions.to(torch.int64),
             self.rotary_emb.cos_sin_cache,
+            self.padded_heads,
             self.eps,
             swa_metadata.block_size,
         )
@@ -602,9 +604,6 @@ direct_register_custom_op(
 
 
 class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
-    # FlashMLA FP8 sparse only supports 64 or 128 heads
-    SUPPORTED_HEAD_COUNTS = (64, 128)
-
     def __init__(
         self,
         num_heads: int,
@@ -650,19 +649,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.aux_stream = aux_stream
         self.ln_events = [torch.cuda.Event(), torch.cuda.Event()]
 
-        # Determine padded head count for FlashMLA
-        if num_heads not in self.SUPPORTED_HEAD_COUNTS:
-            if num_heads < 64:
-                self.padded_heads = 64
-            elif num_heads < 128:
-                self.padded_heads = 128
-            else:
-                raise ValueError(
-                    f"DeepseekV4MLAAttention does not support {num_heads} heads. "
-                    f"Supported: <= 128 (will be padded to 64 or 128)"
-                )
-        else:
-            self.padded_heads = num_heads
+        # Padded Q head count is dictated by the selected impl.
+        self.padded_heads = self.impl_cls.get_padded_num_q_heads(num_heads)
 
         # Store attention sink
         assert attn_sink is not None
@@ -792,6 +780,7 @@ class DeepseekV4Indexer(nn.Module):
         topk_indices_buffer: torch.Tensor | None,
         compress_ratio: int = 1,
         prefix: str = "",
+        aux_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         self.vllm_config = vllm_config
@@ -877,6 +866,13 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
+        # None on ROCm — maybe_execute_in_parallel falls back to sequential.
+        self.aux_stream = aux_stream
+        self.ln_events: list[torch.cuda.Event] = [
+            torch.cuda.Event(),
+            torch.cuda.Event(),
+        ]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -886,17 +882,29 @@ class DeepseekV4Indexer(nn.Module):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
-        # ReplicatedLinear returns (output, bias); bias is None.
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-        k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        q_quant, weights = fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
+        compressor = self.compressor
+
+        def wq_b_and_q_quant():
+            # ReplicatedLinear returns (output, bias); bias is None.
+            q, _ = self.wq_b(qr)
+            q = q.view(-1, self.n_head, self.head_dim)
+            return fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                use_fp4=self.use_fp4_kv,
+            )
+
+        # compressor returns None and writes K to the indexer KV cache; the
+        # join orders that write before indexer_op (skip_k_cache_insert=True).
+        (q_quant, weights), k = maybe_execute_in_parallel(
+            wq_b_and_q_quant,
+            lambda: compressor(compressed_kv_score, positions, rotary_emb),
+            self.ln_events[0],
+            self.ln_events[1],
+            self.aux_stream,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)
