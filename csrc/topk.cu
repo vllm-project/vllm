@@ -58,20 +58,15 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   params.input = logits.data_ptr<float>();
   params.output = output.data_ptr<int32_t>();
   params.lengths = lengths.data_ptr<int32_t>();
-  params.states =
-      reinterpret_cast<ct::ClusterState*>(workspace.data_ptr<uint8_t>());
   params.num_rows = static_cast<uint32_t>(num_rows);
   params.stride = static_cast<uint32_t>(logits.size(1));
-  const size_t state_bytes =
-      ((num_rows * sizeof(ct::ClusterState)) + 7) & ~size_t(7);
   params.tie_ws =
-      reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>() + state_bytes);
+      reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>());
 
   // TODO (roberto): can't the workspace size be smaller now? - only used in large_topk_twopass
   TORCH_CHECK(
       workspace.size(0) >=
-          static_cast<int64_t>(num_rows * (sizeof(ct::ClusterState) +
-                                           ct::kMaxTies * sizeof(ct::Tie))),
+          static_cast<int64_t>(num_rows * ct::kMaxTies * sizeof(ct::Tie)),
       "workspace too small");
 
   if (num_rows <= 8) {

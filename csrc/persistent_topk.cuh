@@ -51,14 +51,12 @@ constexpr uint32_t kStreamNumStages = 2;
 
 struct alignas(16) MatchBin { uint32_t bin, above_count, equal_count; };
 struct alignas(8) Tie { uint32_t idx; float score; };
-struct ClusterState { int output_counter; };
 
 template <uint32_t TopK = 1024>
 struct CooperativeTopKParams {
   const float* __restrict__ input;
   int32_t* __restrict__ output;
   const int32_t* __restrict__ lengths;
-  ClusterState* __restrict__ states;
   Tie* __restrict__ tie_ws;  // per-cluster tie workspace, kMaxTies entries each
   uint32_t num_rows, stride;
 };
@@ -654,11 +652,14 @@ using Smem8 = SmemFused<kNumStages8>;
 using Smem4 = SmemFused<kNumStages4, 2>;
 using SmemSinglePass = SmemFused<kMaxSinglePassStages>;
 
-template <uint32_t TopK, uint32_t CS, typename SmemType>
-__device__ void large_topk_fused(const float* __restrict__ row_input,
-                                 int32_t* __restrict__ row_output,
-                                 uint32_t seq_len,
-                                 uint32_t* phases, Tie* tie_ws) 
+// Cluster-cooperative large path.
+// kFused=true: all TMA stages resident, single-pass histogram + scatter (rescan from smem).
+// kFused=false: TMA double-buffer streaming, two passes (histogram then scatter).
+template <uint32_t TopK, uint32_t CS, typename SmemType, bool kFused>
+__device__ void large_topk(const float* __restrict__ row_input,
+                           int32_t* __restrict__ row_output,
+                           uint32_t seq_len,
+                           uint32_t* phases, Tie* tie_ws) 
 {
   const auto rank = blockIdx.y; // this block's position in cluster
   const auto tx = threadIdx.x;
@@ -668,103 +669,125 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   auto* smem = reinterpret_cast<SmemType*>(smem_raw);
   int32_t* s_topk = reinterpret_cast<int32_t*>(smem_raw + sizeof(SmemType));
 
-  // Phase 1: Partition row across cluster ranks.
+  // Partition row across cluster ranks
   constexpr uint32_t kAlign = 4;
-  const auto units    = (seq_len + kAlign - 1) / kAlign; //float4-aligned element count
-  const auto base     = units / CS, extra = units % CS;  //elements per block
-  const auto lu       = base + (rank < extra ? 1u : 0u); //remainder blocks
-  const auto ou       = rank * base + min(rank, extra);  //this block's count (load-balanced)
-  const auto my_start = ou * kAlign;                     //global start offset
-  const auto my_len   = min(my_start + lu * kAlign, seq_len) - my_start; //actual length of this block
-  const auto num_iters = (my_len + kSizePerStage - 1) / kSizePerStage;   //TMA stages needed
+  const auto units = (seq_len + kAlign - 1) / kAlign; //float4-aligned element count
+  const auto base  = units / CS, extra = units % CS;  //elements per block
+  const auto lu    = base + (rank < extra ? 1u : 0u); //remainder blocks
+  const auto ou    = rank * base + min(rank, extra);  //this block's count (load-balanced)
+  const auto my_start  = ou * kAlign;                 //global start offset
+  const auto my_len    = min(my_start + lu * kAlign, seq_len) - my_start; //actual length of this block
+  const auto num_iters = (my_len + kSizePerStage - 1) / kSizePerStage;    //TMA stages needed
   const auto len_aligned = (my_len + 3u) & ~3u;
 
-  // Fused init + TMA prologue
-  if (tx < kHistBins) {
-    smem->histogram[tx] = 0; // all threads zero histogram
-  }
-  if (tx == 0) { // thread 0 issues TMA - then all threads continue working until mbarrier sync
-    smem->counter_gt = 0;
-    smem->counter_eq = 0;
-    for (uint32_t i = 0; i < num_iters; i++) {
-      const auto off = i * kSizePerStage;
-      const auto sz = min(kSizePerStage, len_aligned - off) * sizeof(float);
-      tma_load(smem->score_buffer[i], row_input + my_start + off,
-               sz, &smem->barrier[0][i]); //cp.async.bulk of size kSizePerStage × sizeof(float)
-      mbarrier_arrive_expect_tx(&smem->barrier[0][i], sz);
+  if constexpr (kFused) {
+    // Fused init + TMA prologue
+    if (tx < kHistBins) {
+      smem->histogram[tx] = 0; // all threads zero histogram
     }
-  }
-  __syncthreads();
+    if (tx == 0) { // thread 0 issues TMA - then all threads continue working until mbarrier sync
+      smem->counter_gt = 0;
+      smem->counter_eq = 0;
+      for (uint32_t i = 0; i < num_iters; i++) {
+        const auto off = i * kSizePerStage;
+        const auto sz = min(kSizePerStage, len_aligned - off) * sizeof(float);
+        tma_load(smem->score_buffer[i], row_input + my_start + off,
+                 sz, &smem->barrier[0][i]); //cp.async.bulk of size kSizePerStage × sizeof(float)
+        mbarrier_arrive_expect_tx(&smem->barrier[0][i], sz);
+      }
+    }
+    __syncthreads();
 
-  // Phase 2: Histogram build. ILP unroll-by-2, no inter-stage sync
-  for (uint32_t iter = 0; iter < num_iters; iter++) {
-    const auto off = iter * kSizePerStage;
-    const auto sz = min(kSizePerStage, my_len - off);
-    if (lane == 0) {
-      mbarrier_wait(&smem->barrier[0][iter], phases[iter] & 1); // wait for TMA
-    }
-    phases[iter]++;
-    __syncwarp();
+    // Histogram build. ILP unroll-by-2, no inter-stage sync
+    for (uint32_t iter = 0; iter < num_iters; iter++) {
+      const auto off = iter * kSizePerStage;
+      const auto sz = min(kSizePerStage, my_len - off);
+      if (lane == 0) {
+        mbarrier_wait(&smem->barrier[0][iter], phases[iter] & 1); // wait for TMA
+      }
+      phases[iter]++;
+      __syncwarp();
 #pragma unroll
-    for (uint32_t i = 0; i < kElemPerStage; i += 2) {
-      const auto li0 = tx + i * kBlockSize;
-      const auto li1 = tx + (i + 1) * kBlockSize;
-      if (li0 >= sz) {
-        break;
-      }
-      const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
-      if (li1 < sz) {
-        const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
-        atomicAdd(&smem->histogram[b0], 1);
-        atomicAdd(&smem->histogram[b1], 1);
-      } else {
-        atomicAdd(&smem->histogram[b0], 1);
+      for (uint32_t i = 0; i < kElemPerStage; i += 2) {
+        const auto li0 = tx + i * kBlockSize;
+        const auto li1 = tx + (i + 1) * kBlockSize;
+        if (li0 >= sz) {
+          break;
+        }
+        const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
+        if (li1 < sz) {
+          const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
+          atomicAdd(&smem->histogram[b0], 1);
+          atomicAdd(&smem->histogram[b1], 1);
+        } else {
+          atomicAdd(&smem->histogram[b0], 1);
+        }
       }
     }
+  } else {
+    // Twopass: init then stream histogram pass
+    if (tx < kHistBins) {
+      smem->histogram[tx] = 0;
+    }
+    if (tx == 0) {
+      smem->counter_gt = 0;
+      smem->counter_eq = 0;
+    }
+    __syncthreads();
+    tma_stream_pass<SmemType, kNumStages4, kHistBits, false>(
+        row_input + my_start, my_len, 0, nullptr, phases, smem);
   }
 
-  // Phase 3: DSMEM all-reduce + find threshold
+  // DSMEM all-reduce + find threshold
   dsmem_hist_reduce<CS>(smem->histogram); // each block histogram is summed across all CS blocks
   find_threshold<TopK>(smem->histogram, smem->warp_sum,
                        &smem->counter_gt, &smem->counter_eq, &smem->match);
 
   const auto thr = smem->match.bin;
 
-  // Phase 4: Scatter. Rescan score_buffer (still in smem)
-  for (uint32_t iter = 0; iter < num_iters; iter++) {
-    const auto off = iter * kSizePerStage;
-    const auto sz = min(kSizePerStage, my_len - off);
+  if constexpr (kFused) {
+    // Fused scatter: rescan score_buffer (still in smem)
+    for (uint32_t iter = 0; iter < num_iters; iter++) {
+      const auto off = iter * kSizePerStage;
+      const auto sz = min(kSizePerStage, my_len - off);
 #pragma unroll
-    for (uint32_t i = 0; i < kElemPerStage; i++) {
-      const auto li = tx + i * kBlockSize;
-      if (li >= sz) {
-        break;
-      }
-      const auto score = smem->score_buffer[iter][li]; // still in smem
-      const auto bin = extract_coarse_bin(score);
-      const auto gidx = off + li;
-      if (bin > thr) {
-        s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx; // above -> s_topk
-      } else if (bin == thr) {
-        const auto p = atomicAdd(&smem->counter_eq, 1); // equal -> ties (later refinement)
-        if (p < kMaxTies) {
-          smem->tie_buffer[p] = {gidx, score};
+      for (uint32_t i = 0; i < kElemPerStage; i++) {
+        const auto li = tx + i * kBlockSize;
+        if (li >= sz) {
+          break;
+        }
+        const auto score = smem->score_buffer[iter][li]; // still in smem
+        const auto bin = extract_coarse_bin(score);
+        const auto gidx = off + li;
+        if (bin > thr) {
+          s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx; // above -> s_topk
+        } else if (bin == thr) {
+          const auto p = atomicAdd(&smem->counter_eq, 1); // equal -> ties (later refinement)
+          if (p < kMaxTies) {
+            smem->tie_buffer[p] = {gidx, score};
+          }
         }
       }
     }
+    __syncthreads();
+  } else {
+    // Twopass scatter: re-stream data via TMA
+    uint32_t scatter_phases[kNumStages4] = {0, 0};
+    tma_stream_pass<SmemType, kNumStages4, kHistBits, true>(
+        row_input + my_start, my_len, thr, s_topk, scatter_phases, smem);
   }
-  __syncthreads();
 
-  // Phase 5: Cross-block output collection via DSMEM prefix sum
+  // Output collection via DSMEM prefix sum
   constexpr uint32_t kAboveBits = 16;
   constexpr uint32_t kAboveMask = (1 << kAboveBits) - 1;
   static_assert(kAboveMask >= TopK);
   static_assert(kAboveMask >= kMaxSinglePassPerBlock,
                 "kAboveBits must cover max per-block element count");
 
+  
   const uint32_t la = smem->counter_gt;
   const uint32_t le_full = smem->counter_eq;
-  const uint32_t le = min(le_full, kMaxTies);  // smem tie_buffer cap
+  const uint32_t le = min(le_full, kMaxTies); // smem tie_buffer cap
 
   __shared__ uint32_t s_local_counts[CS];
   __shared__ uint32_t s_prefix_packed;
@@ -807,7 +830,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
     const auto t = smem->tie_buffer[i];
     uint32_t p = s_total_above + prefix_equal + i;
     if (p < TopK) {
-      row_output[p] = t.idx + my_start; 
+      row_output[p] = t.idx + my_start;
     }
     uint32_t tp = prefix_equal + i;
     if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) {
@@ -815,7 +838,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
     }
   }
 
-  // Phase 6: Tie refinement
+  // Tie refinement
   cooperative_groups::this_cluster().sync();
   if (rank != 0) { // only rank 0 does tie refinement
     return;
@@ -837,106 +860,6 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
     // TopK=2048: process directly from tie_ws (GMEM)
     const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
     tie_handle_large<TopK>(tie_ws, num_ties, s_total_above, row_output, smem);
-  }
-}
-
-// Fallback path when data doesn't fit in SMEM for single-pass.
-// Instead of keeping all TMA stages resident and rescanning, it streams data twice:
-// once for histogram, once for scatter.
-template <uint32_t TopK, uint32_t CS>
-__device__ void large_topk_twopass(const float* __restrict__ ri,
-                                   int32_t* __restrict__ ro,
-                                   uint32_t sl, 
-                                   ClusterState* state,
-                                   uint32_t* hp, uint32_t* sp, Tie* tie_ws) 
-{
-  const auto rank = blockIdx.y, tx = threadIdx.x;
-  extern __shared__ uint8_t smem_raw[];
-  auto* smem = reinterpret_cast<Smem4*>(smem_raw);
-  int32_t* s_topk = reinterpret_cast<int32_t*>(smem_raw + sizeof(Smem4));
-
-  constexpr uint32_t kA = 4;
-  const auto u = (sl + kA-1)/kA, b = u/CS, e = u%CS;
-  const auto lu = b + (rank < e ? 1u : 0u);
-  const auto ou = rank * b + min(rank, e);
-  const auto ms = ou * kA, ml = min(ms + lu * kA, sl) - ms;
-
-  // Phase 0: Init. Histogram zeroed, counters zeroed. Unlike large_topk_fused, 
-  // there's no TMA prologue here.
-  // tma_stream_pass handles its own TMA issuing internally.
-  if (tx < kHistBins) smem->histogram[tx] = 0;
-  if (tx == 0) {
-    smem->counter_gt = 0;
-    smem->counter_eq = 0;
-  }
-  __syncthreads();
-
-  // Phase 1: Histogram pass.
-  tma_stream_pass<Smem4, kNumStages4, kHistBits, false>(ri + ms, ml, 0, nullptr, hp, smem);
-  __syncthreads();
-
-  // DSMEM all-reduce + find threshold
-  dsmem_hist_reduce<CS>(smem->histogram);
-  find_threshold<TopK>(smem->histogram, smem->warp_sum,
-                  &smem->counter_gt, &smem->counter_eq, &smem->match);
-
-  // Phase 2: Scatter pass
-  tma_stream_pass<Smem4, kNumStages4, kHistBits, true>(ri + ms, ml, smem->match.bin, s_topk, sp, smem);
-  __syncthreads();
-
-  const uint32_t la = smem->counter_gt;
-  const uint32_t le_full = smem->counter_eq;
-  const uint32_t le = min(le_full, kMaxTies);  // smem tie_buffer cap
-
-  // Phase 3: Output collection. Unlike large_topk_fused which uses DSMEM prefix sums, twopass uses
-  // global atomicAdd on state->output_counter.
-  __shared__ uint32_t s_off;
-  // Step 1: Reserve slots for above-threshold indices.
-  if (tx == 0) s_off = atomicAdd(&state->output_counter, (int)la);
-  __syncthreads();
-  for (uint32_t i = tx; i < la; i += kBlockSize) { ro[s_off + i] = s_topk[i] + ms; }
-
-  // Step 2: cluster.sync() - all blocks done writting above-threshold
-  cooperative_groups::this_cluster().sync();
-
-  __shared__ uint32_t s_toff, s_ta;
-  // Step 3: Read total above count (= how many positions filled so far)
-  if (tx == 0) s_ta = state->output_counter;
-  __syncthreads();
-  cooperative_groups::this_cluster().sync(); // ensure all blocks read same s_ta
-  // Step 4: Reserve slots for ties
-  if (tx == 0) s_toff = atomicAdd(&state->output_counter, (int)le);
-  __syncthreads();
-  if (s_ta >= TopK) return; // all TopK already filled, no ties needed
-
-  // Phase 4: Write ties to global output and workspace for refinement
-  for (uint32_t i = tx; i < le; i += kBlockSize) {
-    const auto t = smem->tie_buffer[i];
-    uint32_t p = s_toff + i;
-    if (p < TopK) { ro[p] = t.idx + ms; }
-    uint32_t tp = s_toff - s_ta + i;
-    if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) { 
-      tie_ws[tp] = Tie{t.idx + ms, t.score}; 
-    }
-  }
-
-  // Phase 5: Tie refinement
-  cooperative_groups::this_cluster().sync();
-  if (rank != 0) return;
-
-  const auto tt = state->output_counter - s_ta; // total ties across all blocks
-  if (tt <= TopK - s_ta) return; // all fit, no refinement needed
-  if constexpr (TopK <= kBlockSize) {
-    // copy ties from tie_ws back to smem, then refine
-    // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
-    for (uint32_t i = tx; i < min(tt, kMaxTies); i += kBlockSize) {
-      smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
-    }
-    __syncthreads();
-    tie_handle<TopK>(smem->tie_buffer, min(tt, kMaxTies), s_ta, ro, smem);
-  } else {
-    // TopK=2048: process directly from tie_ws (GMEM)
-    tie_handle_large<TopK>(tie_ws, min(tt, static_cast<uint32_t>(TopK)), s_ta, ro, smem);
   }
 }
 
@@ -973,7 +896,6 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params)
   }
 
   // Large path: init mbarriers + state, then dispatch fused or twopass
-  auto* st = &params.states[row];
   const uint32_t per_block = (params.stride + CS - 1) / CS; // how many elements per block
   constexpr uint32_t kFusedMax = ((CS == 8) ? kNumStages8 : kMaxSinglePassStages) * kSizePerStage;
   const bool use_singlepass = per_block <= kFusedMax; // single pass or TMA streaming: histogram+scatter
@@ -993,20 +915,16 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params)
     }
     __syncthreads();
     uint32_t phases[kFusedStages] = {}; // tracks the parity for mbarrier wait/arrive protocol
-    large_topk_fused<TopK, CS, FusedSmem>(in, out, sl, phases, params.tie_ws + row * TopK);
+    large_topk<TopK, CS, FusedSmem, true>(in, out, sl, phases, params.tie_ws + row * TopK);
   } else {
     // Two-pass: only CS=4 in practice (CS=8 always fits in singlepass)
     auto* smem = reinterpret_cast<Smem4*>(sr);
     if (tx < 2 * kNumStages4) {
       mbarrier_init(&smem->barrier[0][tx], 1); // init 2×2=4 barriers (2 passes × 2 stages)
     }
-    if (rank == 0 && tx == 0) {
-      st->output_counter = 0;
-      __threadfence(); // ensure visibility to other blocks via GMEM - needed for atomicAdd
-    }
     __syncthreads();
-    uint32_t hp[kNumStages4] = {0, 0}, sp_ph[kNumStages4] = {0, 0}; // histogram+scatter pass counters
-    large_topk_twopass<TopK, CS>(in, out, sl, st, hp, sp_ph, params.tie_ws + row * TopK);
+    uint32_t hp[kNumStages4] = {0, 0}; // histogram+scatter pass counters
+    large_topk<TopK, CS, Smem4, false>(in, out, sl, hp, params.tie_ws + row * TopK);
   }
 }
 
