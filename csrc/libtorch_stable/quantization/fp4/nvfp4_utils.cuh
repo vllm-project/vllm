@@ -281,10 +281,10 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
     outputScale = SFValue != 0.0f ? (1.0f / SFValue) : 0.0f;
   } else {
     // NVFP4 path: use fast approximate reciprocal (original behavior).
-    outputScale =
-        SFValue != 0.0f ? reciprocal_approximate_ftz(
-                              SFValue * reciprocal_approximate_ftz(SFScaleVal))
-                        : 0.0f;
+    outputScale = SFValue != 0.0f
+                      ? reciprocal_approximate_ftz(
+                            SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                      : 0.0f;
   }
 
   // Convert the input to float.

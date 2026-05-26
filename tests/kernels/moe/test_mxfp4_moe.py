@@ -308,8 +308,6 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     3. Reconstruction error is within expected bounds for MXFP4
     """
     device = "cuda"
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
 
     # Generate input with controlled range
     input_tensor = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.5
@@ -339,7 +337,9 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
         for blk in range(num_blocks):
             block_start = blk * MXFP4_BLOCK_SIZE
             block_end = block_start + MXFP4_BLOCK_SIZE
-            block_max = input_tensor[row, block_start:block_end].float().abs().max().item()
+            block_max = (
+                input_tensor[row, block_start:block_end].float().abs().max().item()
+            )
 
             actual_scale = scale_flat[row, blk].item()
             expected_scale = compute_reference_e8m0_scale(block_max)
@@ -352,12 +352,14 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     total_blocks = m * num_blocks
     match_rate = (total_blocks - mismatches) / total_blocks
 
-    print(f"  m={m}, k={k}: scale match rate = {match_rate*100:.2f}% "
-          f"({mismatches}/{total_blocks} mismatches)")
+    print(
+        f"  m={m}, k={k}: scale match rate = {match_rate * 100:.2f}% "
+        f"({mismatches}/{total_blocks} mismatches)"
+    )
 
     # The fixed kernel should match the reference formula exactly
     assert match_rate > 0.99, (
-        f"E8M0 scale match rate too low: {match_rate*100:.2f}%. "
+        f"E8M0 scale match rate too low: {match_rate * 100:.2f}%. "
         f"Buggy pattern (scale too low): {buggy_pattern}/{mismatches}. "
         f"This suggests the NVFP4 formula bug is present."
     )
@@ -373,14 +375,15 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     # Dequantize and check cosine similarity
     fp4_lut = torch.tensor(
         [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
-        device=device, dtype=torch.float32,
+        device=device,
+        dtype=torch.float32,
     )
     lo = (output_fp4 & 0x0F).long()
     hi = ((output_fp4 >> 4) & 0x0F).long()
     unpacked = torch.stack([lo, hi], dim=-1).reshape(m, k)
     fp4_vals = fp4_lut[unpacked]
 
-    scales_expanded = (2.0 ** (scale_flat.float() - 127.0))
+    scales_expanded = 2.0 ** (scale_flat.float() - 127.0)
     scales_expanded = scales_expanded.unsqueeze(-1).expand(-1, -1, MXFP4_BLOCK_SIZE)
     scales_expanded = scales_expanded.reshape(m, k)
     recon = (fp4_vals * scales_expanded).bfloat16()
@@ -392,7 +395,9 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     ).item()
     max_abs_diff = (recon.float() - input_tensor.float()).abs().max().item()
 
-    print(f"  Reconstruction: cosine_sim={cos_sim:.6f}, max_abs_diff={max_abs_diff:.4f}")
+    print(
+        f"  Reconstruction: cosine_sim={cos_sim:.6f}, max_abs_diff={max_abs_diff:.4f}"
+    )
 
     assert cos_sim > 0.99, (
         f"Reconstruction cosine similarity too low: {cos_sim:.6f}. "
@@ -419,8 +424,6 @@ def test_mxfp4_experts_quant_no_saturation():
     block_max / scale <= 6.0 (the max E2M1 value) in almost all cases.
     """
     device = "cuda"
-    torch.manual_seed(123)
-    torch.cuda.manual_seed(123)
 
     m, k = 128, 1024
     # Use inputs with known range to make saturation detectable
@@ -445,14 +448,16 @@ def test_mxfp4_experts_quant_no_saturation():
     total_values = m * k
     saturation_rate = saturated / total_values
 
-    print(f"  Saturation rate: {saturation_rate*100:.2f}% "
-          f"({saturated}/{total_values} values at ±6)")
+    print(
+        f"  Saturation rate: {saturation_rate * 100:.2f}% "
+        f"({saturated}/{total_values} values at ±6)"
+    )
 
     # For Gaussian input with std=0.5, saturation should be very rare
     # (±6 * scale is far from the typical range).
     # The buggy kernel had ~30-50% saturation; fixed should be < 5%.
     assert saturation_rate < 0.05, (
-        f"FP4 saturation rate too high: {saturation_rate*100:.2f}%. "
+        f"FP4 saturation rate too high: {saturation_rate * 100:.2f}%. "
         "This suggests the E8M0 scale is too small (NVFP4 formula bug). "
         "Expected < 5% for Gaussian(0, 0.5) input with correct OCP MX scale."
     )
