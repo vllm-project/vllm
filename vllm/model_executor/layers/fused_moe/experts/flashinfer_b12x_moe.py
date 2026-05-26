@@ -17,10 +17,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
+    kNvfp4StaticGroupScale,
+    kStaticTensorScale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    flashinfer_b12x_fused_moe,
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
@@ -42,6 +43,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
 
+    _ACTIVATION_MAP: dict[MoEActivation, str] = {
+        MoEActivation.SILU: "silu",
+        MoEActivation.RELU2_NO_MUL: "relu2",
+    }
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -54,6 +60,60 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.out_dtype = moe_config.in_dtype
         self.num_local_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        # Shape params for B12xMoEWrapper construction.
+        self.global_num_experts = moe_config.num_experts
+        self.topk = moe_config.experts_per_token
+        self.hidden_dim = moe_config.hidden_dim
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.max_num_tokens = moe_config.max_num_tokens
+        self.local_expert_offset = self.ep_rank * self.num_local_experts
+
+        activation = moe_config.activation
+        if activation not in self._ACTIVATION_MAP:
+            raise ValueError(
+                f"FlashInferB12xExperts does not support "
+                f"activation {activation!r}. "
+                f"Supported: {list(self._ACTIVATION_MAP.keys())}"
+            )
+        self._activation_str = self._ACTIVATION_MAP[activation]
+
+        self.activation_precision = (
+            "fp4" if quant_config.a1_gscale is not None else "bf16"
+        )
+
+        self.source_format = self._detect_source_format()
+
+        # Lazily created on first apply() call.
+        self._wrapper: object | None = None
+        # Populated in process_weights_after_loading.
+        self.w1_sf_mma: torch.Tensor | None = None
+        self.w2_sf_mma: torch.Tensor | None = None
+
+    @staticmethod
+    def _detect_source_format() -> str:
+        """Walk the constructor's call stack to find the parent quant-method
+        class and map it to a FlashInfer ``source_format`` string.
+
+        ``make_nvfp4_moe_kernel`` instantiates the experts class from the
+        parent method's ``create_weights`` (compressed-tensors) or equivalent
+        (modelopt) — so the parent ``self`` is reachable in an outer frame.
+        Fall back to "modelopt" if no recognized parent is found.
+        """
+        import inspect
+
+        for frame_info in inspect.stack():
+            parent = frame_info.frame.f_locals.get("self")
+            if parent is None:
+                continue
+            cls_name = type(parent).__name__
+            if "CompressedTensors" in cls_name:
+                return "compressed_tensors"
+            if "ModelOpt" in cls_name:
+                return "modelopt"
+        return "modelopt"
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale
@@ -87,26 +147,27 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         if self.a2_gscale is not None:
             self.a2_gscale.fill_(1.0)
 
-        # Precompute MMA-layout views of the weight scale factors once here
-        # rather than recomputing on every forward pass.
-        assert self.w1_scale is not None
-        num_experts_w1, m1, k1_sf = self.w1_scale.shape
-        k1 = k1_sf * 16
+        # Precompute MMA-layout views of the (now-rewritten) weight scale
+        # factors once here rather than recomputing on every forward pass.
+        # Converts swizzled 3D scale factors [E, M, K_sf] to the 6D MMA
+        # layout expected by the SM12x kernel's _get_weight_views().
+        assert self.w1_scale is not None and self.w2_scale is not None
+        sf_vec_size = 16
+        E_w1, M_w1, K_sf_w1 = self.w1_scale.shape
         self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
+            self.w1_scale.reshape(E_w1 * M_w1, K_sf_w1),
+            m=M_w1,
+            k=K_sf_w1 * sf_vec_size,
+            num_groups=E_w1,
+            sf_vec_size=sf_vec_size,
         )
-
-        assert self.w2_scale is not None
-        num_experts_w2, m2, k2_sf = self.w2_scale.shape
-        k2 = k2_sf * 16
+        E_w2, M_w2, K_sf_w2 = self.w2_scale.shape
         self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
+            self.w2_scale.reshape(E_w2 * M_w2, K_sf_w2),
+            m=M_w2,
+            k=K_sf_w2 * sf_vec_size,
+            num_groups=E_w2,
+            sf_vec_size=sf_vec_size,
         )
 
     @staticmethod
@@ -124,18 +185,32 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+        # Original W4A4 NVFP4 (modelopt format).
+        if (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic):
+            return True
+        
+        # W4A16 NVFP4 compressed-tensors `nvfp4-pack-quantized`
+        if (
+            weight_key is not None
+            and weight_key.dtype == torch.uint8
+            and weight_key.scale == kNvfp4StaticGroupScale
+            and weight_key.scale2 == kStaticTensorScale
+            and weight_key.symmetric
+            and activation_key is None
+        ):
+            return True
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -167,12 +242,30 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # b12x_fused_moe expects BF16 hidden states and performs its own FP4
+        # B12xMoEWrapper expects BF16 hidden states and performs its own FP4
         # quantization internally.  Returning True prevents the modular kernel
-        # from pre-quantizing activations, which would produce an FP4-packed
-        # tensor with size(-1)=k//2 and break the scale-factor conversion that
-        # expects size(-1)=k.
+        # from pre-quantizing activations.
         return True
+
+    def _ensure_wrapper(self) -> None:
+        """Lazily create B12xMoEWrapper on first use."""
+        if self._wrapper is not None:
+            return
+
+        from flashinfer.fused_moe import B12xMoEWrapper
+
+        self._wrapper = B12xMoEWrapper(
+            num_experts=self.global_num_experts,
+            top_k=self.topk,
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            use_cuda_graph=True,
+            max_num_tokens=self.max_num_tokens,
+            num_local_experts=self.num_local_experts,
+            activation=self._activation_str,
+            activation_precision=self.activation_precision,
+            source_format=self.source_format,
+        )
 
     def apply(
         self,
@@ -201,13 +294,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.a2_gscale is not None, (
             "a2_gscale must not be None for FlashInferB12xExperts"
         )
+        assert self.w1_sf_mma is not None and self.w2_sf_mma is not None, (
+            "process_weights_after_loading must run before FlashInferB12xExperts.apply"
+        )
 
-        top_k = topk_ids.shape[1]
+        self._ensure_wrapper()
 
-        flashinfer_b12x_fused_moe(
+        result = self._wrapper.run(
             x=hidden_states,
-            token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
@@ -215,9 +309,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
-            num_experts=global_num_experts,
-            top_k=top_k,
-            num_local_experts=self.num_local_experts,
-            output_dtype=self.out_dtype,
-            output=output,
+            token_selected_experts=topk_ids.to(torch.int32),
+            token_final_scales=topk_weights,
         )
+        output.copy_(result)

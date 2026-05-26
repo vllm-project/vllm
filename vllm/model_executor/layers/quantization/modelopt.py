@@ -47,6 +47,7 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -2312,6 +2313,24 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if candidate in self.quantized_layers:
                 return self.quantized_layers[candidate]["quant_algo"].upper()
 
+        # Qwen VLM wrappers can construct the LM head under a nested vLLM
+        # prefix while ModelOpt exports the tensor names as top-level lm_head.*.
+        if prefix.endswith(".lm_head") and "lm_head" in self.quantized_layers:
+            return self.quantized_layers["lm_head"]["quant_algo"].upper()
+
+        # Qwen3.5/3.6-MoE VLM: vLLM's internal naming can be
+        # language_model.model.layers.X... while ModelOpt exports keys as
+        # model.language_model.layers.X... (swapped wrapper order). Try the
+        # swap as a direct fallback for any prefix that does not match.
+        if prefix.startswith("language_model.model."):
+            swapped = "model.language_model." + prefix[len("language_model.model.") :]
+            if swapped in self.quantized_layers:
+                return self.quantized_layers[swapped]["quant_algo"].upper()
+        elif prefix.startswith("model.language_model."):
+            swapped = "language_model.model." + prefix[len("model.language_model.") :]
+            if swapped in self.quantized_layers:
+                return self.quantized_layers[swapped]["quant_algo"].upper()
+
         # 2. Packed / fused layer lookup
         proj_name = prefix.rsplit(".", 1)[-1]
         if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
@@ -2385,6 +2404,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, ParallelLMHead):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):
