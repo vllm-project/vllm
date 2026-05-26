@@ -7,9 +7,10 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -28,6 +29,35 @@ _MAX_TEMP = 1e-2
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+
+def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
+    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, float)) or not isinstance(value, int):
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    if value == -1:
+        return None
+    if value < 0:
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    return value
+
+
+ThinkingTokenBudget = Annotated[
+    int | None,
+    BeforeValidator(validate_thinking_token_budget),
+]
 
 
 class SamplingType(IntEnum):
@@ -421,6 +451,10 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
+
+        self.thinking_token_budget = validate_thinking_token_budget(
+            self.thinking_token_budget
+        )
 
         if self.stop is None:
             self.stop = []
