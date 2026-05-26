@@ -2991,6 +2991,96 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert len(computed_blocks.blocks[1]) == 0
 
 
+def test_hybrid_local_kv_retention_auto_mtp_reuses_latest_boundary():
+    """Verify MTP/EAGLE SWA retention keeps the extra proof block.
+
+    EAGLE/MTP lookup matches one additional local block after the returned
+    prefix and then drops it. Sparse retention must therefore cache the normal
+    local tail at the latest replay boundary plus one extra SWA block.
+    """
+    block_size = 8
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=4 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa_mtp"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["swa_peer"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        local_kv_retention_interval="auto",
+        use_eagle=True,
+    )
+
+    # 127 tokens: latest replay boundary is floor((127 - 1) / 32) * 32 = 96.
+    # The EAGLE/MTP SWA lookup group must cache the local tail ending at
+    # 104 tokens, and that tail is two 8-token blocks wide: hashes 11 and 12.
+    # The unflagged SWA peer has the same spec, so it participates in the same
+    # lookup group and needs the same retained blocks.
+    token_ids = [i for i in range(15) for _ in range(block_size)] + [15] * 7
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0,
+        len(token_ids),
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+
+    pool = manager.block_pool
+    expected_swa_cached = {11, 12}
+    for group_id in (1, 2):
+        for i in range(15):
+            cached = pool.get_cached_block(
+                req0.block_hashes[i], kv_cache_group_ids=[group_id]
+            )
+            if i in expected_swa_cached:
+                assert cached is not None, f"SWA hash {i} should be cached"
+            else:
+                assert cached is None, f"SWA hash {i} should not be cached"
+
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 12 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12, 12]
+
+
 def test_block_lookup_cache_single_block_per_key():
     cache = BlockHashToBlockMap()
     key0 = BlockHashWithGroupId(b"hash0")

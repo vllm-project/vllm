@@ -714,6 +714,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         interval_tokens: RetentionInterval,
         latest_boundary_token: int | None,
+        extra_tokens_after_replay_boundary: int = 0,
     ) -> None:
         """Cache local tails at retained checkpoint boundaries.
 
@@ -721,8 +722,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         the default retention schedule, and "0" means no regular interval
         checkpoints. "latest_boundary_token" optionally adds the prompt replay
         boundary that exact prompt replays can hit.
+
+        "extra_tokens_after_replay_boundary" is the number of local tokens after
+        each replay boundary that must also be cached for lookup but will not
+        be returned as part of the prefix hit. EAGLE/MTP uses this to match one
+        extra local block after the replay boundary, then drops that block.
         """
         assert alignment_tokens % self.block_size == 0
+        assert extra_tokens_after_replay_boundary % self.block_size == 0
+        extra_tail_blocks = extra_tokens_after_replay_boundary // self.block_size
         if isinstance(interval_tokens, int) and interval_tokens > 0:
             interval_tokens = self._align_retention_boundary(
                 interval_tokens, alignment_tokens
@@ -735,11 +743,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
         request_id = request.request_id
 
+        max_replay_boundary = max(0, num_tokens - extra_tokens_after_replay_boundary)
         last_boundary = self._last_interval_retention_boundary.get(request_id, 0)
         for boundary in self._retention_boundaries(
-            last_boundary, num_tokens, alignment_tokens, interval_tokens
+            last_boundary, max_replay_boundary, alignment_tokens, interval_tokens
         ):
-            self._cache_tail_at_boundary(request, boundary)
+            self._cache_tail_at_boundary(
+                request,
+                boundary + extra_tokens_after_replay_boundary,
+                extra_tail_blocks=extra_tail_blocks,
+            )
             last_boundary = boundary
         self._last_interval_retention_boundary[request_id] = last_boundary
 
@@ -748,10 +761,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # at most once to avoid redundant tail-mask work on every decode step.
         if (
             latest_boundary_token is not None
-            and latest_boundary_token <= num_tokens
+            and latest_boundary_token + extra_tokens_after_replay_boundary <= num_tokens
             and request_id not in self._latest_retention_cached
         ):
-            self._cache_tail_at_boundary(request, latest_boundary_token)
+            self._cache_tail_at_boundary(
+                request,
+                latest_boundary_token + extra_tokens_after_replay_boundary,
+                extra_tail_blocks=extra_tail_blocks,
+            )
             self._latest_retention_cached.add(request_id)
 
         # update the num_cached_block cursor
@@ -805,10 +822,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             cdiv(boundary, alignment_tokens) * alignment_tokens,
         )
 
-    def _cache_tail_at_boundary(self, request: Request, boundary_token: int) -> None:
+    def _cache_tail_at_boundary(
+        self,
+        request: Request,
+        boundary_token: int,
+        extra_tail_blocks: int = 0,
+    ) -> None:
         """Cache the sliding-window tail needed to reuse "boundary_token"."""
         assert boundary_token % self.block_size == 0
         tail_blocks = cdiv(self.sliding_window - 1, self.block_size)
+        tail_blocks += extra_tail_blocks
         end_block = boundary_token // self.block_size
         start_block = max(0, end_block - tail_blocks)
         self._cache_block_range(request, start_block, end_block)

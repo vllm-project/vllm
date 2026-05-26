@@ -522,6 +522,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
+        self.eagle_lookup_group_ids: set[int] = {
+            gid
+            for i, (_, group_ids, _) in enumerate(self.attention_groups)
+            if i in self.eagle_attn_group_indices
+            for gid in group_ids
+        }
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         # Cache hits in this coordinator are always a multiple of
@@ -529,9 +535,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # aligned region, SWA groups only consult a subset of blocks per
         # ``lcm_block_size``-segment so the unused blocks also stay out of the
         # prefix-cache hash map.
-        prompt_complete = num_computed_tokens >= request.num_prompt_tokens
-        num_computed_tokens = (
-            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+        raw_num_computed_tokens = num_computed_tokens
+        prompt_complete = raw_num_computed_tokens >= request.num_prompt_tokens
+        aligned_num_computed_tokens = (
+            raw_num_computed_tokens // self.lcm_block_size * self.lcm_block_size
         )
 
         # Cache the latest prompt boundary in addition to the interval boundaries.
@@ -553,17 +560,34 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if self.local_kv_retention_interval is not None and isinstance(
                 manager, SlidingWindowManager
             ):
+                extra_tokens_after_replay_boundary = (
+                    manager.block_size
+                    if manager.kv_cache_group_id in self.eagle_lookup_group_ids
+                    else 0
+                )
+                # MTP/EAGLE lookup matches one local block after the replay
+                # boundary and then drops it, so sparse local retention may
+                # need cacheable tokens past the aligned returned-hit boundary.
+                # Non-EAGLE groups only cache aligned replay boundaries.
+                num_cacheable_tokens = (
+                    raw_num_computed_tokens
+                    if extra_tokens_after_replay_boundary
+                    else aligned_num_computed_tokens
+                )
                 manager.cache_blocks_at_boundaries(
                     request=request,
-                    num_tokens=num_computed_tokens,
+                    num_tokens=num_cacheable_tokens,
                     alignment_tokens=self.lcm_block_size,
                     interval_tokens=self.local_kv_retention_interval,
                     latest_boundary_token=latest_retention_boundary,
+                    extra_tokens_after_replay_boundary=(
+                        extra_tokens_after_replay_boundary
+                    ),
                 )
             else:
                 manager.cache_blocks(
                     request,
-                    num_computed_tokens,
+                    aligned_num_computed_tokens,
                     alignment_tokens=self.lcm_block_size,
                 )
 
