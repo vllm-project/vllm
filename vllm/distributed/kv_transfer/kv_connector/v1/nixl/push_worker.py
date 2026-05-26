@@ -258,8 +258,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Start push-based KV transfer from P worker to D node."""
         decode_engine_id = registration_data["decode_engine_id"]
         remote_block_ids = registration_data["local_block_ids"]
-        remote_host = registration_data["remote_host"]
-        remote_port = registration_data["remote_port"]
+        decode_host = registration_data["decode_host"]
+        decode_port = registration_data["decode_port"]
         decode_request_id = registration_data.get("decode_request_id", request_id)
         if not local_block_ids:
             logger.warning(
@@ -286,8 +286,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             try:
                 remote_tp_size = registration_data["decode_tp_size"]
                 remote_agents = self._nixl_handshake(
-                    remote_host,
-                    remote_port,
+                    decode_host,
+                    decode_port,
                     remote_tp_size,
                     decode_engine_id,
                 )

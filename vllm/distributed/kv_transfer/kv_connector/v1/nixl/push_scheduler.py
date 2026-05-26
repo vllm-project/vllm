@@ -149,10 +149,15 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
 
                 # Store registration data for the worker to send via NIXL.
+                # NOTE: "remote_*" fields are P's coordinates (from D's
+                # perspective). "decode_*" fields are D's own info
+                # that P needs for the reverse handshake.
                 self._push_pending_registrations[request.request_id] = {
                     "request_id": params["remote_request_id"],
                     "decode_request_id": request.request_id,
                     "decode_engine_id": self.engine_id,
+                    "decode_host": self.side_channel_host,
+                    "decode_port": self.side_channel_port,
                     "decode_tp_size": (
                         self.vllm_config.parallel_config.tensor_parallel_size
                     ),
