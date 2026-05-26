@@ -1040,7 +1040,7 @@ def apply_top_k_top_p_triton(
 
     # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
     if logits.device.type == "cpu":
-        block_size, block_size_trunc = 512, 256
+        block_size, block_size_trunc = 256, 128
     else:
         block_size, block_size_trunc = 8192, 4096
 
