@@ -23,7 +23,7 @@
 //     fragment uses a different mapping: lane t holds COLUMN n=lane_lo
 //     of the 16x16 output, with 8 elements alternating M rows by lane_hi
 //     (lanes 0..15 = even rows, lanes 16..31 = odd rows). See the layout
-//     diagram on `gemm_q4_wmma_kernel` below for the full mapping.
+//     diagram on `gemm_q4_wmma_kernel_16x16_1w` below for the full mapping.
 //   * No native v_global_atomic_pk_add_{f16,bf16} on gfx11; the K-split
 //     epilogue (gridDim.z > 1) emulates packed atomic add via a CAS-32
 //     retry loop on a uint32 word covering 2 fp16/bf16 lanes. Within a
@@ -352,13 +352,13 @@ __device__ __forceinline__ bf16_t tzero<bf16_t>() {
 // and assumed the output was C[lane_lo][2*i+lane_hi]. That layout passes
 // all-A=identity tests because A=I makes the K-axis sum collapse, but
 // implements C = A @ B^T for non-trivial A — the bug only shows up against
-// random A. The probe op gptq_gemm_rdna3_wmma_probe iterates all four
-// {row,col} × {row,col} loadings and identifies mode 1 (A row, B col) with
+// random A. A layout probe iterating all four
+// {row,col} × {row,col} loadings identified mode 1 (A row, B col) with
 // output [m=2*i+hi][n=lane_lo] as the unique mapping that yields A @ B.
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel(
+__global__ void gemm_q4_wmma_kernel_16x16_1w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -582,7 +582,7 @@ __global__ void gemm_q4_wmma_kernel(
 }
 
 template <typename T>
-void launch_gemm_q4_wmma(const T* a, const uint32_t* b_q_weight,
+void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
                          const uint32_t* b_qzeros, const T* b_scales,
                          const int* b_q_perm, T* c, int size_m, int size_n,
                          int size_k, int groups, int zero_offset,
@@ -593,13 +593,13 @@ void launch_gemm_q4_wmma(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(32);
   dim3 grid((size_n + 15) / 16, (size_m + 15) / 16, k_split);
-  gemm_q4_wmma_kernel<T><<<grid, block, 0, stream>>>(
+  gemm_q4_wmma_kernel_16x16_1w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
 
 // ===========================================================================
-// V2 kernel: 2 waves per block, 32M × 16N tile, double-buffered LDS.
+// 32x16_2w kernel: 2 waves per block, 32M × 16N tile, double-buffered LDS.
 //
 // Targets the bf16-WMMA prefill regime (M >= 128) where the v1 single-wave
 // kernel saturates only ~24% of WMMA peak because each wave does roughly
@@ -624,14 +624,14 @@ void launch_gemm_q4_wmma(const T* a, const uint32_t* b_q_weight,
 // the next K-tile has committed AND both waves have finished reading the
 // current K-tile before wave 0 wraps around and overwrites it.
 //
-// The v2 launcher (`launch_gemm_q4_wmma_v2`) is the production entry on
+// The v2 launcher (`launch_gemm_q4_wmma_32x16_2w`) is the production entry on
 // the WMMA path and falls back to v1 internally for size_m < 32 — see the
-// comment at the top of `launch_gemm_q4_wmma_v2` for the M=16 regression
+// comment at the top of `launch_gemm_q4_wmma_32x16_2w` for the M=16 regression
 // rationale that justifies the fallback.
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v2(
+__global__ void gemm_q4_wmma_kernel_32x16_2w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -818,7 +818,7 @@ __global__ void gemm_q4_wmma_kernel_v2(
 }
 
 template <typename T>
-void launch_gemm_q4_wmma_v2(const T* a, const uint32_t* b_q_weight,
+void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
                             const uint32_t* b_qzeros, const T* b_scales,
                             const int* b_q_perm, T* c, int size_m, int size_n,
                             int size_k, int groups, int zero_offset,
@@ -831,7 +831,7 @@ void launch_gemm_q4_wmma_v2(const T* a, const uint32_t* b_q_weight,
   // max-num-seqs=32 lands at M≈32 steady-state; the M=16 sliver is edge),
   // but the fallback costs nothing and is the right shape.
   if (size_m < 32) {
-    launch_gemm_q4_wmma<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+    launch_gemm_q4_wmma_16x16_1w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                            size_m, size_n, size_k, groups, zero_offset, stream);
     return;
   }
@@ -843,13 +843,13 @@ void launch_gemm_q4_wmma_v2(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(64);
   dim3 grid((size_n + 15) / 16, (size_m + 31) / 32, k_split);
-  gemm_q4_wmma_kernel_v2<T><<<grid, block, 0, stream>>>(
+  gemm_q4_wmma_kernel_32x16_2w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
 
 // ===========================================================================
-// V3 kernel: 4 waves per block, 64M × 16N tile, double-buffered LDS.
+// 64x16_4w kernel: 4 waves per block, 64M × 16N tile, double-buffered LDS.
 //
 // Targets the prefill plateau observed at M >= 128 in v2 (~144 K tk/s bf16,
 // ~28 % of WMMA peak). The bottleneck is wmma issue rate per resident wave:
@@ -879,7 +879,7 @@ void launch_gemm_q4_wmma_v2(const T* a, const uint32_t* b_q_weight,
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v3(
+__global__ void gemm_q4_wmma_kernel_64x16_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -1062,14 +1062,14 @@ __global__ void gemm_q4_wmma_kernel_v3(
 }
 
 template <typename T>
-void launch_gemm_q4_wmma_v3(const T* a, const uint32_t* b_q_weight,
+void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
                             const uint32_t* b_qzeros, const T* b_scales,
                             const int* b_q_perm, T* c, int size_m, int size_n,
                             int size_k, int groups, int zero_offset,
                             cudaStream_t stream) {
   // Fall back to v2 for M < 64 (would waste 1+ waves on out-of-range rows).
   if (size_m < 64) {
-    launch_gemm_q4_wmma_v2<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+    launch_gemm_q4_wmma_32x16_2w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                               size_m, size_n, size_k, groups, zero_offset,
                               stream);
     return;
@@ -1079,13 +1079,13 @@ void launch_gemm_q4_wmma_v3(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 16);
   dim3 block(128);
   dim3 grid((size_n + 15) / 16, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_v3<T><<<grid, block, 0, stream>>>(
+  gemm_q4_wmma_kernel_64x16_4w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
 
 // ===========================================================================
-// V4 kernel: 4 waves per block, 64M × 32N tile, double-buffered LDS.
+// 64x32_4w kernel: 4 waves per block, 64M × 32N tile, double-buffered LDS.
 //
 // Builds on v3 by doubling the N-tile from 16 → 32. Each wave now issues
 // 2 wmmas per K-iter (one for cols 0-15, one for cols 16-31, sharing the
@@ -1109,7 +1109,7 @@ void launch_gemm_q4_wmma_v3(const T* a, const uint32_t* b_q_weight,
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v4(
+__global__ void gemm_q4_wmma_kernel_64x32_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -1303,7 +1303,7 @@ __global__ void gemm_q4_wmma_kernel_v4(
 }
 
 template <typename T>
-void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
+void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
                             const uint32_t* b_qzeros, const T* b_scales,
                             const int* b_q_perm, T* c, int size_m, int size_n,
                             int size_k, int groups, int zero_offset,
@@ -1312,7 +1312,7 @@ void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
   // narrower 64M × 16N path) or when N < 32 (tile would waste a wave on
   // out-of-range cols).
   if (size_m < 64 || size_n < 32) {
-    launch_gemm_q4_wmma_v3<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+    launch_gemm_q4_wmma_64x16_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                               size_m, size_n, size_k, groups, zero_offset,
                               stream);
     return;
@@ -1322,13 +1322,13 @@ void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 32);
   dim3 block(128);
   dim3 grid((size_n + 31) / 32, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_v4<T><<<grid, block, 0, stream>>>(
+  gemm_q4_wmma_kernel_64x32_4w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
 
 // ===========================================================================
-// V5 kernel: 4 waves per block, 64M × 64N tile, 4 wmmas per wave per K-iter.
+// 64x64_4w kernel: 4 waves per block, 64M × 64N tile, 4 wmmas per wave per K-iter.
 //
 // Doubles the N-tile from 32 → 64. Each wave issues 4 wmmas per K-iter
 // (cols 0-15, 16-31, 32-47, 48-63), all sharing the same a_frag. With
@@ -1351,7 +1351,7 @@ void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v5(
+__global__ void gemm_q4_wmma_kernel_64x64_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -1538,7 +1538,7 @@ __global__ void gemm_q4_wmma_kernel_v5(
 }
 
 // ===========================================================================
-// V7 kernel: 8 waves per block, 128M × 64N tile, K=16 per iteration.
+// 128x64_k16 kernel: 8 waves per block, 128M × 64N tile, K=16 per iteration.
 //
 // Doubles M-tile from 64 → 128. Each B-tile in LDS is reused by 8 waves
 // (8 independent A-row slices) instead of 4, halving the effective B-load
@@ -1550,7 +1550,7 @@ __global__ void gemm_q4_wmma_kernel_v5(
 // ===========================================================================
 
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v7(
+__global__ void gemm_q4_wmma_kernel_128x64_k16(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -1732,7 +1732,7 @@ __global__ void gemm_q4_wmma_kernel_v7(
 }
 
 // ===========================================================================
-// V8: K=32 per iteration, all 8 waves dequant.
+// 128x64_k32 kernel: K=32 per iteration, all 8 waves dequant.
 //
 // Same 128M × 64N tile as V7, but processes 32 K-elements per iteration
 // instead of 16.  Halves iteration count and __syncthreads() calls.
@@ -1749,7 +1749,7 @@ __global__ void gemm_q4_wmma_kernel_v7(
 // Requires K divisible by 32 and groupsize ≥ 32.
 // ===========================================================================
 template <typename T>
-__global__ void gemm_q4_wmma_kernel_v8(
+__global__ void gemm_q4_wmma_kernel_128x64_k32(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
@@ -1944,14 +1944,14 @@ __global__ void gemm_q4_wmma_kernel_v8(
 }
 
 template <typename T>
-void launch_gemm_q4_wmma_v5(const T* a, const uint32_t* b_q_weight,
+void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
                             const uint32_t* b_qzeros, const T* b_scales,
                             const int* b_q_perm, T* c, int size_m, int size_n,
                             int size_k, int groups, int zero_offset,
                             cudaStream_t stream) {
   // Fall back to v4 when N < 64 (would waste 1+ waves on out-of-range cols).
   if (size_m < 64 || size_n < 64) {
-    launch_gemm_q4_wmma_v4<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+    launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                               size_m, size_n, size_k, groups, zero_offset,
                               stream);
     return;
@@ -1966,11 +1966,11 @@ void launch_gemm_q4_wmma_v5(const T* a, const uint32_t* b_q_weight,
     dim3 block(256);
     dim3 grid((size_n + 63) / 64, (size_m + 127) / 128, k_split);
     if (size_k % 32 == 0 && groupsize >= 32 && (size_k / k_split) % 32 == 0) {
-      gemm_q4_wmma_kernel_v8<T><<<grid, block, 0, stream>>>(
+      gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
           zero_offset, b_q_perm);
     } else {
-      gemm_q4_wmma_kernel_v7<T><<<grid, block, 0, stream>>>(
+      gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
           zero_offset, b_q_perm);
     }
@@ -1981,207 +1981,9 @@ void launch_gemm_q4_wmma_v5(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 64);
   dim3 block(128);
   dim3 grid((size_n + 63) / 64, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_v5<T><<<grid, block, 0, stream>>>(
+  gemm_q4_wmma_kernel_64x64_4w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
-}
-
-// ===========================================================================
-// Layout probe kernel — diagnostic only.
-// Takes fp16 A[16,16] and B[16,16] directly (no dequant). Loads them into
-// the WMMA fragments under one of several layout hypotheses, runs WMMA, and
-// dumps c_acc[i] per lane to a flat fp32 output[32 * 8].
-// Mode selects how A and B are loaded:
-//   0: A row-major (a_frag[i] = A[lane_lo][i]),
-//      B row-major (b_frag[i] = B[lane_lo][i])
-//   1: A row-major,
-//      B col-major (b_frag[i] = B[i][lane_lo])
-//   2: A col-major (a_frag[i] = A[i][lane_lo]),
-//      B row-major
-//   3: A col-major,
-//      B col-major
-// With A = identity (16x16) and B with unique per-cell values, decoding the
-// dump tells us which C cell each c_acc[lane][i] holds.
-// ===========================================================================
-
-// Full-kernel dump probe: same code path as gemm_q4_wmma_kernel for ONE 16x16
-// output tile (block (0,0)) — dequant + LDS + WMMA — but writes c_acc[lane][i]
-// directly to a flat fp32 [32 * 8] dump instead of doing the interleaved
-// row store. Used to isolate whether c_acc is correct (store-mapping bug)
-// vs c_acc itself wrong (dequant/LDS/fragment-load bug).
-__global__ void gemm_q4_wmma_dump_kernel(
-    const half* __restrict__ a, const uint32_t* __restrict__ b_q,
-    const uint32_t* __restrict__ b_qzeros, const half* __restrict__ b_scales,
-    float* __restrict__ dump_out, const int size_m, const int size_n,
-    const int size_k, const int groups, const int zero_offset) {
-  const int lane = threadIdx.x;
-  const int lane_lo = lane & 15;
-  const int lane_hi = lane >> 4;
-
-  v8fp32 c_acc = {0, 0, 0, 0, 0, 0, 0, 0};
-  const int groupsize = size_k / groups;
-  __shared__ half b_lds[16][16];
-
-  for (int k_tile = 0; k_tile < size_k; k_tile += 16) {
-    const int my_n = lane_lo;
-    const int my_k_octet = lane_hi;
-    const int actual_n = my_n;
-
-    if (actual_n < size_n) {
-      const int qk_row = (k_tile / 8) + my_k_octet;
-      const uint32_t qa = b_q[qk_row * size_n + actual_n];
-
-      const int g = k_tile / groupsize;
-      const int qz_idx = g * (size_n / 8) + actual_n / 8;
-      const int qz_shift = (actual_n & 7) * 4;
-      const uint32_t zero_v =
-          ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
-      const half scale_t = b_scales[g * size_n + actual_n];
-
-      const int k_base = my_k_octet * 8;
-
-      half2 z_prep, y_prep;
-      prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
-      half2 dq[4];
-      dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-      b_lds[k_base + 0][my_n] = __low2half(dq[0]);
-      b_lds[k_base + 1][my_n] = __high2half(dq[0]);
-      b_lds[k_base + 2][my_n] = __low2half(dq[1]);
-      b_lds[k_base + 3][my_n] = __high2half(dq[1]);
-      b_lds[k_base + 4][my_n] = __low2half(dq[2]);
-      b_lds[k_base + 5][my_n] = __high2half(dq[2]);
-      b_lds[k_base + 6][my_n] = __low2half(dq[3]);
-      b_lds[k_base + 7][my_n] = __high2half(dq[3]);
-    }
-
-    __syncthreads();
-
-    v16fp16 a_frag, b_frag;
-    const int m_row = lane_lo;
-
-    if (m_row < size_m) {
-      const half* a_row = a + m_row * size_k;
-  #pragma unroll
-      for (int i = 0; i < 16; i++) {
-        half v =
-            (k_tile + i < size_k) ? a_row[k_tile + i] : __float2half_rn(0.0f);
-        a_frag[i] = bitcast_elem<half, _Float16>(v);
-      }
-    } else {
-  #pragma unroll
-      for (int i = 0; i < 16; i++) a_frag[i] = (_Float16)0;
-    }
-
-  #pragma unroll
-    for (int i = 0; i < 16; i++) {
-      b_frag[i] = bitcast_elem<half, _Float16>(b_lds[i][lane_lo]);
-    }
-
-    c_acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_acc);
-
-    __syncthreads();
-  }
-
-  #pragma unroll
-  for (int i = 0; i < 8; i++) {
-    dump_out[lane * 8 + i] = c_acc[i];
-  }
-}
-
-// LDS-content probe. Runs the same dequant + LDS-write path as the GEMM
-// kernel for a single 16x16 B tile, then has lane 0 dump all 256 b_lds cells
-// to global memory after __syncthreads. If the dump matches the expected
-// dequantized B[k][n], then dequant + LDS-write are correct and the bug is
-// in fragment load (b_frag = b_lds[lane_lo][i]) or the WMMA instruction.
-__global__ void wmma_lds_check_kernel(const uint32_t* __restrict__ b_q,
-                                      const uint32_t* __restrict__ b_qzeros,
-                                      const half* __restrict__ b_scales,
-                                      half* __restrict__ lds_dump,
-                                      const int size_n, const int size_k,
-                                      const int groups, const int zero_offset) {
-  const int lane = threadIdx.x;
-  const int lane_lo = lane & 15;
-  const int lane_hi = lane >> 4;
-
-  const int groupsize = size_k / groups;
-  __shared__ half b_lds[16][16];
-
-  const int k_tile = 0;
-  const int my_n = lane_lo;
-  const int my_k_octet = lane_hi;
-  const int actual_n = my_n;
-
-  if (actual_n < size_n) {
-    const int qk_row = (k_tile / 8) + my_k_octet;
-    const uint32_t qa = b_q[qk_row * size_n + actual_n];
-
-    const int g = k_tile / groupsize;
-    const int qz_idx = g * (size_n / 8) + actual_n / 8;
-    const int qz_shift = (actual_n & 7) * 4;
-    const uint32_t zero_v =
-        ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
-    const half scale_t = b_scales[g * size_n + actual_n];
-
-    const int k_base = my_k_octet * 8;
-
-    half2 z_prep, y_prep;
-    prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
-    half2 dq[4];
-    dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-    b_lds[k_base + 0][my_n] = __low2half(dq[0]);
-    b_lds[k_base + 1][my_n] = __high2half(dq[0]);
-    b_lds[k_base + 2][my_n] = __low2half(dq[1]);
-    b_lds[k_base + 3][my_n] = __high2half(dq[1]);
-    b_lds[k_base + 4][my_n] = __low2half(dq[2]);
-    b_lds[k_base + 5][my_n] = __high2half(dq[2]);
-    b_lds[k_base + 6][my_n] = __low2half(dq[3]);
-    b_lds[k_base + 7][my_n] = __high2half(dq[3]);
-  }
-
-  __syncthreads();
-
-  if (lane == 0) {
-    for (int k = 0; k < 16; k++) {
-      for (int n = 0; n < 16; n++) {
-        lds_dump[k * 16 + n] = b_lds[k][n];
-      }
-    }
-  }
-}
-
-__global__ void wmma_layout_probe_kernel(const half* a_in, const half* b_in,
-                                         float* dump_out, int mode) {
-  const int lane = threadIdx.x;
-  const int lane_lo = lane & 15;
-
-  v16fp16 a_frag, b_frag;
-  #pragma unroll
-  for (int i = 0; i < 16; i++) {
-    half av, bv;
-    if (mode == 0) {
-      av = a_in[lane_lo * 16 + i];
-      bv = b_in[lane_lo * 16 + i];
-    } else if (mode == 1) {
-      av = a_in[lane_lo * 16 + i];
-      bv = b_in[i * 16 + lane_lo];
-    } else if (mode == 2) {
-      av = a_in[i * 16 + lane_lo];
-      bv = b_in[lane_lo * 16 + i];
-    } else {
-      av = a_in[i * 16 + lane_lo];
-      bv = b_in[i * 16 + lane_lo];
-    }
-    a_frag[i] = bitcast_elem<half, _Float16>(av);
-    b_frag[i] = bitcast_elem<half, _Float16>(bv);
-  }
-
-  v8fp32 c = {0, 0, 0, 0, 0, 0, 0, 0};
-  c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c);
-
-  #pragma unroll
-  for (int i = 0; i < 8; i++) {
-    dump_out[lane * 8 + i] = c[i];
-  }
 }
 
 #endif  // USE_ROCM
@@ -2257,21 +2059,22 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 
   const int zero_offset = use_v2_format ? 0 : 1;
 
-  // launch_gemm_q4_wmma_v5 dispatches:
-  //   M >= 64 && N >= 64 → v5 (4 waves, 64M × 64N tile, 4 wmma/wave/K-iter)
-  //   M >= 64 && N >= 32 → v4 (4 waves, 64M × 32N tile, 2 wmma/wave/K-iter)
-  //   M >= 64 && N <  32 → v3 (4 waves, 64M × 16N)
-  //   32 <= M < 64       → v2 (2 waves, 32M × 16N)
-  //   M < 32             → v1 (1 wave, 16M × 16N)
+  // launch_gemm_q4_wmma_64x64_4w dispatches:
+  //   M >= 128           → 128x64_k32 / 128x64_k16 (8 waves, K=32/16 per iter)
+  //   64 <= M < 128 & N >= 64 → 64x64_4w (4 waves, 4 wmma/wave/K-iter)
+  //   M >= 64 && 32 <= N < 64 → 64x32_4w (4 waves, 2 wmma/wave/K-iter)
+  //   M >= 64 && N <  32 → 64x16_4w (4 waves)
+  //   32 <= M < 64       → 32x16_2w (2 waves)
+  //   M < 32             → 16x16_1w (1 wave)
 #if defined(USE_ROCM)
   if (a.scalar_type() == torch::kHalf) {
-    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v5<half>(
+    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
         g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
         zero_offset, stream);
   } else {
-    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v5<
+    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<
         vllm::gptq_rdna3_wmma::bf16_t>(
         (const vllm::gptq_rdna3_wmma::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
@@ -2287,106 +2090,3 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   return c;
 }
 
-// Diagnostic probe: takes raw fp16 A[16,16] and B[16,16], runs a single WMMA
-// under the requested fragment-load hypothesis, returns fp32 [32, 8] dump of
-// c_acc[lane][i] per lane. Used to empirically identify the wave32 fragment
-// layout. Not for production use.
-// Diagnostic: runs the FULL gemm_q4_wmma path (dequant + LDS + WMMA) for a
-// single 16x16 output tile, dumps c_acc per lane to fp32 [32, 8]. Tells us
-// whether c_acc itself is correct or whether the bug is in the store mapping.
-torch::Tensor gptq_gemm_rdna3_wmma_dump(torch::Tensor a,
-                                        torch::Tensor b_q_weight,
-                                        torch::Tensor b_qzeros,
-                                        torch::Tensor b_scales,
-                                        bool use_v2_format) {
-  TORCH_CHECK(a.is_cuda() && b_q_weight.is_cuda() && b_qzeros.is_cuda() &&
-                  b_scales.is_cuda(),
-              "all tensors must be CUDA");
-  TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be fp16");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kHalf, "b_scales must be fp16");
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
-  auto stream = at::cuda::getCurrentCUDAStream();
-
-  int size_m = (int)a.size(0);
-  int size_k = (int)a.size(1);
-  int size_n = (int)b_q_weight.size(1);
-  int groups = (int)b_qzeros.size(0);
-  const int zero_offset = use_v2_format ? 0 : 1;
-
-  auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(a.device());
-  at::Tensor dump = torch::zeros({32, 8}, opts);
-
-#if defined(USE_ROCM)
-  vllm::gptq_rdna3_wmma::gemm_q4_wmma_dump_kernel<<<1, 32, 0, stream>>>(
-      (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
-      (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
-      (float*)dump.data_ptr(), size_m, size_n, size_k, groups, zero_offset);
-#else
-  TORCH_CHECK(false, "gptq_gemm_rdna3_wmma_dump is ROCm-only");
-#endif
-
-  return dump;
-}
-
-// Diagnostic: runs the dequant + LDS-write path, then dumps the entire
-// 16x16 b_lds tile to a fp16 [16, 16] tensor. Lets us verify dequant + LDS
-// produce correct B values before the WMMA reads them.
-torch::Tensor gptq_gemm_rdna3_wmma_lds_check(torch::Tensor b_q_weight,
-                                             torch::Tensor b_qzeros,
-                                             torch::Tensor b_scales,
-                                             bool use_v2_format) {
-  TORCH_CHECK(b_q_weight.is_cuda() && b_qzeros.is_cuda() && b_scales.is_cuda(),
-              "all tensors must be CUDA");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kHalf, "b_scales must be fp16");
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
-  auto stream = at::cuda::getCurrentCUDAStream();
-
-  int size_k = (int)b_q_weight.size(0) * 8;
-  int size_n = (int)b_q_weight.size(1);
-  int groups = (int)b_qzeros.size(0);
-  const int zero_offset = use_v2_format ? 0 : 1;
-
-  auto opts =
-      torch::TensorOptions().dtype(torch::kHalf).device(b_q_weight.device());
-  at::Tensor dump = torch::zeros({16, 16}, opts);
-
-#if defined(USE_ROCM)
-  vllm::gptq_rdna3_wmma::wmma_lds_check_kernel<<<1, 32, 0, stream>>>(
-      (const uint32_t*)b_q_weight.data_ptr(),
-      (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
-      (half*)dump.data_ptr(), size_n, size_k, groups, zero_offset);
-#else
-  TORCH_CHECK(false, "gptq_gemm_rdna3_wmma_lds_check is ROCm-only");
-#endif
-
-  return dump;
-}
-
-torch::Tensor gptq_gemm_rdna3_wmma_probe(torch::Tensor a, torch::Tensor b,
-                                         int64_t mode) {
-  TORCH_CHECK(a.is_cuda() && b.is_cuda(), "a/b must be CUDA tensors");
-  TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be fp16");
-  TORCH_CHECK(b.scalar_type() == torch::kHalf, "b must be fp16");
-  TORCH_CHECK(a.dim() == 2 && a.size(0) == 16 && a.size(1) == 16,
-              "a must be 16x16");
-  TORCH_CHECK(b.dim() == 2 && b.size(0) == 16 && b.size(1) == 16,
-              "b must be 16x16");
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
-  auto stream = at::cuda::getCurrentCUDAStream();
-
-  auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(a.device());
-  at::Tensor dump = torch::zeros({32, 8}, opts);
-
-#if defined(USE_ROCM)
-  vllm::gptq_rdna3_wmma::wmma_layout_probe_kernel<<<1, 32, 0, stream>>>(
-      (const half*)a.data_ptr(), (const half*)b.data_ptr(),
-      (float*)dump.data_ptr(), (int)mode);
-#else
-  TORCH_CHECK(false, "gptq_gemm_rdna3_wmma_probe is ROCm-only");
-#endif
-
-  return dump;
-}
