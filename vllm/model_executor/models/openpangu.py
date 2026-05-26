@@ -45,6 +45,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -100,10 +101,14 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionType
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    kv_cache_dtype_str_to_dtype,
+)
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
-from vllm.v1.kv_cache_interface import MomeSpec
+from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -161,6 +166,7 @@ class MomeAttention(MambaBase, CustomOp):
         num_spec_tokens: int,
         q_lora_rank: int,
         kv_lora_rank: int,
+        num_heads: int,
         num_local_heads: int,
         v_head_dim: int,
         vllm_config: VllmConfig,
@@ -172,10 +178,14 @@ class MomeAttention(MambaBase, CustomOp):
         self.dtype = vllm_config.model_config.dtype
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
         self.num_local_heads = num_local_heads
         self.v_head_dim = v_head_dim
         self.o_dim = num_local_heads * v_head_dim
+        self.cache_o_dim = num_heads * v_head_dim
+        self.cache_head_size = q_lora_rank + kv_lora_rank + self.cache_o_dim
         self.prefix = prefix
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         # 3 Conv1d weights for q, kv, o
         # These names match the original weights in the checkpoint
@@ -232,26 +242,23 @@ class MomeAttention(MambaBase, CustomOp):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return (self.qa_conv.weight.dtype,) * 3
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MomeSpec:
-        num_total_tokens = self.kernel_size - 1 + self.num_spec_tokens
-        state_shapes = self.get_state_shape()
-        if is_conv_state_dim_first():
-            shapes = tuple((*s, num_total_tokens) for s in state_shapes)
-        else:
-            shapes = tuple((num_total_tokens, *s) for s in state_shapes)
-        return MomeSpec(
-            block_size=vllm_config.cache_config.block_size,
-            shapes=shapes,
-            dtypes=self.get_state_dtype(),
-            mamba_type=self.mamba_type,
-            kernel_size=self.kernel_size,
-            num_spec_tokens=self.num_spec_tokens,
-            page_size_padded=vllm_config.cache_config.mamba_page_size_padded,
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMLASpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        # FIXME(runze): block_size and sliding_window are hardcoded to be 8 now; make it general later
+        return SlidingWindowMLASpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=self.cache_head_size,
+            dtype=kv_cache_dtype,
+            sliding_window=8,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            alignment=576,
         )
 
     def get_attn_backend(self) -> type:
         from vllm.v1.attention.backends.mome_attn import MomeAttentionBackend
-
         return MomeAttentionBackend
 
     def forward(self, hidden_states: torch.Tensor, state_indice: int) -> torch.Tensor:
@@ -424,7 +431,7 @@ direct_register_custom_op(
 )
 
 
-class PanguIndexer(nn.Module):
+class PanguIndexer(nn.Module, AttentionLayerBase):
     """
     Pangu Indexer for DSA Attention.
     """
@@ -483,7 +490,36 @@ class PanguIndexer(nn.Module):
         self.sink_len = getattr(config, "param_sink_number", 0)
         self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
+        self.attn_backend = get_attn_backend(
+            self.head_dim,
+            torch.get_default_dtype(),
+            self.kv_cache_dtype,
+            use_mla=True,
+            num_heads=1,
+        )
+        self.kv_cache = torch.tensor([])
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
         # self.topk_tokens += self.sink_len
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        return MLAAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=kv_cache_dtype,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            compress_ratio=1,
+            alignment=576,
+        )
 
     def forward(
         self,
@@ -1075,6 +1111,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 num_spec_tokens=spec_token_num,
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
+                num_heads=self.num_heads,
                 num_local_heads=self.num_local_heads,
                 v_head_dim=self.v_head_dim,
                 vllm_config=vllm_config,
