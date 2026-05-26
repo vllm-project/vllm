@@ -20,6 +20,7 @@ from vllm.multimodal.processing import (
 )
 
 from .glm4_1v import (
+    _MAX_FRAMES_PER_VIDEO,
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
     Glm4vMultiModalProcessor,
@@ -29,7 +30,49 @@ from .glm4_1v import (
 
 
 class GlmGaProcessingInfo(Glm4vProcessingInfo):
-    pass
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int] | None:
+        result: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            result["image"] = self.get_max_image_tokens()
+
+        if mm_counts.get("video", 0) > 0:
+            # The video processor uses a different (larger) max_pixels than
+            # the hardcoded value in get_num_video_tokens().  Also,
+            # smart_resize can give more tokens for non-square video aspect
+            # ratios than for the square dimensions the dummy uses.  Compute
+            # a conservative upper bound using the actual video max_pixels.
+            video_processor = self.get_video_processor()
+            max_pixels = video_processor.size["longest_edge"]
+
+            vision_config = self.get_hf_config().vision_config
+            temporal_patch_size = vision_config.temporal_patch_size
+            patch_size = vision_config.patch_size
+            merge_size = vision_config.spatial_merge_size
+
+            # Upper bound on total vision tokens (grid_t * grid_h * grid_w /
+            # merge_size^2) is max_pixels / (temporal * patch_size^2 * merge^2)
+            max_vision_tokens = max_pixels // (
+                temporal_patch_size * patch_size**2 * merge_size**2
+            )
+
+            # Timestamp overhead from _construct_video_placeholder_glm46v:
+            # boi + eoi + timestamp_tokens per frame, bov + eov per video.
+            max_grid_t = _MAX_FRAMES_PER_VIDEO // temporal_patch_size
+
+            tokenizer = self.get_tokenizer()
+            max_ts_tokens = max(
+                len(tokenizer.encode(f"{t:.1f} seconds", add_special_tokens=False))
+                for t in range(min(_MAX_FRAMES_PER_VIDEO, 300))
+            )
+
+            result["video"] = max_vision_tokens + max_grid_t * (2 + max_ts_tokens) + 2
+
+        return result
 
 
 class GlmGaDummyInputsBuilder(Glm4vDummyInputsBuilder):
