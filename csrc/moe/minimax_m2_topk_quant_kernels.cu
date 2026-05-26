@@ -151,19 +151,21 @@ void minimax_m2_topk_sigmoid_quant_kernel(
       local_absmax = fmaxf(local_absmax, fabsf(v));
     }
 
-    const float absmax = warp_reduce_max(local_absmax, full_mask);
+    const float absmax = __shfl_sync(full_mask,
+                                     warp_reduce_max(local_absmax, full_mask),
+                                     0);
     const float scale = absmax / kFp8E4M3Max;
-    const float inv_scale = 1.0f / scale;
 
     if (lane_id == 0) {
       a1q_scale[token_id * a1q_scale_stride_m + group_id] = scale;
     }
 
+
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int hidden_offset = hidden_base + i;
       if (hidden_offset < hidden_size) {
-        float q = fminf(fmaxf(vals[i] * inv_scale, kFp8E4M3Min),
+        float q = fminf(fmaxf(vals[i] / scale, kFp8E4M3Min),
                         kFp8E4M3Max);
         a1q[token_id * a1q_stride_m + hidden_offset] = __nv_fp8_e4m3(q);
       }
