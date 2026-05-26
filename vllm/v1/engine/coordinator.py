@@ -11,7 +11,11 @@ import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
+from vllm.utils.network_utils import (
+    get_tcp_uri,
+    make_zmq_socket,
+    normalize_last_endpoint,
+)
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
@@ -234,9 +238,11 @@ class DPCoordinatorProc:
                 try:
                     zmq_addr_pipe.send(
                         (
-                            publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                            output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                            publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            normalize_last_endpoint(
+                                publish_front, front_publish_address
+                            ),
+                            normalize_last_endpoint(output_back, back_output_address),
+                            normalize_last_endpoint(publish_back, back_publish_address),
                         )
                     )
                 finally:
