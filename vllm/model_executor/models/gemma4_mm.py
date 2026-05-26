@@ -1174,7 +1174,11 @@ class Gemma4ForConditionalGeneration(
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            free, total = current_platform.mem_get_info()
+            if self.is_cpu():
+                free, total = 0, 0
+            else:
+                free, total = current_platform.mem_get_info()
+
             max_batch_size = min(
                 len(items),
                 self._encoder_chunk(
@@ -1281,7 +1285,12 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
-        free, total = current_platform.mem_get_info()
+
+        if self.is_cpu():
+            free, total = 0, 0
+        else:
+            free, total = current_platform.mem_get_info()
+
         max_batch_size = min(
             total_frames,
             self._encoder_chunk(
