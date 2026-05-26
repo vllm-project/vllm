@@ -9,14 +9,11 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
 from quack.compile_utils import make_fake_tensor
 
-from vllm.models.deepseek_v4.nvidia.ops.cutedsl_utils import (
+from vllm.cute_utils import (
     _bf16x2_abs,
     _bf16x2_max,
-    _bf16x2_to_fp32,
-    _fp32x2_to_bf16x2,
-    _fp32x4_to_fp8x4,
-    _fp32x8_to_fp4x8,
-    _recast_val,
+    cvt,
+    recast_val,
 )
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
@@ -225,8 +222,8 @@ class IndexerQRopeQuantKernel:
                 cute.copy(cp_u32x4, cute.recast_tensor(sin_src, Uint32), sin_bf16x2)
 
                 for i in cutlass.range_constexpr(4):
-                    cos0, cos1 = _bf16x2_to_fp32(cos_bf16x2[i])
-                    sin0, sin1 = _bf16x2_to_fp32(sin_bf16x2[i])
+                    cos0, cos1 = cvt.bf16x2_to_fp32x2(cos_bf16x2[i])
+                    sin0, sin1 = cvt.bf16x2_to_fp32x2(sin_bf16x2[i])
                     cos_vals[i * 2] = cos0
                     cos_vals[i * 2 + 1] = cos1
                     sin_vals[i * 2] = sin0
@@ -234,11 +231,11 @@ class IndexerQRopeQuantKernel:
 
             for i in cutlass.range_constexpr(self.coarsen):
                 for j in cutlass.range_constexpr(8):
-                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    q0, q1 = cvt.bf16x2_to_fp32x2(q_bf16x2[i, j])
                     rot0 = q0 * cos_vals[j] - q1 * sin_vals[j]
                     rot1 = q0 * sin_vals[j] + q1 * cos_vals[j]
                     # convert back to BF16 to match numerics
-                    q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
+                    q_bf16x2[i, j] = cvt.fp32x2_to_bf16x2(rot0, rot1)
 
         return (
             q_bf16x2,
@@ -327,7 +324,7 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
                 _bf16x2_max,
                 width=MXFP4_BLOCK_SIZE // 16,
             )
-            amax_pair = _bf16x2_to_fp32(amax_bf16x2)
+            amax_pair = cvt.bf16x2_to_fp32x2(amax_bf16x2)
             amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
 
             if in_bounds:
@@ -336,7 +333,7 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
                 # increments the exponent whenever fp4_scale is not exactly a power of 2
                 eps = cutlass.const_expr(float.fromhex("0x6p-126"))
                 fp4_scale = cute_utils.fmax(amax, eps) * Float32(1.0 / 6.0)
-                bits = _recast_val(fp4_scale, Uint32)
+                bits = recast_val(fp4_scale, Uint32)
                 ue8m0 = cute_utils.shr_u32(
                     bits + Uint32(0x7FFFFF), Uint32(23)
                 ) & Uint32(0xFF)
@@ -349,18 +346,18 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
                 # If scale = 2^A and ue8m0 = A + 127, then inverse scale has exponent
                 # -A + 127 = 254 - ue8m0.
                 inv_scale_bits = (Uint32(254) - ue8m0) << Uint32(23)
-                inv_fp4_scale = _recast_val(inv_scale_bits, Float32)
+                inv_fp4_scale = recast_val(inv_scale_bits, Float32)
 
                 vals = cute.make_rmem_tensor(16, Float32)
                 for j in cutlass.range_constexpr(8):
-                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    q0, q1 = cvt.bf16x2_to_fp32x2(q_bf16x2[i, j])
                     vals[j * 2] = q0 * inv_fp4_scale
                     vals[j * 2 + 1] = q1 * inv_fp4_scale
 
                 # pack to FP4
                 packed = cute.make_rmem_tensor((2,), Uint32)
-                packed[0] = _fp32x8_to_fp4x8(vals, 0)
-                packed[1] = _fp32x8_to_fp4x8(vals, 8)
+                packed[0] = cvt.fp32x8_to_fp4x8(vals, 0)
+                packed[1] = cvt.fp32x8_to_fp4x8(vals, 8)
 
                 dst = q_fp4_tile[i, None]
                 cp_u32x2 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=64)
@@ -519,24 +516,24 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
                 _bf16x2_max,
                 width=self.subwarp_size,
             )
-            amax_pair = _bf16x2_to_fp32(amax_bf16x2)
+            amax_pair = cvt.bf16x2_to_fp32x2(amax_bf16x2)
             amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
 
             # scale = max(amax, eps) / fp8_max, then rounded UP to the next
             # power of two. Adding the mantissa mask before shifting out the
             # mantissa bumps the exponent whenever s isn't a pure pow2.
             fp32_scale = cute_utils.fmax(amax, Float32(1e-4)) * Float32(1.0 / 448.0)
-            bits = _recast_val(fp32_scale, Uint32)
+            bits = recast_val(fp32_scale, Uint32)
             scale_exp = cute_utils.shr_u32(
                 bits + Uint32(0x7FFFFF), Uint32(23)
             ) & Uint32(0xFF)
 
             # rounded scale = 2^(scale_exp - 127); bit pattern is scale_exp << 23
             fp8_scale_bits = scale_exp << Uint32(23)
-            fp8_scale = _recast_val(fp8_scale_bits, Float32)
+            fp8_scale = recast_val(fp8_scale_bits, Float32)
             # inverse = 2^-(scale_exp - 127); bit pattern is (254 - scale_exp) << 23
             inv_scale_bits = (Uint32(254) - scale_exp) << Uint32(23)
-            inv_fp8_scale = _recast_val(inv_scale_bits, Float32)
+            inv_fp8_scale = recast_val(inv_scale_bits, Float32)
 
             # Weight fold: weights_out = weights * q_scale * scale_combined.
             # All threads in the subwarp share the same fp8_scale after the
@@ -553,9 +550,9 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
                 # (one cp.async-shaped 128-bit store per row).
                 packed = cute.make_rmem_tensor((4,), Uint32)
                 for j in cutlass.range_constexpr(4):
-                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j * 2])
-                    q2, q3 = _bf16x2_to_fp32(q_bf16x2[i, j * 2 + 1])
-                    packed[j] = _fp32x4_to_fp8x4(
+                    q0, q1 = cvt.bf16x2_to_fp32x2(q_bf16x2[i, j * 2])
+                    q2, q3 = cvt.bf16x2_to_fp32x2(q_bf16x2[i, j * 2 + 1])
+                    packed[j] = cvt.fp32x4_to_fp8x4(
                         q0 * inv_fp8_scale,
                         q1 * inv_fp8_scale,
                         q2 * inv_fp8_scale,
