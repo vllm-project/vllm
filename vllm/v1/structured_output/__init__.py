@@ -191,9 +191,6 @@ class StructuredOutputManager:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
-                # Note that for thinking support, we will need to
-                # reset the relevant part of the bitmask for consequent
-                # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
     def _async_submit_fill_bitmask(
@@ -275,17 +272,44 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
+                # Per-token reasoning-end detection: when apply_bitmask is
+                # False because reasoning is active, we need to watch for the
+                # end-of-reasoning token within the draft batch. When found,
+                # flip apply_bitmask so subsequent positions (including the
+                # bonus token) get the constrained bitmask.
+                reasoner = (
+                    self._get_reasoner(request)
+                    if not apply_bitmask and not self.enable_in_reasoning
+                    else None
+                )
+                reasoning_ended_in_batch = False
+
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for token in itertools.chain(req_tokens, (-1,)):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
-                        # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
                     if apply_bitmask and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if not reasoning_ended_in_batch:
+                            accepted = grammar.accept_tokens(req_id, [token])
+                            assert accepted, (
+                                token,
+                                req_id,
+                                scheduled_spec_decode_tokens,
+                            )
+                            state_advancements += 1
+                    elif (
+                        token != -1
+                        and reasoner is not None
+                        and reasoner.is_reasoning_end_streaming(
+                            request.all_token_ids, [token]
+                        )
+                    ):
+                        apply_bitmask = True
+                        reasoning_ended_in_batch = True
+                        reasoner = None
+                        structured_output_request.bonus_requires_grammar = True
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)

@@ -27,6 +27,11 @@ class StructuredOutputRequest:
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
+    # When reasoning ends mid-draft-batch during speculative decoding, the bonus
+    # token is constrained by the grammar bitmask but should_advance() returns
+    # False in the same step (because reasoning just ended). This flag tells
+    # update_from_output() to advance the grammar with the bonus token anyway.
+    bonus_requires_grammar: bool = False
 
     @staticmethod
     def from_sampling_params(

@@ -1429,6 +1429,21 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
                     stopped = True
+            elif (
+                request.structured_output_request is not None
+                and request.structured_output_request.bonus_requires_grammar
+                and generated_token_ids
+            ):
+                struct_req = request.structured_output_request
+                assert struct_req.grammar is not None
+                struct_req.grammar.suppress_accept_errors = True
+                accepted = struct_req.grammar.accept_tokens(
+                    req_id, [generated_token_ids[-1]]
+                )
+                struct_req.grammar.suppress_accept_errors = False
+                struct_req.bonus_requires_grammar = False
+                if accepted:
+                    struct_req.reasoning_ended = True
 
             routed_experts = None
             if (

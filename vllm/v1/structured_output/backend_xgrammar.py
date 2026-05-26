@@ -144,6 +144,13 @@ class XgrammarGrammar(StructuredOutputGrammar):
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
+    # When True, accept_tokens() will not log errors on rejection.
+    # Used to suppress expected failures e.g. when a bonus token generated
+    # without grammar constraint is force-fed in the bonus_requires_grammar
+    # path after the spec-dec <channel|> draft token was rejected.
+    suppress_accept_errors: bool = field(
+        default=False, repr=False, hash=False, init=False
+    )
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -155,12 +162,13 @@ class XgrammarGrammar(StructuredOutputGrammar):
             return False
         for token in tokens:
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
-                    token,
-                )
+                if not self.suppress_accept_errors:
+                    logger.error(
+                        "Failed to advance FSM for request %s "
+                        "for tokens %s. Please file an issue.",
+                        request_id,
+                        token,
+                    )
                 return False
             self.num_processed_tokens += 1
         self._is_terminated = self.matcher.is_terminated()
