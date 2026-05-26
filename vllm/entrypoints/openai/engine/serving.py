@@ -1,25 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
-import numpy as np
 from fastapi import Request
 from openai.types.responses import ToolChoiceFunction
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -39,11 +37,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -51,12 +44,16 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -71,7 +68,6 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import collect_from_async_generator
 from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
@@ -118,6 +114,7 @@ AnyResponse: TypeAlias = (
 )
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
+_T = TypeVar("_T")
 
 
 @dataclass(kw_only=True)
@@ -132,7 +129,7 @@ class ServeContext(Generic[RequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing:
+class OpenAIServing(BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -156,6 +153,9 @@ class OpenAIServing:
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.has_kv_connector = kv_transfer_config is not None
 
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
@@ -169,205 +169,6 @@ class OpenAIServing:
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
-
-    async def beam_search(
-        self,
-        prompt: EngineInput,
-        request_id: str,
-        params: BeamSearchParams,
-        lora_request: LoRARequest | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
-        ignore_eos = params.ignore_eos
-        temperature = params.temperature
-        length_penalty = params.length_penalty
-        include_stop_str_in_output = params.include_stop_str_in_output
-
-        tokenizer = self.renderer.get_tokenizer()
-        eos_token_id = tokenizer.eos_token_id
-        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
-
-        if prompt["type"] == "embeds":
-            raise NotImplementedError("Embedding prompt not supported for beam search")
-
-        # Extract prompt tokens and text based on model type
-        decoder_prompt = (
-            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
-        )
-        prompt_text = decoder_prompt.get("prompt")
-        prompt_token_ids = decoder_prompt["prompt_token_ids"]
-
-        tokenized_length = len(prompt_token_ids)
-
-        logprobs_num = 2 * beam_width
-        sampling_params = SamplingParams(
-            logprobs=logprobs_num,
-            max_tokens=1,
-            temperature=temperature,
-        )
-        all_beams = [
-            BeamSearchSequence(
-                orig_prompt=prompt,
-                tokens=prompt_token_ids,
-                cum_logprob=0,
-                logprobs=[],
-                lora_request=lora_request,
-            )
-        ]
-        completed = []
-
-        for _ in range(max_tokens):
-            tasks = []
-            request_id_batch = f"{request_id}-{random_uuid()}"
-
-            for i, beam in enumerate(all_beams):
-                prompt_item = beam.get_prompt()
-                lora_request_item = beam.lora_request
-                request_id_item = f"{request_id_batch}-beam-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.engine_client.generate(
-                            prompt_item,
-                            sampling_params,
-                            request_id_item,
-                            lora_request=lora_request_item,
-                            trace_headers=trace_headers,
-                        )
-                    )
-                )
-                tasks.append(task)
-
-            output = [x[0] for x in await asyncio.gather(*tasks)]
-
-            new_beams = []
-            # Store all new tokens generated by beam
-            all_beams_token_id = []
-            # Store the cumulative probability of all tokens
-            # generated by beam search
-            all_beams_logprob = []
-            # Iterate through all beam inference results
-            for i, result in enumerate(output):
-                current_beam = all_beams[i]
-
-                # check for error finish reason and abort beam search
-                if result.outputs[0].finish_reason == "error":
-                    # yield error output and terminate beam search
-                    yield RequestOutput(
-                        request_id=request_id,
-                        prompt=prompt_text,
-                        outputs=[
-                            CompletionOutput(
-                                index=0,
-                                text="",
-                                token_ids=[],
-                                cumulative_logprob=None,
-                                logprobs=None,
-                                finish_reason="error",
-                            )
-                        ],
-                        finished=True,
-                        prompt_token_ids=prompt_token_ids,
-                        prompt_logprobs=None,
-                    )
-                    return
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    all_beams_token_id.extend(list(logprobs.keys()))
-                    all_beams_logprob.extend(
-                        [
-                            current_beam.cum_logprob + obj.logprob
-                            for obj in logprobs.values()
-                        ]
-                    )
-
-            # Handle the token for the end of sentence (EOS)
-            all_beams_token_id = np.array(all_beams_token_id)
-            all_beams_logprob = np.array(all_beams_logprob)
-
-            if not ignore_eos:
-                # Get the index position of eos token in all generated results
-                eos_idx = np.where(all_beams_token_id == eos_token_id)[0]
-                for idx in eos_idx:
-                    current_beam = all_beams[idx // logprobs_num]
-                    result = output[idx // logprobs_num]
-                    assert result.outputs[0].logprobs is not None
-                    logprobs_entry = result.outputs[0].logprobs[0]
-                    completed.append(
-                        BeamSearchSequence(
-                            orig_prompt=prompt,
-                            tokens=current_beam.tokens + [eos_token_id]
-                            if include_stop_str_in_output
-                            else current_beam.tokens,
-                            logprobs=current_beam.logprobs + [logprobs_entry],
-                            cum_logprob=float(all_beams_logprob[idx]),
-                            finish_reason="stop",
-                            stop_reason=eos_token_id,
-                        )
-                    )
-                # After processing, set the log probability of the eos condition
-                # to negative infinity.
-                all_beams_logprob[eos_idx] = -np.inf
-
-            # Processing non-EOS tokens
-            # Get indices of the top beam_width probabilities
-            topn_idx = np.argpartition(np.negative(all_beams_logprob), beam_width)[
-                :beam_width
-            ]
-
-            for idx in topn_idx:
-                current_beam = all_beams[idx // logprobs_num]
-                result = output[idx // logprobs_num]
-                token_id = int(all_beams_token_id[idx])
-                assert result.outputs[0].logprobs is not None
-                logprobs_entry = result.outputs[0].logprobs[0]
-                new_beams.append(
-                    BeamSearchSequence(
-                        orig_prompt=prompt,
-                        tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs + [logprobs_entry],
-                        lora_request=current_beam.lora_request,
-                        cum_logprob=float(all_beams_logprob[idx]),
-                    )
-                )
-
-            all_beams = new_beams
-
-        completed.extend(all_beams)
-        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
-        best_beams = sorted_completed[:beam_width]
-
-        for beam in best_beams:
-            if beam.tokens[-1] == eos_token_id and not ignore_eos:
-                # Skip the eos token in the text.
-                tokens = beam.tokens[tokenized_length:-1]
-            else:
-                tokens = beam.tokens[tokenized_length:]
-            beam.text = tokenizer.decode(tokens)
-
-        yield RequestOutput(
-            request_id=request_id,
-            prompt=prompt_text,
-            outputs=[
-                CompletionOutput(
-                    text=beam.text,  # type: ignore
-                    cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens[tokenized_length:],
-                    index=i,
-                    logprobs=beam.logprobs,
-                    finish_reason=beam.finish_reason
-                    if beam.finish_reason is not None
-                    else "length",
-                    stop_reason=beam.stop_reason,
-                )
-                for (i, beam) in enumerate(best_beams)
-            ],
-            finished=True,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,
-        )
 
     @staticmethod
     def create_error_response(
@@ -616,6 +417,40 @@ class OpenAIServing:
         except ValueError:
             return None
 
+    async def _with_kv_transfer_rejection_cleanup(
+        self,
+        awaitable: Awaitable[_T],
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> _T:
+        """Wrap a `create_*` coroutine so that, if it raises or returns an
+        ErrorResponse (i.e. the request never reached the engine), the KV
+        connector is notified to free any pinned remote-prefill blocks."""
+        kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
+        if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+            return await awaitable
+
+        notify = True
+        try:
+            result = await awaitable
+            if not isinstance(result, ErrorResponse):
+                notify = False
+            return result
+        finally:
+            if notify:
+                try:
+                    await self.engine_client.notify_kv_transfer_request_rejected(
+                        request.request_id,
+                        kv_transfer_params,
+                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to notify KV connector about rejected request %s",
+                        request.request_id,
+                        exc_info=True,
+                    )
+
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,
@@ -638,8 +473,9 @@ class OpenAIServing:
             and request.tool_choice
             and isinstance(request.tool_choice, ToolChoiceFunction)
         ):
-            assert content is not None
             # Forced Function Call (Responses API)
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
@@ -651,7 +487,8 @@ class OpenAIServing:
             and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
         ):
             # Named function with standard JSON-based parsing
-            assert content is not None
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
@@ -754,6 +591,8 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
+            return True
+        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
             return True
         return self.models.is_base_model(model_name)
 

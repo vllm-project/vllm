@@ -38,7 +38,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    extract_types_from_schema,
+    find_tool_properties,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -123,27 +127,13 @@ class Glm4MoeModelToolParser(ToolParser):
             return ""
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
-    @staticmethod
-    def _is_string_type(
-        tool_name: str,
-        arg_name: str,
-        tools: list[Tool] | None,
-    ) -> bool:
-        if tools is None:
+    def _is_string_type(self, tool_name: str, arg_name: str) -> bool:
+        tool_properties = find_tool_properties(self.tools, tool_name)
+        param_schema = tool_properties.get(arg_name)
+        if param_schema is None:
             return False
-        for tool in tools:
-            if tool.function.name != tool_name:
-                continue
-            if tool.function.parameters is None:
-                return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
-            return arg_type == "string"
-        logger.debug("No tool named '%s'.", tool_name)
-        return False
+        param_types = extract_types_from_schema(param_schema)
+        return set(param_types) - {"null"} == {"string"}
 
     @staticmethod
     def _tools_enabled(request: ChatCompletionRequest) -> bool:
@@ -210,9 +200,10 @@ class Glm4MoeModelToolParser(ToolParser):
                 arg_dct: dict[str, Any] = {}
                 for key, value in pairs:
                     arg_key = key.strip()
-                    arg_val = value.strip()
-                    if not self._is_string_type(tc_name, arg_key, self.tools):
-                        arg_val = self._deserialize(arg_val)
+                    if self._is_string_type(tc_name, arg_key):
+                        arg_val = value
+                    else:
+                        arg_val = self._deserialize(value.strip())
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
                 tool_calls.append(
@@ -351,7 +342,7 @@ class Glm4MoeModelToolParser(ToolParser):
         for key, value in pairs:
             key = key.strip()
             key_json = json.dumps(key, ensure_ascii=False)
-            if self._is_string_type(tool_name, key, self.tools):
+            if self._is_string_type(tool_name, key):
                 # Don't strip string values — whitespace is significant
                 # and must match the partial-value path for diffing.
                 val_json = json.dumps(value, ensure_ascii=False)
@@ -391,7 +382,7 @@ class Glm4MoeModelToolParser(ToolParser):
                     # Tool call finished but </arg_value> is missing
                     # (malformed output). Treat partial as complete value
                     # so the diff naturally closes any open quotes.
-                    if self._is_string_type(tool_name, partial_key, self.tools):
+                    if self._is_string_type(tool_name, partial_key):
                         val_json = json.dumps(partial_content, ensure_ascii=False)
                     else:
                         val_json = json.dumps(
@@ -399,7 +390,7 @@ class Glm4MoeModelToolParser(ToolParser):
                             ensure_ascii=False,
                         )
                     parts.append(f"{key_json}: {val_json}")
-                elif self._is_string_type(tool_name, partial_key, self.tools):
+                elif self._is_string_type(tool_name, partial_key):
                     escaped = self._json_escape_string_content(partial_content)
                     # Open quote but no close — more content may arrive
                     parts.append(f'{key_json}: "{escaped}')

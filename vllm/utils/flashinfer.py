@@ -20,6 +20,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -134,6 +135,9 @@ flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
+flashinfer_b12x_fused_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "b12x_fused_moe"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -143,7 +147,6 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
-_is_fi_autotuning: bool = False
 
 
 @functools.cache
@@ -265,6 +268,39 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_b12x_gemm() -> bool:
+    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    if mod is None:
+        return False
+    # FlashInfer 0.6.11 renamed Sm120BlockScaledDenseGemmKernel ->
+    # Sm120B12xBlockScaledDenseGemmKernel (commit 223f2a49). Accept either.
+    return hasattr(mod, "Sm120B12xBlockScaledDenseGemmKernel") or hasattr(
+        mod, "Sm120BlockScaledDenseGemmKernel"
+    )
+
+
+@functools.cache
+def has_flashinfer_b12x_moe() -> bool:
+    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+
+    required_functions = [
+        ("flashinfer.fused_moe", "b12x_fused_moe"),
+        ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
@@ -480,6 +516,8 @@ if has_flashinfer():
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        block_size: int = 16,
+        use_nvfp4: bool = True,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
@@ -490,8 +528,9 @@ if has_flashinfer():
             B_scale,
             g_scale,
             dtype,
-            block_size=16,
+            block_size=block_size,
             use_8x4_sf_layout=use_8x4_sf_layout,
+            use_nvfp4=use_nvfp4,
             backend=backend,
         )
 
@@ -507,8 +546,35 @@ if has_flashinfer():
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        block_size: int = 16,
+        use_nvfp4: bool = True,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+
+    @torch.library.custom_op(
+        "vllm::flashinfer_mxfp4_quantize",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp4_quantize(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import mxfp4_quantize as _mxfp4_quantize
+
+        return _mxfp4_quantize(a)
+
+    @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
+    def flashinfer_mxfp4_quantize_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        sf_vec_size = 32
+        padded_m = cdiv(m, 128) * 128
+        sf_cols = cdiv(k // sf_vec_size, 4) * 4
+        return (
+            torch.empty(m, k // 2, dtype=torch.uint8, device=a.device),
+            torch.empty(padded_m, sf_cols, dtype=torch.uint8, device=a.device),
+        )
 
     @torch.library.custom_op(
         "vllm::bmm_fp8",
@@ -658,14 +724,19 @@ def flashinfer_scaled_fp4_mm(
     b: torch.Tensor,
     block_scale_a: torch.Tensor,
     block_scale_b: torch.Tensor,
-    alpha: torch.Tensor,
+    alpha: torch.Tensor | None,
     out_dtype: torch.dtype,
     backend: str,
+    block_size: int = 16,
+    use_nvfp4: bool = True,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
+
+    if alpha is None:
+        alpha = torch.ones(1, dtype=torch.float32, device=a.device)
 
     if backend in ("cutlass", "cudnn"):
         block_scale_a = block_scale_a.view(torch.uint8)
@@ -682,7 +753,50 @@ def flashinfer_scaled_fp4_mm(
         out_dtype,
         use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
+        block_size=block_size,
+        use_nvfp4=use_nvfp4,
     )
+
+
+def flashinfer_scaled_fp4_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None,
+    use_8x4_sf_layout: bool,
+    backend: str,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
+    assert a.stride(-1) == 1
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert out.device.type == "cuda"
+
+    if backend in ("cutlass", "cudnn"):
+        if block_scale_a.dtype != torch.uint8:
+            block_scale_a = block_scale_a.view(torch.uint8)
+        if block_scale_b.dtype != torch.uint8:
+            block_scale_b = block_scale_b.view(torch.uint8)
+
+    from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+    flashinfer_mm_fp4_(
+        a,
+        b,
+        block_scale_a,
+        block_scale_b,
+        alpha,
+        out_dtype or out.dtype,
+        out=out,
+        block_size=16,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
+    )
+    return out
 
 
 def flashinfer_scaled_fp8_mm(
@@ -713,6 +827,38 @@ def flashinfer_scaled_fp8_mm(
     if bias is not None:
         output = output + bias
     return output
+
+
+def flashinfer_scaled_fp8_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert scale_a.numel() == 1 and scale_b.numel() == 1
+    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
+    assert out.device.type == "cuda"
+    assert a.is_contiguous()
+
+    from flashinfer import bmm_fp8 as bmm_fp8_
+
+    bmm_fp8_(
+        a.unsqueeze(0),
+        # FlashInfer expects the weight in the same column-major view layout
+        # consumed by flashinfer_scaled_fp8_mm, so keep the transposed view.
+        b.unsqueeze(0),
+        scale_a,
+        scale_b,
+        out_dtype or out.dtype,
+        out.unsqueeze(0),
+        "auto",
+    )
+    return out
 
 
 def flashinfer_quant_nvfp4_8x4_sf_layout(
@@ -816,6 +962,7 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -826,13 +973,18 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_b12x_moe",
+    "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
+    "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
