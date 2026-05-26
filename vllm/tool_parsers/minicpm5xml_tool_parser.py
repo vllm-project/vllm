@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -87,7 +88,9 @@ def _streaming_args_snapshot(args_json: str, *, is_complete: bool) -> str:
     return args_json[:-1]
 
 
-def _streaming_args_diff(prev_args: str, args_json: str, *, is_complete: bool) -> str | None:
+def _streaming_args_diff(
+    prev_args: str, args_json: str, *, is_complete: bool
+) -> str | None:
     """Compute the next arguments fragment for OpenAI-style streaming accumulation."""
     if prev_args == "{}":
         prev_args = ""
@@ -163,7 +166,11 @@ def _add_argument(
     # MiniCPM5 can emit OpenAI-style wrappers, e.g.
     # <param name="properties">{'id': '...'}</param>. Keep known fields and
     # ignore extra fields so valid tool calls do not fall back to long text.
-    if key in {"properties", "arguments"} and allowed_props and key not in allowed_props:
+    if (
+        key in {"properties", "arguments"}
+        and allowed_props
+        and key not in allowed_props
+    ):
         parsed_val, parsed_ok = _parse_arguments(val_text)
         if not parsed_ok or not isinstance(parsed_val, dict):
             return False
@@ -239,7 +246,10 @@ def _normalize_alias_tool_call(
         if line_id is not None:
             return "toggle_roaming", {"line_id": line_id, "enabled": False}
 
-    if func_name in {"add_refueled_data", "add_data_to_line"} and "refuel_data" in tool_names:
+    if (
+        func_name in {"add_refueled_data", "add_data_to_line"}
+        and "refuel_data" in tool_names
+    ):
         line_id = arguments.get("line_id") or arguments.get("id")
         amount = (
             arguments.get("amount_gb")
@@ -292,7 +302,12 @@ def _build_tool_maps(
             )
             name_to_required[name] = set()
 
-    return set(name_to_tool.keys()), name_to_allowed_props, name_to_required, name_to_tool
+    return (
+        set(name_to_tool.keys()),
+        name_to_allowed_props,
+        name_to_required,
+        name_to_tool,
+    )
 
 
 def _parse_function_block(
@@ -463,8 +478,9 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.streamed_args_for_tool = []
 
     def adjust_request(
-        self, request: ChatCompletionRequest
-    ) -> ChatCompletionRequest:
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Tool XML tags are special tokens in MiniCPM5; must not strip them
             # before tool parsing (see internlm2/mistral vLLM tool parsers).
@@ -778,7 +794,9 @@ class MiniCPM5XMLToolParser(ToolParser):
                 func_idx = partial_block.find(self.tool_call_start_token)
                 if func_idx == -1:
                     self._processed_len = len(current_text)
-                    return DeltaMessage(content=partial_block) if partial_block else None
+                    if partial_block:
+                        return DeltaMessage(content=partial_block)
+                    return None
                 partial_block = partial_block[func_idx:]
 
             return self._process_partial_block_streaming(partial_block, request)

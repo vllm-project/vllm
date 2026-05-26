@@ -357,11 +357,6 @@ def test_extract_tool_calls_streaming_incremental_arguments(
         '<param name="unit">fahrenheit</param>'
         "</function>"
     )
-    chunks = [
-        text[:37],
-        text[:70],
-        text,
-    ]
     prev = ""
     arguments = ""
     for chunk in [text[:37], text[37:70], text[70:]]:
