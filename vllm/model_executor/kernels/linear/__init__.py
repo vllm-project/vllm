@@ -341,8 +341,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         ExllamaLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        # RDNA3 (gfx1100) HIP kernel — supports both fp16 and bf16. Falls
-        # through on non-RDNA3 ROCm GPUs (CDNA / MI300) via can_implement().
         RDNA3W4A16LinearKernel,
         TritonW4A16LinearKernel,
         ConchLinearKernel,

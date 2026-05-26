@@ -190,9 +190,6 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
-# RDNA3 only (gfx11xx). Distinct from the broader _ON_GFX1X — used by the
-# RDNA3 W4A16 GPTQ kernel to gate against gfx12 (RDNA4) which has different
-# WMMA semantics.
 _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
@@ -280,7 +277,6 @@ def on_gfx1x() -> bool:
 
 
 def on_gfx11() -> bool:
-    """RDNA3 / RDNA3.5 (gfx11xx). Distinct from gfx12 (RDNA4)."""
     return _ON_GFX11
 
 
