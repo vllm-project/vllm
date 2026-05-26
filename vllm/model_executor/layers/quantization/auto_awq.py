@@ -348,11 +348,7 @@ class AutoAWQConfig(QuantizationConfig):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        if self.modules_to_not_convert:
-            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
-                self.modules_to_not_convert
-            )
+    
 
     @staticmethod
     def is_awq_marlin_compatible(quant_config: dict[str, Any]) -> bool:
@@ -384,6 +380,11 @@ class AutoAWQConfig(QuantizationConfig):
         return check_marlin_supported(
             scalar_types.uint4, group_size, has_zp
         )
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
 
     def maybe_update_config(
         self,
