@@ -49,6 +49,22 @@ if current_platform.is_cuda_alike():
         )
 
 
+def _get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+    if eep_stage:
+        from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
+
+        ep_group = get_standby_ep_group()
+        assert ep_group is not None
+        device_communicator = ep_group.device_communicator
+    else:
+        device_communicator = get_ep_group().device_communicator
+
+    assert device_communicator is not None
+    all2all_manager = device_communicator.all2all_manager
+    assert all2all_manager is not None
+    return all2all_manager
+
+
 def maybe_roundup_layer_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
@@ -92,6 +108,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
+    eep_stage: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
@@ -117,21 +134,16 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            device_communicator = get_ep_group().device_communicator
-            assert device_communicator is not None
-            assert device_communicator.all2all_manager is not None
+            all2all_manager = _get_ep_all2all_manager(eep_stage)
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-                num_dispatchers=(device_communicator.all2all_manager.world_size),
+                num_dispatchers=all2all_manager.world_size,
                 use_monolithic=use_monolithic,
             )
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    device_communicator = get_ep_group().device_communicator
-    assert device_communicator is not None
-    all2all_manager = device_communicator.all2all_manager
-    assert all2all_manager is not None
+    all2all_manager = _get_ep_all2all_manager(eep_stage)
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
@@ -283,6 +295,7 @@ def maybe_make_prepare_finalize(
             num_ep_ranks=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
+            stage=eep_stage,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 

@@ -15,7 +15,7 @@ Many embedding models support both (sequence) embedding and token embedding. For
 
 !!! note
 
-    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
+    Pooling multitask support has been removed since v0.21. When the default pooling task (embed) is not 
     what you want, you need to manually specify it via `PoolerConfig(task="token_embed")` offline or
     `--pooler-config.task token_embed` online.
 
@@ -129,7 +129,7 @@ print(f"Score: {score}")
 
 ## Online Serving
 
-Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
+Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
 ## More examples
 
