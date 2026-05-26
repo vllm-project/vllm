@@ -244,18 +244,19 @@ class MistralTokenizer(TokenizerLike):
         if not (self.is_tekken or self.is_spm):
             raise TypeError(f"Unsupported tokenizer: {type(self.tokenizer)}")
 
-        # Reverse order to ensure that the lowest token id is kept.
-        self._vocab_dict = {
-            self.convert_ids_to_tokens([i], skip_special_tokens=False)[0]: i
-            for i in range(self.vocab_size - 1, -1, -1)
-        }
-        # Sort the dict for convenience
-        self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
-
-        # Vocab sorted by token id.
+        # Vocab sorted by token id: _vocab[i] == tokenizer.id_to_piece(i) for all i.
+        # Both Tekkenizer and SentencePieceTokenizer build their internal _vocab list
+        # via [id_to_piece(i) for i in range(vocab_size)], so indexing is equivalent
+        # to calling id_to_piece — but without the per-call Python dispatch overhead.
         self._vocab = self.tokenizer.vocab()
         self._max_token_id = self.vocab_size - 1
         self._max_chars_per_token = max(len(tok) for tok in self._vocab)
+
+        # Build reverse mapping (piece -> lowest token id) in a single O(n) pass.
+        # Reverse iteration ensures the lowest token id wins when multiple ids share
+        # the same piece string (e.g. byte-fallback tokens that collapse to "<?>").
+        self._vocab_dict = {tok: i for i, tok in reversed(list(enumerate(self._vocab)))}
+        self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
 
         # Cache special tokens for faster access.
         self._special_token_ids = self._get_special_token_ids()
