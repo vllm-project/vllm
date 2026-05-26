@@ -752,7 +752,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention_core",
+        "vllm::qwen_gdn_attention_core",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
@@ -1012,6 +1012,14 @@ class CompilationConfig:
             raise ValueError(
                 "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (None = auto-infer)"
+            )
+
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
             )
 
         if self.backend == "":

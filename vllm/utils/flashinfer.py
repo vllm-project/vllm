@@ -135,6 +135,9 @@ flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
+flashinfer_b12x_fused_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "b12x_fused_moe"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -144,7 +147,6 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
-_is_fi_autotuning: bool = False
 
 
 @functools.cache
@@ -266,6 +268,39 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_b12x_gemm() -> bool:
+    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    if mod is None:
+        return False
+    # FlashInfer 0.6.11 renamed Sm120BlockScaledDenseGemmKernel ->
+    # Sm120B12xBlockScaledDenseGemmKernel (commit 223f2a49). Accept either.
+    return hasattr(mod, "Sm120B12xBlockScaledDenseGemmKernel") or hasattr(
+        mod, "Sm120BlockScaledDenseGemmKernel"
+    )
+
+
+@functools.cache
+def has_flashinfer_b12x_moe() -> bool:
+    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+
+    required_functions = [
+        ("flashinfer.fused_moe", "b12x_fused_moe"),
+        ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
@@ -927,6 +962,7 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -937,6 +973,8 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_b12x_moe",
+    "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
