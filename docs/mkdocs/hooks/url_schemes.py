@@ -35,7 +35,7 @@ gh_icon = ":octicons-mark-github-16:"
 
 # Regex pieces
 TITLE = r"(?P<title>[^\[\]<>]+?)"
-REPO = r"(?P<repo>[^/\s\]\)<>]+/[^/\s\]\)<>]+)"
+REPO = r"(?P<repo>.+?/.+?)"
 TYPE = r"(?P<type>issues|pull|projects)"
 NUMBER = r"(?P<number>\d+)"
 PATH = r"(?P<path>[^\s]+?)"
