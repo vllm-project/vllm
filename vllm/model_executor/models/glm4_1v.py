@@ -123,15 +123,6 @@ logger = init_logger(__name__)
 _MAX_FRAMES_PER_VIDEO = 600
 
 
-def _is_glmga_model(processor: object) -> bool:
-    """Detect GLMGA variant via its Glmga sub-processors."""
-    for attr in ("image_processor", "video_processor"):
-        sub = getattr(processor, attr, None)
-        if sub and "Glmga" in type(sub).__name__:
-            return True
-    return False
-
-
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
     return VideoMetadata(
         **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
@@ -1200,48 +1191,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             placeholder.extend([hf_processor.video_token_id] * num_tokens_per_frame)
             placeholder.append(eoi_token_id)
             placeholder.extend(frame_idx)
-        placeholder.append(eov_token_id)
-
-        return placeholder
-
-    def _construct_video_placeholder_glm46v(
-        self,
-        metadata: VideoMetadata,
-        grid_thw: torch.Tensor,
-    ) -> list[int]:
-        hf_processor = self.get_hf_processor()
-        tokenizer = self.get_tokenizer()
-        image_processor = hf_processor.image_processor
-
-        hf_config = self.get_hf_config()
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
-        merge_length = image_processor.merge_size**2
-
-        assert isinstance(grid_thw, torch.Tensor)
-        T, H, W = grid_thw
-        num_frames = int(T)
-        num_tokens_per_frame = int(H * W) // merge_length
-
-        timestamps = metadata.timestamps[::2]
-        selected_timestamps = list(timestamps[:num_frames])
-        while len(selected_timestamps) < num_frames:
-            selected_timestamps.append(
-                selected_timestamps[-1] if selected_timestamps else 0
-            )
-
-        placeholder = [bov_token_id]
-        for timestamp_sec in selected_timestamps:
-            timestamp_token_ids = tokenizer.encode(
-                f"{timestamp_sec:.1f} seconds",
-                add_special_tokens=False,
-            )
-            placeholder.append(boi_token_id)
-            placeholder.extend([hf_processor.image_token_id] * num_tokens_per_frame)
-            placeholder.append(eoi_token_id)
-            placeholder.extend(timestamp_token_ids)
         placeholder.append(eov_token_id)
 
         return placeholder
