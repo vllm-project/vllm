@@ -387,7 +387,7 @@ class Platform:
 
         Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
         Subclasses should override with platform-specific discovery
-        (e.g. nvidia-smi for CUDA, amd-smi for ROCm).
+        (e.g. pynvml for CUDA).
         """
         raise NotImplementedError(
             "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "

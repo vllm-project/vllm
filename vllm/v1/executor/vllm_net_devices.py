@@ -12,7 +12,6 @@ Requires two env vars set together:
   each optionally suffixed (e.g. ``UCX_NET_DEVICES:1,NCCL_IB_HCA:1``).
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -21,9 +20,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-# Parent executor stores this JSON before spawning workers so each worker avoids nvidia-smi.
-_VLLM_INTERNAL_GPU_PCI_ENV = "VLLM_INTERNAL_GPU_PCI_BY_INDEX_JSON"
 
 
 def normalize_pci(addr: str) -> tuple[int, int, int, int]:
@@ -87,46 +83,6 @@ def parse_gpu_nic_mapping(
     return out
 
 
-def query_all_gpu_pci_bus_ids() -> dict[int, str]:
-    """Device index -> PCI bus ID string via platform-specific discovery.
-
-    Delegates to ``current_platform.get_all_gpu_pci_bus_ids()``.
-    Raises ``NotImplementedError`` on platforms that have not implemented
-    GPU PCI bus ID discovery.
-    """
-    return current_platform.get_all_gpu_pci_bus_ids()
-
-
-def _pci_by_index_from_env_or_query() -> dict[int, str]:
-    raw = os.environ.get(_VLLM_INTERNAL_GPU_PCI_ENV, "").strip()
-    if raw:
-        data = json.loads(raw)
-        return {int(k): str(v) for k, v in data.items()}
-    return query_all_gpu_pci_bus_ids()
-
-
-def prefetch_gpu_pci_map_when_pcie_mapping_enabled() -> None:
-    """Parent-only: one ``nvidia-smi`` when ``VLLM_GPU_NIC_PCIE_MAPPING`` is set.
-
-    Fills ``VLLM_INTERNAL_GPU_PCI_BY_INDEX_JSON`` so workers avoid per-process
-    ``nvidia-smi``. **No-op** if mapping env unset or JSON already present (idempotent).
-    """
-    if not os.environ.get("VLLM_GPU_NIC_PCIE_MAPPING", "").strip():
-        return
-    if os.environ.get(_VLLM_INTERNAL_GPU_PCI_ENV, "").strip():
-        return
-    try:
-        pci_map = query_all_gpu_pci_bus_ids()
-        os.environ[_VLLM_INTERNAL_GPU_PCI_ENV] = json.dumps(pci_map)
-        logger.info(
-            "Prefetched GPU PCI map (%d GPUs) into %s",
-            len(pci_map),
-            _VLLM_INTERNAL_GPU_PCI_ENV,
-        )
-    except Exception as e:
-        logger.warning(
-            "GPU PCI prefetch failed; workers will run nvidia-smi once each: %s", e
-        )
 
 
 def rdma_name_for_nic_pci(nic_pci: tuple[int, int, int, int]) -> str:
@@ -182,9 +138,7 @@ def parse_nic_selection_vars(raw: str) -> list[tuple[str, str]]:
     return result
 
 
-def set_worker_gpu_nic_mapping(
-    local_rank: int, pci_by_index: dict[int, str] | None = None
-) -> None:
+def set_worker_gpu_nic_mapping(local_rank: int) -> None:
     """Set NIC selection env vars from VLLM_GPU_NIC_PCIE_MAPPING for a worker.
 
     Which env vars are set is controlled by ``VLLM_NIC_SELECTION_VARS``.
@@ -195,8 +149,7 @@ def set_worker_gpu_nic_mapping(
     selection_raw = os.environ.get("VLLM_NIC_SELECTION_VARS", "").strip()
     selection_vars = parse_nic_selection_vars(selection_raw)
     mapping = parse_gpu_nic_mapping(raw)
-    if pci_by_index is None:
-        pci_by_index = _pci_by_index_from_env_or_query()
+    pci_by_index = current_platform.get_all_gpu_pci_bus_ids()
     # Translate CUDA-relative local_rank to the physical device index,
     # which accounts for CUDA_VISIBLE_DEVICES narrowing (e.g. DP sharding).
     physical_id = current_platform.device_id_to_physical_device_id(local_rank)
@@ -231,11 +184,11 @@ def set_worker_gpu_nic_mapping(
 
     nic_fmt = f"{nic_pci[0]:04x}:{nic_pci[1]:02x}:{nic_pci[2]:02x}.{nic_pci[3]}"
     logger.info(
-        "[rank %s] GPU PCI %s -> NIC PCI %s (%s) -> %s",
+        "GPU rank %s (PCIe addr %s) mapped to NIC %s (PCIe addr %s) via env vars: %s",
         local_rank,
         gpu_bdf,
-        nic_fmt,
         rdma_dev,
+        nic_fmt,
         ", ".join(set_vars),
     )
 

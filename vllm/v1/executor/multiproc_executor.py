@@ -60,10 +60,7 @@ from vllm.utils.system_utils import (
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.executor.vllm_net_devices import (
-    prefetch_gpu_pci_map_when_pcie_mapping_enabled,
-    set_worker_net_device,
-)
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -126,9 +123,6 @@ class MultiprocExecutor(Executor):
         )
 
         set_multiprocessing_worker_envs()
-
-        # if VLLM_GPU_NIC_PCIE_MAPPING is set, use nvidia-smi to get PCIe bus IDs for all GPUs.
-        prefetch_gpu_pci_map_when_pcie_mapping_enabled()
 
         # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
