@@ -339,12 +339,12 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
 
-        dispatch = (
+        compress_norm_rope_insert_fn = (
             fused_kv_compress_norm_rope_insert
             if self.head_dim == 128
             else compress_norm_rope_store
         )
-        dispatch(
+        compress_norm_rope_insert_fn(
             state_cache=state_cache,
             num_actual=num_actual,
             token_to_req_indices=token_to_req_indices,
