@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
@@ -95,26 +92,28 @@ def backend_to_kernel_cls(
         return TrtLlmBf16Experts
 
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
         return FlashInferExperts
 
     elif backend == UnquantizedMoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
         return AiterExperts
 
     elif backend == UnquantizedMoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonExperts,
+        )
 
         return TritonExperts
 
     elif backend == UnquantizedMoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
@@ -213,19 +212,6 @@ def select_unquantized_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
-
-    # LoRA needs Triton's unfused activation/reduction hooks. Selecting the
-    # backend here ensures weights stay in a LoRA-compatible layout instead of
-    # being permuted for a backend like FlashInfer or AITER during load.
-    if moe_config.is_lora_enabled:
-        backend = UnquantizedMoeBackend.TRITON
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            backend = UnquantizedMoeBackend.BATCHED_TRITON
-        return _return_or_raise(
-            backend,
-            moe_config,
-            activation_format,
-        )
 
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
@@ -340,7 +326,6 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
@@ -374,7 +359,6 @@ def make_unquantized_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 

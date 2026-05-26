@@ -66,6 +66,17 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
+        if moe_config.is_act_and_mul and quant_config.gemm1_clamp_limit is not None:
+            device = torch.accelerator.current_device_index()
+            self.gemm1_clamp_limit = torch.full(
+                (self.local_num_experts,),
+                quant_config.gemm1_clamp_limit,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
@@ -83,6 +94,20 @@ class TrtLlmNvFp4ExpertsBase:
             torch.nn.Parameter(g1_scale_c, requires_grad=False),
         )
         self.g1_scale_c = layer.g1_scale_c
+
+        # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
+        # division so the TRTLLM kernel receives the raw-GEMM-space clamp
+        # directly. g1_alphas is set once here in process_weights_after_loading
+        # (via the in-place mul above) and never changes again, so this is a
+        # static, per-expert constant. Register on the layer so EPLB
+        # rearranges it alongside the other expert tensors.
+        if self.gemm1_clamp_limit is not None:
+            gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_clamp_limit",
+                torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
+            )
+            self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -112,8 +137,12 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports only SiLU, RELU^2 non-gated and GELU activation."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.RELU2_NO_MUL,
+            MoEActivation.GELU,
+        ]
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
@@ -190,20 +219,14 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
         # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
-
-        # trtllm_fp4_block_scale_routed_moe does not support autotuning
-        # so skip this kernel during dummy run for autotuning.
-        import vllm.utils.flashinfer as fi_utils
-
-        if fi_utils._is_fi_autotuning:
-            return
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -218,12 +241,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             gemm1_bias=None,
             gemm1_alpha=None,
             gemm1_beta=None,
-            gemm1_clamp_limit=None,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
@@ -233,7 +256,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
-            routing_method_type=1,
+            routing_method_type=1,  # not used
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
             output=output,
@@ -267,7 +290,10 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
+            RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.MiniMax2,
             RoutingMethodType.Simulated,
+            RoutingMethodType.SigmoidRenorm,
         ]
 
     @staticmethod
@@ -275,20 +301,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        """
-        The FlashInfer TRTLLM NvFp4 kernel expects bfloat16 router_logits by default.
-        DeepSeekV3 routing supports float32 router_logits (converted internally).
-        Simulated routing generates synthetic decisions and is agnostic to dtype.
-        """
-        if router_logits_dtype == torch.float32:
-            # DeepSeekV3 routing handles float32 logits internally.
-            # Simulated routing generates synthetic decisions, so the
-            # kernel doesn't care about the actual logits dtype.
-            # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method in (
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Simulated,
-            )
         return True
 
     def apply(
@@ -310,7 +322,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> torch.Tensor:
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert self._supports_activation(activation)
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
@@ -322,17 +334,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Prepare router logits for kernel format.
-        router_logits = (
-            router_logits.to(torch.float32)
-            if self.routing_method_type == RoutingMethodType.DeepSeekV3
-            else router_logits
-        )
-
         # Currently FI requires bfloat16 routing bias.
         # https://github.com/flashinfer-ai/flashinfer/issues/2909
         if e_score_correction_bias is not None:
             e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+
+        output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         # NOTE: Activation padding and output
@@ -349,12 +356,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
             gemm1_bias=None,
             gemm1_alpha=None,
             gemm1_beta=None,
-            gemm1_clamp_limit=None,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
+            output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,

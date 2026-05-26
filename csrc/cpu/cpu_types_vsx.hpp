@@ -9,6 +9,10 @@
 
 namespace vec_op {
 
+// FP8 tag types for tag dispatch (see cpu_attn_vec.hpp)
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 // FIXME: FP16 is not fully supported in Torch-CPU
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
@@ -142,6 +146,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
       : reg({vec8_data.reg, vec8_data.reg, vec8_data.reg, vec8_data.reg}) {}
 
   void save(void* ptr) const { *reinterpret_cast<ss16x8x4_t*>(ptr) = reg; }
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : reg{} {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : reg{} {}
 };
 
 struct FP32Vec4 : public Vec<FP32Vec4> {
@@ -403,6 +410,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
+
+  // FP8 stub: dead code on PowerPC (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
 
   explicit FP32Vec16(const INT32Vec16& v) {
     reg.val[0] = vec_ctf(v.reg.val[0], 0);

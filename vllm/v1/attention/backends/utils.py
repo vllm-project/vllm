@@ -136,6 +136,32 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
+def get_num_attention_heads_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> int | None:
+    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+
+    Use in metadata builders whose plan-time allocations depend on the
+    head count: the model-wide ``get_num_attention_heads()`` is wrong
+    for models with non-uniform per-layer head counts. All layers in
+    one attention group must agree on ``num_heads``; this is asserted.
+    Returns ``None`` when no matching Attention layer is found.
+    """
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    if not attn_layers:
+        return None
+    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    assert len(heads) == 1, (
+        f"All layers in one attention group must share num_heads; "
+        f"got {heads} for {layer_names}."
+    )
+    return heads.pop()
+
+
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
@@ -332,8 +358,10 @@ def make_local_attention_virtual_batches(
     # regression when using numpy arrays (batch and block indices) to index into
     # torch tensor (block_table). As a workaround, convert numpy arrays to torch
     # tensor first, which recovers perf.
-    batch_indices_torch = torch.from_numpy(batch_indices)
-    block_indices_torch = torch.from_numpy(block_indices)
+    # Upload the index tensors to the block_table's device up-front so that the
+    # fancy indexing below doesn't implicitly force a synchronous H2D copy.
+    batch_indices_torch = torch.from_numpy(batch_indices).to(device, non_blocking=True)
+    block_indices_torch = torch.from_numpy(block_indices).to(device, non_blocking=True)
 
     # Save as a lambda so we can return this for update_block_table
     make_block_table = lambda block_table: block_table[
@@ -356,6 +384,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
     ), make_block_table
@@ -390,7 +419,16 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     # Figure out how many tokens are in each request
     # num_decode_tokens: [1, 2, 1]
-    num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
+    # Avoid `torch.bincount` here — on CUDA it forces a sync to determine
+    # the output size (even with `minlength`, the kernel must confirm no
+    # value exceeds the bound). `scatter_add_` into a preallocated buffer
+    # is equivalent and stays async.
+    num_decode_tokens = torch.zeros(
+        num_reqs, dtype=request_ids.dtype, device=request_ids.device
+    )
+    num_decode_tokens.scatter_add_(
+        0, request_ids.to(num_decode_tokens.dtype), torch.ones_like(request_ids)
+    )
 
     # Calculate new query_start_loc with tokens in generation_indices
     # decode_query_start_loc: [0, 1, 3, 4]
@@ -398,7 +436,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         num_reqs + 1, device=query_start_loc.device, dtype=query_start_loc.dtype
     )
 
-    decode_query_start_loc[0] = 0
+    decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
     decode_max_query_len = int(num_decode_tokens.max().item())
     total_num_decode_tokens = int(num_decode_tokens.sum().item())
@@ -414,6 +452,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
         _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
@@ -445,7 +484,11 @@ def split_decodes_prefills_and_extends(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    # Upper bound is exact for prefill rows; decode rows still satisfy
+    # seq_len > query_len under the optimistic bound, so `seq_lens ==
+    # query_lens` identifies prefills correctly either way.
+    assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
 
     if max_query_len <= decode_threshold:
         return num_reqs, 0, 0, num_tokens, 0, 0
@@ -861,8 +904,10 @@ def mamba_get_block_table_tensor(
     Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size));
-               output (#requests, cdiv(max_model_len, block_size)).
+    - "all":   input  (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks);
+               output (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks).
 
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).

@@ -41,6 +41,7 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
     enforce_eager: bool = True,
+    gpu_memory_utilization: float = 0.9,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -57,6 +58,7 @@ def run_test(
         distributed_executor_backend=distributed_executor_backend,
         limit_mm_per_prompt={"audio": 2},
         enforce_eager=enforce_eager,
+        gpu_memory_utilization=gpu_memory_utilization,
         disable_custom_all_reduce=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
@@ -319,6 +321,7 @@ def test_models_distributed(
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=False,
+        gpu_memory_utilization=0.65,
     )
 
 
