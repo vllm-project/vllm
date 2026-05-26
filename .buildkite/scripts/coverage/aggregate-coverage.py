@@ -75,6 +75,12 @@ def load_coverage_files(files: list[Path]) -> dict[str, list[str]]:
             covered = fdata.get("covered_lines") or fdata.get("summary", {}).get("covered_lines", 0)
             if covered == 0:
                 continue
+            # If function-level data is available, skip import-only files
+            # (files where only module-level code ran but no named functions
+            # were actually called).
+            funcs_called = fdata.get("functions_called")
+            if funcs_called is not None and funcs_called == 0:
+                continue
             # Normalize paths to be relative to the vllm package root.
             # coverage.py may report absolute paths or paths relative to
             # the installed package location. We only care about files
