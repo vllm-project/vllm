@@ -6,6 +6,7 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
+import regex as re
 import zmq
 
 from vllm.platforms import current_platform
@@ -55,3 +56,18 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
         inner = next(iter(spec.kv_cache_specs.values()))
         return type(inner)
     return type(spec)
+
+
+# Compiled regex to extract a standard UUID from vLLM request IDs.
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def get_base_request_id(request_id: str) -> str:
+    """Extract the core UUID from a vLLM request ID.
+    If the ID is already a bare UUID, it is returned as-is.
+    """
+    m = _UUID_RE.search(request_id)
+    return m.group(0) if m else request_id

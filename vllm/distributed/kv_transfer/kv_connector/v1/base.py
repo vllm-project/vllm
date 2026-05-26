@@ -569,6 +569,11 @@ class KVConnectorBase_V1(ABC):
         """
         return ()
 
+    def has_pending_push_work(self) -> bool:
+        # TODO: replace with a more general connector hook for keeping
+        # the scheduler alive (e.g. extend has_unfinished_requests).
+        return False
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
