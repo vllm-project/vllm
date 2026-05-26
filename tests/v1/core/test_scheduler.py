@@ -1541,6 +1541,81 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
     assert len(scheduler.waiting) == 0
 
 
+def test_prefix_cache_stats_ignore_unscheduled_allocation_failure():
+    """Do not count prefix-cache lookups until allocation succeeds."""
+
+    block_size = 4
+    num_blocks = 4  # 1 null block + 3 usable blocks.
+    num_tokens = 12
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        num_blocks=num_blocks,
+    )
+
+    # Fill the prefix cache with a prompt that occupies all usable blocks.
+    (warmup_req,) = create_requests(
+        num_requests=1,
+        num_tokens=num_tokens,
+        max_tokens=1,
+        block_size=block_size,
+        same_prompt=True,
+    )
+    scheduler.add_request(warmup_req)
+    scheduler.schedule()
+    scheduler.finish_requests(warmup_req.request_id, RequestStatus.FINISHED_ABORTED)
+    assert (
+        scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == num_blocks - 1
+    )
+    # Drain warmup stats so the assertion below only covers the retry scenario.
+    scheduler.make_stats()
+
+    # Both requests have the cached prefix. The first one can touch the cached
+    # blocks and allocate the recomputed tail block. The second one can look up
+    # the same prefix but cannot allocate its tail block, so it must not be
+    # counted in prefix-cache stats yet.
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=num_tokens,
+        max_tokens=1,
+        block_size=block_size,
+        same_prompt=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+
+    stats = scheduler.make_stats()
+    assert stats is not None
+    prefix_stats = stats.prefix_cache_stats
+    assert prefix_stats.requests == 1
+    assert prefix_stats.queries == num_tokens
+    # max_cache_hit_length is num_tokens - 1, so only two full blocks hit.
+    assert prefix_stats.hits == num_tokens - block_size
+
+    # Once the first request releases its blocks, the waiting request can be
+    # scheduled and should be counted exactly once in the next stats snapshot.
+    scheduler.finish_requests(
+        requests[0].request_id,
+        RequestStatus.FINISHED_ABORTED,
+    )
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 0
+
+    stats = scheduler.make_stats()
+    assert stats is not None
+    prefix_stats = stats.prefix_cache_stats
+    assert prefix_stats.requests == 1
+    assert prefix_stats.queries == num_tokens
+    assert prefix_stats.hits == num_tokens - block_size
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
