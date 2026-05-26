@@ -142,10 +142,32 @@ class AsyncLookupWorker:
     # ------------------------------------------------------------------
 
     def _evict_if_full(self) -> None:
-        """Evict the oldest entry if at capacity. Must be called under _lock."""
-        if len(self._async_results) >= self._max_results:
-            evicted_slot, _ = self._async_results.popitem(last=False)
-            self._result_tier.pop(evicted_slot, None)
+        """Evict the oldest resolved entry if at capacity. Must be called under _lock.
+
+        _IN_FLIGHT entries are never evicted — evicting a pending slot would
+        cause its result to be silently discarded and the key re-queued
+        indefinitely, producing a livelock under high load.
+        """
+        if len(self._async_results) < self._max_results:
+            return
+        for slot, state in self._async_results.items():
+            if state is not _IN_FLIGHT:
+                del self._async_results[slot]
+                self._result_tier.pop(slot, None)
+                logger.warning(
+                    "async_lookup cache full (%d entries): evicted slot %d state=%s",
+                    self._max_results,
+                    slot,
+                    state,
+                )
+                return
+        # Every slot is _IN_FLIGHT — allow the dict to exceed max_results
+        # temporarily rather than evict a pending lookup.
+        logger.warning(
+            "async_lookup cache full (%d entries): all slots _IN_FLIGHT, "
+            "skipping eviction",
+            self._max_results,
+        )
 
     def _worker(self) -> None:
         while not self._shutdown_event.is_set():
