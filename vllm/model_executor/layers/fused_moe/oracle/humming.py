@@ -164,16 +164,135 @@ def select_humming_moe_backend(
 
 
 def convert_to_humming_moe_kernel_format(
-    backend: HummingBackend,
-    layer: torch.nn.Module,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w13_input_scale: torch.Tensor | None,
-    w2_input_scale: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    raise NotImplementedError
+    layer: "RoutedExperts",
+    sublayer_configs: dict[str, Any],
+    weight_schema: Any,
+    input_schema: Any,
+    force_weight_schema: Any | None,
+    has_bias: bool,
+) -> None:
+    """
+    Convert MoE weights from checkpoint format to Humming kernel format.
+
+    This function processes weights for each sublayer (w13, w2) by:
+    1. Converting from checkpoint format to humming format if needed
+    2. Force requanting if a different quantization schema is specified
+    3. Preparing layer metadata for the Humming kernel
+    4. Transforming weights for inference
+
+    Args:
+        layer: The RoutedExperts layer containing weights to process
+        sublayer_configs: Configuration dict for each sublayer (w13, w2)
+        weight_schema: Initial weight quantization schema
+        input_schema: Initial input quantization schema
+        force_weight_schema: Optional schema to force requantization to
+        has_bias: Whether the layer has bias terms
+
+    Side effects:
+        - Modifies layer parameters in place
+        - Sets layer.weight_schemas and layer.input_schemas
+    """
+    from humming.layer import HummingMethod
+    from humming.schema import HummingWeightSchema
+
+    layer.weight_schemas = {}
+    layer.input_schemas = {}
+
+    for sublayer_name, configs in sublayer_configs.items():
+        current_input_schema = input_schema
+        current_weight_schema = weight_schema
+
+        # convert from checkpoint format to humming format
+        if not isinstance(current_weight_schema, HummingWeightSchema):
+            tensors: dict[str, torch.Tensor] = dict(
+                (key.removeprefix(sublayer_name + "_"), value)
+                for key, value in layer.state_dict().items()
+                if key.startswith(sublayer_name + "_")
+            )
+
+            shape_k_stacks = [configs["shape_k"]]
+            shape_n_stacks = [configs["shape_n"]]
+            if sublayer_name == "w13":
+                shape_n_stacks = [configs["shape_n"] // 2] * 2
+
+            current_weight_schema, tensors = current_weight_schema.convert_humming(
+                tensors=tensors,
+                shape_n_stacks=shape_n_stacks,
+                shape_k_stacks=shape_k_stacks,
+                param_dtype=layer.param_dtype,
+                num_experts=layer.num_experts,
+            )
+
+            current_input_schema, _ = current_input_schema.convert_humming(
+                tensors=tensors,
+                shape_n_stacks=shape_n_stacks,
+                shape_k_stacks=shape_k_stacks,
+                param_dtype=layer.param_dtype,
+                num_experts=layer.num_experts,
+            )
+
+            for name, _ in list(layer.named_parameters()):
+                if not name.startswith(sublayer_name + "_"):
+                    continue
+                delattr(layer, name)
+
+            for name, tensor in tensors.items():
+                name = f"{sublayer_name}_{name}"
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+                setattr(layer, name, param)
+
+            layer.weight_schemas[sublayer_name] = current_weight_schema
+            layer.input_schemas[sublayer_name] = current_input_schema
+
+        # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
+        assert isinstance(current_weight_schema, HummingWeightSchema)
+        force_requant = force_weight_schema is not None
+        if force_requant and current_weight_schema != force_weight_schema:
+            tensors = dict(
+                (key.removeprefix(sublayer_name + "_"), value)
+                for key, value in layer.state_dict().items()
+                if key.startswith(sublayer_name + "_")
+            )
+
+            tensors = current_weight_schema.requant_tensors(
+                tensors=tensors,
+                target_weight_schema=force_weight_schema,
+                param_dtype=layer.param_dtype,
+            )
+
+            current_weight_schema = force_weight_schema
+
+            for name, _ in list(layer.named_parameters()):
+                if not name.startswith(sublayer_name + "_"):
+                    continue
+                if name == sublayer_name + "_bias":
+                    continue
+                delattr(layer, name)
+
+            for name, tensor in tensors.items():
+                name = f"{sublayer_name}_{name}"
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+                setattr(layer, name, param)
+
+            del tensors
+
+        # prepare layer config from humming kernel
+        HummingMethod.prepare_layer_meta(
+            layer=layer,
+            shape_n=configs["shape_n"],
+            shape_k=configs["shape_k"],
+            pad_n_to_multiple=256,
+            pad_k_to_multiple=128,
+            input_schema=current_input_schema,
+            weight_schema=current_weight_schema,
+            has_bias=has_bias,
+            num_experts=layer.num_experts,
+            torch_dtype=layer.param_dtype,
+            sublayer_name=sublayer_name,
+        )
+
+        # preprocess weight for inference
+        HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
 
 
 def make_humming_moe_quant_config(
