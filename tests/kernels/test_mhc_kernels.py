@@ -6,6 +6,7 @@ import torch
 import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.import_utils import has_tilelang
 
 DEVICE = current_platform.device_type
 
@@ -92,11 +93,11 @@ def hc_head_ref(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_rocm()),
-    reason="CUDA or ROCm required",
+    not (current_platform.is_cuda_alike() and has_tilelang()),
+    reason="CUDA or ROCm and tilelang required",
 )
-@pytest.mark.parametrize("num_tokens", [4, 256])
-@pytest.mark.parametrize("hidden_size", [1280, 7168])
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
 def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
     torch.set_default_device(DEVICE)
@@ -145,11 +146,11 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_rocm()),
-    reason="CUDA or ROCm required",
+    not (current_platform.is_cuda_alike() and has_tilelang()),
+    reason="CUDA or ROCm and tilelang required",
 )
-@pytest.mark.parametrize("num_tokens", [4, 256])
-@pytest.mark.parametrize("hidden_size", [1280, 7168])
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
 def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
     torch.set_default_device(DEVICE)
@@ -172,8 +173,8 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_rocm()),
-    reason="CUDA or ROCm required",
+    not (current_platform.is_cuda_alike() and has_tilelang()),
+    reason="CUDA or ROCm and tilelang required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -279,8 +280,8 @@ def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_rocm()),
-    reason="CUDA or ROCm required",
+    not (current_platform.is_cuda_alike() and has_tilelang()),
+    reason="CUDA or ROCm and tilelang required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
