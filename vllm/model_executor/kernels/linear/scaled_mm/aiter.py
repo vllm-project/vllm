@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -15,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
+from vllm.model_executor.layers.quantization.utils.aiter_debug import emit_trace
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
@@ -328,11 +331,29 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+        emit_trace(
+            "blockscale.aiter.apply_block_scaled_mm.pre",
+            tensors={"A": A, "B": B, "As": As, "Bs": Bs},
+            extra={
+                "use_triton": self.use_triton,
+                "out_dtype": str(out_dtype),
+                "weight_group_shape": list(self.weight_group_shape),
+            },
+        )
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
-        return gemm_a8w8_blockscale_op(
+        output = gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
         )
+        emit_trace(
+            "blockscale.aiter.apply_block_scaled_mm.post",
+            tensors={"Y": output},
+            extra={
+                "use_triton": self.use_triton,
+                "out_dtype": str(out_dtype),
+            },
+        )
+        return output

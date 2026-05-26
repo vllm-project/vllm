@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.quantization.utils.aiter_debug import (
+    emit_trace,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
@@ -150,21 +155,69 @@ class QuantFP8(CustomOp):
         use_aiter_per_token_quant = use_aiter_quant and self.group_shape.is_per_token()
 
         use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
+        extra = {
+            "use_triton": use_triton,
+            "use_aiter_quant": use_aiter_quant,
+            "use_aiter_per_group_quant": use_aiter_per_group_quant,
+            "use_aiter_per_tensor_quant": use_aiter_per_tensor_quant,
+            "use_aiter_per_token_quant": use_aiter_per_token_quant,
+        }
+
+        if os.environ.get("AITER_DEBUG_TENSORS"):
+            print(f"[QUANT-HIP] "
+                  f"x={x.shape}|s={x.stride()}|c={x.is_contiguous()} "
+                  f"aiter={use_aiter_quant} group={use_aiter_per_group_quant}",
+                  flush=True)
+        emit_trace(
+            "blockscale.quant.forward_hip",
+            tensors={"x": x, "scale": scale, "scale_ub": scale_ub},
+            extra=extra,
+        )
 
         if use_aiter_per_group_quant:
-            return rocm_aiter_ops.group_fp8_quant(x, self.group_size)
+            qx, qscale = rocm_aiter_ops.group_fp8_quant(x, self.group_size)
+            emit_trace(
+                "blockscale.quant.group_fp8_quant",
+                tensors={"q_input": qx, "q_scale": qscale},
+                extra=extra,
+            )
+            return qx, qscale
         if use_aiter_per_tensor_quant:
-            return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
+            qx, qscale = rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
+            emit_trace(
+                "blockscale.quant.per_tensor_quant",
+                tensors={"q_input": qx, "q_scale": qscale},
+                extra=extra,
+            )
+            return qx, qscale
         if use_aiter_per_token_quant:
-            return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
+            qx, qscale = rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
+            emit_trace(
+                "blockscale.quant.per_token_quant",
+                tensors={"q_input": qx, "q_scale": qscale},
+                extra=extra,
+            )
+            return qx, qscale
 
         # Fallback to native implementation for group quantization.
         if self.is_group_quant:
             assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
+            qx, qscale = self._quantize_group_native(x)
+            emit_trace(
+                "blockscale.quant.native_group_quant",
+                tensors={"q_input": qx, "q_scale": qscale},
+                extra=extra,
+            )
+            return qx, qscale
 
         # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        qx, qscale = self.forward_cuda(x, scale, scale_ub)
+        emit_trace(
+            "blockscale.quant.forward_cuda_fallback",
+            tensors={"q_input": qx, "q_scale": qscale},
+            extra=extra,
+        )
+        return qx, qscale
 
     def forward_xpu(
         self,

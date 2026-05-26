@@ -148,6 +148,12 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
+    fuse_blockscale_splitk_zero_init: bool = None  # type: ignore[assignment]
+    """Fuse the zero-init of the blockscale FP8 GEMM output buffer into the
+    upstream producer (RMSNorm/quant) and enable SplitK on the GEMM. Eliminates
+    the standalone Y.zero_() fill kernel that otherwise precedes a SplitK
+    blockscale GEMM. ROCm/AITER only -- the dispatching producer and GEMM
+    custom ops live in vllm/_aiter_ops.py."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
@@ -231,6 +237,7 @@ class PassConfig:
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
         "fuse_rope_kvcache_cat_mla",
+        "fuse_blockscale_splitk_zero_init",
         mode="wrap",
     )
     @classmethod
@@ -294,6 +301,12 @@ class PassConfig:
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache_cat_mla = False
+        if self.fuse_blockscale_splitk_zero_init and not current_platform.is_rocm():
+            logger.warning_once(
+                "Blockscale SplitK zero-init fusion currently only enabled on "
+                "ROCm/AITER. The fusion will be disabled."
+            )
+            self.fuse_blockscale_splitk_zero_init = False
 
     def log_enabled_passes(self) -> None:
         """

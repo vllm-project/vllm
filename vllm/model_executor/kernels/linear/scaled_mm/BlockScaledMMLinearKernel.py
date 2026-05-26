@@ -9,6 +9,10 @@ import torch
 from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.aiter_debug import (
+    blockscale_call_context,
+    emit_trace,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
@@ -112,33 +116,83 @@ class Fp8BlockScaledMMLinearKernel(
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
-        # View input as 2D matrix for fp8 methods
-        input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
-
-        if self.apply_input_quant:
-            q_input, input_scale = self.quant_fp8(
-                input_2d, input_scale, scale_up, use_triton=self.use_triton
+        with blockscale_call_context(
+            layer=layer,
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            bias=bias,
+        ):
+            # View input as 2D matrix for fp8 methods
+            input_2d = x.view(-1, x.shape[-1])
+            output_shape = [*x.shape[:-1], weight.shape[0]]
+            emit_trace(
+                "blockscale.apply_weights.input_view",
+                tensors={
+                    "input_2d": input_2d,
+                    "input_scale": input_scale,
+                    "scale_up": scale_up,
+                },
+                extra={
+                    "apply_input_quant": self.apply_input_quant,
+                    "use_triton": self.use_triton,
+                    "output_shape": output_shape,
+                },
             )
-        else:
-            q_input = input_2d
-            # Provide a concrete placeholder so apply_block_scaled_mm args are
-            # always Tensors. Subclasses with apply_input_quant=False must not
-            # use As in apply_block_scaled_mm.
-            input_scale = (
-                input_scale if input_scale is not None else input_2d.new_ones(1)
+
+            if self.apply_input_quant:
+                q_input, input_scale = self.quant_fp8(
+                    input_2d, input_scale, scale_up, use_triton=self.use_triton
+                )
+            else:
+                q_input = input_2d
+                # Provide a concrete placeholder so apply_block_scaled_mm args are
+                # always Tensors. Subclasses with apply_input_quant=False must not
+                # use As in apply_block_scaled_mm.
+                input_scale = (
+                    input_scale if input_scale is not None else input_2d.new_ones(1)
+                )
+
+            emit_trace(
+                "blockscale.apply_weights.after_quant",
+                tensors={
+                    "A": q_input,
+                    "As": input_scale,
+                    "B": weight,
+                    "Bs": weight_scale,
+                },
+                extra={
+                    "apply_input_quant": self.apply_input_quant,
+                    "use_triton": self.use_triton,
+                },
             )
 
-        output = self.apply_block_scaled_mm(
-            A=q_input,
-            B=weight,
-            As=input_scale,
-            Bs=weight_scale,
-        )
+            output = self.apply_block_scaled_mm(
+                A=q_input,
+                B=weight,
+                As=input_scale,
+                Bs=weight_scale,
+            )
+            emit_trace(
+                "blockscale.apply_weights.after_gemm",
+                tensors={"Y": output},
+                extra={"has_bias": bias is not None},
+            )
 
-        if bias is not None:
-            output = output + bias
-        return output.to(dtype=out_dtype).view(*output_shape)
+            if bias is not None:
+                output = output + bias
+                emit_trace(
+                    "blockscale.apply_weights.after_bias",
+                    tensors={"Y_bias": output, "bias": bias},
+                )
+
+            final_output = output.to(dtype=out_dtype).view(*output_shape)
+            emit_trace(
+                "blockscale.apply_weights.after_cast_view",
+                tensors={"final_output": final_output},
+                extra={"out_dtype": str(out_dtype), "output_shape": output_shape},
+            )
+            return final_output
 
     @abstractmethod
     def apply_block_scaled_mm(

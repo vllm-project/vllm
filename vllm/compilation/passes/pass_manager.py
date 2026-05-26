@@ -22,6 +22,9 @@ if rocm_aiter_ops.is_enabled():
     from .fusion.allreduce_rms_fusion import (
         RocmAiterAllReduceFusionPass,
     )
+    from .fusion.blockscale_splitk_zero_init import (
+        BlockScaleSplitKZeroInitFusionPass,
+    )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
@@ -168,6 +171,17 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
+            # Blockscale SplitK + zero-init fusion runs AFTER the producer
+            # fusions above, so its pattern matches against the already-fused
+            # producer ops (e.g. rocm_aiter_rmsnorm_fp8_group_quant,
+            # rocm_aiter_fused_rms_gated_fp8_group_quant, etc.) rather than
+            # the raw RMSNorm + quant chain.
+            if (
+                self.pass_config.fuse_blockscale_splitk_zero_init
+                and rocm_aiter_ops.is_enabled()
+            ):
+                self.passes += [BlockScaleSplitKZeroInitFusionPass(config)]
 
             if (
                 self.pass_config.fuse_mla_dual_rms_norm

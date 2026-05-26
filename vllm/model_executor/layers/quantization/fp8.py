@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -479,6 +480,16 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.use_marlin:
             return self.fp8_linear.apply_weights(layer, x, bias)
+
+        if os.environ.get("AITER_DEBUG_TENSORS"):
+            ws = getattr(layer, 'weight_scale_inv',
+                         getattr(layer, 'weight_scale', None))
+            print(f"[FP8-APPLY] "
+                  f"x={x.shape}|s={x.stride()}|c={x.is_contiguous()} "
+                  f"w={layer.weight.shape}|s={layer.weight.stride()}"
+                  + (f" ws={ws.shape}|s={ws.stride()}" if ws is not None
+                     else ""),
+                  flush=True)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
 
