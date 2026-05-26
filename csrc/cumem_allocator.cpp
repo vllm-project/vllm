@@ -503,10 +503,28 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   PyObject* py_result =
       PyObject_CallFunctionObjArgs(g_python_free_callback, py_ptr, NULL);
 
-  if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
+  if (!py_result) {
+    PyErr_Print();
+    Py_DECREF(py_ptr);
+    PyGILState_Release(gstate);
+    return;
+  }
+
+  if (py_result == Py_None) {
+    Py_DECREF(py_result);
+    Py_DECREF(py_ptr);
+    PyGILState_Release(gstate);
+
+    CUDA_CHECK(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(ptr), size));
+    return;
+  }
+
+  if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    PyErr_Print();
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -523,6 +541,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     // PyArg_ParseTuple sets an error if it fails
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 

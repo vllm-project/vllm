@@ -1612,11 +1612,7 @@ def _format_subprocess_exit(returncode: int) -> str:
 _SPAWN_CHILD_ENV = "VLLM_TEST_SPAWN_CHILD"
 
 
-def spawn_new_process_for_each_test(
-    f: Callable[_P, None],
-    *,
-    fast_exit_on_success: bool = False,
-) -> Callable[_P, None]:
+def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
 
     Uses subprocess to run each test in a fresh interpreter and propagates
@@ -1654,12 +1650,11 @@ def spawn_new_process_for_each_test(
                     "args": args,
                     "kwargs": kwargs,
                     "tb_file": tb_file,
-                    "fast_exit_on_success": fast_exit_on_success,
                 }
             )
 
             child_script = (
-                "import sys, os, importlib, cloudpickle, traceback\n"
+                "import sys, importlib, cloudpickle, traceback\n"
                 "try:\n"
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
@@ -1671,9 +1666,6 @@ def spawn_new_process_for_each_test(
                 "    target = getattr(target, name)\n"
                 "try:\n"
                 "    target(*data['args'], **data['kwargs'])\n"
-                "    if data.get('fast_exit_on_success', False):\n"
-                "        sys.stdout.flush(); sys.stderr.flush()\n"
-                "        os._exit(0)\n"
                 "except Skipped:\n"
                 "    sys.exit(0)\n"
                 "except BaseException:\n"
@@ -1714,8 +1706,6 @@ def spawn_new_process_for_each_test(
 
 def create_new_process_for_each_test(
     method: Literal["spawn", "fork"] | None = None,
-    *,
-    fast_exit_on_success: bool = False,
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """Creates a decorator that runs each test function in a new process.
 
@@ -1734,12 +1724,6 @@ def create_new_process_for_each_test(
 
     if method == "fork":
         return fork_new_process_for_each_test
-
-    if fast_exit_on_success:
-        return functools.partial(
-            spawn_new_process_for_each_test,
-            fast_exit_on_success=True,
-        )
 
     return spawn_new_process_for_each_test
 

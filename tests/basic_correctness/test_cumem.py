@@ -18,7 +18,6 @@ DEVICE_TYPE = current_platform.device_type
 CUMEM_PROCESS_METHOD: Literal["spawn", "fork"] = (
     "spawn" if current_platform.is_rocm() else "fork"
 )
-CUMEM_FAST_EXIT_ON_SUCCESS = current_platform.is_rocm()
 ROCM_SLEEP_MODE_GPU_MEMORY_UTILIZATION = 0.05
 ROCM_SLEEP_MODE_MAX_MODEL_LEN = 1024
 
@@ -32,9 +31,7 @@ def _rocm_sleep_mode_llm_kwargs() -> dict:
     }
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_python_error():
     """
     Test if Python error occurs when there's low-level
@@ -67,9 +64,7 @@ def test_python_error():
         allocator.wake_up()
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -102,9 +97,7 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
@@ -149,9 +142,7 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 @pytest.mark.parametrize(
     "model",
     [
@@ -208,9 +199,7 @@ def test_end_to_end(model: str):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_deep_sleep():
     model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.cuda.mem_get_info()
@@ -241,9 +230,7 @@ def test_deep_sleep():
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
@@ -284,9 +271,7 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-@create_new_process_for_each_test(
-    CUMEM_PROCESS_METHOD, fast_exit_on_success=CUMEM_FAST_EXIT_ON_SUCCESS
-)
+@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_deep_sleep_fp8_kvcache():
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()

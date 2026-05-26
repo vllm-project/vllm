@@ -8,6 +8,7 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import atexit
 import dataclasses
 import gc
 import os
@@ -18,6 +19,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
 
@@ -53,6 +55,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -65,7 +68,7 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
-    python_free_func: Callable[[int], HandleType],
+    python_free_func: Callable[[int], HandleType | None],
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
@@ -77,14 +80,29 @@ def get_pluggable_allocator(
 @contextmanager
 def use_memory_pool_with_allocator(
     python_malloc_fn: Callable[[HandleType], None],
-    python_free_func: Callable[[int], HandleType],
+    python_free_func: Callable[[int], HandleType | None],
 ) -> Iterator[
     tuple[torch.cuda.memory.MemPool, torch.cuda.memory.CUDAPluggableAllocator]
 ]:
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
-    with torch.cuda.memory.use_mem_pool(mem_pool):
+    if not current_platform.is_rocm():
+        with torch.cuda.memory.use_mem_pool(mem_pool):
+            yield mem_pool, new_alloc
+        return
+
+    # On ROCm, torch.cuda.memory.use_mem_pool() calls _cuda_releasePool()
+    # when leaving the context. PyTorch's HIP MemPool destructor can later
+    # abort after that release because the pool has already been removed from
+    # graph_pools. Use the same begin/end routing without eagerly releasing
+    # the pool; the MemPool object is kept alive by CuMemAllocator and can
+    # then tear down normally.
+    device = torch.cuda.current_device()
+    torch.cuda.memory._cuda_beginAllocateCurrentThreadToPool(device, mem_pool.id)
+    try:
         yield mem_pool, new_alloc
+    finally:
+        torch.cuda.memory._cuda_endAllocateToPool(device, mem_pool.id)
 
 
 class CuMemAllocator:
@@ -131,11 +149,15 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self.released_unmapped_pointers: set[int] = set()
+        self._shutdown = False
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
+        if current_platform.is_rocm():
+            atexit.register(self.shutdown)
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -153,13 +175,26 @@ class CuMemAllocator:
         )
         return
 
-    def _python_free_callback(self, ptr: int) -> HandleType:
+    def _python_free_callback(self, ptr: int) -> HandleType | None:
         """
         Internal method to look up the allocation data
         when memory is freed in the memory pool."""
-        data = self.pointer_to_data.pop(ptr)
+        data = self.pointer_to_data.pop(ptr, None)
+        if data is None:
+            if ptr in self.released_unmapped_pointers:
+                self.released_unmapped_pointers.remove(ptr)
+                log = globals().get("logger")
+                if log is not None:
+                    log.debug(
+                        "Freed VA-only allocation for address %s from cumem allocator",
+                        ptr,
+                    )
+                return None
+            raise KeyError(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        if not data.is_mapped:
+            return None
         # Drain pending kernels before the C extension's cuMemUnmap.
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
@@ -213,6 +248,7 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -243,6 +279,7 @@ class CuMemAllocator:
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.is_mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -306,12 +343,56 @@ class CuMemAllocator:
                 allocations = data[0].snapshot()
                 for allocation in allocations:
                     if allocation["allocated_size"] == 0:
-                        handle = self._python_free_callback(allocation["address"])
+                        address = allocation["address"]
+                        handle = self._python_free_callback(address)
+                        assert handle is not None
                         unmap_and_release(handle)
+                        self.released_unmapped_pointers.add(address)
         finally:
             self.current_tag = old_tag
             if expandable_was_enabled:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+
+    def shutdown(self) -> None:
+        """Release retained MemPool state before Python finalization.
+
+        PyTorch keeps inactive blocks inside ``MemPool`` even after tensors are
+        gone. We may have already unmapped/released those blocks to emulate
+        empty_cache for the pluggable allocator, so a later MemPool destructor
+        should only release the VA reservation. Draining that state while Python
+        is still alive avoids invoking Python callbacks from native teardown.
+        """
+        if self._shutdown:
+            return
+        self._shutdown = True
+
+        try:
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            return
+
+        for pool_data in list(self.allocator_and_pools.values()):
+            mem_pool = pool_data[0]
+            for allocation in mem_pool.snapshot():
+                if allocation["allocated_size"] != 0:
+                    continue
+                address = allocation["address"]
+                if address not in self.pointer_to_data:
+                    continue
+                if not self.pointer_to_data[address].is_mapped:
+                    continue
+                handle = self._python_free_callback(address)
+                assert handle is not None
+                unmap_and_release(handle)
+                self.released_unmapped_pointers.add(address)
+
+        self.allocator_and_pools.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     def get_current_usage(self) -> int:
         """
