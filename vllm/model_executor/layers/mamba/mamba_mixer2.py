@@ -1168,6 +1168,23 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cache_buf_idx=cache_buf_idx,
                 prev_num_accepted_tokens=prev_num_accepted_tokens,
                 state_scales=ssm_state_scales,
+                # MTP + checkpointing: vLLM's spec layout
+                # (mamba_get_block_table_tensor in v1/attention/backends/utils.py)
+                # uses DISTINCT cache blocks per spec position in *all*
+                # mamba_cache_mode values, not just "all". Each spec
+                # column therefore points at a different cache slot,
+                # incompatible with flashinfer checkpointing_ssu's
+                # one-slot-per-batch API. We always fall back to the
+                # non-checkpointing kernel under spec.
+                #
+                # Enabling MTP+checkpointing would require either an
+                # upstream kernel change (multi-slot-per-batch) or a
+                # vLLM layout change (share one SSM slot across spec
+                # positions). The dispatcher and kernel-level plumbing
+                # (NPREDICTED>1 buffers, per-slot tracker increment,
+                # generalized cumAdt fold) are in place for whenever
+                # one of those lands.
+                spec_uniform_state_slots=False,
             )
         if old_x is not old_x_src:
             old_x_src.copy_(old_x)

@@ -177,6 +177,8 @@ def _call_backend(
     cu_seqlens: torch.Tensor,
     dst_state_batch_indices: torch.Tensor | None = None,
     max_seqlen: int = 1,
+    num_accepted_tokens: torch.Tensor | None = None,
+    spec_uniform_state_slots: bool = False,
 ) -> torch.Tensor:
     out = torch.empty_like(x)
     kwargs = {}
@@ -206,6 +208,8 @@ def _call_backend(
         out=out,
         cu_seqlens=cu_seqlens,
         max_seqlen=max_seqlen,
+        num_accepted_tokens=num_accepted_tokens,
+        spec_uniform_state_slots=spec_uniform_state_slots,
         **kwargs,
     )
     return out
@@ -586,3 +590,279 @@ def test_checkpointing_ssu_stp_large_batch_outputs_match_old_flashinfer(
             f"large-batch STP output mismatch at decode step {step}: "
             f"max_abs_error={max_abs_error.item()}"
         )
+
+
+@requires_flashinfer
+@pytest.mark.parametrize("num_spec", [1, 2, 4])
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("checkpoint_interval", [1, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_checkpointing_ssu_mtp_kept_outputs_match_serial_reference(
+    num_spec: int,
+    batch_size: int,
+    checkpoint_interval: int,
+    dtype: torch.dtype,
+) -> None:
+    """MTP equivalence: the first ``accepted`` outputs from the checkpointing
+    NPREDICTED>1 path must match a serial one-token-at-a-time reference.
+
+    Semantic reference for spec/MTP: applying the first ``accepted[i]``
+    proposed tokens of batch row ``i`` one at a time (NPREDICTED=1 calls,
+    no checkpoint cache, no num_accepted_tokens trimming) produces the
+    correct token outputs and final state. The MTP checkpointing dispatch
+    must produce the same outputs for those accepted positions.
+
+    The non-checkpoint NPREDICTED>1 + uniform-column path is *not* used as
+    reference — its bf16 numerics differ across the buffer-flip / replay
+    boundary, and the resulting drift exceeds kernel tolerance over many
+    steps. The serial NPREDICTED=1 path is the precise per-token semantic.
+    """
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    cache_size = batch_size * 2 + 4
+    nheads = 4
+    head_dim = 64
+    dstate = 128
+    ngroups = 1
+    npredicted = 1 + num_spec
+    # Match the production buffer sizing (mamba_utils.py): checkpoint_interval
+    # + num_spec, so a single overflowing spec call cannot exceed the window
+    # mid-write. Kernel hard limit: max_window <= 16.
+    max_window = checkpoint_interval + num_spec
+    assert max_window <= 16
+
+    serial_backend = _make_backend()
+    ckpt_backend = _make_backend()
+
+    initial_state = 0.1 * torch.randn(
+        cache_size,
+        nheads,
+        head_dim,
+        dstate,
+        device=device,
+        dtype=torch.float16,
+    )
+    serial_state = initial_state.clone()
+    ckpt_state = initial_state.clone()
+    cache = _make_checkpointing_cache(
+        cache_size=cache_size,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        max_window=max_window,
+        device=device,
+        dtype=dtype,
+    )
+    A, D, dt_bias = _make_weights(
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        device=device,
+        dtype=dtype,
+    )
+
+    # 2D state indices (batch, npredicted) with identical columns —
+    # the align/none cache mode under spec.
+    slots = torch.arange(batch_size, device=device, dtype=torch.int32) * 2 + 1
+    state_batch_indices_2d = (
+        slots[:, None].expand(batch_size, npredicted).contiguous()
+    )
+    cu_seqlens_spec = torch.arange(
+        0,
+        (batch_size + 1) * npredicted,
+        npredicted,
+        device=device,
+        dtype=torch.int32,
+    )
+
+    # Reference plumbing for the serial path.
+    sbi_1d_per_batch = slots[:, None]
+    cu_one = torch.tensor([0, 1], device=device, dtype=torch.int32)
+
+    accept_generator = torch.Generator(device=device).manual_seed(7)
+
+    for step in range(6):
+        total_tokens = batch_size * npredicted
+        x, dt, B, C = _make_decode_inputs(
+            batch_size=total_tokens,
+            nheads=nheads,
+            head_dim=head_dim,
+            dstate=dstate,
+            ngroups=ngroups,
+            device=device,
+            dtype=dtype,
+            seed=300 + step,
+        )
+        accepted = torch.randint(
+            1,
+            npredicted + 1,
+            (batch_size,),
+            device=device,
+            dtype=torch.int32,
+            generator=accept_generator,
+        )
+
+        # --- Checkpointing MTP path (under test) ---
+        ckpt_out = _call_backend(
+            ckpt_backend,
+            state=ckpt_state,
+            cache=cache,
+            x=x,
+            dt=dt,
+            A=A,
+            B=B,
+            C=C,
+            D=D,
+            dt_bias=dt_bias,
+            state_batch_indices=state_batch_indices_2d,
+            cu_seqlens=cu_seqlens_spec,
+            max_seqlen=npredicted,
+            num_accepted_tokens=accepted,
+            spec_uniform_state_slots=True,
+        )
+
+        # --- Serial reference (one token at a time per batch row) ---
+        for b in range(batch_size):
+            acc_b = int(accepted[b].item())
+            sbi_b = sbi_1d_per_batch[b : b + 1]  # shape (1, 1)
+            for tok in range(acc_b):
+                global_idx = b * npredicted + tok
+                serial_out_slice = torch.empty_like(x[global_idx : global_idx + 1])
+                serial_backend(
+                    serial_state,
+                    x[global_idx : global_idx + 1],
+                    dt[global_idx : global_idx + 1],
+                    A,
+                    B[global_idx : global_idx + 1],
+                    C[global_idx : global_idx + 1],
+                    D,
+                    dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=sbi_b,
+                    dst_state_batch_indices=None,
+                    null_block_id=NULL_BLOCK_ID,
+                    out=serial_out_slice,
+                    cu_seqlens=cu_one,
+                    max_seqlen=1,
+                )
+                # Compare only the kept positions.
+                err = (
+                    ckpt_out[global_idx : global_idx + 1].float()
+                    - serial_out_slice.float()
+                ).abs().max().item()
+                assert err <= 3e-2, (
+                    f"MTP kept-output mismatch step={step} batch={b} "
+                    f"tok={tok}/{acc_b} num_spec={num_spec} "
+                    f"interval={checkpoint_interval} err={err}"
+                )
+
+
+@requires_flashinfer
+@pytest.mark.parametrize("num_spec", [4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_checkpointing_ssu_mtp_falls_back_for_distinct_columns(
+    num_spec: int,
+    dtype: torch.dtype,
+) -> None:
+    """When `spec_uniform_state_slots=False` and `state_batch_indices` is 2D
+    with distinct columns (the `mamba_cache_mode="all"` + spec case), the
+    dispatcher must fall through to the non-checkpointing kernel and not
+    crash. Outputs must still match the non-checkpoint reference."""
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    batch_size = 2
+    cache_size = batch_size * (1 + num_spec) + 4
+    nheads = 4
+    head_dim = 64
+    dstate = 128
+    ngroups = 1
+    npredicted = 1 + num_spec
+
+    old_backend = _make_backend()
+    new_backend = _make_backend()
+
+    initial_state = 0.1 * torch.randn(
+        cache_size, nheads, head_dim, dstate, device=device, dtype=torch.float16
+    )
+    old_state = initial_state.clone()
+    new_state = initial_state.clone()
+    A, D, dt_bias = _make_weights(
+        nheads=nheads, head_dim=head_dim, dstate=dstate, device=device, dtype=dtype
+    )
+
+    # 2D state indices with DISTINCT columns: each batch row's spec
+    # positions point at consecutive blocks (mimicking "all" cache mode).
+    start = torch.arange(batch_size, device=device, dtype=torch.int32) * npredicted
+    offsets = torch.arange(npredicted, device=device, dtype=torch.int32)
+    state_batch_indices_2d = (start[:, None] + offsets).contiguous()
+    cu_seqlens = torch.arange(
+        0,
+        (batch_size + 1) * npredicted,
+        npredicted,
+        device=device,
+        dtype=torch.int32,
+    )
+
+    cache = _make_checkpointing_cache(
+        cache_size=cache_size,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        max_window=npredicted,
+        device=device,
+        dtype=dtype,
+    )
+
+    total_tokens = batch_size * npredicted
+    x, dt, B, C = _make_decode_inputs(
+        batch_size=total_tokens,
+        nheads=nheads,
+        head_dim=head_dim,
+        dstate=dstate,
+        ngroups=ngroups,
+        device=device,
+        dtype=dtype,
+        seed=42,
+    )
+    accepted = torch.tensor([2, 3], device=device, dtype=torch.int32)
+
+    # Reference: non-checkpoint dispatch with the same 2D indices.
+    old_out = _call_backend(
+        old_backend,
+        state=old_state,
+        cache=None,
+        x=x, dt=dt, A=A, B=B, C=C, D=D, dt_bias=dt_bias,
+        state_batch_indices=state_batch_indices_2d,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=npredicted,
+        num_accepted_tokens=accepted,
+    )
+    # Under test: cache passed but spec_uniform_state_slots=False. The
+    # dispatch must NOT try to checkpoint; the cache buffers must stay
+    # untouched, and outputs must equal the non-checkpoint reference.
+    new_out = _call_backend(
+        new_backend,
+        state=new_state,
+        cache=cache,
+        x=x, dt=dt, A=A, B=B, C=C, D=D, dt_bias=dt_bias,
+        state_batch_indices=state_batch_indices_2d,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=npredicted,
+        num_accepted_tokens=accepted,
+        spec_uniform_state_slots=False,
+    )
+
+    torch.testing.assert_close(
+        new_out.float(), old_out.float(), atol=3e-2, rtol=3e-2,
+        msg="Distinct-column spec inputs must take the non-checkpoint path",
+    )
+    # The checkpoint cache should remain at its initial zeros since the
+    # dispatcher fell through.
+    assert torch.all(cache["prev_num_accepted_tokens"] == 0)
+    assert torch.all(cache["cache_buf_idx"] == 0)
+    assert torch.all(cache["old_x"] == 0)
+    assert torch.all(cache["old_cumAdt"] == 0)

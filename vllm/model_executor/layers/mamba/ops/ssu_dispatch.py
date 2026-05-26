@@ -28,11 +28,13 @@ def _update_checkpointing_trackers_kernel(
     prev_num_accepted_tokens,
     state_batch_indices,
     cu_seqlens,
+    num_accepted_tokens,
     fixed_seq_len: tl.constexpr,
     max_window: tl.constexpr,
     pad_slot_id: tl.constexpr,
     n_slots: tl.constexpr,
     HAS_CU_SEQLENS: tl.constexpr,
+    HAS_NUM_ACCEPTED: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -45,11 +47,19 @@ def _update_checkpointing_trackers_kernel(
         )
     else:
         seq_lens = tl.full((BLOCK,), fixed_seq_len, tl.int32)
+    # `seq_lens` is what the kernel wrote (NPREDICTED). Under MTP only the
+    # first `accepted` tokens are kept; for window-overflow detection the
+    # full NPREDICTED write counts, but `prev_num_accepted_tokens` must
+    # advance only by the accepted count.
+    if HAS_NUM_ACCEPTED:
+        accepted = tl.load(num_accepted_tokens + offsets, mask=mask, other=0)
+    else:
+        accepted = seq_lens
     prev = tl.load(prev_num_accepted_tokens + slots, mask=valid, other=0)
     must_checkpoint = prev + seq_lens > max_window
     old_buf = tl.load(cache_buf_idx + slots, mask=valid, other=0)
     new_buf = tl.where(must_checkpoint, 1 - old_buf, old_buf)
-    new_prev = tl.where(must_checkpoint, seq_lens, prev + seq_lens)
+    new_prev = tl.where(must_checkpoint, accepted, prev + accepted)
     tl.store(cache_buf_idx + slots, new_buf, mask=valid)
     tl.store(prev_num_accepted_tokens + slots, new_prev, mask=valid)
 
@@ -87,26 +97,34 @@ def _make_old_cumAdt_cumulative_kernel(
     n_slots: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ) -> None:
-    """Convert the per-step `smem.cumAdt[0]` the kernel just wrote at
-    slot `prev_k_pre` into the running cumulative cumAdt-up-to-slot.
+    """Convert the per-call prefix-sum the kernel just wrote at
+    `[prev_k .. prev_k + seq_len - 1]` into the running cumulative
+    cumAdt-up-to-slot.
 
     The FlashInfer kernel writes `smem.cumAdt[lane]` which is the inclusive
-    prefix sum across the NPREDICTED tokens *in the current call only*. For
-    non-spec single-token decode (NPREDICTED == 1) that means each call
-    stores a per-step value at its new slot, but the commit step reads
-    `total_old_cumAdt = old_cumAdt[prev_k - 1]` and treats it as cumulative
-    over the whole accumulated window. Without this update the commit math
-    inverts the sign of cross-slot exponent differences for some heads and
-    produces +/-inf/NaN. We patch the just-written slot here so the running
-    cumulative is correct for the next commit.
+    prefix sum across the NPREDICTED (= `seq_len`) tokens *in the current
+    call only*. The commit step on the *next* call reads
+    `total_old_cumAdt = old_cumAdt[prev_k_new - 1]` and treats it as
+    cumulative over the whole accumulated window. Without this update the
+    commit math inverts the sign of cross-slot exponent differences for
+    some heads and produces +/-inf/NaN. We patch each just-written slot
+    here by adding `old_cumAdt[prev_k - 1]` (the running cumulative from
+    the prior call) so the running cumulative is correct for the next
+    commit.
+
+    Under MTP (NPREDICTED > 1) some of the written entries correspond to
+    rejected speculative tokens; they will be overwritten on the next
+    call (which starts at `prev_k + num_accepted_tokens`). It is harmless
+    to fold them now — their wrong-but-overwritten values are never read.
 
     Skips slots where:
       - the cache slot is padded,
       - the kernel committed this step (`prev_k + seq_len > max_window`):
-        the kernel wrote to slot 0 of the OTHER buffer, which is already
-        cumulative for that 1-token new window,
-      - `prev_k == 0`: slot 0 of the current buffer is already cumulative
-        for the first token of the window.
+        the kernel wrote to slot 0 of the OTHER buffer with a fresh
+        intra-call prefix sum that is already globally cumulative
+        (prior cumulative is 0 in the new window),
+      - `prev_k == 0`: slot 0..seq_len-1 of the current buffer are already
+        globally cumulative for the first call into a window.
     """
     slot = tl.program_id(0)
     if slot >= n_slots:
@@ -126,9 +144,12 @@ def _make_old_cumAdt_cumulative_kernel(
         + buf * cumAdt_stride_dbuf
         + h_offsets * cumAdt_stride_head
     )
-    cur = tl.load(old_cumAdt + base + prev_k, mask=mask)
     prev = tl.load(old_cumAdt + base + (prev_k - 1), mask=mask)
-    tl.store(old_cumAdt + base + prev_k, cur + prev, mask=mask)
+    # `seq_len` is the constexpr NPREDICTED; tl.static_range unrolls.
+    for i in tl.static_range(seq_len):
+        p = prev_k + i
+        cur = tl.load(old_cumAdt + base + p, mask=mask)
+        tl.store(old_cumAdt + base + p, cur + prev, mask=mask)
 
 
 @triton.jit
@@ -187,6 +208,8 @@ class MambaSSUBackend(ABC):
         old_cumAdt: torch.Tensor | None = None,
         cache_buf_idx: torch.Tensor | None = None,
         prev_num_accepted_tokens: torch.Tensor | None = None,
+        state_scales: torch.Tensor | None = None,
+        spec_uniform_state_slots: bool = False,
     ) -> None: ...
 
 
@@ -231,7 +254,13 @@ class TritonSSUBackend(MambaSSUBackend):
         old_cumAdt: torch.Tensor | None = None,
         cache_buf_idx: torch.Tensor | None = None,
         prev_num_accepted_tokens: torch.Tensor | None = None,
+        state_scales: torch.Tensor | None = None,
+        spec_uniform_state_slots: bool = False,
     ) -> None:
+        # Triton backend has no checkpointing or quantized-state path;
+        # state_scales and spec_uniform_state_slots are accepted for API
+        # parity with FlashInferSSUBackend and ignored.
+        del spec_uniform_state_slots, state_scales
         self._kernel(
             state,
             x,
@@ -302,6 +331,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         cache_buf_idx: torch.Tensor | None = None,
         prev_num_accepted_tokens: torch.Tensor | None = None,
         state_scales: torch.Tensor | None = None,
+        spec_uniform_state_slots: bool = False,
     ) -> None:
         rand_seed = (
             torch.randint(0, 2**32, (1,), dtype=torch.int64, device=state.device)
@@ -317,10 +347,20 @@ class FlashInferSSUBackend(MambaSSUBackend):
             cache_buf_idx,
             prev_num_accepted_tokens,
         )
+        # Under MTP, callers that route 1+num_spec tokens through the SAME
+        # cache slot per sequence (mamba_cache_mode ∈ {"align", "none"}) set
+        # `spec_uniform_state_slots=True`. The state_batch_indices tensor
+        # then has shape (batch, 1+num_spec) with identical columns; we
+        # extract the first column as the 1D form the kernel expects.
+        # For "all" mode + spec the columns differ across spec positions
+        # (different blocks per token) — the helper returns None and we
+        # fall through to the non-checkpointing kernel.
+        ckpt_state_indices = self._checkpointing_state_indices(
+            state_batch_indices, spec_uniform_state_slots=spec_uniform_state_slots
+        )
         can_checkpoint = (
-            num_accepted_tokens is None
-            and all(arg is not None for arg in checkpointing_args)
-            and self._checkpointing_state_indices(state_batch_indices) is not None
+            all(arg is not None for arg in checkpointing_args)
+            and ckpt_state_indices is not None
             and state.dtype
             in (
                 torch.float16,
@@ -337,10 +377,13 @@ class FlashInferSSUBackend(MambaSSUBackend):
             assert old_cumAdt is not None
             assert cache_buf_idx is not None
             assert prev_num_accepted_tokens is not None
-            state_indices = self._checkpointing_state_indices(state_batch_indices)
+            state_indices = ckpt_state_indices
             assert state_indices is not None
             kernel_state_indices = state_indices
-            dst_indices = self._checkpointing_state_indices(dst_state_batch_indices)
+            dst_indices = self._checkpointing_state_indices(
+                dst_state_batch_indices,
+                spec_uniform_state_slots=spec_uniform_state_slots,
+            )
             if dst_indices is not None and dst_indices.numel() == state_indices.numel():
                 self._copy_checkpointing_slots(
                     (
@@ -435,6 +478,11 @@ class FlashInferSSUBackend(MambaSSUBackend):
                         ckpt_max_seqlen,
                         old_x.size(1),
                         null_block_id,
+                        num_accepted_tokens=(
+                            num_accepted_tokens[start:end]
+                            if num_accepted_tokens is not None
+                            else None
+                        ),
                     )
                 return
             self._checkpointing_kernel(
@@ -483,6 +531,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 ckpt_max_seqlen,
                 old_x.size(1),
                 null_block_id,
+                num_accepted_tokens=num_accepted_tokens,
             )
             return
 
@@ -548,12 +597,23 @@ class FlashInferSSUBackend(MambaSSUBackend):
     @staticmethod
     def _checkpointing_state_indices(
         state_batch_indices: torch.Tensor | None,
+        *,
+        spec_uniform_state_slots: bool = False,
     ) -> torch.Tensor | None:
         if state_batch_indices is None:
             return None
         if state_batch_indices.dim() == 1:
             return state_batch_indices.to(torch.int32).contiguous()
         if state_batch_indices.dim() == 2 and state_batch_indices.size(1) == 1:
+            return state_batch_indices[:, 0].to(torch.int32).contiguous()
+        if (
+            spec_uniform_state_slots
+            and state_batch_indices.dim() == 2
+            and state_batch_indices.size(1) > 1
+        ):
+            # MTP with align/none cache mode: all 1+num_spec columns point
+            # at the same in-place cache slot. Take the first column;
+            # per-call NPREDICTED is conveyed via cu_seqlens/max_seqlen.
             return state_batch_indices[:, 0].to(torch.int32).contiguous()
         return None
 
@@ -624,6 +684,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         max_seqlen: int,
         max_window: int,
         pad_slot_id: int,
+        num_accepted_tokens: torch.Tensor | None = None,
     ) -> None:
         block = 128
         n_slots = state_batch_indices.numel()
@@ -632,11 +693,13 @@ class FlashInferSSUBackend(MambaSSUBackend):
             prev_num_accepted_tokens,
             state_batch_indices,
             cu_seqlens,
+            num_accepted_tokens,
             max_seqlen,
             max_window,
             pad_slot_id,
             n_slots,
             cu_seqlens is not None,
+            num_accepted_tokens is not None,
             BLOCK=block,
         )
 
@@ -797,10 +860,17 @@ def selective_state_update(
     cache_buf_idx: torch.Tensor | None = None,
     prev_num_accepted_tokens: torch.Tensor | None = None,
     state_scales: torch.Tensor | None = None,
+    spec_uniform_state_slots: bool = False,
 ) -> None:
     """Unified dispatch for Mamba selective state update.
 
     Delegates to the initialized backend (Triton or FlashInfer).
+
+    `spec_uniform_state_slots`: caller-asserted flag that the 2D
+    `state_batch_indices` (shape `(batch, 1+num_spec)`) under MTP has
+    identical entries across the spec-token dimension — true for
+    mamba_cache_mode ∈ {"align", "none"}, false for "all". Enables the
+    FlashInfer backend to checkpoint the in-place same-slot history.
     """
     get_mamba_ssu_backend()(
         state,
@@ -828,4 +898,5 @@ def selective_state_update(
         cache_buf_idx=cache_buf_idx,
         prev_num_accepted_tokens=prev_num_accepted_tokens,
         state_scales=state_scales,
+        spec_uniform_state_slots=spec_uniform_state_slots,
     )

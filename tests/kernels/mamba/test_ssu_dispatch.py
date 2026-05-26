@@ -142,3 +142,55 @@ def test_triton_basic_call():
         out=out,
     )
     assert not torch.isnan(out).any()
+
+
+def test_selective_state_update_signature_has_spec_uniform_state_slots():
+    """Public API surface check: MTP integration adds an explicit
+    `spec_uniform_state_slots` flag. Regressing this back to auto-detect
+    or removing it should fail loudly."""
+    import inspect
+
+    params = inspect.signature(selective_state_update).parameters
+    assert "spec_uniform_state_slots" in params
+    p = params["spec_uniform_state_slots"]
+    assert p.default is False, (
+        f"spec_uniform_state_slots default must be False, got {p.default!r}"
+    )
+
+
+def test_triton_backend_ignores_spec_uniform_state_slots():
+    """Triton backend has no checkpointing path; the spec_uniform_state_slots
+    kwarg must be accepted without affecting behaviour."""
+    set_random_seed(0)
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+    )
+    device = "cuda"
+    batch_size = 2
+    dim = 64
+    dstate = 16
+
+    state = torch.randn(batch_size, dim, dstate, device=device)
+    x = torch.randn(batch_size, dim, device=device)
+    out_a = torch.empty_like(x)
+    out_b = torch.empty_like(x)
+    dt = torch.randn(batch_size, dim, device=device)
+    dt_bias = torch.rand(dim, device=device) - 4.0
+    A = -torch.rand(dim, dstate, device=device)
+    B = torch.randn(batch_size, dstate, device=device)
+    C = torch.randn(batch_size, dstate, device=device)
+    D = torch.randn(dim, device=device)
+
+    state_a = state.clone()
+    state_b = state.clone()
+    selective_state_update(
+        state_a, x, dt, A, B, C,
+        D=D, dt_bias=dt_bias, dt_softplus=True, out=out_a,
+    )
+    selective_state_update(
+        state_b, x, dt, A, B, C,
+        D=D, dt_bias=dt_bias, dt_softplus=True, out=out_b,
+        spec_uniform_state_slots=True,
+    )
+    assert torch.equal(out_a, out_b)
+    assert torch.equal(state_a, state_b)

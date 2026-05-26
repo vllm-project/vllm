@@ -199,10 +199,15 @@ class MambaStateShapeCalculator:
         temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim)
         nheads = divide(num_heads, tp_world_size)
         ngroups = max(1, divide(n_groups, tp_world_size))
-        old_x_shape = (checkpoint_interval, nheads, head_dim)
-        old_B_shape = (2, checkpoint_interval, ngroups, state_size)
-        old_dt_shape = (2, nheads, checkpoint_interval)
-        old_cumAdt_shape = (2, nheads, checkpoint_interval)
+        # MTP: each spec step writes 1+num_spec tokens to one slot; the
+        # window must fit `checkpoint_interval` accepted history + the
+        # current call's NPREDICTED writes before the kernel checks
+        # `prev_k + NPREDICTED > max_window` (kernel hard limit: 16).
+        max_window = checkpoint_interval + num_spec
+        old_x_shape = (max_window, nheads, head_dim)
+        old_B_shape = (2, max_window, ngroups, state_size)
+        old_dt_shape = (2, nheads, max_window)
+        old_cumAdt_shape = (2, nheads, max_window)
         cache_buf_idx_shape = ()
         prev_num_accepted_tokens_shape = ()
         return (
