@@ -664,7 +664,18 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> MiMoOmniProcessor:
         hf_config = self.get_hf_config()
         tokenizer = self.get_tokenizer()
-        return MiMoOmniProcessor.from_hf_config(tokenizer, hf_config)
+        # Thread the deployer's SSRF / local-path policy from ModelConfig into
+        # the processor so that MediaConnector instances built inside
+        # MiMoVLProcessor (_fetch_image and preprocess_audio) enforce
+        # --allowed-media-domains and --allowed-local-media-path. Without
+        # this, MediaConnector() defaults to empty allowlist (no-op).
+        model_config = self.ctx.model_config
+        return MiMoOmniProcessor.from_hf_config(
+            tokenizer,
+            hf_config,
+            allowed_media_domains=model_config.allowed_media_domains,
+            allowed_local_media_path=model_config.allowed_local_media_path,
+        )
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor

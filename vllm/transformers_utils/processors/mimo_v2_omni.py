@@ -227,13 +227,22 @@ def _transform_single(
     return _standardize(out).squeeze(0), w_bar, h_bar
 
 
-def _fetch_image(src: Any) -> Image.Image:
+def _fetch_image(
+    src: Any,
+    allowed_media_domains: list[str] | None = None,
+    allowed_local_media_path: str | None = None,
+) -> Image.Image:
     # Route string sources through MediaConnector so this surface inherits
     # the URL-scheme allowlist (allowed_media_domains) and the
     # allowed_local_media_path policy that already harden the OpenAI chat
     # path via vllm/entrypoints/chat_utils.py. Direct requests.get and
     # Image.open on caller-supplied strings would otherwise reach cloud
     # metadata endpoints and arbitrary local files.
+    #
+    # The allowlist + local-path policy is threaded in from the deployer's
+    # ModelConfig (see MiMoV2OmniProcessingInfo.get_hf_processor) so
+    # constructing MediaConnector() with default empty arguments here
+    # would silently no-op the guard.
     from vllm.multimodal.media.connector import MediaConnector
 
     if isinstance(src, Image.Image):
@@ -241,7 +250,11 @@ def _fetch_image(src: Any) -> Image.Image:
     if isinstance(src, bytes):
         return _to_rgb(copy.deepcopy(Image.open(BytesIO(src))))
     if isinstance(src, str):
-        return _to_rgb(MediaConnector().fetch_image(src))
+        connector = MediaConnector(
+            allowed_local_media_path=allowed_local_media_path,
+            allowed_media_domains=allowed_media_domains,
+        )
+        return _to_rgb(connector.fetch_image(src))
     raise ValueError(f"Unrecognized image source: {type(src)}")
 
 
@@ -303,11 +316,19 @@ class MiMoVLProcessor:
         rope_type: str = "rope",
         video_process_num_threads: int = 16,
         device: Any | None = None,
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.tokenizer = tokenizer
         self.video_process_num_threads = video_process_num_threads
         self.device = torch.device(device) if isinstance(device, str) else device
+        # SSRF / local-path policy threaded from
+        # MiMoV2OmniProcessingInfo.get_hf_processor. Without these,
+        # MediaConnector() defaults to empty allowed_media_domains
+        # (allowlist no-op) and None allowed_local_media_path.
+        self._allowed_media_domains = allowed_media_domains
+        self._allowed_local_media_path = allowed_local_media_path
 
         self.rope_type = "rope" if rope_type == "1d" else rope_type
         assert self.rope_type in ("rope", "mrope"), (
@@ -473,9 +494,15 @@ class MiMoVLProcessor:
                     # URL or local-path strings go through MediaConnector for
                     # the same SSRF allowlist + allowed_local_media_path policy
                     # that hardens the OpenAI chat path (see _fetch_image).
+                    # The allowlist + local-path settings are threaded from the
+                    # deployer's ModelConfig via __init__.
                     from vllm.multimodal.media.connector import MediaConnector
 
-                    waveform_np, original_sr = MediaConnector().fetch_audio(audio)
+                    connector = MediaConnector(
+                        allowed_local_media_path=self._allowed_local_media_path,
+                        allowed_media_domains=self._allowed_media_domains,
+                    )
+                    waveform_np, original_sr = connector.fetch_audio(audio)
                     waveform = torch.from_numpy(waveform_np)
             else:
                 raise ValueError(f"Unsupported audio source type: {type(audio)}")
@@ -506,7 +533,11 @@ class MiMoVLProcessor:
         kw = self._resolve_img_kw(image)
         src = image.image
         if isinstance(src, (str, bytes)):
-            src = _fetch_image(src)
+            src = _fetch_image(
+                src,
+                allowed_media_domains=self._allowed_media_domains,
+                allowed_local_media_path=self._allowed_local_media_path,
+            )
         tensor, _, _ = _transform_single(
             src,
             factor=self.patch_size * self.merge_size,
@@ -962,6 +993,8 @@ class MiMoOmniProcessor(ProcessorMixin):
         video_start_token_id: int | None = None,
         video_end_token_id: int | None = None,
         rope_type: str = "rope",
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
 
@@ -1009,11 +1042,25 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_end_token_id=video_end_token_id,
             pad_token_id=tokenizer.pad_token_id,
             rope_type=rope_type,
+            allowed_media_domains=allowed_media_domains,
+            allowed_local_media_path=allowed_local_media_path,
         )
 
     @classmethod
-    def from_hf_config(cls, tokenizer: Any, hf_config: Any) -> "MiMoOmniProcessor":
-        """Convenience factory: instantiate directly from an HF model config object."""
+    def from_hf_config(
+        cls,
+        tokenizer: Any,
+        hf_config: Any,
+        *,
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
+    ) -> "MiMoOmniProcessor":
+        """Convenience factory: instantiate directly from an HF model config object.
+
+        allowed_media_domains and allowed_local_media_path forward the deployer's
+        ModelConfig SSRF / local-path policy to the MediaConnector instances
+        constructed inside MiMoVLProcessor (see _fetch_image and preprocess_audio).
+        """
         vc = hf_config.vision_config
         if isinstance(vc, dict):
             patch_size = vc.get("patch_size", 14)
@@ -1069,6 +1116,8 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_start_token_id=pc.get("video_start_token_id"),
             video_end_token_id=pc.get("video_end_token_id"),
             rope_type=rope_type,
+            allowed_media_domains=allowed_media_domains,
+            allowed_local_media_path=allowed_local_media_path,
         )
 
     @property
