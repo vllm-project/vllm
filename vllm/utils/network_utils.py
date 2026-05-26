@@ -10,7 +10,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
-from typing import Any
+from typing import Any, Literal, overload
 from uuid import uuid4
 
 import psutil
@@ -280,7 +280,82 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def is_wildcard_addr(addr: str) -> bool:
+    """Check if an address is a TCP address with wildcard port (port 0).
+
+    A wildcard port address has port 0, telling the OS to assign an available
+    port when binding. This is used for late binding to avoid port conflicts.
+
+    Args:
+        addr: Address string to check (e.g., "tcp://host:0")
+
+    Returns:
+        True if the address is a TCP address with wildcard port (:0)
+    """
+    if not addr.startswith("tcp://"):
+        return False
+    try:
+        _, _, port_str = split_zmq_path(addr)
+        return port_str == "0"
+    except ValueError:
+        return False
+
+
+def _resolve_bound_address(
+    sock: zmq.Socket | zmq.asyncio.Socket, original_path: str
+) -> str:
+    """Resolve the actual bound address from a ZMQ socket.
+
+    After binding to a wildcard address (port 0), the OS assigns a real port.
+    This function discovers that port via socket.last_endpoint and constructs
+    a proper address string preserving the original host.
+
+    Args:
+        sock: The bound ZMQ socket
+        original_path: The original address used for binding
+
+    Returns:
+        The actual address with the OS-assigned port
+    """
+    actual_endpoint = sock.last_endpoint.decode("utf-8")
+    scheme, host, port_str = split_zmq_path(actual_endpoint)
+    if scheme != "tcp":
+        return actual_endpoint
+    # Use the host from the original path since last_endpoint may
+    # return 0.0.0.0 instead of the specific host we intended.
+    orig_scheme, orig_host, _ = split_zmq_path(original_path)
+    return make_zmq_path(orig_scheme, orig_host, int(port_str))
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+@overload
+def make_zmq_socket(
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    path: str,
+    socket_type: Any,
+    bind: bool | None = ...,
+    identity: bytes | None = ...,
+    linger: int | None = ...,
+    router_handover: bool = ...,
+    *,
+    return_address: Literal[True],
+) -> tuple[zmq.Socket | zmq.asyncio.Socket, str]: ...  # type: ignore[name-defined]
+
+
+@overload
+def make_zmq_socket(
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    path: str,
+    socket_type: Any,
+    bind: bool | None = ...,
+    identity: bytes | None = ...,
+    linger: int | None = ...,
+    router_handover: bool = ...,
+    *,
+    return_address: Literal[False] = ...,
+) -> zmq.Socket | zmq.asyncio.Socket: ...  # type: ignore[name-defined]
+
+
 def make_zmq_socket(
     ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
@@ -289,7 +364,8 @@ def make_zmq_socket(
     identity: bytes | None = None,
     linger: int | None = None,
     router_handover: bool = False,
-) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
+    return_address: bool = False,
+) -> zmq.Socket | zmq.asyncio.Socket | tuple[zmq.Socket | zmq.asyncio.Socket, str]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
@@ -336,10 +412,15 @@ def make_zmq_socket(
 
     if bind:
         socket.bind(path)
+        if return_address and is_wildcard_addr(path):
+            actual_address = _resolve_bound_address(socket, path)
+        else:
+            actual_address = path
     else:
         socket.connect(path)
+        actual_address = path
 
-    return socket
+    return (socket, actual_address) if return_address else socket
 
 
 @contextlib.contextmanager
