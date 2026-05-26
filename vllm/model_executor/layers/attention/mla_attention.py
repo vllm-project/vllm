@@ -465,6 +465,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
+        self.use_fused_attn_quant = bool(compilation_config.pass_config.fuse_attn_quant)
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -535,6 +536,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        quant_group_size: int | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -578,6 +582,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+                quant_group_size=quant_group_size,
             )
             return output
         else:
@@ -597,6 +604,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output,
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
             )
             return output
 

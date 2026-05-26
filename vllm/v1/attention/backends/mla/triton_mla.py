@@ -24,7 +24,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
 
@@ -80,6 +79,24 @@ class TritonMLABackend(MLACommonBackend):
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+
+    def fused_output_quant_supported(self, quant_key) -> bool:
+        """Check if this backend supports fused output quantization
+        for the given quant_key.
+        """
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Dynamic64Sym,
+            kFp8Dynamic128Sym,
+            kFp8StaticTensorSym,
+        )
+
+        supported_keys = {
+            kFp8StaticTensorSym,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        }
+
+        return quant_key in supported_keys
 
     def __init__(
         self,
@@ -139,6 +156,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        quant_group_size: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -193,23 +213,82 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Run MQA — always pass layer scales. When KV cache is
-        # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
-        decode_attention_fwd(
-            q,
-            kv_c_and_k_pe_cache,
-            kv_c_cache,
-            o,
-            lse,
-            attn_metadata.decode.block_table,
-            attn_metadata.decode.seq_lens,
-            attn_logits,
-            num_kv_splits,
-            self.scale,
-            PAGE_SIZE,
-            k_scale=layer._k_scale,
-            v_scale=layer._k_scale,
-            is_mla=True,
-        )
+        # Use truly fused kernel when quant params are provided
+        if output_scale is not None or output_block_scale is not None:
+            from vllm.v1.attention.ops.mla_attn_quant_fused import (
+                mla_attn_fused_fp8_group,
+                mla_attn_fused_fp8_static,
+            )
+
+            if output_block_scale is not None:
+                # Per-group FP8 quantization
+                assert quant_group_size is not None
+                mla_attn_fused_fp8_group(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    o,
+                    lse,
+                    attn_metadata.decode.block_table,
+                    attn_metadata.decode.seq_lens,
+                    num_kv_splits,
+                    self.scale,
+                    PAGE_SIZE,
+                    logit_cap=0.0,
+                    k_scale=layer._k_scale,
+                    v_scale=layer._k_scale,
+                    output_block_scale=output_block_scale,
+                    quant_group_size=quant_group_size,
+                )
+            else:
+                # Static FP8 quantization
+                mla_attn_fused_fp8_static(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    o,
+                    lse,
+                    attn_metadata.decode.block_table,
+                    attn_metadata.decode.seq_lens,
+                    num_kv_splits,
+                    self.scale,
+                    PAGE_SIZE,
+                    logit_cap=0.0,
+                    k_scale=layer._k_scale,
+                    v_scale=layer._k_scale,
+                    output_scale=output_scale,
+                )
+
+            return o, lse
+        else:
+            # Use standard two-stage kernel without quantization
+            from vllm.v1.attention.ops.triton_decode_attention import (
+                _decode_grouped_att_m_fwd,
+                _decode_softmax_reducev_fwd,
+            )
+
+            _decode_grouped_att_m_fwd(
+                q,
+                kv_c_and_k_pe_cache,
+                kv_c_cache,
+                attn_logits,
+                attn_metadata.decode.block_table,
+                attn_metadata.decode.seq_lens,
+                num_kv_splits,
+                self.scale,
+                PAGE_SIZE,
+                logit_cap=0.0,
+                k_scale=layer._k_scale,
+                v_scale=layer._k_scale,
+                is_mla=True,
+            )
+
+            _decode_softmax_reducev_fwd(
+                attn_logits,
+                q,
+                o,
+                lse,
+                kv_c_cache,
+                attn_metadata.decode.seq_lens,
+                num_kv_splits,
+            )
 
         return o, lse
