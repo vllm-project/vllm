@@ -20,7 +20,6 @@ from vllm.distributed.device_communicators.quick_all_reduce import (
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx942
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -28,6 +27,15 @@ from ..utils import (
     multi_process_parallel,
     set_random_seed,
 )
+
+
+def on_gfx942() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942 as rocm_on_gfx942
+
+        return rocm_on_gfx942()
+    return False
+
 
 set_random_seed(42)
 _test_size_rng = random.Random(44)
