@@ -153,6 +153,8 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
 

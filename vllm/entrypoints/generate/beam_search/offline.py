@@ -2,17 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Sequence
-from typing import Any
 
 from tqdm import tqdm
 
-from vllm import PromptType, RequestOutput, TextPrompt, TokensPrompt
-from vllm.inputs import EngineInput
+from vllm import RequestOutput, TextPrompt, TokensPrompt
+from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 
 from .utils import (
@@ -25,10 +21,8 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class BeamSearchOfflineMixin(ABC):
+class BeamSearchOfflineMixin(OfflineInferenceMixin):
     """Offline inference for beam search"""
-
-    renderer: BaseRenderer
 
     def beam_search(
         self,
@@ -186,41 +180,3 @@ class BeamSearchOfflineMixin(ABC):
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
-
-    @abstractmethod
-    def _preprocess_cmpl(
-        self,
-        prompts: Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _lora_request_to_seq(
-        self,
-        lora_request: LoRARequest | None | Sequence[LoRARequest | None],
-        num_requests: int,
-    ) -> Sequence[LoRARequest | None]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _params_to_seq(
-        self,
-        params: SamplingParams,
-        num_requests: int,
-    ) -> Sequence[SamplingParams]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _render_and_run_requests(
-        self,
-        prompts: Iterable[EngineInput],
-        params: Sequence[SamplingParams],
-        output_type: type[RequestOutput],
-        *,
-        lora_requests: Sequence[LoRARequest | None] | None = None,
-        priorities: Sequence[int] | None = None,
-        use_tqdm: bool | Callable[..., tqdm] = True,
-    ):
-        raise NotImplementedError
