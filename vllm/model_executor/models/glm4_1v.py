@@ -854,7 +854,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
         processor = self.get_hf_processor()
-        if not _is_glmga_model(processor):
+        if isinstance(processor, Glm4vProcessor):
             return None
 
         result: dict[str, int] = {}
