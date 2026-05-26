@@ -164,6 +164,8 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
+# NOTE: `moe_forward` and `moe_forward_shared` being opaque custom ops is a
+# load-bearing assumption for the MoE-LoRA dual-stream path.
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
@@ -511,10 +513,6 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        # Get routing replay buffer from persistent layer attribute
-        # (set by bind_routing_capture_to_model during capturer init)
-        routing_replay_out = getattr(layer, "_routing_replay_out", None)
-
         if self._quant_method.is_monolithic:
             fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
@@ -529,10 +527,6 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
-            # Write routing data for non-monolithic path (Triton, etc.)
-            if routing_replay_out is not None:
-                routing_replay_out[: topk_ids.shape[0]].copy_(topk_ids.to(torch.int16))
-
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
             fused_out = self._quant_method.apply(
@@ -540,6 +534,7 @@ class MoERunner(MoERunnerInterface):
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
 

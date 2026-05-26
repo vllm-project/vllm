@@ -183,6 +183,7 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
             x=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            shared_experts=None,
             shared_experts_input=None,
         )
 

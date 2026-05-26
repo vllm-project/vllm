@@ -24,11 +24,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.speech_to_text.protocol import TranscriptionRequest
-from vllm.entrypoints.openai.speech_to_text.serving import OpenAIServingTranscription
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import (
+from vllm.entrypoints.speech_to_text.base.serving import (
     OpenAISpeechToText,
     asr_inter_chunk_separator,
+)
+from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.transcription.serving import (
+    OpenAIServingTranscription,
 )
 from vllm.model_executor.models.interfaces import SupportsTranscription
 from vllm.outputs import CompletionOutput, RequestOutput
