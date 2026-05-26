@@ -19,10 +19,8 @@ TransferHandle = int
 ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
-REGISTER_BLOCKS_MSG = b"register_blocks_msg"
-PUSH_TRIGGER_MSG = b"push_trigger_msg"
 
-PUSH_TRIGGER_BASE_PORT = 29600  # Base port for push trigger TCP sockets
+PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #
 # NIXL Connector Version
 #
@@ -164,7 +162,7 @@ class ReqMeta:
     local_physical_block_ids: BlockIds
     tp_size: int
     remote: RemoteMeta | None = None
-    # Remote block size, populated from REGISTER_BLOCKS_MSG ACK in push mode.
+    # Remote block size, discovered during handshake.
     remote_block_size: int | None = None
 
 
@@ -177,6 +175,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_not_processed: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
         self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
+        # Push mode (D side): registration info to send to P workers via NIXL.
+        self.push_registrations: dict[ReqId, dict[str, Any]] = {}
+        # Push mode (P side): newly finished request blocks for P workers.
+        self.push_finished_blocks: dict[ReqId, BlockIds] = {}
 
     def _add_new_req(
         self,

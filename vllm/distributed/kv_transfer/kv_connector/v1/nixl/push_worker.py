@@ -1,25 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Push-specific (WRITE) worker-side logic for the NIXL connector."""
+"""Push-specific (WRITE) worker-side logic for the NIXL connector.
 
-import threading
+All P2P communication uses NIXL notifications as the sole inter-node
+channel.  D workers send registration notifications to P workers, and
+P workers initiate WRITE transfers when matched with finished blocks
+received from the P scheduler via ``build_connector_meta``.
+"""
+
 from collections import defaultdict
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
-import torch
-import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
-    EngineTransferInfo,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-    PUSH_TRIGGER_MSG,
+    PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -30,7 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    push_trigger_addr,
+    get_base_request_id,
 )
 from vllm.logger import init_logger
 
@@ -42,7 +45,12 @@ logger = init_logger(__name__)
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
-    """Push-specific (WRITE) worker logic."""
+    """Push-specific (WRITE) worker logic.
+
+    D-side: sends registration notifications to P workers via NIXL after
+    handshaking.  P-side: receives registrations, matches with finished
+    blocks from the scheduler, and initiates WRITE transfers.
+    """
 
     def __init__(
         self,
@@ -54,19 +62,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Push-specific state
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
-        self._push_stop_event = threading.Event()
-        self._push_listener_thread: threading.Thread | None = None
-        self._push_trigger_path = push_trigger_addr(engine_id, self.tp_rank)
 
-    def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
-        """Register KV caches and start the push listener."""
-        super().register_kv_caches(kv_caches)
-        # Start the push trigger listener so the scheduler can send
-        # push triggers to this worker via ZMQ TCP.
-        self._start_push_listener()
+        # P-side: finished request blocks received from scheduler metadata.
+        self._push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: D registrations awaiting matching finished blocks.
+        self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+
+        # D-side: registrations queued while handshake is in progress.
+        self._pending_reg_notifs: list[tuple[str, dict[str, Any]]] = []
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
-        """D-side: store metadata and wait for P to push blocks."""
+        """Process metadata from the scheduler.
+
+        D-side: sends NIXL registration notifications to P workers.
+        P-side: accumulates finished blocks and matches with pending
+        registrations.
+        """
+        # --- D-side: process reqs_to_recv (wait for P to push) ---
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
@@ -81,32 +93,33 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
-            # Store metadata for failure recovery and completion tracking
             self._recving_metadata[req_id] = meta
-
-            # In push mode, D doesn't handshake with P. Register
-            # P's engine info in transfer_topo so post-processing
-            # (block_size_ratio, etc.) works when the push completes.
-            if (
-                self.transfer_topo is not None
-                and meta.remote_block_size is not None
-                and remote_engine_id not in self.transfer_topo._engines
-            ):
-                self.transfer_topo.register_remote_engine(
-                    remote_engine_id=remote_engine_id,
-                    info=EngineTransferInfo(
-                        remote_tp_size=meta.tp_size or self.world_size,
-                        remote_block_size=meta.remote_block_size,
-                        remote_block_len=meta.remote_block_size * self.block_size,
-                        remote_physical_blocks_per_logical=1,
-                    ),
-                )
             logger.info(
                 "Push mode: D node waiting for P to push blocks for request %s",
                 req_id,
             )
 
-        # Track batch membership and expiration (same as pull)
+        # --- D-side: send registration notifications to P via NIXL ---
+        for req_id, reg_data in metadata.push_registrations.items():
+            self._send_registration_to_p(req_id, reg_data)
+
+        # --- P-side: accumulate newly finished blocks ---
+        for req_id, block_ids in metadata.push_finished_blocks.items():
+            self._push_finished_blocks[req_id] = block_ids
+
+            # Check for a pending D registration (scenario 1: D registered
+            # before P finished).
+            matched_reg = self._pop_matching_registration(req_id)
+            if matched_reg is not None:
+                logger.info(
+                    "Scenario 1: matched D registration with "
+                    "finished blocks for request %s, initiating WRITE",
+                    req_id,
+                )
+                self._push_finished_blocks.pop(req_id, None)
+                self.start_push_kv(req_id, block_ids, matched_reg)
+
+        # --- Common: batch tracking and expiration ---
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
 
@@ -120,77 +133,121 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         self._send_heartbeats(metadata)
 
-    def _start_push_listener(self) -> None:
-        """Start the background thread that listens for push triggers
-        from the scheduler via ZMQ TCP."""
-        if self._push_listener_thread is not None:
-            return
-        ready = threading.Event()
-        self._push_listener_thread = threading.Thread(
-            target=self._push_listener_loop,
-            args=(ready,),
-            daemon=True,
-            name="nixl-push-listener",
+    # ------------------------------------------------------------------ #
+    #  D-side: registration notification helpers                          #
+    # ------------------------------------------------------------------ #
+
+    def _send_registration_to_p(self, req_id: str, reg_data: dict[str, Any]) -> None:
+        """Handshake with P (if needed) then send registration notification."""
+        remote_engine_id = reg_data["remote_engine_id"]
+        remote_host = reg_data["remote_host"]
+        remote_port = reg_data["remote_port"]
+        remote_tp_size = reg_data.get("decode_tp_size", self.world_size)
+
+        fut = self._ensure_handshake(
+            remote_engine_id, remote_host, remote_port, remote_tp_size
         )
-        self._push_listener_thread.start()
-        ready.wait()
-        logger.info(
-            "Push listener thread started on %s",
-            self._push_trigger_path,
-        )
+        if fut is None:
+            self._do_send_reg_notif(req_id, reg_data)
+        else:
 
-    def _push_listener_loop(self, ready: threading.Event) -> None:
-        """Poll the ZMQ PULL socket for push triggers and call
-        start_push_kv directly on this thread."""
-        ctx = zmq.Context.instance()
-        sock = ctx.socket(zmq.PULL)
-        sock.setsockopt(zmq.RCVTIMEO, 500)  # 500ms poll
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.bind(self._push_trigger_path)
-        ready.set()
-
-        while not self._push_stop_event.is_set():
-            try:
-                raw = sock.recv()
-            except zmq.Again:
-                continue
-            except Exception:
-                if self._push_stop_event.is_set():
-                    break
-                logger.exception("Push listener recv error")
-                continue
-
-            try:
-                decoded = msgspec.msgpack.decode(raw)
-                if not isinstance(decoded, (tuple, list)) or len(decoded) < 2:
-                    logger.warning(
-                        "Push listener got malformed message: %s",
-                        type(decoded),
+            def _on_handshake(
+                f: Future[dict[int, str]],
+                rid: str = req_id,
+                rd: dict[str, Any] = reg_data,
+            ) -> None:
+                try:
+                    f.result()
+                    self._do_send_reg_notif(rid, rd)
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="push_reg_handshake_failed",
+                        req_id=rid,
+                        error=e,
                     )
-                    continue
-                msg_type, msg = decoded[0], decoded[1]
-                if msg_type != PUSH_TRIGGER_MSG:
-                    logger.warning(
-                        "Push listener got unexpected message type: %s",
-                        msg_type,
-                    )
-                    continue
-                request_id = msg["request_id"]
-                block_ids = msg["block_ids"]
-                registration_data = msg["registration_data"]
-            except Exception:
-                logger.exception("Failed to decode push trigger message")
-                continue
+                    self._handle_failed_transfer(rid, None)
 
-            logger.info(
-                "Push listener received trigger for request %s (%d blocks)",
-                request_id,
-                len(block_ids),
+            fut.add_done_callback(_on_handshake)
+
+    def _do_send_reg_notif(self, req_id: str, reg_data: dict[str, Any]) -> None:
+        """Encode and send the registration notification to all P workers."""
+        remote_engine_id = reg_data["remote_engine_id"]
+        payload = msgspec.msgpack.encode(reg_data)
+        notif_msg = PUSH_REG_NOTIF_PREFIX + payload
+
+        agents = self._remote_agents.get(remote_engine_id)
+        if not agents:
+            logger.error(
+                "No remote agents for engine %s, cannot send registration "
+                "for request %s",
+                remote_engine_id,
+                req_id,
             )
-            self.start_push_kv(request_id, block_ids, registration_data)
+            self._handle_failed_transfer(req_id, None)
+            return
 
-        sock.close()
-        logger.info("Push listener thread stopped")
+        for rank, agent_name in agents.items():
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="push_reg_notif_failed",
+                    req_id=req_id,
+                    error=e,
+                    remote_rank=rank,
+                )
+
+        logger.info(
+            "Sent push registration notification for request %s to %d "
+            "P workers on engine %s",
+            req_id,
+            len(agents),
+            remote_engine_id,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  P-side: matching helpers                                           #
+    # ------------------------------------------------------------------ #
+
+    def _pop_matching_registration(self, request_id: str) -> dict[str, Any] | None:
+        """Find and remove a pending D registration matching *request_id*."""
+        data = self._pending_d_registrations.pop(request_id, None)
+        if data is not None:
+            return data
+        base_id = get_base_request_id(request_id)
+        for reg_id in list(self._pending_d_registrations):
+            if get_base_request_id(reg_id) == base_id:
+                logger.info(
+                    "Fuzzy-matched registration %s to finished blocks %s (base: %s)",
+                    reg_id,
+                    request_id,
+                    base_id,
+                )
+                return self._pending_d_registrations.pop(reg_id)
+        return None
+
+    def _pop_matching_finished_blocks(
+        self, request_id: str
+    ) -> tuple[str, BlockIds] | None:
+        """Find and remove finished blocks matching *request_id*."""
+        blocks = self._push_finished_blocks.pop(request_id, None)
+        if blocks is not None:
+            return request_id, blocks
+        base_id = get_base_request_id(request_id)
+        for fin_id in list(self._push_finished_blocks):
+            if get_base_request_id(fin_id) == base_id:
+                logger.info(
+                    "Fuzzy-matched finished blocks %s to registration %s (base: %s)",
+                    fin_id,
+                    request_id,
+                    base_id,
+                )
+                return fin_id, self._push_finished_blocks.pop(fin_id)
+        return None
+
+    # ------------------------------------------------------------------ #
+    #  WRITE transfer logic (P-side, largely unchanged)                   #
+    # ------------------------------------------------------------------ #
 
     def start_push_kv(
         self,
@@ -442,7 +499,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 notif_msg=notif_id,
             )
             self.nixl_wrapper.transfer(handle)
-            # Track push WRITE handles so P can free blocks once done.
             self._sending_transfers[request_id].append(handle)
         except Exception as e:
             self._log_failure(
@@ -458,13 +514,42 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _get_new_notifs(self) -> set[str]:
         """Handle notifications for push mode.
 
-        On D-side: receives notification that P finished writing.
-        On P-side: receives notification that D finished reading (pull compat).
+        Processes three kinds of notifications:
+        - PUSH_REG: registration from D worker (P-side)
+        - HB: heartbeat for lease renewal
+        - req_id:tp_size: transfer completion
         """
         assert self.transfer_topo is not None
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
+                # P-side: D worker registration notification.
+                if notif.startswith(PUSH_REG_NOTIF_PREFIX):
+                    reg_payload = notif[len(PUSH_REG_NOTIF_PREFIX) :]
+                    reg_data = msgspec.msgpack.decode(reg_payload)
+                    p_request_id = reg_data["request_id"]
+
+                    # Check for matching finished blocks (scenario 2:
+                    # P finished before D registered).
+                    match = self._pop_matching_finished_blocks(p_request_id)
+                    if match is not None:
+                        fin_id, block_ids = match
+                        logger.info(
+                            "Scenario 2: matched finished blocks for "
+                            "request %s with D registration, "
+                            "initiating WRITE",
+                            fin_id,
+                        )
+                        self.start_push_kv(fin_id, block_ids, reg_data)
+                    else:
+                        self._pending_d_registrations[p_request_id] = reg_data
+                        logger.debug(
+                            "Stored D registration for request %s, "
+                            "awaiting P finished blocks",
+                            p_request_id,
+                        )
+                    continue
+
                 msg = notif.decode("utf-8")
 
                 if msg.startswith("HB:"):
@@ -473,7 +558,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
                 req_id, tp_size = msg.rsplit(":", 1)
 
-                # Push mode: D receives notification that P finished writing.
+                # D receives notification that P finished writing.
                 if req_id in self._recving_metadata and (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -482,12 +567,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         "Received push completion notification for request %s",
                         req_id,
                     )
-                    # Create empty handle list so _pop_done_transfers
-                    # immediately marks it as done.
                     _ = self._recving_transfers[req_id]
                     continue
 
-                # P-side: receives notification that D finished reading.
+                # P-side: D finished reading.
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -521,7 +604,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Override to also track push WRITE transfer completions."""
         done_sending, done_recving = super().get_finished()
 
-        # Push mode: check if outgoing WRITE transfers have completed.
+        # Check if outgoing WRITE transfers have completed.
         done_pushing = self._pop_done_transfers(self._sending_transfers)
         for req_id in done_pushing:
             logger.info(
@@ -536,12 +619,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return done_sending, done_recving
 
     def shutdown(self):
-        """Shutdown push listener and base worker."""
-        self._push_stop_event.set()
-        if self._push_listener_thread is not None:
-            self._push_listener_thread.join(timeout=2)
-            self._push_listener_thread = None
-        # Clean up sending transfers
+        """Shutdown: clean up sending transfers."""
         for handles in self._sending_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-import os
-import sys
 from typing import Any
 
 from vllm.logger import init_logger
@@ -15,25 +13,6 @@ logger = init_logger(__name__)
 NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
-
-
-def _maybe_set_ucx_rcache_limit() -> None:
-    if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
-        return
-
-    if "nixl" in sys.modules or "rixl" in sys.modules:
-        logger.warning_once(
-            "NIXL was already imported, we can't reset "
-            "UCX_RCACHE_MAX_UNRELEASED. "
-            "Please set it to '1024' manually."
-        )
-        return
-
-    logger.info_once(
-        "Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare "
-        "memory leak in UCX when using NIXL."
-    )
-    os.environ["UCX_RCACHE_MAX_UNRELEASED"] = "1024"
 
 
 def _get_nixl_module_name(name: str) -> str:
@@ -50,7 +29,6 @@ def _load_nixl_attr(name: str) -> Any:
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
 
-    _maybe_set_ucx_rcache_limit()
     try:
         module = importlib.import_module(_get_nixl_module_name(name))
     except ImportError:

@@ -3,7 +3,6 @@
 """Shared constants, lazy imports and helpers for the NIXL connector."""
 
 import contextlib
-import hashlib
 from collections.abc import Iterator
 from typing import Any
 
@@ -72,21 +71,3 @@ def get_base_request_id(request_id: str) -> str:
     """
     m = _UUID_RE.search(request_id)
     return m.group(0) if m else request_id
-
-
-def push_trigger_addr(engine_id: str, tp_rank: int = 0) -> str:
-    """Return a tcp:// address unique to this engine+rank for push triggers.
-
-    The port is derived from a deterministic
-    hash of the engine_id (not Python's randomized hash()) to ensure
-    scheduler and worker processes agree on the same port.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        PUSH_TRIGGER_BASE_PORT,
-    )
-
-    h = int(hashlib.md5(engine_id.encode()).hexdigest(), 16)
-    port = PUSH_TRIGGER_BASE_PORT + (h % 1000) + tp_rank
-
-    # TODO: add remote node ip and port details for xPyD deployments
-    return f"tcp://127.0.0.1:{port}"
