@@ -101,7 +101,7 @@ pre-commit run ruff-check --all-files
 pre-commit run mypy-3.10 --all-files --hook-stage manual
 ```
 
-The line length limit is 88 characters. If you are not sure, use pre-commit to check.
+The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
 
 ### Commit messages
 
