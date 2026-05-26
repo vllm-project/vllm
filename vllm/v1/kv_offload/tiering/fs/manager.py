@@ -121,6 +121,11 @@ class FileSystemTierManager(SecondaryTierManager):
     ) -> bool | None:
         return os.path.exists(self.file_mapper.get_file_name(key))
 
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        return [os.path.exists(self.file_mapper.get_file_name(k)) for k in keys]
+
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         tasks = (

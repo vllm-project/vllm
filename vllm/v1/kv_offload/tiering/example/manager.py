@@ -66,6 +66,11 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
 
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        return [k in self.blocks for k in keys]
+
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """

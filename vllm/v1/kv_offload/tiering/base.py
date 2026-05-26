@@ -153,6 +153,26 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    @abstractmethod
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        """
+        Check whether a batch of blocks exist in this secondary tier.
+
+        Called from the AsyncLookupWorker thread — must be synchronous and
+        must not touch the primary tier or scheduler state.
+
+        Args:
+            keys: Offload keys to look up.
+            req_context: Per-request context.
+
+        Returns:
+            List of results parallel to keys: True if present, False if not
+            found, None if the tier is busy (retry later).
+        """
+        pass
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
