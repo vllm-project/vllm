@@ -1480,6 +1480,30 @@ class AiterFlashAttentionImpl(AttentionImpl):
         x = 16 // key_cache.element_size()
         block_size = key_cache.shape[1]
 
+        # Partial-RoPE: derive rotary_dim from the cos_sin_cache layout.
+        # RotaryEmbedding builds cache = cat(cos, sin, dim=-1) where
+        # cos/sin each have last dim = rotary_dim/2, so
+        # cos_sin_cache.shape[-1] == rotary_dim exactly.  Without this the
+        # aiter fused kernel defaults rotary_dim to head_dim and applies
+        # full RoPE to partial-RoPE models (e.g. GLM-4.7 has
+        # partial_rotary_factor=0.5).
+        rotary_dim = cos_sin_cache.shape[-1]
+        # Fail loud if a future model arrives with an unexpected layout:
+        # silently using the wrong rotary_dim produces correct-looking but
+        # numerically wrong outputs (gsm8k 0.92 -> 0.79 regression cause).
+        # Use an explicit raise (not assert) so the check survives `python -O`.
+        if not (
+            cos_sin_cache.ndim == 2
+            and 0 < rotary_dim <= head_dim
+            and rotary_dim % 2 == 0
+        ):
+            raise ValueError(
+                f"fused_qk_norm_rope_and_cache: unexpected cos_sin_cache "
+                f"layout {tuple(cos_sin_cache.shape)} for "
+                f"head_dim={head_dim}; expected shape [max_pos, rotary_dim] "
+                f"with rotary_dim<=head_dim and even"
+            )
+
         # Cache CPU scalar tensors for scales so the C++ kernel's .item()
         # call doesn't trigger a device-to-host sync during CUDA graph capture.
         k_scale_val = layer._k_scale_float
@@ -1521,6 +1545,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             use_shuffle_layout=use_shuffle_layout,
             block_size=block_size,
             x=x,
+            rotary_dim=rotary_dim,
         )
 
     def do_rope_and_kv_cache_update(

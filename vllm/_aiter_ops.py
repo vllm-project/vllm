@@ -2153,7 +2153,15 @@ class rocm_aiter_ops:
         use_shuffle_layout: bool,
         block_size: int,
         x: int,
+        rotary_dim: int = 0,
     ):
+        # Partial-RoPE support: when rotary_dim < head_dim, the fused kernel
+        # rotates only the first `rotary_dim` elements of each head and
+        # leaves the remainder pass-through (e.g. GLM-4.7 has
+        # partial_rotary_factor=0.5, so head_dim=128 and rotary_dim=64).
+        # The aiter kernel treats rotary_dim==0 as "full head", so callers
+        # that don't pass it correctly silently apply full RoPE -> garbage
+        # outputs for partial-RoPE models.
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
         )
@@ -2183,6 +2191,7 @@ class rocm_aiter_ops:
             use_shuffle_layout,
             block_size,
             x,
+            rotary_dim,
         )
 
     @staticmethod
