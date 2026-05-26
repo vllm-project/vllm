@@ -15,7 +15,8 @@ steps:
 
   - label: ":smoking: Non-root smoke tests"
     key: image-smoke-test
-    depends_on: image-build
+    depends_on:
+      - image-build
     commands:
     # Smoke 1: the default (root) image must still be importable
     # under a non-root UID via `--user 2000:0`. Validates the `vllm` passwd
