@@ -66,6 +66,7 @@ def test_rollback_uncommitted_evicts_preempt_zombies():
     req_a = make_request("a", common_token_ids, block_size, sha256)
     computed_a, num_computed_a = manager.get_computed_blocks(req_a)
     assert num_computed_a == 0  # cold cache
+    manager.begin_step()
     blocks_a = manager.allocate_slots(req_a, 32, 0, computed_a)
     assert blocks_a is not None
 
@@ -132,6 +133,7 @@ def test_rollback_uncommitted_covers_mamba_hybrid_groups():
     common_token_ids = [i for i in range(2) for _ in range(block_size)]
     req_a = make_request("a", common_token_ids, block_size, sha256)
     computed_a, _ = manager.get_computed_blocks(req_a)
+    manager.begin_step()
     blocks_a = manager.allocate_slots(req_a, 32, 0, computed_a)
     assert blocks_a is not None
 
@@ -176,6 +178,7 @@ def test_finish_path_free_alone_preserves_cache_entries():
     common_token_ids = [i for i in range(2) for _ in range(block_size)]
     req_a = make_request("a", common_token_ids, block_size, sha256)
     computed_a, _ = manager.get_computed_blocks(req_a)
+    manager.begin_step()
     manager.allocate_slots(req_a, 32, 0, computed_a)
     assert len(_uncommitted_blocks_for(manager, "a")) == 2
 
@@ -220,6 +223,7 @@ def test_cache_blocks_committed_kwarg_skips_uncommitted_tracking():
     tokens = [i for i in range(2) for _ in range(block_size)]
     req = make_request("a", tokens, block_size, sha256)
     computed, _ = manager.get_computed_blocks(req)
+    manager.begin_step()
     blocks = manager.allocate_slots(req, 32, 0, computed)
     assert blocks is not None
 
@@ -292,6 +296,7 @@ def test_reset_prefix_cache_clears_uncommitted():
     tokens = [i for i in range(2) for _ in range(block_size)]
     req = make_request("a", tokens, block_size, sha256)
     computed, _ = manager.get_computed_blocks(req)
+    manager.begin_step()
     manager.allocate_slots(req, 32, 0, computed)
 
     # Sanity: eager registration populated _uncommitted.
@@ -316,6 +321,7 @@ def test_reset_prefix_cache_clears_uncommitted():
     req2 = make_request("b", tokens, block_size, sha256)
     computed2, _ = manager.get_computed_blocks(req2)
     assert _ == 0  # cache was cleared by reset
+    manager.begin_step()
     manager.allocate_slots(req2, 32, 0, computed2)
     assert len(_uncommitted_blocks_for(manager, "b")) == 2
 

@@ -275,14 +275,12 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
 
-        # Where to record this request's new registrations for later
-        # rollback_uncommitted. ``None`` means skip tracking (the caller
-        # passed committed=True, signalling worker-confirmed bytes).
-        if self._suppress_uncommitted_tracking:
+        # Track new registrations in the current step's bucket so they can
+        # be rolled back on preempt. Skipped when committed=True (bytes are
+        # worker-confirmed) or no step is open (caller bypassed schedule()).
+        if self._suppress_uncommitted_tracking or not self._uncommitted:
             uncommitted_bucket: list[KVCacheBlock] | None = None
         else:
-            if not self._uncommitted:
-                self._uncommitted.append({})
             uncommitted_bucket = self._uncommitted[-1].setdefault(
                 request.request_id, []
             )
