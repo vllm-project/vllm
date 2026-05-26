@@ -792,6 +792,38 @@ class Qwen2_5_VisionTransformer(nn.Module):
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
+    def get_encoder_cudagraph_max_window_seqs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> int:
+        # token_budget is an upper bound on the total number of merged vision
+        # tokens replayed by this encoder CUDA graph. cu_window_seqlens, however,
+        # is sized by the number of window-attention sequences (non-empty local
+        # windows), not by the number of tokens. Using max_num_batched_tokens as
+        # this sequence count can over-pad cu_window_seqlens and make FlashAttention
+        # launch thousands of empty CTAs during replay.
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
+        max_sequence_units = max(max_batch_size, max_frames_per_batch)
+
+        # Each local window covers vit_merger_window_size tokens along one merged
+        # spatial axis. The largest number of non-empty windows for a fixed token
+        # budget comes from a thin strip that advances along only one axis, so
+        # ceil(token_budget / window_side) is a safe geometry-driven bound. Multiple
+        # images or video frames can fragment that strip at item/frame boundaries,
+        # so add max_sequence_units to cover one extra partial window per sequence.
+        max_strip_windows = (
+            token_budget + vit_merger_window_size - 1
+        ) // vit_merger_window_size
+
+        # A non-empty window must contain at least one merged vision token, so the
+        # number of window sequences can never exceed token_budget. This final
+        # clamp keeps the bound tight for tiny budgets while remaining safe.
+        return min(token_budget, max_sequence_units + max_strip_windows)
+
     def prepare_encoder_metadata(
         self,
         grid_thw: list[list[int]],
@@ -1787,9 +1819,8 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        max_window_seqs_per_batch = min(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
+        max_window_seqs_per_batch = self.visual.get_encoder_cudagraph_max_window_seqs(
+            token_budget, max_batch_size, max_frames_per_batch
         )
         # Use ceil here (not floor) so total captured capacity is never smaller
         # than token_budget when token_budget is not divisible by max_batch_size
@@ -1884,23 +1915,21 @@ class Qwen2_5_VLForConditionalGeneration(
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
+        # Keep replay metadata sized to the actual batch. The captured buffers
+        # may be larger, but EncoderCudaGraphManager fills the remaining
+        # cu*_seqlens entries with the last cumulative offset to represent empty
+        # sequences. Padding cu_window_seqlens here would require a static upper
+        # bound and can over-pad window attention into many empty FlashAttention
+        # CTAs.
         if modality == "image":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         else:
             raise AssertionError("This line should be unreachable.")
