@@ -25,6 +25,8 @@ ACT = [
     MoEActivation.SWIGLUOAI,
     MoEActivation.GELU,
     MoEActivation.GELU_TANH,
+    MoEActivation.SWIGLUSTEP,
+    MoEActivation.RELU2,
 ]
 USE_BIAS = [True, False]
 ISA = ["amx", "vec"] if torch.cpu._is_amx_tile_supported() else ["vec"]
