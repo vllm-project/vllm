@@ -1635,6 +1635,7 @@ def test_register_kv_caches(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
         is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
+        virtually_split = is_blocks_first and not connector.prefer_cross_layer_blocks
 
         if connector.prefer_cross_layer_blocks:
             with set_current_vllm_config(vllm_config):
@@ -1665,9 +1666,6 @@ def test_register_kv_caches(
             ]
             expected_num_entries = 1
 
-            virtually_split = (
-                is_blocks_first and not connector.prefer_cross_layer_blocks
-            )
             expected_blocks_count = num_blocks * (2 if virtually_split else 1)
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
@@ -1742,7 +1740,7 @@ def test_register_kv_caches(
         else:
             num_blocks = kv_cache_config.num_blocks
 
-        if is_blocks_first:
+        if virtually_split:
             expected_block_len = expected_tensor_size // num_blocks // 2
         else:
             expected_block_len = expected_tensor_size // num_blocks

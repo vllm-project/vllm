@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
@@ -85,15 +84,6 @@ def _allocate_and_reshape_kv_caches(
         set_kv_cache_layout(None)
 
 
-def _make_mock_layer(backend_cls: type[AttentionBackend]):
-    """
-    Create a mock AttentionLayerBase whose get_attn_backend returns backend_cls.
-    """
-    layer = MagicMock()
-    layer.get_attn_backend.return_value = backend_cls
-    return layer
-
-
 def _make_worker(kv_cache_config: KVCacheConfig):
     """
     Create an OffloadingConnectorWorker with mocked dependencies.
@@ -119,11 +109,7 @@ def _make_worker(kv_cache_config: KVCacheConfig):
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches(mock_get_layers, backend):
+def test_register_kv_caches(backend):
     """Test register_kv_caches with multiple groups covering all layer types.
 
     Creates one FullAttention group, one MLA group, one Mamba group, and
@@ -287,13 +273,6 @@ def test_register_kv_caches(mock_get_layers, backend):
         device=torch.device("cuda:0"),
     )
 
-    mock_layers: dict[str, MagicMock] = {}
-    for layer_name in attn_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(backend_cls)
-    for layer_name in mla_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(DeepseekV32IndexerBackend)
-    mock_get_layers.return_value = mock_layers
-
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
@@ -360,11 +339,7 @@ def test_register_kv_caches(mock_get_layers, backend):
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches_uniform_type(mock_get_layers, backend):
+def test_register_kv_caches_uniform_type(backend):
     """Test register_kv_caches with UniformTypeKVCacheSpecs.
 
     Two attention layers use the same backend but different num_kv_heads,
@@ -440,11 +415,6 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
         attn_groups,
         device=torch.device("cuda:0"),
     )
-
-    mock_get_layers.return_value = {
-        layer_a: _make_mock_layer(backend_cls),
-        layer_b: _make_mock_layer(backend_cls),
-    }
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
