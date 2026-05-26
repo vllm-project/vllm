@@ -23,6 +23,7 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     fp8_max_val,
     hidden_stride_m: tl.constexpr,
     logits_stride_m: tl.constexpr,
+    a1q_stride_m: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     TOP_K: tl.constexpr,
@@ -53,7 +54,7 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     ).to(a1q_ptr.dtype.element_ty)
 
     tl.store(
-        a1q_ptr + token_id * hidden_stride_m + hidden_offsets,
+        a1q_ptr + token_id * a1q_stride_m + hidden_offsets,
         x_q,
         mask=hidden_mask,
     )
@@ -69,7 +70,9 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
         ).to(tl.float32)
 
         sigmoid_scores = 1.0 / (1.0 + tl.exp(-logits))
-        sigmoid_scores = tl.where(sigmoid_scores == sigmoid_scores, sigmoid_scores, 0.0)
+        sigmoid_scores = tl.where(
+            sigmoid_scores == sigmoid_scores, sigmoid_scores, 0.0
+        )
         bias = tl.load(
             e_score_correction_bias_ptr + expert_offsets,
             mask=expert_mask,
@@ -102,7 +105,6 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
 
 def _allocate_outputs(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
     top_k: int,
     block_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -133,11 +135,19 @@ def _validate_inputs(
 ) -> None:
     assert hidden_states.dim() == 2
     assert router_logits.dim() == 2
+    assert e_score_correction_bias.dim() == 1
     assert hidden_states.shape[0] == router_logits.shape[0]
+    assert router_logits.shape[-1] == e_score_correction_bias.shape[0]
+    assert hidden_states.is_cuda
+    assert router_logits.device == hidden_states.device
+    assert e_score_correction_bias.device == hidden_states.device
+    assert hidden_states.dtype == torch.bfloat16
+    assert router_logits.dtype == torch.float32
+    assert e_score_correction_bias.dtype == torch.float32
     assert hidden_states.stride(-1) == 1
     assert router_logits.stride(-1) == 1
+    assert e_score_correction_bias.stride(0) == 1
     assert block_k > 0
-    assert router_logits.shape[-1] == e_score_correction_bias.shape[0]
 
 
 def _minimax_moe_topk_sigmoid_quant_triton_impl(
@@ -153,7 +163,7 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
     num_experts = router_logits.shape[-1]
     num_groups = triton.cdiv(hidden_size, block_k)
     topk_weights, topk_ids, a1q, a1q_scale = _allocate_outputs(
-        hidden_states, router_logits, top_k, block_k
+        hidden_states, top_k, block_k
     )
 
     if num_tokens == 0:
@@ -171,6 +181,7 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
         fp8_max,
         hidden_states.stride(0),
         router_logits.stride(0),
+        a1q.stride(0),
         fp8_min=fp8_min,
         fp8_max=fp8_max,
         TOP_K=top_k,

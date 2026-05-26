@@ -158,10 +158,19 @@ def test_runner_prepared_topk_skips_router_select_experts():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA-only kernel test")
 @pytest.mark.parametrize("m", [1, 17, 128])
-def test_minimax_moe_topk_sigmoid_quant_matches_reference(m: int):
+@pytest.mark.parametrize("non_contiguous_rows", [False, True])
+def test_minimax_moe_topk_sigmoid_quant_matches_reference(
+    m: int, non_contiguous_rows: bool
+):
     from vllm import _custom_ops as ops
 
     hidden_states = torch.randn((m, 3072), device="cuda", dtype=torch.bfloat16)
+    if non_contiguous_rows:
+        base = torch.empty((m, 4096), device="cuda", dtype=torch.bfloat16)
+        base[:, :3072].copy_(hidden_states)
+        hidden_states = base[:, :3072]
+        assert hidden_states.stride(-1) == 1
+        assert hidden_states.stride(0) != hidden_states.shape[-1]
     router_logits = torch.randn((m, 256), device="cuda", dtype=torch.float32)
     e_score_correction_bias = torch.randn((256,), device="cuda", dtype=torch.float32)
 

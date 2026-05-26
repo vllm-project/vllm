@@ -142,6 +142,7 @@ class MiniMaxM2MoE(nn.Module):
             and current_platform.is_cuda()
             and is_hopper_or_blackwell
             and not self.experts.apply_router_weight_on_input
+            and self.experts.moe_config.pcp_size == 1
         )
         self._minimax_fused_topk_quant_static_ok = (
             self._prepared_moe_static_ok
@@ -200,6 +201,7 @@ class MiniMaxM2MoE(nn.Module):
             or hidden_states.stride(-1) != 1
             or router_logits.stride(-1) != 1
             or not hidden_states.is_cuda
+            or self.experts.runner.enable_dbo
         ):
             return None, None, None, None
 
