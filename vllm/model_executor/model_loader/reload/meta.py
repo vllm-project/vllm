@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
@@ -55,11 +56,45 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _is_non_persistent_parameter_alias_buffer(
+    layer: torch.nn.Module,
+    name: str,
+    buffer: torch.Tensor,
+    parameter_storage_ptrs: set[int],
+) -> bool:
+    if name not in layer._non_persistent_buffers_set:
+        return False
+
+    buffer_storage_ptr = _tensor_storage_ptr(buffer)
+    return (
+        buffer_storage_ptr is not None and buffer_storage_ptr in parameter_storage_ptrs
+    )
+
+
+def _tensor_storage_ptr(tensor: torch.Tensor) -> int | None:
+    if isinstance(tensor, UninitializedParameter):
+        return None
+
+    try:
+        return tensor.untyped_storage().data_ptr()
+    except (RuntimeError, ValueError):
+        return None
+
+
+def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
+    return {
+        storage_ptr
+        for param in layer.parameters(recurse=True)
+        if (storage_ptr := _tensor_storage_ptr(param)) is not None
+    }
+
+
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
+    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
@@ -70,6 +105,9 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
+            and not _is_non_persistent_parameter_alias_buffer(
+                layer, name, buffer, parameter_storage_ptrs
+            )
         },
     )
 

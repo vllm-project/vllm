@@ -68,6 +68,9 @@ from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.xpu import (
+    XPUMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -98,6 +101,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
     FbgemmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
@@ -158,6 +162,96 @@ from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
 
+
+def _get_linear_backend() -> str:
+    """Get the linear_backend setting from the current vllm config."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    if config is not None:
+        return config.kernel_config.linear_backend
+    return "auto"
+
+
+# Mapping from linear_backend name to the set of kernel classes it covers.
+# When a user sets --linear-backend <name>, only kernels in the corresponding
+# set are considered candidates. If none can implement the layer config,
+# an error is raised to respect the user's explicit intent.
+_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
+    "cutlass": {
+        CutlassInt8ScaledMMLinearKernel,
+        CutlassFP8ScaledMMLinearKernel,
+        CutlassFp8BlockScaledMMKernel,
+        CutlassW4A8LinearKernel,
+        CutlassNvFp4LinearKernel,
+    },
+    "flashinfer_cutlass": {
+        FlashInferFP8ScaledMMLinearKernel,
+        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+        FlashInferCutlassNvFp4LinearKernel,
+        FlashInferMxFp4LinearKernel,
+    },
+    "flashinfer_trtllm": {
+        FlashInferTrtllmNvFp4LinearKernel,
+    },
+    "flashinfer_cudnn": {
+        FlashInferCudnnNvFp4LinearKernel,
+    },
+    "marlin": {
+        MarlinFP8ScaledMMLinearKernel,
+        MarlinLinearKernel,
+        MarlinMxfp8LinearKernel,
+        MarlinNvFp4LinearKernel,
+        MarlinMxFp4LinearKernel,
+    },
+    "triton": {
+        TritonInt8ScaledMMLinearKernel,
+        TritonFp8BlockScaledMMKernel,
+        TritonW4A16LinearKernel,
+    },
+    "deep_gemm": {
+        DeepGemmFp8BlockScaledMMKernel,
+    },
+    "torch": {
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        RowWiseTorchFP8ScaledMMLinearKernel,
+    },
+    "aiter": {
+        AiterInt8ScaledMMLinearKernel,
+        AiterFp8BlockScaledMMKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    },
+    "machete": {
+        MacheteLinearKernel,
+    },
+    "fbgemm": {
+        FbgemmNvFp4LinearKernel,
+    },
+    "conch": {
+        ConchLinearKernel,
+    },
+    "exllama": {
+        ExllamaLinearKernel,
+    },
+    "emulation": {
+        EmulationMxfp8LinearKernel,
+        EmulationNvFp4LinearKernel,
+    },
+}
+
+
+def _filter_kernels_by_backend(
+    backend: str,
+    kernels: list[type],
+) -> list[type]:
+    """Filter a kernel priority list to only those matching the backend."""
+    backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
+    return [k for k in kernels if k in backend_kernels]
+
+
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
@@ -212,6 +306,9 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
     PlatformEnum.CPU: [
         CPUFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.XPU: [
+        TritonFp8BlockScaledMMKernel,
     ],
 }
 
@@ -273,6 +370,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
+        # upstream CUTLASS SM121 MMA op guard is resolved; use
+        # VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
@@ -290,6 +390,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp4LinearKernel,
     ],
 }
 
@@ -369,7 +472,20 @@ def choose_scaled_mm_linear_kernel(
             scope="global",
         )
 
-    for kernel in possible_kernels[current_platform._enum]:
+    platform_kernels = possible_kernels[current_platform._enum]
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for this layer type."
+            )
+        platform_kernels = filtered
+
+    for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
             is_supported_and_can_implement_kernel(kernel, config, compute_capability)
         )
@@ -520,8 +636,21 @@ def choose_mp_linear_kernel(
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
 
+    platform_kernels = _POSSIBLE_KERNELS[current_platform._enum]
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for mixed-precision layers."
+            )
+        platform_kernels = filtered
+
     failure_reasons = []
-    for kernel in _POSSIBLE_KERNELS[current_platform._enum]:
+    for kernel in platform_kernels:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(
                 f" {kernel.__name__} disabled by environment variable"
@@ -558,7 +687,18 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     config = Mxfp8LinearLayerConfig()
 
     platform = current_platform._enum
-    possible = _POSSIBLE_MXFP8_KERNELS.get(platform, [])
+    possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for MXFP8 layers."
+            )
+        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -590,8 +730,10 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
 def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
+    linear_backend = _get_linear_backend()
+
     force_kernel: type[MxFp4LinearKernel] | None = None
-    if envs.VLLM_MXFP4_USE_MARLIN:
+    if linear_backend == "auto" and envs.VLLM_MXFP4_USE_MARLIN:
         force_kernel = MarlinMxFp4LinearKernel
 
     if force_kernel is not None:
@@ -605,7 +747,17 @@ def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
         return force_kernel(MxFp4LinearLayerConfig())
 
     platform = current_platform._enum
-    possible = _POSSIBLE_MXFP4_KERNELS.get(platform, [])
+    possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for MXFP4 layers."
+            )
+        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -666,6 +818,7 @@ def init_wfp8_a16_linear_kernel(
 
 # Maps VLLM_NVFP4_GEMM_BACKEND env var values to kernel classes.
 _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
+    "flashinfer-b12x": FlashInferB12xNvFp4LinearKernel,
     "flashinfer-cutlass": FlashInferCutlassNvFp4LinearKernel,
     "cutlass": CutlassNvFp4LinearKernel,
     "marlin": MarlinNvFp4LinearKernel,
@@ -680,26 +833,57 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
 
-    # Env-var overrides.
+    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
+    # batch-invariant CUTLASS implementation when available, otherwise fall
+    # back to emulation. It overrides both --linear-backend and the deprecated
+    # env vars below.
     force_kernel: type[NvFp4LinearKernel] | None = None
+    linear_backend = _get_linear_backend()
     if envs.VLLM_BATCH_INVARIANT:
-        logger.info_once(
-            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-            "emulation backend for deterministic execution."
-        )
-        force_kernel = EmulationNvFp4LinearKernel
-    elif envs.VLLM_USE_FBGEMM:
-        force_kernel = FbgemmNvFp4LinearKernel
-    elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-        force_kernel = EmulationNvFp4LinearKernel
-    elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
-        backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
-        force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
-        if force_kernel is None:
-            raise ValueError(
-                f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
-                f"Valid choices: {list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+        if bi_supported:
+            if linear_backend not in ("auto", "cutlass"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the CUTLASS backend for deterministic execution.",
+                    linear_backend,
+                )
+            else:
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+                    "CUTLASS backend for deterministic execution."
+                )
+            force_kernel = CutlassNvFp4LinearKernel
+        else:
+            if linear_backend not in ("auto", "emulation"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the emulation backend for deterministic execution.",
+                    linear_backend,
+                )
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                "kernel is not supported on this platform; falling back to "
+                "emulation for deterministic execution. Reason: %s",
+                reason,
             )
+            force_kernel = EmulationNvFp4LinearKernel
+    elif linear_backend == "auto":
+        # Deprecated env-var overrides — only honoured when --linear-backend
+        # is "auto". Deprecation warnings are emitted from vllm/envs.py.
+        if envs.VLLM_USE_FBGEMM:
+            force_kernel = FbgemmNvFp4LinearKernel
+        elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            force_kernel = EmulationNvFp4LinearKernel
+        elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
+            backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
+            force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
+            if force_kernel is None:
+                raise ValueError(
+                    f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
+                    f"Valid choices: "
+                    f"{list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+                )
 
     if force_kernel is not None:
         is_supported, reason = force_kernel.is_supported()
@@ -711,9 +895,19 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
         logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
         return force_kernel(config)
 
-    # Auto-select from registry.
+    # Auto-select from registry (or --linear-backend filtered).
     platform = current_platform._enum
-    possible = _POSSIBLE_NVFP4_KERNELS.get(platform, [])
+    possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for NVFP4 layers."
+            )
+        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -852,6 +1046,7 @@ __all__ = [
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
+    "FlashInferB12xNvFp4LinearKernel",
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
