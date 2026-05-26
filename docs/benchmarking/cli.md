@@ -231,12 +231,20 @@ vllm bench serve \
 
 #### Custom Image Dataset
 
-If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
+If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and can use "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
 
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
 {"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
 ```
+
+Every image listed in "image_files" is added to the request in the listed order after the prompt text. To preserve an interleaved order of text and images, use a "content" field with OpenAI-compatible content parts:
+
+```json
+{"content": [{"type": "text", "text": "Compare "}, {"type": "image", "image": "/path/to/image/folder/chart_a.png"}, {"type": "text", "text": " with "}, {"type": "image_url", "image_url": {"url": "/path/to/image/folder/chart_b.png"}}]}
+```
+
+The "image" shorthand accepts the same values as "image_files". The "image_url" field accepts either an OpenAI-style object with a "url" field or a URL string.
 
 ```bash
 # need a model with vision capability here
