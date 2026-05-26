@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-import warnings
 from typing import TypeVar
 
 import torch
@@ -307,6 +306,9 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
     PlatformEnum.CPU: [
         CPUFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.XPU: [
+        TritonFp8BlockScaledMMKernel,
     ],
 }
 
@@ -831,51 +833,49 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
 
-    # VLLM_BATCH_INVARIANT unconditionally forces emulation for deterministic
-    # execution. It overrides both --linear-backend and the deprecated env
-    # vars below.
+    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
+    # batch-invariant CUTLASS implementation when available, otherwise fall
+    # back to emulation. It overrides both --linear-backend and the deprecated
+    # env vars below.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
     if envs.VLLM_BATCH_INVARIANT:
-        if linear_backend not in ("auto", "emulation"):
-            logger.warning_once(
-                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using "
-                "the emulation backend for deterministic execution.",
-                linear_backend,
-            )
+        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+        if bi_supported:
+            if linear_backend not in ("auto", "cutlass"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the CUTLASS backend for deterministic execution.",
+                    linear_backend,
+                )
+            else:
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+                    "CUTLASS backend for deterministic execution."
+                )
+            force_kernel = CutlassNvFp4LinearKernel
         else:
+            if linear_backend not in ("auto", "emulation"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the emulation backend for deterministic execution.",
+                    linear_backend,
+                )
             logger.info_once(
-                "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                "emulation backend for deterministic execution."
-            )
-        force_kernel = EmulationNvFp4LinearKernel
-    elif linear_backend == "auto":
-        # Deprecated env-var overrides — only honoured when --linear-backend
-        # is "auto". Will be removed in v0.21; users should migrate to
-        # --linear-backend.
-        if envs.VLLM_USE_FBGEMM:
-            warnings.warn(
-                "VLLM_USE_FBGEMM is deprecated and will be removed in "
-                "v0.21. Use --linear-backend fbgemm instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            force_kernel = FbgemmNvFp4LinearKernel
-        elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-            warnings.warn(
-                "VLLM_USE_NVFP4_CT_EMULATIONS is deprecated and will be "
-                "removed in v0.21. Use --linear-backend emulation instead.",
-                DeprecationWarning,
-                stacklevel=2,
+                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                "kernel is not supported on this platform; falling back to "
+                "emulation for deterministic execution. Reason: %s",
+                reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
+    elif linear_backend == "auto":
+        # Deprecated env-var overrides — only honoured when --linear-backend
+        # is "auto". Deprecation warnings are emitted from vllm/envs.py.
+        if envs.VLLM_USE_FBGEMM:
+            force_kernel = FbgemmNvFp4LinearKernel
+        elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            force_kernel = EmulationNvFp4LinearKernel
         elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
-            warnings.warn(
-                "VLLM_NVFP4_GEMM_BACKEND is deprecated and will be "
-                "removed in v0.21. Use --linear-backend instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
             backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
             force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
             if force_kernel is None:
