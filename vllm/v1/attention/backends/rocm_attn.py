@@ -208,6 +208,12 @@ class RocmAttentionBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+        # incompatible with KV connectors that require blocks-first layout.
+        return False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
