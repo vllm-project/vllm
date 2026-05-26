@@ -1,6 +1,7 @@
 // clang-format off
 // adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/selective_scan_fwd_kernel.cuh
 #include "../torch_utils.h"
+#include <torch/csrc/stable/macros.h>
 #include "selective_scan.h"
 
 #ifndef USE_ROCM
