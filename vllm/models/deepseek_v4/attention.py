@@ -847,8 +847,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
         post_aux_streams = aux_streams
-        if (
+        rocm_ms_active = (
             current_platform.is_rocm()
+            and post_aux_streams is not None
+            and rocm_ms_strategy != "off"
+        )
+        if (
+            rocm_ms_active
             and post_aux_streams is not None
             and len(post_aux_streams) >= 5
         ):
@@ -904,15 +909,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
             indexer_fn: Callable[[], Any] | None = run_indexer
             compressor_fn: Callable[[], Any] | None = run_compressor
-            if current_platform.is_rocm() and (
+            if rocm_ms_active and (
                 rocm_ms_strategy == "indexer_only"
                 or not envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
             ):
                 compressor_fn = None
-            if (
-                current_platform.is_rocm()
-                and not envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER
-            ):
+            if rocm_ms_active and not envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER:
                 indexer_fn = None
 
             q, (indexer_result, compressor_result) = execute_in_parallel(
@@ -923,7 +925,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 outer_post_aux_streams,
                 enable=post_aux_streams is not None,
             )
-            if current_platform.is_rocm() and post_aux_streams is not None:
+            if rocm_ms_active:
                 if indexer_result is None and indexer_fn is None:
                     run_indexer()
                 if compressor_result is None and compressor_fn is None:
@@ -947,7 +949,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 else None
             )
             if (
-                current_platform.is_rocm()
+                rocm_ms_active
                 and not envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
             ):
                 aux_stream = None
