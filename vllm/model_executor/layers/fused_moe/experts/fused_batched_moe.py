@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_batched_scales_shape,
     resolve_moe_use_td,
     swiglu_limit_func,
+    warn_if_moe_use_td_ineffective,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -293,11 +294,8 @@ def batched_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    # Use Triton tensor descriptors for A/B loads and the C store on the
-    # non-quantized path (Intel Xe2/Xe3 HW 2D block reads).  Defaults to
-    # False so the baseline pointer-arith path is byte-identical when the
-    # caller does not set this kwarg.  Gated to fall back to the pointer
-    # path under any quantization scheme.
+    # Tensor-descriptor path for A/B loads and C store; falls back to the
+    # pointer path when quantization is on.
     USE_TD: tl.constexpr = False,
 ):
     expert_id = tl.program_id(axis=0)
@@ -319,8 +317,6 @@ def batched_triton_kernel(
         # Early exit
         return
 
-    # The TD path is currently restricted to the non-quantized path so the
-    # quantization scale handling stays in the baseline branch unchanged.
     td_active: tl.constexpr = USE_TD and not use_fp8_w8a8 and not use_int8_w8a16
 
     if td_active:
@@ -437,6 +433,9 @@ def invoke_moe_batched_triton_kernel(
     block_shape: list[int] | None = None,
 ):
     assert not use_int4_w4a16
+    warn_if_moe_use_td_ineffective(
+        "BATCHED_TRITON", is_quantized=use_fp8_w8a8 or use_int8_w8a16
+    )
     max_num_tokens = A.size(1)
     K = A.size(2)
     N = C.size(2)

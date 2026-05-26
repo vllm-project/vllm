@@ -453,21 +453,7 @@ def swiglu_limit_func(
 
 
 def resolve_moe_use_td() -> bool:
-    """Tri-state resolver for ``VLLM_TRITON_MOE_USE_TD``.
-
-    Returns ``True`` on XPU when the env is unset (auto-on), the explicit
-    boolean override when set to ``"1"``/``"0"``, and ``False`` everywhere
-    else.  Mirrors the dispatcher in ``triton_attn.py`` for the
-    unified-attention TD path.
-
-    Only consulted from the Triton MoE kernel launch sites
-    (``invoke_fused_moe_triton_kernel`` / ``invoke_moe_batched_triton_kernel``);
-    other backends (FlashInfer, CUTLASS, AITer, the Intel-XPU SYCL
-    ``XPUExperts`` default) never reach this resolver, so the env var is
-    a no-op for them.  See ``warn_if_moe_use_td_ineffective`` for the
-    one-shot warning emitted when the env is set but the active MoE
-    backend is not Triton.
-    """
+    """Tri-state resolver for ``VLLM_TRITON_MOE_USE_TD`` (auto-on for XPU)."""
     override = envs.VLLM_TRITON_MOE_USE_TD
     if override is None:
         return current_platform.is_xpu()
@@ -477,32 +463,41 @@ def resolve_moe_use_td() -> bool:
 _warned_moe_use_td_ineffective = False
 
 
-def warn_if_moe_use_td_ineffective(active_backend: str) -> None:
-    """Log a one-shot warning if ``VLLM_TRITON_MOE_USE_TD`` is set but the
-    selected MoE backend won't honor it.
+def warn_if_moe_use_td_ineffective(
+    active_backend: str, is_quantized: bool = False
+) -> None:
+    """One-shot warning when ``VLLM_TRITON_MOE_USE_TD`` is set but ignored.
 
-    Called from the MoE backend dispatcher once the final backend has
-    been chosen.  ``active_backend`` is the resolved backend name (e.g.
-    "TRITON", "BATCHED_TRITON", "XPU", "FLASHINFER_CUTLASS"); the
-    warning fires only when the user explicitly set the env to ``"1"``
-    or ``"0"`` and the backend name does not contain ``"TRITON"``.
+    Fires when the user set the env explicitly and either (a) the active
+    MoE backend is not Triton-family, or (b) the model is quantized (the
+    TD path falls back to the pointer path under any quantization).
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
         return
     if envs.VLLM_TRITON_MOE_USE_TD is None:
         return
-    if "TRITON" in active_backend.upper():
+    is_triton = "TRITON" in active_backend.upper()
+    if is_triton and not is_quantized:
         return
     import logging
 
     logger = logging.getLogger("vllm")
+    if not is_triton:
+        reason = (
+            f"the active MoE backend is {active_backend!r}; pass "
+            "`--moe-backend triton` (or `triton_unfused` / `batched_triton`) "
+            "to enable the tensor-descriptor path"
+        )
+    else:
+        reason = (
+            "the model uses quantized MoE weights; the TD path is "
+            "currently restricted to non-quantized weights and falls "
+            "back to the pointer path"
+        )
     logger.warning(
-        "VLLM_TRITON_MOE_USE_TD is set to %s but the active MoE backend "
-        "is %r, which does not honor it.  Pass `--moe-backend triton` "
-        "(or `triton_unfused` / `batched_triton`) to enable the "
-        "tensor-descriptor path.",
+        "VLLM_TRITON_MOE_USE_TD is set to %s but %s.",
         envs.VLLM_TRITON_MOE_USE_TD,
-        active_backend,
+        reason,
     )
     _warned_moe_use_td_ineffective = True

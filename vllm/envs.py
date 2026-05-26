@@ -602,20 +602,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
     ),
     # Use tensor descriptors for A/B loads and C stores in the Triton
-    # fused-MoE and batched-MoE kernels.  Enables HW 2D block reads on
-    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
-    # compile time so other platforms see no overhead.  Tri-state override:
-    # unset (default) lets the dispatcher auto-select per platform
-    # (currently auto-enabled on XPU only); ``1`` forces TD on; ``0``
-    # forces TD off.  Useful for A/B benchmarking the TD path.
-    #
-    # NOTE: this knob only takes effect when the active MoE expert
-    # implementation is the Triton kernel (``--moe-backend=triton`` /
-    # ``triton_unfused``, or ``BATCHED_TRITON``).  Other backends
-    # (FlashInfer, CUTLASS, AITer, the Intel-XPU SYCL ``XPUExperts``
-    # default, etc.) do not consult this env var and ignore it
-    # silently.  vLLM logs a one-shot warning if you set it without a
-    # Triton-family MoE backend selected.
+    # fused-MoE and batched-MoE kernels.  Tri-state: unset auto-selects
+    # per platform (default-on for XPU); ``1`` / ``0`` force.  Only
+    # takes effect when the active MoE backend is Triton-family and the
+    # weights are not quantized; otherwise ignored with a one-shot log.
     "VLLM_TRITON_MOE_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_MOE_USE_TD", "").strip()
     ),

@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
     moe_kernel_quantize_input,
     resolve_moe_use_td,
+    warn_if_moe_use_td_ineffective,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -346,10 +347,7 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    # Use Triton tensor descriptors for the A gather and B load inside
-    # the K-loop (Intel Xe2/Xe3 HW 2D block reads).  Defaults to False so
-    # the baseline pointer-arith path is byte-identical for callers that
-    # do not pass this kwarg.
+    # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
 ):
     """
@@ -441,12 +439,7 @@ def fused_moe_kernel(
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     if USE_TD:
-        # Tensor descriptors view the per-expert (M, K) and (N, K) sub-tensors
-        # of A and B.  ``a_desc`` uses ``block_shape=(1, BLOCK_SIZE_K)`` —
-        # ``tt.descriptor_gather`` requires the row dimension to be 1 and
-        # gathers a stack of independent tokens via the i32 index vector.
-        # Out-of-bounds reads are zero-filled by the descriptor shape, so
-        # no extra masking is needed.
+        # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
         a_desc = tl.make_tensor_descriptor(
             base=a_ptr,
@@ -543,9 +536,7 @@ def fused_moe_kernel(
         else:
             accumulator += tl.dot(a, b)
         if not USE_TD:
-            # Advance the ptrs to the next K block (the TD path uses
-            # absolute (k * BLOCK_SIZE_K) offsets above and does not
-            # carry running pointers).
+            # Advance the ptrs to the next K block.
             a_ptrs += BLOCK_SIZE_K * stride_ak
             b_ptrs += BLOCK_SIZE_K * stride_bk
 
@@ -765,6 +756,13 @@ def invoke_fused_moe_triton_kernel(
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+
+    warn_if_moe_use_td_ineffective(
+        "TRITON",
+        is_quantized=(
+            use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
+        ),
+    )
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
