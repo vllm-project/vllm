@@ -74,10 +74,6 @@ def _get_priority_backends(
     """
     _AVAILABLE_BACKENDS = []
 
-    # Temp. triton first for testing
-    if not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
-
     if not may_have_zp and not may_have_bias:
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
 
