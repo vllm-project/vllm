@@ -302,6 +302,38 @@ def _get_chat_content(
     return text_contents + mm_contents
 
 
+def _is_chat_messages(prompt: Any) -> bool:
+    return (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("role"), str)
+            and isinstance(item.get("content"), (str, list))
+            for item in prompt
+        )
+    )
+
+
+def _get_chat_messages(
+    request_func_input: RequestFuncInput,
+    mm_position: Literal["first", "last"] = "last",
+) -> list[dict[str, Any]]:
+    prompt = request_func_input.prompt
+    if _is_chat_messages(prompt):
+        return prompt
+
+    return [
+        {
+            "role": "user",
+            "content": _get_chat_content(
+                request_func_input,
+                mm_position=mm_position,
+            ),
+        }
+    ]
+
+
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -311,15 +343,13 @@ async def async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
@@ -622,15 +652,13 @@ async def async_request_openai_embeddings_chat(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         # Many embedding models have short context length,
         # this is to avoid dropping some of the requests.
         "truncate_prompt_tokens": -1,

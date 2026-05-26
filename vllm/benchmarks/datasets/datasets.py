@@ -2349,7 +2349,7 @@ class CustomImageDataset(CustomDataset):
                 "Only JSONL format is supported for CustomImageDataset."
             )
 
-        with open(self.dataset_path) as f:
+        with open(self.dataset_path, encoding="utf-8") as f:
             for line_number, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
@@ -2498,9 +2498,14 @@ class CustomImageDataset(CustomDataset):
                 content = self._process_interleaved_content(item["content"])
                 text_prompt = self._get_text_from_content(content)
                 prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt = (
+                    [{"role": "user", "content": content}]
+                    if enable_multimodal_chat
+                    else content
+                )
                 sampled_requests.append(
                     SampleRequest(
-                        prompt=content,
+                        prompt=prompt,
                         prompt_len=prompt_len,
                         expected_output_len=output_len,
                         multi_modal_data=None,

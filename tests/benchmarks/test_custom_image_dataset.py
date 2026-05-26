@@ -11,6 +11,7 @@ from vllm.benchmarks.datasets import CustomImageDataset, get_samples
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
     _get_chat_content,
+    _get_chat_messages,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -179,6 +180,54 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
         model="test-model",
     )
     assert _get_chat_content(request_input) == sample.prompt
+
+
+@pytest.mark.benchmark
+def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "chart.png"
+    jsonl = tmp_path / "images.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "content": [
+                    {"type": "text", "text": "Describe "},
+                    {"type": "image", "image": str(image)},
+                ],
+            }
+        ],
+    )
+
+    dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
+    samples = dataset.sample(
+        tokenizer=_Tokenizer(),
+        num_requests=1,
+        output_len=32,
+        enable_multimodal_chat=True,
+    )
+
+    sample = samples[0]
+    assert sample.multi_modal_data is None
+    assert sample.prompt == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe "},
+                {"type": "image_url", "image_url": {"url": f"file://{image}"}},
+            ],
+        }
+    ]
+
+    request_input = RequestFuncInput(
+        prompt=sample.prompt,
+        api_url="http://localhost:8000/v1/chat/completions",
+        prompt_len=sample.prompt_len,
+        output_len=32,
+        model="test-model",
+    )
+    assert _get_chat_messages(request_input) == sample.prompt
 
 
 @pytest.mark.benchmark
