@@ -37,6 +37,10 @@ AUTO_RETENTION_INTERVAL = 32768
 RetentionInterval = int | Literal["auto"]
 
 
+def _align_up(value: int, alignment: int) -> int:
+    return cdiv(value, alignment) * alignment
+
+
 class SingleTypeKVCacheManager(ABC):
     """
     An abstract base class for a manager that handle the kv cache management
@@ -386,11 +390,8 @@ class SingleTypeKVCacheManager(ABC):
 
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
-        if not req_blocks:
-            self.num_cached_block.pop(request_id, None)
-            return
+        ordered_blocks = reversed(req_blocks)
 
-        ordered_blocks = list(reversed(req_blocks))
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
@@ -732,9 +733,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert extra_tokens_after_replay_boundary % self.block_size == 0
         extra_tail_blocks = extra_tokens_after_replay_boundary // self.block_size
         if isinstance(interval_tokens, int) and interval_tokens > 0:
-            interval_tokens = self._align_retention_boundary(
-                interval_tokens, alignment_tokens
-            )
+            interval_tokens = _align_up(interval_tokens, alignment_tokens)
         assert (
             interval_tokens == "auto"
             or interval_tokens == 0
@@ -791,15 +790,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 boundary += interval_tokens
             return boundaries
 
-        interval = self._align_retention_boundary(
-            AUTO_RETENTION_INTERVAL, alignment_tokens
-        )
+        interval = _align_up(AUTO_RETENTION_INTERVAL, alignment_tokens)
         emitted: set[int] = set()
         boundary = AUTO_RETENTION_BASE
         while boundary <= AUTO_RETENTION_INTERVAL:
-            aligned_boundary = self._align_retention_boundary(
-                boundary, alignment_tokens
-            )
+            aligned_boundary = _align_up(boundary, alignment_tokens)
             if (
                 aligned_boundary not in emitted
                 and last_boundary < aligned_boundary <= num_tokens
@@ -814,13 +809,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 boundaries.append(boundary)
             boundary += interval
         return boundaries
-
-    @staticmethod
-    def _align_retention_boundary(boundary: int, alignment_tokens: int) -> int:
-        return max(
-            alignment_tokens,
-            cdiv(boundary, alignment_tokens) * alignment_tokens,
-        )
 
     def _cache_tail_at_boundary(
         self,
