@@ -1885,15 +1885,13 @@ class DPEngineCoreProc(EngineCoreProc):
         notification_addresses = getattr(self, "eep_notification_addresses", None)
         if notification_addresses is not None:
             encoder = MsgpackEncoder()
-            with (
-                zmq.Context() as ctx,
-                make_zmq_socket(
-                    ctx,
-                    notification_addresses.outputs[0],
-                    zmq.PUSH,
-                    linger=4000,
-                ) as socket,
-            ):
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx,
+                notification_addresses.outputs[0],
+                zmq.PUSH,
+                linger=4000,
+            ) as socket:
                 socket.send_multipart(encoder.encode(outputs))
         elif hasattr(self, "output_thread") and self.output_thread.is_alive():
             self.output_queue.put_nowait((0, outputs))
