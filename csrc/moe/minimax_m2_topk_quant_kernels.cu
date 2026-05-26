@@ -17,7 +17,9 @@ namespace {
 constexpr int kMiniMaxExperts = 256;
 constexpr int kMiniMaxTopK = 8;
 constexpr int kMiniMaxBlockK = 128;
-constexpr int kThreads = WARP_SIZE;
+constexpr int kThreadsPerGroup = 16;
+constexpr int kGroupsPerBlock = 16;
+constexpr int kThreads = kThreadsPerGroup * kGroupsPerBlock;
 constexpr float kFp8E4M3Min = -448.0f;
 constexpr float kFp8E4M3Max = 448.0f;
 constexpr float kQuantEps = 1.0e-10f;
@@ -27,10 +29,12 @@ __device__ __forceinline__ float sigmoidf_stable(float x) {
   return y == y ? y : 0.0f;
 }
 
-__device__ __forceinline__ float warp_reduce_max(float val, uint32_t mask) {
+__device__ __forceinline__ float half_warp_reduce_max(float val) {
+  const uint32_t mask =
+      (threadIdx.x & 16) != 0 ? 0xffff0000u : 0x0000ffffu;
 #pragma unroll
-  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-    val = fmaxf(val, __shfl_down_sync(mask, val, offset));
+  for (int offset = 8; offset > 0; offset >>= 1) {
+    val = fmaxf(val, __shfl_xor_sync(mask, val, offset));
   }
   return val;
 }
@@ -62,50 +66,55 @@ void minimax_m2_topk_sigmoid_quant_kernel(
     __nv_fp8_e4m3* __restrict__ a1q, float* __restrict__ a1q_scale,
     int64_t hidden_stride_m, int64_t logits_stride_m, int64_t a1q_stride_m,
     int64_t topk_weights_stride_m, int64_t topk_ids_stride_m,
-    int64_t a1q_scale_stride_m, int hidden_size) {
+    int64_t a1q_scale_stride_m, int hidden_size, int num_groups) {
   const int token_id = blockIdx.x;
-  const int group_id = blockIdx.y;
-  const int lane_id = threadIdx.x;
-  const uint32_t full_mask = 0xffffffffu;
+  const int group_block_id = blockIdx.y;
+  const int local_group_id = threadIdx.x / kThreadsPerGroup;
+  const int group_lane_id = threadIdx.x % kThreadsPerGroup;
+  const int group_id = group_block_id * kGroupsPerBlock + local_group_id;
 
-  const int hidden_base = group_id * kMiniMaxBlockK + lane_id * 4;
-  float vals[4];
-  float local_absmax = kQuantEps;
-
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    const int hidden_offset = hidden_base + i;
-    float v = 0.0f;
-    if (hidden_offset < hidden_size) {
-      v = static_cast<float>(
-          hidden_states[token_id * hidden_stride_m + hidden_offset]);
-    }
-    vals[i] = v;
-    local_absmax = fmaxf(local_absmax, fabsf(v));
-  }
-
-  const float absmax = __shfl_sync(
-      full_mask, warp_reduce_max(local_absmax, full_mask), 0);
-  const float scale = absmax / kFp8E4M3Max;
-
-  if (lane_id == 0) {
-    a1q_scale[token_id * a1q_scale_stride_m + group_id] = scale;
-  }
+  if (group_id < num_groups) {
+    const int hidden_base =
+        group_id * kMiniMaxBlockK + group_lane_id * 8;
+    float vals[8];
+    float local_absmax = kQuantEps;
 
 #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    const int hidden_offset = hidden_base + i;
-    if (hidden_offset < hidden_size) {
-      const float q = fminf(fmaxf(vals[i] / scale, kFp8E4M3Min),
-                            kFp8E4M3Max);
-      a1q[token_id * a1q_stride_m + hidden_offset] = __nv_fp8_e4m3(q);
+    for (int i = 0; i < 8; ++i) {
+      const int hidden_offset = hidden_base + i;
+      float v = 0.0f;
+      if (hidden_offset < hidden_size) {
+        v = static_cast<float>(
+            hidden_states[token_id * hidden_stride_m + hidden_offset]);
+      }
+      vals[i] = v;
+      local_absmax = fmaxf(local_absmax, fabsf(v));
+    }
+
+    const float absmax = half_warp_reduce_max(local_absmax);
+    const float scale = absmax / kFp8E4M3Max;
+
+    if (group_lane_id == 0) {
+      a1q_scale[token_id * a1q_scale_stride_m + group_id] = scale;
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const int hidden_offset = hidden_base + i;
+      if (hidden_offset < hidden_size) {
+        const float q = fminf(fmaxf(vals[i] / scale, kFp8E4M3Min),
+                              kFp8E4M3Max);
+        a1q[token_id * a1q_stride_m + hidden_offset] = __nv_fp8_e4m3(q);
+      }
     }
   }
 
-  if (group_id != 0) {
+  if (group_block_id != 0 || threadIdx.x >= WARP_SIZE) {
     return;
   }
 
+  const int lane_id = threadIdx.x;
+  const uint32_t full_mask = 0xffffffffu;
   float scores_per_lane[kMiniMaxTopK];
   float weights_per_lane[kMiniMaxTopK];
   int expert_ids_per_lane[kMiniMaxTopK];
@@ -237,8 +246,11 @@ void minimax_m2_topk_sigmoid_quant(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(hidden_states));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int64_t group_blocks =
+      (num_groups + vllm::moe::kGroupsPerBlock - 1) /
+      vllm::moe::kGroupsPerBlock;
   const dim3 grid(static_cast<unsigned int>(num_tokens),
-                  static_cast<unsigned int>(num_groups));
+                  static_cast<unsigned int>(group_blocks));
 
   VLLM_DISPATCH_HALF_TYPES(
       hidden_states.scalar_type(), "minimax_m2_topk_sigmoid_quant", ([&] {
@@ -253,6 +265,7 @@ void minimax_m2_topk_sigmoid_quant(
                 static_cast<float*>(a1q_scale.data_ptr()),
                 hidden_states.stride(0), router_logits.stride(0),
                 a1q.stride(0), topk_weights.stride(0), topk_ids.stride(0),
-                a1q_scale.stride(0), static_cast<int>(hidden_size));
+                a1q_scale.stride(0), static_cast<int>(hidden_size),
+                static_cast<int>(num_groups));
       }));
 }
