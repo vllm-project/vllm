@@ -308,7 +308,14 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+    # Per-API-server ports are picked by the kernel at each child's bind()
+    # to avoid parent-probe vs child-bind TOCTOU; Rust front-end opts out
+    # because it has no port-report-back channel.
+    addresses = get_engine_zmq_addresses(
+        vllm_config,
+        num_api_servers,
+        defer_api_server_ports=not rust_frontend_path,
+    )
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
@@ -340,6 +347,12 @@ def run_multi_api_server(args: argparse.Namespace):
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
             )
+
+            # Forward each child's bound endpoints to the engine handshake
+            # (runs on ``with`` exit).
+            actual_inputs, actual_outputs = api_server_manager.gather_actual_addresses()
+            addresses.inputs = actual_inputs
+            addresses.outputs = actual_outputs
 
     # Wait for API servers.
     try:

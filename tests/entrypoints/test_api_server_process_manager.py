@@ -8,8 +8,14 @@ import time
 from unittest.mock import patch
 
 import pytest
+import zmq
 
-from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
+from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.v1.utils import (
+    APIServerProcessManager,
+    get_engine_client_zmq_addr,
+    wait_for_completion_or_failure,
+)
 
 # Global variables to control worker behavior
 WORKER_RUNTIME_SECONDS = 0.5
@@ -21,6 +27,39 @@ def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
     print(f"Mock worker started with client_config: {client_config}")
     time.sleep(WORKER_RUNTIME_SECONDS)
     print("Mock worker completed successfully")
+
+
+# Module-level stub for the gather_actual_addresses test. Must be
+# importable by `multiprocessing.spawn` (no closures, no nesting).
+def defer_addresses_stub_worker(listen_address, sock, args, client_config):
+    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
+    endpoints back via the pipe, then exit."""
+    ctx = zmq.Context()
+    try:
+        in_sock = make_zmq_socket(
+            ctx, client_config["input_address"], zmq.ROUTER, bind=True
+        )
+        out_sock = make_zmq_socket(
+            ctx, client_config["output_address"], zmq.PULL, bind=True
+        )
+        try:
+            pipe = client_config["actual_address_pipe"]
+            try:
+                pipe.send(
+                    {
+                        "input_address": in_sock.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                        "output_address": out_sock.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode(),
+                    }
+                )
+            finally:
+                pipe.close()
+        finally:
+            in_sock.close(linger=0)
+            out_sock.close(linger=0)
+    finally:
+        ctx.term()
 
 
 @pytest.fixture
@@ -268,3 +307,92 @@ def test_external_process_monitoring(api_server_args):
         manager.shutdown()
         mock_coordinator.shutdown()
         time.sleep(0.2)
+
+
+@pytest.mark.timeout(60)
+def test_gather_actual_addresses_end_to_end():
+    """Each child binds ROUTER/PULL with a kernel-picked port and reports
+    the bound endpoints back via its per-child pipe; the manager surfaces
+    them via :py:meth:`gather_actual_addresses`."""
+    host = "127.0.0.1"
+    num_servers = 4
+
+    placeholder_inputs = [
+        get_engine_client_zmq_addr(local_only=False, host=host)
+        for _ in range(num_servers)
+    ]
+    placeholder_outputs = [
+        get_engine_client_zmq_addr(local_only=False, host=host)
+        for _ in range(num_servers)
+    ]
+    for addr in placeholder_inputs + placeholder_outputs:
+        assert addr == f"tcp://{host}:0", addr
+
+    sock = socket.socket()
+    manager = APIServerProcessManager(
+        listen_address=f"tcp://{host}:0",
+        sock=sock,
+        args="test_args",
+        num_servers=num_servers,
+        input_addresses=placeholder_inputs,
+        output_addresses=placeholder_outputs,
+        target_server_fn=defer_addresses_stub_worker,
+    )
+
+    try:
+        assert len(manager.processes) == num_servers
+        actual_inputs, actual_outputs = manager.gather_actual_addresses(timeout=15.0)
+    finally:
+        manager.shutdown()
+        time.sleep(0.2)
+        sock.close()
+
+    assert len(actual_inputs) == num_servers
+    assert len(actual_outputs) == num_servers
+
+    for addr in actual_inputs + actual_outputs:
+        scheme, parsed_host, port = split_zmq_path(addr)
+        assert scheme == "tcp", addr
+        assert parsed_host == host, addr
+        assert port and int(port) > 0, addr
+
+    all_addrs = actual_inputs + actual_outputs
+    assert len(set(all_addrs)) == len(all_addrs), all_addrs
+
+
+@pytest.mark.timeout(30)
+def test_gather_actual_addresses_child_crash_before_report():
+    """A child that exits before sending its endpoints must surface a
+    clear ``RuntimeError`` rather than hang or return ``None`` slots."""
+    host = "127.0.0.1"
+    num_servers = 2
+    placeholder_inputs = [
+        get_engine_client_zmq_addr(local_only=False, host=host)
+        for _ in range(num_servers)
+    ]
+    placeholder_outputs = [
+        get_engine_client_zmq_addr(local_only=False, host=host)
+        for _ in range(num_servers)
+    ]
+
+    sock = socket.socket()
+    manager = APIServerProcessManager(
+        listen_address=f"tcp://{host}:0",
+        sock=sock,
+        args="test_args",
+        num_servers=num_servers,
+        input_addresses=placeholder_inputs,
+        output_addresses=placeholder_outputs,
+        # mock_run_api_server_worker exits without touching
+        # ``actual_address_pipe`` — simulates a child that dies before
+        # reporting its bound addresses.
+        target_server_fn=mock_run_api_server_worker,
+    )
+    try:
+        # Sentinel-first vs pipe-EOF-first both produce "reporting".
+        with pytest.raises(RuntimeError, match="reporting"):
+            manager.gather_actual_addresses(timeout=10.0)
+    finally:
+        manager.shutdown()
+        time.sleep(0.2)
+        sock.close()
