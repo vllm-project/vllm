@@ -31,9 +31,11 @@ impl ToolParser for DeepSeekV3ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
@@ -54,7 +56,7 @@ mod tests {
         V3_JSON_START,
     };
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParser, ToolParserOutput};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn v3_tool_call(function_name: &str, arguments: &str) -> String {
         format!(

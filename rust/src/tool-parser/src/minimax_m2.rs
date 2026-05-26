@@ -92,6 +92,7 @@ impl MinimaxM2ToolParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = MinimaxM2Mode::Text;
@@ -107,6 +108,7 @@ impl ToolParser for MinimaxM2ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -119,6 +121,7 @@ impl ToolParser for MinimaxM2ToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {
@@ -234,6 +237,7 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{MinimaxM2ToolParser, TOOL_CALL_END, TOOL_CALL_START, ToolParser};
+    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn build_tool_block(invokes: &[(&str, Vec<(&str, &str)>)]) -> String {

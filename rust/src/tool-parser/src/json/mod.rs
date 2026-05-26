@@ -79,6 +79,7 @@ impl JsonToolCallParser {
             emitted_tool_count: 0,
         }
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
         let config = self.config;
@@ -92,6 +93,7 @@ impl JsonToolCallParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
@@ -155,6 +157,7 @@ impl JsonToolCallParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = JsonToolCallMode::Text;

@@ -138,6 +138,7 @@ impl DeepSeekJsonToolParser {
         }
         Ok(())
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -150,6 +151,7 @@ impl DeepSeekJsonToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
@@ -165,6 +167,7 @@ impl DeepSeekJsonToolParser {
         let _ = self.reset();
         Ok(output)
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = DeepSeekJsonMode::Text;

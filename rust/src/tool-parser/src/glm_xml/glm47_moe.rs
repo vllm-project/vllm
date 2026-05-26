@@ -39,7 +39,8 @@ impl ToolParser for Glm47MoeToolParser {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Glm47MoeToolParser, ToolParser};
+    use super::Glm47MoeToolParser;
+    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn glm47_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {

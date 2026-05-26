@@ -39,12 +39,15 @@ impl ToolParser for DeepSeekV32ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn preserve_special_tokens(&self) -> bool {
         true
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
@@ -60,8 +63,8 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::DeepSeekV32ToolParser;
-    use crate::ToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params

@@ -119,6 +119,7 @@ impl KimiK2ToolParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = KimiK2Mode::Text;
@@ -134,9 +135,11 @@ impl ToolParser for KimiK2ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn preserve_special_tokens(&self) -> bool {
         true
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -149,6 +152,7 @@ impl ToolParser for KimiK2ToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
@@ -318,8 +322,8 @@ mod tests {
         KimiK2ToolParser, TOOL_CALL_ARGUMENT_START, TOOL_CALL_END, TOOL_CALL_START, TOOL_CALLS_END,
         TOOL_CALLS_START, ToolParser, tool_header,
     };
-    use crate::ToolParserOutput;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, index: usize, arguments: &str) -> String {
         format!(

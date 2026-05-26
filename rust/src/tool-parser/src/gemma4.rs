@@ -291,7 +291,7 @@ mod tests {
         Gemma4ToolParser, ToolCallDelta, ToolParser, ToolParserOutput, gemma4_args,
         gemma4_array_content,
     };
-    use crate::Tool;
+    use crate::{Tool, ToolParserTestExt as _};
 
     fn parse_gemma4_args(args: &str) -> super::Result<serde_json::Map<String, Value>> {
         let mut input = Partial::new(args);

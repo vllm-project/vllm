@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{ToolParser, ToolParserOutput};
-use crate::Tool;
+use crate::{Tool, ToolParserTestExt as _};
 
 /// Build a reusable set of function tools for parser unit tests.
 pub fn test_tools() -> Vec<Tool> {

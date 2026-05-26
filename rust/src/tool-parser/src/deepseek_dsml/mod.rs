@@ -124,12 +124,14 @@ impl DeepSeekDsmlToolParser {
         };
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
         buffered
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         // Extract tool calls from streaming model output.
         //
@@ -147,6 +149,7 @@ impl DeepSeekDsmlToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {

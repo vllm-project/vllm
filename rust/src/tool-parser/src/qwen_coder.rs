@@ -93,6 +93,7 @@ impl Qwen3CoderToolParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = QwenCoderMode::Text;
@@ -108,6 +109,7 @@ impl ToolParser for Qwen3CoderToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -120,6 +122,7 @@ impl ToolParser for Qwen3CoderToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
@@ -226,6 +229,7 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{Qwen3CoderToolParser, ToolParser};
+    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {

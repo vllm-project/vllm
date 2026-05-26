@@ -99,12 +99,14 @@ impl GlmXmlToolParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
         buffered
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -117,6 +119,7 @@ impl GlmXmlToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
@@ -250,8 +253,8 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::Glm45MoeToolParser;
-    use crate::ToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params

@@ -44,9 +44,11 @@ impl ToolParser for HermesToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.inner.finish()
     }
@@ -63,7 +65,7 @@ mod tests {
 
     use super::HermesToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParser, ToolParserOutput};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
         format!(r#"<tool_call>{{"name":"{function_name}","arguments":{arguments}}}</tool_call>"#)

@@ -27,9 +27,11 @@ impl ToolParser for DeepSeekV31ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
@@ -49,7 +51,7 @@ mod tests {
         TOOL_CALL_END, TOOL_CALL_SEPARATOR, TOOL_CALL_START, TOOL_CALLS_END, TOOL_CALLS_START,
     };
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParser, ToolParserOutput};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn v31_tool_call(function_name: &str, arguments: &str) -> String {
         format!("{TOOL_CALL_START}{function_name}{TOOL_CALL_SEPARATOR}{arguments}{TOOL_CALL_END}")

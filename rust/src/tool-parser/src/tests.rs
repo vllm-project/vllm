@@ -1,4 +1,5 @@
 use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::ToolParserTestExt as _;
 
 struct DefaultParser;
 

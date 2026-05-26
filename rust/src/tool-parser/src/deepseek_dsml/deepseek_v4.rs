@@ -42,12 +42,15 @@ impl ToolParser for DeepSeekV4ToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn preserve_special_tokens(&self) -> bool {
         true
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
@@ -61,7 +64,8 @@ impl ToolParser for DeepSeekV4ToolParser {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{DeepSeekV4ToolParser, ToolParser};
+    use super::DeepSeekV4ToolParser;
+    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, test_tools};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {

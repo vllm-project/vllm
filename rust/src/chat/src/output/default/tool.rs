@@ -267,9 +267,11 @@ mod tests {
     use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::output::structured::structured_chat_event_stream;
-    use crate::parser::tool::{ToolParser, ToolParserError, ToolParserOutput};
+    use crate::parser::tool::{
+        DeepSeekV4ToolParser, ToolParser, ToolParserError, ToolParserOutput,
+    };
     use crate::request::ChatTool;
-    use crate::stream::ChatEventStream;
+    use crate::stream::{ChatEventStream, CollectedAssistantMessage};
 
     struct FailingParser {
         fail_next: bool,
@@ -383,6 +385,77 @@ mod tests {
         }
     }
 
+    fn deepseek_v4_test_tools() -> Vec<ChatTool> {
+        vec![
+            ChatTool {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "location": { "type": "string" }
+                    }
+                }),
+                strict: None,
+            },
+            ChatTool {
+                name: "add".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    }
+                }),
+                strict: None,
+            },
+        ]
+    }
+
+    async fn collect_deepseek_v4_message(chunks: Vec<String>) -> CollectedAssistantMessage {
+        let events = chunks
+            .into_iter()
+            .map(|delta| {
+                Ok(ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta,
+                })
+            })
+            .chain(std::iter::once(Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            })));
+        let parser = DeepSeekV4ToolParser::create(&deepseek_v4_test_tools()).unwrap();
+        let assistant_events = tool_event_stream(stream::iter(events), Some(parser));
+        let chat_events = structured_chat_event_stream(assistant_events);
+
+        ChatEventStream::new("req_deepseek_v4".to_string(), Box::pin(chat_events))
+            .collect_message()
+            .await
+            .unwrap()
+    }
+
+    fn message_tool_projection(
+        message: &CollectedAssistantMessage,
+    ) -> (String, Vec<(String, serde_json::Value)>) {
+        (
+            message.message.text(),
+            message
+                .message
+                .tool_calls()
+                .map(|call| {
+                    (
+                        call.name.clone(),
+                        serde_json::from_str(&call.arguments).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     #[tokio::test]
     async fn tool_parser_error_preserves_partial_output_and_flushes_buffer() {
         let events = stream::iter(vec![
@@ -426,6 +499,42 @@ mod tests {
             }
         );
         assert!(matches!(events[3], AssistantEvent::Done { .. }));
+    }
+
+    #[tokio::test]
+    async fn real_buffered_parser_error_matches_streaming_and_non_streaming() {
+        let prefix = "I will check both.\n";
+        let first_tool_call = concat!(
+            "<｜DSML｜tool_calls>\n",
+            "<｜DSML｜invoke name=\"get_weather\">\n",
+            "<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo</｜DSML｜parameter>\n",
+            "</｜DSML｜invoke>",
+        );
+        let malformed_second_tool_call = concat!(
+            "\n<｜DSML｜invoke name=\"add\">\n",
+            "not a parameter\n",
+            "</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>",
+        );
+        let streaming_chunks = vec![
+            prefix.to_string(),
+            first_tool_call.to_string(),
+            malformed_second_tool_call.to_string(),
+        ];
+        let full_output = streaming_chunks.concat();
+
+        let streaming = collect_deepseek_v4_message(streaming_chunks).await;
+        let non_streaming = collect_deepseek_v4_message(vec![full_output]).await;
+
+        let expected = (
+            format!("{prefix}{malformed_second_tool_call}"),
+            vec![(
+                "get_weather".to_string(),
+                serde_json::json!({ "location": "Tokyo" }),
+            )],
+        );
+        assert_eq!(message_tool_projection(&streaming), expected);
+        assert_eq!(message_tool_projection(&non_streaming), expected);
     }
 
     #[tokio::test]

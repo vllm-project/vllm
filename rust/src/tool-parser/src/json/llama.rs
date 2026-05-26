@@ -116,6 +116,7 @@ impl Llama3JsonToolParser {
         }
         Ok(())
     }
+
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = LlamaJsonMode::Start;
@@ -132,6 +133,7 @@ impl ToolParser for Llama3JsonToolParser {
     {
         Ok(Box::new(Self::new(tools)))
     }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -154,6 +156,7 @@ impl ToolParser for Llama3JsonToolParser {
 
         Ok(())
     }
+
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
@@ -251,7 +254,7 @@ mod tests {
 
     use super::Llama3JsonToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParser, ToolParserOutput};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, parameters: &str) -> String {
         format!(r#"{{"name":"{function_name}","parameters":{parameters}}}"#)

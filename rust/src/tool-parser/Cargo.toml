@@ -16,6 +16,7 @@ winnow.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+easy-ext.workspace = true
 expect-test.workspace = true
 futures.workspace = true
 openai-protocol.workspace = true
