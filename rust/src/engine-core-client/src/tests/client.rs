@@ -2117,11 +2117,12 @@ async fn collective_rpc_flattens_results_from_all_engines() {
 }
 
 /// Spawn a mock engine that handles a single utility call, asserts the method
-/// name matches, and replies with `result`.
+/// name and serialized args match, and replies with `result`.
 fn spawn_mock_utility_engine(
     handshake_address: String,
     engine_id: Vec<u8>,
     expected_method: &'static str,
+    expected_args: Value,
     result: bool,
 ) -> (
     tokio::sync::oneshot::Sender<()>,
@@ -2136,8 +2137,10 @@ fn spawn_mock_utility_engine(
                 Value::Array(array) => array,
                 other => panic!("expected utility payload array, got {other:?}"),
             };
+            // Utility requests serialize as `(client_index, call_id, method, args)`.
             let call_id = array[1].as_u64().expect("call_id");
             assert_eq!(array[2], Value::from(expected_method));
+            assert_eq!(array[3], expected_args, "unexpected utility args");
             send_outputs(
                 push,
                 EngineCoreOutputs {
@@ -2164,13 +2167,14 @@ async fn is_sleeping_returns_error_when_engines_disagree() {
         handshake_address.clone(),
         b"engine-0".to_vec(),
         "is_sleeping",
+        Value::Array(vec![]),
         true,
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
         handshake_address.clone(),
         b"engine-1".to_vec(),
         "is_sleeping",
+        Value::Array(vec![]),
         false,
     );
 
@@ -2204,6 +2208,49 @@ async fn is_sleeping_returns_error_when_engines_disagree() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_value_when_all_engines_agree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.is_sleeping().await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_prefix_cache_returns_true_when_all_engines_succeed() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -2213,13 +2260,14 @@ async fn reset_prefix_cache_returns_true_when_all_engines_succeed() {
         handshake_address.clone(),
         b"engine-0".to_vec(),
         "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
         true,
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
         handshake_address.clone(),
         b"engine-1".to_vec(),
         "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
         true,
     );
 
@@ -2255,13 +2303,14 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
         handshake_address.clone(),
         b"engine-0".to_vec(),
         "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
         true,
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
         handshake_address.clone(),
         b"engine-1".to_vec(),
         "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
         false,
     );
 

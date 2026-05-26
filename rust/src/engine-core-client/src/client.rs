@@ -602,8 +602,12 @@ impl EngineCoreClient {
     pub async fn is_sleeping(&self) -> Result<bool> {
         let results: Vec<bool> = self.call_utility("is_sleeping", ()).await?;
         // `engine_count >= 1` is enforced during startup handshake, so `results`
-        // is non-empty.
-        let first = results[0];
+        // is normally non-empty; fall back to a fail-loud error rather than
+        // indexing in case that invariant is ever bypassed.
+        let first = *results.first().ok_or_else(|| Error::InconsistentUtilityResults {
+            method: "is_sleeping".to_string(),
+            values: "[]".to_string(),
+        })?;
         if results.iter().all(|&v| v == first) {
             Ok(first)
         } else {
@@ -641,6 +645,15 @@ impl EngineCoreClient {
                 (reset_running_requests, reset_connector),
             )
             .await?;
+        // `engine_count >= 1` is enforced during startup handshake, so `results`
+        // is normally non-empty; fail loud rather than reporting a vacuous
+        // success (`[].all() == true`) in case that invariant is ever bypassed.
+        if results.is_empty() {
+            return Err(Error::InconsistentUtilityResults {
+                method: "reset_prefix_cache".to_string(),
+                values: "[]".to_string(),
+            });
+        }
         Ok(results.into_iter().all(|ok| ok))
     }
 
