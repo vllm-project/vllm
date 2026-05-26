@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 
 import torch
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -30,6 +31,26 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+def sparse_indexer_max_logits_bytes(is_sm12x: bool | None = None) -> int:
+    if is_sm12x is None:
+        is_sm12x = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        )
+    if "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" in os.environ:
+        return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    default_mb = 96 if is_sm12x else 512
+    return default_mb * 1024 * 1024
+
+
+def _uses_deep_gemm_scheduler_metadata() -> bool:
+    return (
+        current_platform.is_cuda()
+        and has_deep_gemm()
+        and not current_platform.is_device_capability_family(120)
+    )
 
 
 @triton.jit
@@ -226,7 +247,12 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     # within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    # SM12x (consumer Blackwell, 95 GiB) cannot afford the upstream multiplier
+    # of 40 that was sized for H200's 140 GiB headroom. Drop to 8 — prefill
+    # chunks subdivide automatically via split_indexer_prefill_chunks so
+    # correctness is preserved; just more chunk passes on very long prefills.
+    multiplier = 8 if current_platform.is_device_capability_family(120) else 40
+    return max_model_len * multiplier
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
@@ -269,13 +295,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.reorder_batch_threshold += self.num_speculative_tokens
         # NOTE(zyongye) fp4 indexer cache only natively supports next_n in
         # natively_supported_next_n_fp4; for other next_n values we fall back
-        # to the flattening path. Outside the SM100 datacenter family the FP8
-        # paged MQA logits kernel has the same [1, 2] constraint (deepgemm
-        # smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there too.
+        # to the flattening path. When fp4 indexer cache is disabled, the
+        # native (non-flattening) path handles all next_n values.
         self.use_flattening = (
             self.use_fp4_indexer_cache
-            or not current_platform.is_device_capability_family(100)
-        ) and next_n not in self.natively_supported_next_n_fp4
+            and next_n not in self.natively_supported_next_n_fp4
+        )
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -518,7 +543,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
-            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            max_logits_bytes = sparse_indexer_max_logits_bytes()
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -608,8 +633,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _uses_deep_gemm_scheduler_metadata():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,

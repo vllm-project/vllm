@@ -145,7 +145,12 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            x=hidden_states,
+            positions=positions,
+            input_ids=input_ids,
+            post_mix=None,
+            res_mix=None,
+            residual=None,
         )
         if current_platform.is_cuda():
             hidden_states = self.mtp_block.hc_post(

@@ -326,6 +326,51 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _has_scheduled_decode(self, requests: list[Request]) -> bool:
+        return any(
+            request.num_computed_tokens >= request.num_prompt_tokens
+            for request in requests
+        )
+
+    def _limit_mixed_decode_prefill_chunk(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        scheduled_running_reqs: list[Request],
+        has_waiting_requests: bool = False,
+    ) -> int:
+        if (
+            not self.scheduler_config.enable_chunked_prefill
+            or request.num_computed_tokens >= request.num_prompt_tokens
+        ):
+            return num_new_tokens
+
+        has_scheduled_decode = self._has_scheduled_decode(scheduled_running_reqs)
+        if not has_scheduled_decode and not has_waiting_requests:
+            return num_new_tokens
+
+        remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
+        if remaining_prefill <= self.max_num_scheduled_tokens:
+            return num_new_tokens
+
+        # Very long prefills span many scheduling steps; a smaller chunk keeps
+        # already-active decoders from seeing long inter-token gaps and leaves
+        # room for short requests that arrive behind an active long prefill.
+        very_long_prefill_steps = 4
+        very_long_prefill_threshold = (
+            self.max_num_scheduled_tokens * very_long_prefill_steps
+        )
+        if has_scheduled_decode:
+            if remaining_prefill > very_long_prefill_threshold:
+                mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 8)
+            else:
+                mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 4)
+        elif remaining_prefill > very_long_prefill_threshold:
+            mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 2)
+        else:
+            mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)
+        return min(num_new_tokens, mixed_prefill_budget)
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -390,6 +435,12 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = self._limit_mixed_decode_prefill_chunk(
+                request,
+                num_new_tokens,
+                scheduled_running_reqs,
+                bool(self.waiting or self.skipped_waiting),
+            )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -667,6 +718,9 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = self._limit_mixed_decode_prefill_chunk(
+                        request, num_new_tokens, scheduled_running_reqs
+                    )
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.

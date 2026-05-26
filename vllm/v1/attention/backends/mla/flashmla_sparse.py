@@ -238,7 +238,11 @@ def get_prefill_workspace_size(max_model_len: int):
     #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
+    # SM12x: drop multiplier 5 -> 2. Workspace just holds chunk rows;
+    # cp_gather_and_upconvert_fp8_kv_cache iterates PREFILL_CHUNK_SIZE=4
+    # rows at a time so smaller workspace just means more passes.
+    multiplier = 2 if current_platform.is_device_capability_family(120) else 5
+    return max_model_len * multiplier
 
 
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
@@ -1060,6 +1064,44 @@ def build_c128a_topk_metadata(
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
+    BLOCK_SIZE = 1024
+
+    # Compute the smallest BLOCK_SIZE-aligned width that covers every
+    # in-flight token's num_compressed. When ``max_model_len`` is much
+    # larger than the actual prompts (e.g. 1M cap with 2K inputs) the
+    # original ``range(0, max_compressed_tokens, BLOCK_SIZE)`` iterated
+    # over a tail that always wrote ``-1`` for shorter contexts. Capping
+    # the inner loop at ``effective_topk`` cuts those dead iterations.
+    #
+    # This builder runs OUTSIDE the CUDA-graph-captured forward pass, so
+    # ``effective_topk`` may vary freely per call. To keep downstream
+    # (which reads the full ``max_compressed_tokens`` buffer width inside
+    # the captured forward) correct, we pre-fill the active slice with
+    # ``-1`` so the kernel-skipped tail is treated as "invalid" by the
+    # sentinel checks in the sparse MLA accumulate kernels.
+    if num_decode_tokens > 0:
+        global_decode_buffer[:num_decode_tokens].fill_(-1)
+        decode_lens_buffer[:num_decode_tokens].zero_()
+    if num_prefill_tokens > 0:
+        prefill_buffer[:num_prefill_tokens].fill_(-1)
+
+    # ``.item()`` is a host sync, but this builder runs in metadata
+    # build (outside the captured forward) so it is harmless w.r.t.
+    # cudagraph capture/replay (see the comment block above).
+    max_pos = int(positions.max().item())
+    max_num_compressed = min(
+        max((max_pos + 1) // compress_ratio, 0),
+        max_compressed_tokens,
+    )
+    effective_topk_arg = min(
+        max_compressed_tokens,
+        cdiv(max_num_compressed, BLOCK_SIZE) * BLOCK_SIZE,
+    )
+    if effective_topk_arg == 0:
+        # Nothing to write; the fill_(-1) above already produced the
+        # correct "all-invalid" buffer state.
+        return global_decode, decode_lens, prefill_local
+
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
         global_decode_buffer,
         global_decode_buffer.stride(0),
@@ -1068,14 +1110,14 @@ def build_c128a_topk_metadata(
         prefill_buffer.stride(0),
         positions,
         compress_ratio,
-        max_compressed_tokens,
+        effective_topk_arg,
         num_decode_tokens,
         token_to_req_indices,
         block_table,
         block_table.stride(0),
         block_size,
         slot_mapping,
-        BLOCK_SIZE=1024,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
     return global_decode, decode_lens, prefill_local
 
@@ -1092,7 +1134,7 @@ def _build_c128a_topk_metadata_kernel(
     # Inputs
     positions_ptr,
     compress_ratio,
-    max_compressed_tokens,
+    effective_topk,
     num_decode_tokens,
     token_to_req_indices_ptr,
     block_table_ptr,
@@ -1101,10 +1143,18 @@ def _build_c128a_topk_metadata_kernel(
     slot_mapping_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # ``effective_topk`` is the BLOCK_SIZE-aligned cap that covers every
+    # in-flight token's ``num_compressed`` (computed by the Python
+    # caller in ``build_c128a_topk_metadata``). The buffer columns
+    # extend out to the Python-side ``max_compressed_tokens`` width;
+    # entries past ``effective_topk`` are left at ``-1`` by the caller's
+    # ``fill_(-1)`` pre-pass so the downstream sparse MLA accumulate
+    # kernels treat them as invalid via their ``kv_index >= 0`` /
+    # ``slot_id >= 0`` sentinel checks.
     token_idx = tl.program_id(0)
     position = tl.load(positions_ptr + token_idx)
     num_compressed = (position + 1) // compress_ratio
-    num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
+    num_compressed = tl.minimum(num_compressed, effective_topk)
     is_decode = token_idx < num_decode_tokens
 
     if is_decode:
@@ -1112,9 +1162,9 @@ def _build_c128a_topk_metadata_kernel(
         is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
         req_idx = tl.load(token_to_req_indices_ptr + token_idx)
         count = tl.zeros((), dtype=tl.int32)
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+        for i in range(0, effective_topk, BLOCK_SIZE):
             offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
+            mask = offset < effective_topk
             is_valid = offset < num_compressed
 
             block_indices = offset // block_size
@@ -1139,9 +1189,9 @@ def _build_c128a_topk_metadata_kernel(
     else:
         # --- Prefill: write local indices ---
         pfx_idx = token_idx - num_decode_tokens
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+        for i in range(0, effective_topk, BLOCK_SIZE):
             offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
+            mask = offset < effective_topk
             tl.store(
                 prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
                 tl.where(offset < num_compressed, offset, -1),

@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
@@ -228,7 +229,14 @@ class SpecDecodeBaseProposer:
         self._enable_probabilistic_draft_probs = (
             self.speculative_config.rejection_sample_method == "standard"
             and self.speculative_config.draft_sample_method == "probabilistic"
-        )
+        ) or self.method == "mtp"
+        # MTP drafts benefit from probabilistic sampling at ``temperature > 0``:
+        # the draft model is a near-copy of the target, so sampling from
+        # ``softmax(draft_logits)`` covers the target distribution much better
+        # than argmax and lifts acceptance by ~9 pp on DSv4-Flash mt-bench
+        # (measured 58.9% → 67.8%). The ``all_greedy`` fast path inside
+        # ``_sample_draft_tokens`` still falls back to argmax for ``temp==0``
+        # requests so this override only changes behaviour where it helps.
         self._last_draft_probs: torch.Tensor | None = None
 
         self._slot_mapping_buffer = torch.zeros(
@@ -394,11 +402,53 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
-    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _get_effective_spec_step_idx(self, spec_step_idx: int) -> int:
+        if self.method != "mtp":
+            return 0
+
+        config = getattr(self.model, "config", None)
+        num_mtp_layers = getattr(config, "num_nextn_predict_layers", None)
+        if not isinstance(num_mtp_layers, int):
+            inner_model = getattr(self.model, "model", None)
+            num_mtp_layers = getattr(inner_model, "num_mtp_layers", None)
+
+        if isinstance(num_mtp_layers, int) and num_mtp_layers > 0:
+            return spec_step_idx % num_mtp_layers
+        return spec_step_idx
+
+    def _compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        if self.method == "mtp":
+            return self.model.compute_logits(
+                hidden_states,
+                spec_step_idx=self._get_effective_spec_step_idx(spec_step_idx),
+            )
+        return self.model.compute_logits(hidden_states)
+
+    def _add_spec_step_idx(
+        self,
+        model_kwargs: dict[str, torch.Tensor | None],
+        spec_step_idx: int,
+    ) -> dict[str, torch.Tensor | int | None]:
+        if self.method != "mtp":
+            return model_kwargs
+        return {
+            **model_kwargs,
+            "spec_step_idx": self._get_effective_spec_step_idx(spec_step_idx),
+        }
+
+    def _greedy_sample(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+        return self._compute_logits(hidden_states, spec_step_idx).argmax(dim=-1)
 
     def _sample_from_logits(
         self,
@@ -415,10 +465,25 @@ class SpecDecodeBaseProposer:
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sample draft token ids (and optionally their probabilities).
+
+        ``spec_step_idx`` is forwarded to ``_compute_logits`` so that
+        MTP-style drafters can route the logits computation through the
+        correct draft layer (DSv4 cycles through ``num_nextn_predict_layers``
+        layers). For non-MTP drafters this argument is ignored.
+
+        Probabilities are only returned when
+        :attr:`_enable_probabilistic_draft_probs` is enabled (set by the
+        speculative config via ``rejection_sample_method="standard"`` and
+        ``draft_sample_method="probabilistic"``). In every other case we
+        fall back to argmax, matching the upstream
+        ``_sample_draft_tokens`` contract.
+        """
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
-            return self._greedy_sample(hidden_states), None
-        logits = self.model.compute_logits(hidden_states)
+            return self._greedy_sample(hidden_states, spec_step_idx), None
+        logits = self._compute_logits(hidden_states, spec_step_idx)
         return self._sample_from_logits(logits, sampling_metadata)
 
     def take_last_draft_probs(self) -> torch.Tensor | None:
@@ -494,7 +559,7 @@ class SpecDecodeBaseProposer:
                 slot_mapping_size, common_attn_metadata.slot_mapping
             ),
         ):
-            ret_hidden_states = self.model(**model_kwargs)
+            ret_hidden_states = self.model(**self._add_spec_step_idx(model_kwargs, 0))
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -505,8 +570,11 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
+            # ``spec_step_idx=0`` selects the first MTP layer for DSv4 (and
+            # is ignored for non-MTP drafters). Probabilities only flow
+            # through when ``_enable_probabilistic_draft_probs`` is set.
             draft_token_ids, draft_probs = self._sample_draft_tokens(
-                sample_hidden_states, sampling_metadata
+                sample_hidden_states, sampling_metadata, spec_step_idx=0
             )
             if draft_probs is not None:
                 self._last_draft_probs = draft_probs.view(
@@ -527,9 +595,8 @@ class SpecDecodeBaseProposer:
             self.positions[:batch_size] = positions
 
         draft_token_ids, draft_probs = self._sample_draft_tokens(
-            sample_hidden_states, sampling_metadata
+            sample_hidden_states, sampling_metadata, spec_step_idx=0
         )
-        draft_probs_list = None if draft_probs is None else [draft_probs]
 
         if self.allowed_attn_types is not None:
             for group_md in per_group_attn_metadata:
@@ -543,6 +610,7 @@ class SpecDecodeBaseProposer:
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
+        draft_probs_list = [] if draft_probs is None else [draft_probs]
 
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
@@ -621,7 +689,9 @@ class SpecDecodeBaseProposer:
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=self._get_slot_mapping(input_batch_size),
             ):
-                ret_hidden_states = self.model(**model_kwargs)
+                ret_hidden_states = self.model(
+                    **self._add_spec_step_idx(model_kwargs, token_index + 1)
+                )
                 if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
@@ -630,16 +700,17 @@ class SpecDecodeBaseProposer:
 
             hidden_states = hidden_states[:batch_size]
             draft_token_ids, draft_probs = self._sample_draft_tokens(
-                last_hidden_states[:batch_size], sampling_metadata
+                last_hidden_states[:batch_size],
+                sampling_metadata,
+                spec_step_idx=token_index + 1,
             )
-            if draft_probs is not None:
-                assert draft_probs_list is not None
-                draft_probs_list.append(draft_probs)
             draft_token_ids_list.append(draft_token_ids)
+            if draft_probs is not None:
+                draft_probs_list.append(draft_probs)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        if draft_probs_list is not None:
+        if draft_probs_list:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
         return draft_token_ids
 
@@ -1645,12 +1716,10 @@ class SpecDecodeBaseProposer:
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
 
 
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
+# NOTE(woosuk): This duplicates part of the main sampling code because MTP
+# needs both the sampled draft token ids and the draft probability tensor for
+# rejection sampling. Refactor this once the sampler exposes a reusable helper
+# that returns both values without extra packing.
 def compute_probs_and_sample_next_token(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -1666,22 +1735,31 @@ def compute_probs_and_sample_next_token(
 
     # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
     # consistent with sampler.py's _SAMPLING_EPS threshold
-    temperature = sampling_metadata.temperature
+    num_tokens = logits.shape[0]
+    temperature = _expand_draft_sampling_tensor(
+        sampling_metadata.temperature,
+        num_tokens,
+    )
     # Avoid division by zero if there are greedy requests.
     if not sampling_metadata.all_random:
         is_greedy = temperature < _SAMPLING_EPS
         temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
+    top_k = _expand_draft_sampling_tensor(sampling_metadata.top_k, num_tokens)
+    top_p = _expand_draft_sampling_tensor(sampling_metadata.top_p, num_tokens)
+    logits = apply_top_k_top_p(logits, top_k, top_p)
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
-
-    # TODO(woosuk): Consider seeds.
+    generators = _expand_draft_sampling_generators(
+        sampling_metadata.generators,
+        sampling_metadata.temperature.shape[0],
+        num_tokens,
+    )
     q = torch.empty_like(probs)
-    q.exponential_()
+    if len(generators) != num_tokens:
+        q.exponential_()
+    for i, generator in generators.items():
+        q[i].exponential_(generator=generator)
     # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
     # will be used later for rejection sampling.
     next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
@@ -1689,3 +1767,41 @@ def compute_probs_and_sample_next_token(
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)
     return next_token_ids, probs
+
+
+def _expand_draft_sampling_tensor(
+    tensor: torch.Tensor | None,
+    num_tokens: int,
+) -> torch.Tensor | None:
+    if tensor is None or tensor.shape[0] == num_tokens:
+        return tensor
+
+    batch_size = tensor.shape[0]
+    if num_tokens % batch_size != 0:
+        raise ValueError(
+            "Draft sampling metadata must either match the draft logits row "
+            "count or evenly divide it."
+        )
+    return tensor.repeat_interleave(num_tokens // batch_size, dim=0)
+
+
+def _expand_draft_sampling_generators(
+    generators: dict[int, torch.Generator],
+    batch_size: int,
+    num_tokens: int,
+) -> dict[int, torch.Generator]:
+    if not generators or batch_size == num_tokens:
+        return generators
+
+    if num_tokens % batch_size != 0:
+        raise ValueError(
+            "Draft sampling generators must either match the draft logits row "
+            "count or evenly divide it."
+        )
+
+    repeat = num_tokens // batch_size
+    return {
+        req_idx * repeat + offset: generator
+        for req_idx, generator in generators.items()
+        for offset in range(repeat)
+    }

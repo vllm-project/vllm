@@ -34,10 +34,21 @@ def test_parser_selection(tokenizer, thinking, expected_parser_type):
     assert isinstance(parser._parser, expected_parser_type)
 
 
-def test_deepseek_v4_reasoning_parser_alias():
+def test_deepseek_v4_reasoning_parser_registration():
+    """``deepseek_v4`` now resolves to its own parser (a defensive
+    extension of ``DeepSeekV3ReasoningParser``) rather than reusing the
+    V3 parser directly. See ``tests/reasoning/test_deepseekv4_reasoning_parser.py``.
+    """
+    from vllm.reasoning.deepseek_v4_reasoning_parser import (
+        DeepSeekV4ReasoningParser,
+    )
+
     parser_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v4")
 
-    assert parser_cls is DeepSeekV3ReasoningParser
+    assert parser_cls is DeepSeekV4ReasoningParser
+    # The V3 alias must remain pointed at V3.
+    v3_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v3")
+    assert v3_cls is DeepSeekV3ReasoningParser
 
 
 def test_identity_reasoning_parser_basic(tokenizer):
