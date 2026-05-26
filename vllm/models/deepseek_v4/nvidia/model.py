@@ -22,9 +22,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
-from vllm.model_executor.layers.fused_moe.router.norm_gate_linear import (
-    NormGateLinear,
-)
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -56,14 +54,14 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.nvidia.ops.attention import (
+from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -116,167 +114,6 @@ class DeepseekV4MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-
-@triton.jit
-def _deepseek_v4_stage_mega_moe_inputs_kernel(
-    hidden_states,
-    x_fp8,
-    x_sf,
-    topk_ids,
-    topk_weights,
-    topk_idx_out,
-    topk_weights_out,
-    hidden_stride_m: tl.constexpr,
-    hidden_stride_k: tl.constexpr,
-    x_stride_m: tl.constexpr,
-    x_stride_k: tl.constexpr,
-    x_sf_stride_m: tl.constexpr,
-    x_sf_stride_k: tl.constexpr,
-    topk_ids_stride_m: tl.constexpr,
-    topk_ids_stride_k: tl.constexpr,
-    topk_weights_stride_m: tl.constexpr,
-    topk_weights_stride_k: tl.constexpr,
-    topk_idx_stride_m: tl.constexpr,
-    topk_idx_stride_k: tl.constexpr,
-    topk_weights_out_stride_m: tl.constexpr,
-    topk_weights_out_stride_k: tl.constexpr,
-    hidden_size: tl.constexpr,
-    top_k: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_K: tl.constexpr,
-    BLOCK_TOPK: tl.constexpr,
-) -> None:
-    token_id = tl.program_id(0)
-    k_block_id = tl.program_id(1)
-
-    k_offsets = k_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
-    k_mask = k_offsets < hidden_size
-    hidden = tl.load(
-        hidden_states + token_id * hidden_stride_m + k_offsets * hidden_stride_k,
-        mask=k_mask,
-        other=0.0,
-    ).to(tl.float32)
-
-    num_groups: tl.constexpr = BLOCK_K // GROUP_K
-    hidden_groups = tl.reshape(tl.abs(hidden), [num_groups, GROUP_K])
-    amax = tl.max(hidden_groups, axis=1)
-    amax = tl.maximum(amax, 1.0e-4)
-
-    scale = amax / 448.0
-    scale_bits = scale.to(tl.uint32, bitcast=True)
-    scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
-        tl.uint32
-    )
-    scale_exp = tl.minimum(tl.maximum(scale_exp, 1), 254)
-    rounded_scale = (scale_exp << 23).to(tl.float32, bitcast=True)
-
-    hidden_groups = tl.reshape(hidden, [num_groups, GROUP_K])
-    scaled = hidden_groups * (1.0 / rounded_scale)[:, None]
-    scaled = tl.reshape(scaled, [BLOCK_K])
-    fp8 = scaled.to(tl.float8e4nv)
-    tl.store(
-        x_fp8 + token_id * x_stride_m + k_offsets * x_stride_k,
-        fp8,
-        mask=k_mask,
-    )
-
-    scale_offsets = tl.arange(0, num_groups)
-    packed_scale = tl.sum(scale_exp << (scale_offsets * 8), axis=0).to(tl.int32)
-    tl.store(
-        x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
-        packed_scale,
-    )
-
-    if k_block_id == 0:
-        topk_offsets = tl.arange(0, BLOCK_TOPK)
-        topk_mask = topk_offsets < top_k
-
-        ids = tl.load(
-            topk_ids + token_id * topk_ids_stride_m + topk_offsets * topk_ids_stride_k,
-            mask=topk_mask,
-            other=0,
-        ).to(tl.int64)
-        tl.store(
-            topk_idx_out
-            + token_id * topk_idx_stride_m
-            + topk_offsets * topk_idx_stride_k,
-            ids,
-            mask=topk_mask,
-        )
-
-        weights = tl.load(
-            topk_weights
-            + token_id * topk_weights_stride_m
-            + topk_offsets * topk_weights_stride_k,
-            mask=topk_mask,
-            other=0.0,
-        )
-        tl.store(
-            topk_weights_out
-            + token_id * topk_weights_out_stride_m
-            + topk_offsets * topk_weights_out_stride_k,
-            weights,
-            mask=topk_mask,
-        )
-
-
-def _stage_deepseek_v4_mega_moe_inputs(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    x_fp8: torch.Tensor,
-    x_sf: torch.Tensor,
-    topk_idx_out: torch.Tensor,
-    topk_weights_out: torch.Tensor,
-) -> None:
-    num_tokens, hidden_size = hidden_states.shape
-    if num_tokens == 0:
-        return
-    if hidden_size % 128 != 0:
-        raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
-            "a multiple of 128."
-        )
-    top_k = topk_ids.shape[1]
-    if topk_weights.shape != topk_ids.shape:
-        raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires topk_weights and "
-            "topk_ids to have the same shape."
-        )
-
-    block_k = 128
-    grid = (num_tokens, triton.cdiv(hidden_size, block_k))
-    block_topk = triton.next_power_of_2(top_k)
-    _deepseek_v4_stage_mega_moe_inputs_kernel[grid](
-        hidden_states,
-        x_fp8,
-        x_sf,
-        topk_ids,
-        topk_weights,
-        topk_idx_out,
-        topk_weights_out,
-        hidden_states.stride(0),
-        hidden_states.stride(1),
-        x_fp8.stride(0),
-        x_fp8.stride(1),
-        x_sf.stride(0),
-        x_sf.stride(1),
-        topk_ids.stride(0),
-        topk_ids.stride(1),
-        topk_weights.stride(0),
-        topk_weights.stride(1),
-        topk_idx_out.stride(0),
-        topk_idx_out.stride(1),
-        topk_weights_out.stride(0),
-        topk_weights_out.stride(1),
-        hidden_size,
-        top_k,
-        BLOCK_K=block_k,
-        GROUP_K=32,
-        BLOCK_TOPK=block_topk,
-        num_warps=4,
-    )
 
 
 def make_deepseek_v4_expert_params_mapping(
@@ -544,7 +381,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
-        _stage_deepseek_v4_mega_moe_inputs(
+        prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
             topk_ids,
@@ -655,23 +492,23 @@ class DeepseekV4MoE(nn.Module):
                 "deep_gemm_mega_moe for this checkpoint."
             )
 
-        # Fused RMSNorm + gate: owns both ffn_norm and the gate matmul.
-        self.norm_gate = NormGateLinear(
-            hidden_size=config.hidden_size,
-            num_experts=config.n_routed_experts,
-            rms_eps=config.rms_norm_eps,
-            prefix=f"{prefix}.norm_gate",
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=config.n_routed_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
-        # Routing-side tensors live on ``norm_gate`` directly (not on the
-        # inner gate); they are initialized to None in NormGatedLinear and
-        # populated below depending on the MoE variant.
+
+        self.gate.e_score_correction_bias = None
+        self.gate.tid2eid = None
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
             # Use randint instead of empty to avoid garbage values causing
             # invalid memory access in dummy mode (--load-format="dummy")
-            self.norm_gate.tid2eid = nn.Parameter(
+            self.gate.tid2eid = nn.Parameter(
                 torch.randint(
                     0,
                     config.n_routed_experts,
@@ -681,7 +518,7 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         elif getattr(config, "topk_method", None) == "noaux_tc":
-            self.norm_gate.e_score_correction_bias = nn.Parameter(
+            self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
             )
@@ -744,9 +581,10 @@ class DeepseekV4MoE(nn.Module):
         self.n_local_experts = config.n_routed_experts // self.tp_size
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
-        # We don't pass `gate` into FusedMoE
+
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
+            gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -756,8 +594,8 @@ class DeepseekV4MoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.norm_gate.e_score_correction_bias,
-            hash_indices_table=self.norm_gate.tid2eid,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
@@ -765,40 +603,40 @@ class DeepseekV4MoE(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.norm_gate.tid2eid is not None and input_ids is None:
+        if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
         org_shape = hidden_states.shape
-        normed_x, router_logits = self.norm_gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=normed_x,
+            hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.norm_gate.e_score_correction_bias.data
-            if self.norm_gate.e_score_correction_bias is not None
+            e_score_correction_bias=self.gate.e_score_correction_bias.data
+            if self.gate.e_score_correction_bias is not None
             else None,
             topk=self.n_activated_experts,
             renormalize=self.renormalize,
             indices_type=self.hash_indices_dtype,
             input_tokens=input_ids,
-            hash_indices_table=self.norm_gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
             routed_scaling_factor=self.routed_scaling_factor,
         )
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
         final_hidden_states = self.experts(
-            normed_x,
+            hidden_states,
             topk_weights,
             topk_ids,
             activation_clamp=activation_clamp,
         )
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(normed_x)
+            shared_output = self.shared_experts(hidden_states)
             final_hidden_states += shared_output
 
         return final_hidden_states.view(org_shape)
@@ -806,14 +644,21 @@ class DeepseekV4MoE(nn.Module):
     def _forward_fused_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        assert not self.experts.is_internal_router
         org_shape = hidden_states.shape
-        normed_x, router_logits = self.norm_gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=normed_x,
-            router_logits=router_logits,
-            input_ids=input_ids,
-        )
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+                input_ids=input_ids,
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
 
         return final_hidden_states.view(org_shape)
 
@@ -935,6 +780,12 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
+            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
+            # free here (outer GEMMs joined) for the inner overlap of
+            # wq_b+fused_indexer_q_rope_quant vs compressor.
+            indexer_aux_stream = (
+                aux_stream_list[2] if aux_stream_list is not None else None
+            )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -945,6 +796,7 @@ class DeepseekV4Attention(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
+                aux_stream=indexer_aux_stream,
             )
 
         mla_modules = DeepseekV4MLAModules(
@@ -1017,8 +869,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
-        # ``ffn_norm`` is owned by ``self.ffn.norm_gate`` (fused with the
-        # router gate matmul); see ``NormGatedLinear``.
+        self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
@@ -1077,6 +928,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
     ):
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -1088,6 +941,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.hc_post_alpha,
             sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return layer_input, post_mix, res_mix
 
@@ -1109,11 +964,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_norm_weight = self.attn_norm.weight.data
+        attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
             x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
         else:
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
@@ -1129,11 +991,17 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
 
-        x = self.attn_norm(x)
+        # attn_norm is fused into hc_pre / mhc_fused_post_pre above.
         x = self.attn(positions, x, None)
 
+        ffn_norm_weight = self.ffn_norm.weight.data
+        ffn_norm_eps = self.ffn_norm.variance_epsilon
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -1147,13 +1015,16 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=ffn_norm_weight,
+            norm_eps=ffn_norm_eps,
         )
-        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
-        # the pre-norm activation directly.
+
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
-    def _forward_rocm(
+    def _forward_native(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1176,8 +1047,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
-        # ffn_norm is now folded into self.ffn.norm_gate; ffn() takes
-        # the pre-norm activation directly.
+        x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
         return x, None, None, None
@@ -1193,8 +1063,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        if current_platform.is_rocm():
-            return self._forward_rocm(
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            return self._forward_native(
                 x, positions, input_ids, post_mix, res_mix, residual
             )
 
@@ -1228,10 +1098,10 @@ class DeepseekV4Model(nn.Module):
         # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
+        # Disable them on ROCm / XPU because of hang issues / no overlap.
         aux_stream_list = (
             None
-            if current_platform.is_rocm()
+            if current_platform.is_rocm() or current_platform.is_xpu()
             else [torch.cuda.Stream() for _ in range(3)]
         )
 
@@ -1527,13 +1397,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         orig_to_new_suffix={
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
-            # Pre-MoE norm + gate are now owned by ``DeepseekV4MoE.norm_gate``
-            # (see NormGatedLinear).
-            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
-            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
-            ".ffn.gate.bias": ".ffn.norm_gate.e_score_correction_bias",
-            # Hash MoE table also moved off the inner gate.
-            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
         },
         orig_to_new_substr={
             ".attn.compressor.": ".attn.mla_attn.compressor.",
