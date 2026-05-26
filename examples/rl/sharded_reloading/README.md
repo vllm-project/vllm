@@ -9,7 +9,7 @@
 > in `etha_sharding.py` is a vendored / adapted version of Etha's
 > `comm/` module; the rest of this directory is the vLLM-side wiring.
 
-The standard `rlhf_nccl_fsdp_ep.py` flow ships weights by gathering the
+The standard [`rlhf_nccl_fsdp_ep.py`](../rlhf_nccl_fsdp_ep.py) flow ships weights by gathering the
 trainer's sharded parameters to rank 0 and broadcasting the full
 tensors to every vLLM worker. That works but wastes bandwidth: every
 inference rank receives the full model even though it only keeps the
@@ -46,7 +46,7 @@ For an M-trainer / N-inference setup, this is "M-to-N" weight transfer.
   (`EthaTrainerWeightTransferEngine`), and the backend registration
   hook (`EthaWorkerExtension`).
 - [rlhf_etha.py](rlhf_etha.py) — runnable end-to-end example. Same
-  shape as `rlhf_nccl_fsdp_ep.py` (load HF weights into a sharded
+  shape as [`rlhf_nccl_fsdp_ep.py`](../rlhf_nccl_fsdp_ep.py) (load HF weights into a sharded
   DTensor state dict on 4 trainer Ray actors, start an
   `AsyncLLMEngine` with `load_format="dummy"`, generate gibberish,
   ship weights, generate coherent text), but with Etha instead of
@@ -125,7 +125,7 @@ Expected output:
 - **Qwen3-MoE only.** Handler taxonomy and placement tables are hard-coded
   for that model.
 - **In-place writes; layerwise reload would clobber.** The engine
-  writes straight into the kernel-format parameter storage.
+  writes straight into the kernel format.
 - **No online quantization.** Because chunks write directly into the
   kernel-format storage that `process_weights_after_loading` produced
   at startup, there is no opportunity to re-run a quantization pass
