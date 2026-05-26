@@ -32,7 +32,7 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             return False, "requires CPU."
         if not current_platform.is_zen_cpu():
             return False, "requires AMD Zen CPU."
-        if not has_zentorch_op("zentorch_dynamic_qlinear"):
+        if not has_zentorch_op(["zentorch_dynamic_qlinear"]):
             return (
                 False,
                 "torch.ops.zentorch.zentorch_dynamic_qlinear is not registered.",

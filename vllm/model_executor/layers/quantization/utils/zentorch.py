@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 __all__ = ["has_zentorch_op"]
 
 
-def has_zentorch_op(*op_names: str) -> bool:
+def has_zentorch_op(op_names: list[str]) -> bool:
     """Return ``True`` when running on Zen CPU with all named ops registered."""
     if not op_names:
         raise ValueError("has_zentorch_op requires at least one op name")
@@ -20,4 +20,4 @@ def has_zentorch_op(*op_names: str) -> bool:
     ns = getattr(torch.ops, "zentorch", None)
     if ns is None:
         return False
-    return all(hasattr(ns, name) for name in op_names)
+    return all(hasattr(ns, op_name) for op_name in op_names)

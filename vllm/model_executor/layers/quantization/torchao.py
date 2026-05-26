@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -25,17 +26,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-
-def torchao_version_at_least(torchao_version: str) -> bool:
-    if find_spec("torchao"):
-        try:
-            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
-                torchao_version
-            ):
-                return True
-        except (ImportError, version.InvalidVersion):
-            return False
-    return False
+logger = init_logger(__name__)
 
 
 def _bond_method_to_cls(func, obj):
@@ -69,6 +60,18 @@ def _restore_weight_attrs(param, recorded_weight_attr):
     for attr_name, attr in recorded_weight_attr.items():
         if not hasattr(param, attr_name):
             setattr(param, attr_name, _bond_method_to_cls(attr, param))
+
+
+def torchao_version_at_least(torchao_version: str) -> bool:
+    if find_spec("torchao"):
+        try:
+            if version.parse(importlib.metadata.version("torchao")) >= version.parse(
+                torchao_version
+            ):
+                return True
+        except (ImportError, version.InvalidVersion):
+            return False
+    return False
 
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:

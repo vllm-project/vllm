@@ -46,7 +46,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if not current_platform.is_zen_cpu():
             return False, "ZentorchWNA16 requires an AMD Zen CPU."
 
-        if not has_zentorch_op("zentorch_woq_repack_weight", "zentorch_woq_linear"):
+        if not has_zentorch_op(["zentorch_woq_repack_weight", "zentorch_woq_linear"]):
             return (
                 False,
                 "torch.ops.zentorch.{zentorch_woq_repack_weight, "

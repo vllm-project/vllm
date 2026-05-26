@@ -29,7 +29,7 @@ class ZentorchTorchAOLinearMethod(TorchAOLinearMethod):
         self._try_setup_zentorch_da8w8(layer)
 
     def _try_setup_zentorch_da8w8(self, layer: torch.nn.Module) -> None:
-        if not has_zentorch_op("zentorch_dynamic_qlinear"):
+        if not has_zentorch_op(["zentorch_dynamic_qlinear"]):
             return
         try:
             from torchao.quantization.granularity import PerRow

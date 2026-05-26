@@ -401,6 +401,10 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_zen_cpu(),
+    reason="zentorch fast path only applies to AMD Zen CPUs",
+)
+@pytest.mark.skipif(
     not TORCHAO_AVAILABLE or not TORCHAO_VERSION_AT_LEAST_0_17_0,
     reason="torchao>=0.17.0 is not available",
 )
