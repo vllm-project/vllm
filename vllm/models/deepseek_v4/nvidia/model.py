@@ -73,14 +73,12 @@ def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
             or envs.VLLM_ROCM_DSV4_CSA_MS_STRATEGY.lower() == "off"
         ):
             return None
-        # SGLang creates five streams for DeepSeek-V4: three top-level
-        # preparation branches and two C4-indexer sub-branches:
+        # ROCm uses five streams for DeepSeek-V4 decode overlap: three
+        # top-level preparation branches and two C4-indexer sub-branches:
         # [0] main KV cache insert, [1] main compressor, [2] C4 indexer,
         # [3] indexer Q branch, [4] indexer weights branch.
         return [
-            torch.cuda.Stream(
-                priority=envs.VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY
-            )
+            torch.cuda.Stream(priority=envs.VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY)
             for _ in range(5)
         ]
     if current_platform.is_xpu():
@@ -804,9 +802,9 @@ class DeepseekV4Attention(nn.Module):
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # NVIDIA uses aux_stream_list[2] for the legacy inner overlap.
-            # ROCm SGLang-style decode uses aux_stream_list[3:5] for the C4
-            # indexer q/weights sub-branches while the outer indexer branch
-            # runs on aux_stream_list[2].
+            # ROCm decode overlap uses aux_stream_list[3:5] for the C4 indexer
+            # q/weights sub-branches while the outer indexer branch runs on
+            # aux_stream_list[2].
             if (
                 current_platform.is_rocm()
                 and aux_stream_list is not None

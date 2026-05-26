@@ -109,24 +109,8 @@ def _is_decode_only_deepseek_v4_step(
     if not metadata:
         return False
     return all(
-        item.num_decode_tokens > 0 and item.num_prefill_tokens == 0
-        for item in metadata
+        item.num_decode_tokens > 0 and item.num_prefill_tokens == 0 for item in metadata
     )
-
-
-def _deepseek_v4_num_decodes(
-    attn_metadata: dict[str, AttentionMetadata]
-    | list[dict[str, AttentionMetadata]]
-    | None,
-) -> int:
-    count = 0
-    for item in _iter_deepseek_v4_swa_metadata(attn_metadata):
-        # The attention metadata dict contains one entry per DeepSeek-V4
-        # attention/cache layer. Each entry describes the same batch, so
-        # summing here turns conc=4 into conc=4*num_layers and incorrectly
-        # gates off low-workload decode.
-        count = max(count, item.num_decodes or item.num_decode_tokens)
-    return count
 
 
 def _select_v4_sparse_impl() -> "type[DeepseekV4SparseMLAAttentionImpl]":
@@ -422,27 +406,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> str:
         if not current_platform.is_rocm():
             return "off"
-        if (
-            not envs.VLLM_ROCM_DSV4_CSA_MULTISTREAM
-            or self.aux_stream_list is None
-        ):
+        if not envs.VLLM_ROCM_DSV4_CSA_MULTISTREAM or self.aux_stream_list is None:
             return "off"
 
         strategy = envs.VLLM_ROCM_DSV4_CSA_MS_STRATEGY.lower()
         if strategy == "off":
             return "off"
         if not _is_decode_only_deepseek_v4_step(attn_metadata):
-            return "off"
-
-        num_decodes = _deepseek_v4_num_decodes(attn_metadata)
-        min_decode = envs.VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE
-        max_decode = envs.VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE
-        if num_decodes < min_decode:
-            return "off"
-        # max_decode <= 0 is an explicit no-cap experiment knob. The default
-        # remains capped at 64 because unlimited decode improves the largest
-        # one-wave backlogs but regresses c128 TTFT substantially on MI355X.
-        if 0 < max_decode < num_decodes:
             return "off"
 
         graph_mode = forward_context.cudagraph_runtime_mode
@@ -460,7 +430,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         if graph_mode_name not in enabled_graph_modes:
             return "off"
 
-        if strategy == "sglang" and len(self.aux_stream_list) < 5:
+        if strategy == "overlap" and len(self.aux_stream_list) < 5:
             return "off"
         if strategy == "indexer_only" and self.indexer is None:
             return "off"
@@ -649,7 +619,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
-    def _rocm_sglang_post_rmsnorm_prepare(
+    def _rocm_multistream_post_rmsnorm_prepare(
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
@@ -750,8 +720,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.indexer is not None and envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER
         )
         launched_compressor = (
-            self.compressor is not None
-            and envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
+            self.compressor is not None and envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
         )
 
         if launched_indexer:
@@ -791,7 +760,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         aux_streams = self._aux_streams_for_step(rocm_ms_strategy, attn_metadata)
         defer_rocm_branch_projections = (
             current_platform.is_rocm()
-            and rocm_ms_strategy == "sglang"
+            and rocm_ms_strategy == "overlap"
             and envs.VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS
         )
         gemm_aux_streams = None if current_platform.is_rocm() else aux_streams
@@ -805,6 +774,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        use_rocm_split_post = (
+            current_platform.is_rocm()
+            and rocm_ms_strategy == "overlap"
+            and envs.VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST
+            and aux_streams is not None
+            and len(aux_streams) >= 5
+        )
         qr, kv = fused_q_kv_rmsnorm(
             qr,
             kv,
@@ -813,14 +789,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.eps,
         )
 
-        if (
-            current_platform.is_rocm()
-            and rocm_ms_strategy == "sglang"
-            and envs.VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST
-            and aux_streams is not None
-            and len(aux_streams) >= 5
-        ):
-            q = self._rocm_sglang_post_rmsnorm_prepare(
+        if use_rocm_split_post:
+            q = self._rocm_multistream_post_rmsnorm_prepare(
                 hidden_states,
                 qr,
                 kv,
@@ -883,8 +853,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             and len(post_aux_streams) >= 5
         ):
             # Legacy ROCm fallback keeps q+kv fused on default. Match the
-            # SGLang stream IDs where possible: aux[2] indexer, aux[1]
-            # compressor.
+            # five-stream layout where possible: aux[2] indexer, aux[1]
+            # compressor, aux[3:5] indexer sub-branches.
             outer_post_aux_streams = [post_aux_streams[2], post_aux_streams[1]]
         elif post_aux_streams is not None:
             outer_post_aux_streams = [post_aux_streams[0], post_aux_streams[1]]
@@ -917,7 +887,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 and (
                     not current_platform.is_rocm()
                     or (
-                        rocm_ms_strategy == "sglang"
+                        rocm_ms_strategy == "overlap"
                         and envs.VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS
                     )
                 ),
@@ -1424,8 +1394,8 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        # aux_stream is the legacy two-way split. aux_streams mirrors SGLang's
-        # C4 indexer sub-branches: [0] Q projection/quant, [1] weights proj.
+        # aux_stream is the legacy two-way split. aux_streams maps the C4
+        # indexer sub-branches as [0] Q projection/quant, [1] weights proj.
         self.aux_stream = aux_stream
         self.aux_streams = aux_streams
         self.ln_events: list[torch.cuda.Event] = [

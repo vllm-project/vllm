@@ -258,11 +258,9 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_ROCM_DSV4_CSA_MULTISTREAM: bool = True
-    VLLM_ROCM_DSV4_CSA_MS_STRATEGY: Literal["off", "indexer_only", "sglang"] = (
-        "sglang"
+    VLLM_ROCM_DSV4_CSA_MS_STRATEGY: Literal["off", "indexer_only", "overlap"] = (
+        "overlap"
     )
-    VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE: int = 1
-    VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE: int = 64
     VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES: set[Literal["none", "piecewise", "full"]] = {
         "none",
         "piecewise",
@@ -270,9 +268,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR: bool = True
     VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS: bool = False
     VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST: bool = True
-    VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER: bool = True
+    VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER: bool = False
     VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS: bool = True
-    VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY: int = 0
+    VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY: int = -1
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1895,25 +1893,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     # ROCm-only opt-in for DeepSeek-V4 CSA decode multi-stream overlap.
-    # The "sglang" strategy overlaps C4 indexer and compressor preparation
-    # branches with fine-grained event joins. The deferred projection and
-    # sub-branch knobs are separate A/B controls because ROCm graph capture and
-    # hipBLASLt ordering differ by PyTorch/ROCm release. "indexer_only" keeps
-    # the conservative single indexer branch path for A/B testing.
+    # The "overlap" strategy runs the KV cache insert, MLA compressor, and C4
+    # indexer preparation branches with fine-grained event joins. The deferred
+    # projection and sub-branch knobs are separate A/B controls because ROCm
+    # graph capture and hipBLASLt ordering differ by PyTorch/ROCm release.
+    # "indexer_only" keeps the conservative single indexer branch path for A/B.
     "VLLM_ROCM_DSV4_CSA_MULTISTREAM": lambda: bool(
         int(os.getenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "1"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_STRATEGY": env_with_choices(
         "VLLM_ROCM_DSV4_CSA_MS_STRATEGY",
-        "sglang",
-        ["off", "indexer_only", "sglang"],
+        "overlap",
+        ["off", "indexer_only", "overlap"],
         case_sensitive=False,
-    ),
-    "VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE": lambda: int(
-        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MIN_DECODE", "1")
-    ),
-    "VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE": lambda: int(
-        os.getenv("VLLM_ROCM_DSV4_CSA_MS_MAX_DECODE", "64")
     ),
     "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES": env_set_with_choices(
         "VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES",
@@ -1931,13 +1923,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST", "1"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER": lambda: bool(
-        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER", "1"))
+        int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER", "0"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS": lambda: bool(
         int(os.getenv("VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS", "1"))
     ),
     "VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY": lambda: int(
-        os.getenv("VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY", "0")
+        os.getenv("VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY", "-1")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
