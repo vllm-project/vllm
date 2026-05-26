@@ -528,26 +528,23 @@ def _make_sliding_window_bias(
 
 
 @functools.lru_cache(maxsize=1)
-def _riscv_supports_rvv_vlen128() -> bool:
-    """Whether the C++ RVV attention path (hardcoded to VLEN==128) is usable.
+def _riscv_supports_rvv() -> bool:
+    """Whether the C++ RVV attention path is usable.
 
-    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses riscv_rvv_vector_bits(128)
-    typedefs and m1/m2 intrinsics with vl=8; CMake's auto-detect picks the
-    largest zvl<N>b advertised by /proc/cpuinfo, so the binary contains the
-    RVV path only when the build host advertised exactly zvl128b. Mirror
-    that here so the Python dispatch doesn't request ISA::RVV on builds
-    where it wasn't compiled in (would TORCH_CHECK at first attention call).
+    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses VLEN-agnostic RVVI()
+    macros and supports VLEN=128 and VLEN=256.  CMake auto-detects the
+    largest zvl<N>b from /proc/cpuinfo and passes it via -mrvv-vector-bits.
+    The RVV path is compiled whenever __riscv_v_min_vlen is defined, so
+    we check that at least one supported zvl<N>b is advertised.
     """
     try:
         with open("/proc/cpuinfo") as f:
             cpuinfo = f.read()
     except OSError:
         return False
-    if "zvl128b" not in cpuinfo:
-        return False
-    # CMake auto-detect picks the largest advertised VLEN; if the host
-    # advertises zvl256b or higher, the build skipped the RVV-128 path.
-    return all(f"zvl{n}b" not in cpuinfo for n in (256, 512, 1024))
+    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(
+        f"zvl{n}b" not in cpuinfo for n in (512, 1024)
+    )
 
 
 def _get_attn_isa(
@@ -580,7 +577,7 @@ def _get_attn_isa(
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
-        elif supports_riscv and _riscv_supports_rvv_vlen128():
+        elif supports_riscv and _riscv_supports_rvv():
             return "rvv"
         elif supports_vxe:
             return "vxe"

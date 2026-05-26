@@ -113,6 +113,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -369,7 +370,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -426,6 +428,7 @@ class Qwen2_5_VisionAttention(nn.Module):
     dynamic_arg_dims={
         "x": 0,
         "cu_seqlens": 0,
+        "sequence_lengths": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
     },
@@ -471,6 +474,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -478,7 +483,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            sequence_lengths=None,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -598,6 +603,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
@@ -607,6 +618,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+        # FP8 attention: Q/K/V become independent contiguous tensors after
+        # quantization, so FlashInfer cu_seqlens uses uniform stride.
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -902,21 +918,55 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     )
                 )
 
-        # transformers
-        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        if max_seqlen_override is None:
-            max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
-        else:
-            max_seqlen_full = torch.tensor(max_seqlen_override, dtype=torch.int32)
-        if max_seqlen_window_override is None:
-            max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
-        else:
-            max_seqlen_window = torch.tensor(
-                max_seqlen_window_override, dtype=torch.int32
-            )
+        cu_seqlens_np = cu_seqlens.cpu().numpy()
+        cu_window_seqlens_np = cu_window_seqlens.cpu().numpy()
 
-        cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=device, non_blocking=True)
+        # FlashInfer needs the real per-sequence lengths in addition to
+        # cu_seqlens. For other backends this returns None and is ignored.
+        sequence_lengths_full = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens_np, device
+        )
+        sequence_lengths_window = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_window_seqlens_np, device
+        )
+
+        # Pre-compute max sequence lengths for window/full attention. FlashInfer
+        # buckets this value for cuDNN graph reuse; other backends keep the exact
+        # maximum. Keep the scalar on CPU because attention wrappers call .item().
+        if max_seqlen_override is None:
+            max_seqlen_full_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens_np
+            )
+        else:
+            max_seqlen_full_val = max_seqlen_override
+        max_seqlen_full = torch.tensor(max_seqlen_full_val, dtype=torch.int32)
+        if max_seqlen_window_override is None:
+            max_seqlen_window_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_window_seqlens_np
+            )
+        else:
+            max_seqlen_window_val = max_seqlen_window_override
+        max_seqlen_window = torch.tensor(max_seqlen_window_val, dtype=torch.int32)
+
+        # FlashInfer uses backend-specific cu_seqlens offsets into the flattened
+        # Q/K/O and V buffers. Other backends receive the original cumulative
+        # token offsets unchanged.
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens_np,
+            self.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
+        cu_window_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_window_seqlens_np,
+            self.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
         window_index = window_index.to(device=device, non_blocking=True)
@@ -930,6 +980,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         metadata["cu_window_seqlens"] = cu_window_seqlens
         metadata["max_seqlen_full"] = max_seqlen_full
         metadata["max_seqlen_window"] = max_seqlen_window
+        metadata["sequence_lengths_full"] = sequence_lengths_full
+        metadata["sequence_lengths_window"] = sequence_lengths_window
 
         return metadata
 
@@ -955,6 +1007,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens = encoder_metadata["cu_window_seqlens"]
         max_seqlen_full = encoder_metadata["max_seqlen_full"]
         max_seqlen_window = encoder_metadata["max_seqlen_window"]
+        sequence_lengths_full = encoder_metadata.get("sequence_lengths_full")
+        sequence_lengths_window = encoder_metadata.get("sequence_lengths_window")
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
@@ -968,9 +1022,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
+                sequence_lengths_now = sequence_lengths_full
             else:
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
+                sequence_lengths_now = sequence_lengths_window
 
             hidden_states = blk(
                 hidden_states,
@@ -978,6 +1034,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
+                sequence_lengths=sequence_lengths_now,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -1578,6 +1635,7 @@ class Qwen2_5_VLForConditionalGeneration(
         # embedding formats between eager and cudagraph paths.
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
         return EncoderCudaGraphConfig(
             modalities=modalities,
             input_key_by_modality={
@@ -1593,8 +1651,11 @@ class Qwen2_5_VLForConditionalGeneration(
                 "cu_window_seqlens",
                 "max_seqlen_full",
                 "max_seqlen_window",
+                "sequence_lengths_full",
+                "sequence_lengths_window",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=max_frames,
         )
 
     def get_input_modality(
@@ -1603,7 +1664,9 @@ class Qwen2_5_VLForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        return "video"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
@@ -1649,26 +1712,21 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_thw = grid_thw.tolist()
         return grid_thw
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         m = self.visual.spatial_merge_size
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * (h // m) * (w // m) for t, h, w in grid_thw]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * h * w for t, h, w in grid_thw]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -1684,11 +1742,13 @@ class Qwen2_5_VLForConditionalGeneration(
                     "pixel_values": pixel_values[:0],
                     "image_grid_thw": [],
                 }
-            else:
+            elif self.get_input_modality(mm_kwargs) == "video":
                 return {
                     "pixel_values_videos": pixel_values[:0],
                     "video_grid_thw": [],
                 }
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         # Compute cumulative patch offsets for slicing pixel_values
         patches_per_item = [t * h * w for t, h, w in grid_thw]
@@ -1706,11 +1766,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 "pixel_values": selected_pv,
                 "image_grid_thw": selected_grid,
             }
-        else:
+        elif self.get_input_modality(mm_kwargs) == "video":
             return {
                 "pixel_values_videos": selected_pv,
                 "video_grid_thw": selected_grid,
             }
+        else:
+            raise AssertionError("This line should be unreachable.")
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1831,7 +1893,7 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
-        else:
+        elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
@@ -1840,6 +1902,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.model_config.max_model_len,
                 ),
             )
+        else:
+            raise AssertionError("This line should be unreachable.")
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 

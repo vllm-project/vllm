@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
+    add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
@@ -41,10 +43,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            # This layer will use KV cache of the sharing target layer.
+            continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
+
+
+def get_shared_kv_cache_layers(vllm_config: VllmConfig):
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    return {
+        layer_name: kv_tgt_layer
+        for layer_name, attn_module in attn_layers.items()
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+    }
 
 
 def init_attn_backend(
@@ -60,6 +74,12 @@ def init_attn_backend(
 ]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
+
+    # Add KV-sharing layers to their target's kv cache group so they are
+    # discovered alongside the target layer in Phase 1 below.
+    add_kv_sharing_layers_to_kv_cache_groups(
+        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+    )
 
     # Phase 1: discover attention groups for each kv cache group.
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -86,10 +106,7 @@ def init_attn_backend(
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
-                    attn_backend,
-                    [layer_name],
-                    layer_kv_cache_spec,
-                    kv_cache_group_id,
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
                 )
                 group_order.append(key)
             else:
