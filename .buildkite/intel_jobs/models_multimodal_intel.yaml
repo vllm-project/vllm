@@ -18,7 +18,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
       cd tests &&
       pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2" &&
       pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model'
@@ -80,13 +80,13 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
       cd tests &&
       pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
 
 - label: Multi-Modal Processor # 44min
   key: multi-modal-processor
-  timeout_in_minutes: 60
+  timeout_in_minutes: 45
   device: intel_gpu
   no_plugin: true
   working_dir: "."
@@ -101,6 +101,8 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-       pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-       pytest -v -s models/multimodal/processing/test_tensor_schema.py'
+      'pip install av matplotlib ftfy git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      pip install open-clip-torch --no-deps &&
+      cd tests &&
+      pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+  parallelism: 4
