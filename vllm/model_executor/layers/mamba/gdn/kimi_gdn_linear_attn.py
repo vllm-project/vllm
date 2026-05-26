@@ -11,7 +11,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
@@ -111,6 +111,91 @@ direct_register_custom_op(
     mutates_args=["core_attn_out"],
     fake_impl=kda_attention_fake,
 )
+
+
+@CustomOp.register("kimi_kda_prefill")
+class KimiKdaPrefill(CustomOp):
+    def __init__(self, head_dim: int) -> None:
+        super().__init__()
+        vllm_config = get_current_vllm_config()
+        additional_config = vllm_config.additional_config
+        backend = (
+            additional_config.get("kda_prefill_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        active_backend = resolve_kda_prefill_backend(backend, head_dim)
+        self.kda_prefill_backend = active_backend
+        self.head_dim = head_dim
+
+        if active_backend == "flashkda":
+            self._forward_method = self.forward_flashkda
+        else:
+            self._forward_method = self.forward_native
+
+    def forward_native(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        g = fused_kda_gate(
+            rearrange(g, "1 n h d -> n (h d)"),
+            A_log,
+            self.head_dim,
+            g_bias=dt_bias,
+        ).unsqueeze(0)
+        beta = beta.float().sigmoid()
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+        )
+
+    def forward_flashkda(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        import flash_kda
+
+        final_state = torch.empty_like(initial_state)
+        out = torch.empty_like(v)
+        flash_kda.fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            self.head_dim**-0.5,
+            out,
+            A_log.reshape(-1),
+            dt_bias.view(-1, self.head_dim),
+            FLASHKDA_LOWER_BOUND,
+            initial_state=initial_state,
+            final_state=final_state,
+            cu_seqlens=cu_seqlens,
+        )
+        return out, final_state
 
 
 @PluggableLayer.register("kimi_gated_delta_net_attention")
@@ -257,12 +342,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.o_proj",
         )
 
-        additional_config = vllm_config.additional_config
-        assert isinstance(additional_config, dict)
-        prefill_backend = additional_config.get("kda_prefill_backend", "auto")
-        self.prefill_backend = resolve_kda_prefill_backend(
-            prefill_backend, self.head_dim
-        )
+        self.kda_prefill = KimiKdaPrefill(head_dim=self.head_dim)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -280,15 +360,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
 
-        beta = self.b_proj(hidden_states)[0]
+        beta = self.b_proj(hidden_states)[0].to(hidden_states.dtype).unsqueeze(0)
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
-        if self.prefill_backend == "flashkda":
-            beta = beta.to(hidden_states.dtype).unsqueeze(0)
-            g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
-        else:
-            beta = beta.float().sigmoid().unsqueeze(0)
-            g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
-            g1 = g1.unsqueeze(0)
+        g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
 
         g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
@@ -441,34 +515,20 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             zero_idx = non_spec_state_indices_tensor[~has_initial_state]
             recurrent_state[zero_idx] = 0
             initial_state = recurrent_state[non_spec_state_indices_tensor].contiguous()
-            if self.prefill_backend == "flashkda":
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = self._flashkda_forward(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g1,
-                    beta=beta,
-                    initial_state=initial_state,
-                    cu_seqlens=non_spec_query_start_loc,
-                )
-            else:
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = chunk_kda(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g1,
-                    beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
-                )
+            (
+                core_attn_out_non_spec,
+                last_recurrent_state,
+            ) = self.kda_prefill(
+                q=q,
+                k=k,
+                v=v,
+                g=g1,
+                beta=beta,
+                initial_state=initial_state,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                cu_seqlens=non_spec_query_start_loc,
+            )
             # Init cache
             recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
         else:
@@ -477,14 +537,13 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             cu_seqlens = non_spec_query_start_loc[
                 : attn_metadata_narrowed.num_decodes + 1
             ]
-            if self.prefill_backend == "flashkda":
-                beta = beta.float().sigmoid()
-                g1 = fused_kda_gate(
-                    rearrange(g1, "1 n h d -> n (h d)"),
-                    self.A_log,
-                    self.head_dim,
-                    g_bias=self.dt_bias,
-                ).unsqueeze(0)
+            beta = beta.float().sigmoid()
+            g1 = fused_kda_gate(
+                rearrange(g1, "1 n h d -> n (h d)"),
+                self.A_log,
+                self.head_dim,
+                g_bias=self.dt_bias,
+            ).unsqueeze(0)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -502,34 +561,3 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
             0, :num_actual_tokens
         ]
-
-    def _flashkda_forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        initial_state: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        import flash_kda
-
-        final_state = torch.empty_like(initial_state)
-        out = torch.empty_like(v)
-        flash_kda.fwd(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            g.contiguous(),
-            beta.contiguous(),
-            self.head_dim**-0.5,
-            out,
-            self.A_log.reshape(-1).contiguous(),
-            self.dt_bias.view(self.local_num_heads, self.head_dim).contiguous(),
-            FLASHKDA_LOWER_BOUND,
-            initial_state=initial_state.contiguous(),
-            final_state=final_state,
-            cu_seqlens=cu_seqlens,
-        )
-        return out, final_state
