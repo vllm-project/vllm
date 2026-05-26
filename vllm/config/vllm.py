@@ -1931,7 +1931,7 @@ class VllmConfig:
                         "num_tokens <= %d.",
                         compile_range_end,
                     )
-                    
+
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
