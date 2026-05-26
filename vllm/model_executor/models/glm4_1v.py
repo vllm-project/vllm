@@ -123,6 +123,15 @@ logger = init_logger(__name__)
 _MAX_FRAMES_PER_VIDEO = 600
 
 
+def _is_glmga_model(processor: object) -> bool:
+    """Detect GLMGA variant via its Glmga sub-processors."""
+    for attr in ("image_processor", "video_processor"):
+        sub = getattr(processor, attr, None)
+        if sub and "Glmga" in type(sub).__name__:
+            return True
+    return False
+
+
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
     return VideoMetadata(
         **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
@@ -838,6 +847,46 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
     def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int] | None:
+        processor = self.get_hf_processor()
+        if not _is_glmga_model(processor):
+            return None
+
+        result: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            result["image"] = self.get_max_image_tokens()
+
+        if mm_counts.get("video", 0) > 0:
+            video_processor = self.get_video_processor()
+            max_pixels = video_processor.size["longest_edge"]
+
+            vision_config = self.get_hf_config().vision_config
+            temporal_patch_size = vision_config.temporal_patch_size
+            patch_size = vision_config.patch_size
+            merge_size = vision_config.spatial_merge_size
+
+            max_vision_tokens = max_pixels // (
+                temporal_patch_size * patch_size**2 * merge_size**2
+            )
+
+            # GLMGA supports up to 640 frames (max_frames).
+            max_grid_t = 640 // temporal_patch_size
+
+            tokenizer = self.get_tokenizer()
+            max_ts_tokens = max(
+                len(tokenizer.encode(f"{t:.1f} seconds", add_special_tokens=False))
+                for t in range(min(max_grid_t, 300))
+            )
+
+            result["video"] = max_vision_tokens + max_grid_t * (2 + max_ts_tokens) + 2
+
+        return result
 
     def get_data_parser(self):
         return MultiModalDataParser(
