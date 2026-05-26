@@ -92,8 +92,88 @@ def hc_head_ref(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="CUDA required",
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm required",
+)
+@pytest.mark.parametrize("num_tokens", [4, 256])
+@pytest.mark.parametrize("hidden_size", [1280, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = 2 * hc_mult + hc_mult2
+    fn = (
+        torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float)
+        * 1e-4
+        * (1 + torch.arange(hc_mult).mul(0.01).view(1, -1, 1))
+    ).flatten(1, 2)
+    hc_scale = torch.randn((3,), dtype=torch.float) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float) * 0.1
+
+    hc_sinkhorn_eps = hc_pre_eps = rms_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+
+    ref = mhc_pre_ref(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    out = torch.ops.vllm.mhc_pre_tilelang(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+
+    for actual, expected in zip(out, ref, strict=True):
+        torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm required",
+)
+@pytest.mark.parametrize("num_tokens", [4, 256])
+@pytest.mark.parametrize("hidden_size", [1280, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+
+    ref = mhc_post_ref(x, residual, post_layer_mix, comb_res_mix)
+    out = torch.ops.vllm.mhc_post_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+    )
+
+    torch.testing.assert_close(out, ref, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -180,6 +260,45 @@ def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
     out.fill_(float("nan"))
 
     result = torch.ops.vllm.hc_head_triton(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_eps,
+        hc_eps,
+        hc_mult,
+    )
+
+    assert result is None
+    assert not torch.isnan(out).any()
+
+    out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
+    torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="CUDA or ROCm required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    fn = torch.randn((hc_mult, hc_mult * hidden_size), dtype=torch.float32) * 1e-4
+    hc_scale = torch.randn((1,), dtype=torch.float32) * 0.1
+    hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
+    rms_eps = hc_eps = 1e-6
+
+    out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16)
+    out.fill_(float("nan"))
+
+    result = torch.ops.vllm.hc_head_fused_kernel_tilelang(
         residual,
         fn,
         hc_scale,

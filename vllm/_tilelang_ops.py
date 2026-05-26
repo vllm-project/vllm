@@ -10,8 +10,20 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
 
-# tilelang is only available on CUDA platforms
-if TYPE_CHECKING or current_platform.is_cuda():
+def _is_tilelang_platform() -> bool:
+    return current_platform.is_cuda() or current_platform.is_rocm()
+
+
+def _is_pdl_supported() -> bool:
+    is_arch_support_pdl = getattr(current_platform, "is_arch_support_pdl", None)
+    if not callable(is_arch_support_pdl):
+        return False
+    return is_arch_support_pdl()
+
+
+# TileLang is used for MHC on CUDA and ROCm. Keep non-GPU imports cheap so
+# registering the Python wrapper modules does not require TileLang everywhere.
+if TYPE_CHECKING or _is_tilelang_platform():
     if not has_tilelang():
         raise ImportError(
             "tilelang is required for mhc but is not installed. Install it with "
@@ -23,6 +35,7 @@ else:
     tilelang = None  # type: ignore[assignment]
     T = None  # type: ignore[assignment]
 
+ENABLE_PDL = _is_pdl_supported()
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
@@ -37,12 +50,17 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
+pass_configs = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+}
+
+if current_platform.is_cuda():
+    pass_configs[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] = 10
+
+
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
@@ -78,7 +96,8 @@ def mhc_pre_big_fuse_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
         ##################################################################
         # _pre_norm_fn_fwd_norm
         rms = T.alloc_fragment(1, T.float32)
@@ -174,18 +193,16 @@ def mhc_pre_big_fuse_tilelang(
                         ol[i1_h] += pre * xl[i_hc, i1_h]
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
-        T.pdl_trigger()
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_mul,
@@ -230,7 +247,8 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         T.clear(mixes)
         rms[0] = 0
 
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
 
         for i_split in T.serial(n_splits):
             rms[0] += gemm_out_sqrsum[i_split, i]
@@ -341,15 +359,12 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
 
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_fused_tilelang(
     comb_mix,
@@ -390,8 +405,8 @@ def mhc_fused_tilelang(
 
     with T.Kernel(m, n_tiles, split_k, threads=n_thr) as (i_n, i_nt, i_ks):
         tid = T.get_thread_binding()
-        warp_id = T.get_warp_idx()
-        lane = T.get_lane_idx()
+        warp_id = tid // 32
+        lane = tid % 32
 
         s_warp = T.alloc_shared((num_warps, tile_n + 1), T.float32)
         s_post = T.alloc_shared((hc,), T.float32)
@@ -407,7 +422,8 @@ def mhc_fused_tilelang(
         T.clear(sqr)
         h_split_start = i_ks * h_per_split
 
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
 
         T.copy(post_mix[i_n, 0], s_post)
         T.copy(comb_mix[i_n, 0, 0], s_comb)
@@ -466,15 +482,12 @@ def mhc_fused_tilelang(
                     v2 += s_warp[w, tile_n]
                 rp_out[i_ks, i_n] = v2
 
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_post_tilelang(
     a,
@@ -507,7 +520,8 @@ def mhc_post_tilelang(
 
         a_local = T.alloc_fragment((hc, hc), T.float32)
         c_local = T.alloc_fragment(hc, T.float32)
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
@@ -523,15 +537,12 @@ def mhc_post_tilelang(
                     x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
 
             T.copy(x_local, x[i_n, 0, i0_h * h_blk])
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def hc_head_fuse_tilelang(
     residual,
@@ -566,7 +577,8 @@ def hc_head_fuse_tilelang(
     out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
 
     with T.Kernel(num_tokens, threads=n_thr) as i:
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
 
         # ------------------------------------------------------------------
         # Pass 1 – for each residual channel m_c and h_block:
@@ -624,4 +636,5 @@ def hc_head_fuse_tilelang(
 
             T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
 
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()

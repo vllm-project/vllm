@@ -592,6 +592,14 @@ class CudaPlatformBase(Platform):
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
         )
 
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        try:
+            device = torch.cuda.current_device()
+            major, _ = torch.cuda.get_device_capability(device)
+        except Exception:
+            return False
+        return major >= 9
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

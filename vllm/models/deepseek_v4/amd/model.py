@@ -1195,10 +1195,10 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        if current_platform.is_rocm():
-            return self._forward_rocm(
-                x, positions, input_ids, post_mix, res_mix, residual
-            )
+        # if current_platform.is_rocm():
+        #     return self._forward_rocm(
+        #         x, positions, input_ids, post_mix, res_mix, residual
+        #     )
 
         return self._forward_cuda(x, positions, input_ids, post_mix, res_mix, residual)
 
@@ -1361,7 +1361,9 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        if layer is not None and current_platform.is_cuda():
+        if layer is not None and (
+            current_platform.is_cuda() or current_platform.is_rocm()
+        ):
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
