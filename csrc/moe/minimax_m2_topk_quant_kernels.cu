@@ -17,7 +17,8 @@ namespace {
 constexpr int kMiniMaxExperts = 256;
 constexpr int kMiniMaxTopK = 8;
 constexpr int kMiniMaxBlockK = 128;
-constexpr int kThreads = 256;
+constexpr int kThreads = 128;
+constexpr int kWarps = kThreads / WARP_SIZE;
 constexpr float kFp8E4M3Min = -448.0f;
 constexpr float kFp8E4M3Max = 448.0f;
 constexpr float kQuantEps = 1.0e-10f;
@@ -52,6 +53,63 @@ __device__ __forceinline__ void warp_argmax(float& score, int& id,
   }
 }
 
+__device__ __forceinline__ float block_reduce_max(float val,
+                                                  float* __restrict__ smem) {
+  const int lane_id = threadIdx.x & (WARP_SIZE - 1);
+  const int warp_id = threadIdx.x / WARP_SIZE;
+  const uint32_t full_mask = 0xffffffffu;
+
+  val = warp_reduce_max(val, full_mask);
+  if (lane_id == 0) {
+    smem[warp_id] = val;
+  }
+  __syncthreads();
+
+  if (warp_id == 0) {
+    val = lane_id < kWarps ? smem[lane_id] : 0.0f;
+    val = warp_reduce_max(val, full_mask);
+    if (lane_id == 0) {
+      smem[0] = val;
+    }
+  }
+  __syncthreads();
+  return smem[0];
+}
+
+__device__ __forceinline__ void block_argmax(float& score, int& id,
+                                             float& weight,
+                                             float* __restrict__ smem_scores,
+                                             int* __restrict__ smem_ids,
+                                             float* __restrict__ smem_weights) {
+  const int lane_id = threadIdx.x & (WARP_SIZE - 1);
+  const int warp_id = threadIdx.x / WARP_SIZE;
+  const uint32_t full_mask = 0xffffffffu;
+
+  warp_argmax(score, id, weight, full_mask);
+  if (lane_id == 0) {
+    smem_scores[warp_id] = score;
+    smem_ids[warp_id] = id;
+    smem_weights[warp_id] = weight;
+  }
+  __syncthreads();
+
+  if (warp_id == 0) {
+    score = lane_id < kWarps ? smem_scores[lane_id] : -INFINITY;
+    id = lane_id < kWarps ? smem_ids[lane_id] : -1;
+    weight = lane_id < kWarps ? smem_weights[lane_id] : 0.0f;
+    warp_argmax(score, id, weight, full_mask);
+    if (lane_id == 0) {
+      smem_scores[0] = score;
+      smem_ids[0] = id;
+      smem_weights[0] = weight;
+    }
+  }
+  __syncthreads();
+  score = smem_scores[0];
+  id = smem_ids[0];
+  weight = smem_weights[0];
+}
+
 template <typename scalar_t>
 __global__ __launch_bounds__(kThreads)
 void minimax_m2_topk_sigmoid_quant_kernel(
@@ -62,113 +120,100 @@ void minimax_m2_topk_sigmoid_quant_kernel(
     __nv_fp8_e4m3* __restrict__ a1q, float* __restrict__ a1q_scale,
     int64_t hidden_stride_m, int64_t logits_stride_m, int64_t a1q_stride_m,
     int64_t topk_weights_stride_m, int64_t topk_ids_stride_m,
-    int64_t a1q_scale_stride_m, int hidden_size, int num_groups) {
+    int64_t a1q_scale_stride_m, int hidden_size) {
   const int token_id = blockIdx.x;
-  const int lane_id = threadIdx.x & (WARP_SIZE - 1);
-  const int warp_id = threadIdx.x / WARP_SIZE;
-  const uint32_t full_mask = 0xffffffffu;
+  const int group_id = blockIdx.y;
+  const int tid = threadIdx.x;
 
-  if (warp_id == 0) {
-    float scores_per_lane[kMiniMaxTopK];
-    float weights_per_lane[kMiniMaxTopK];
-    int expert_ids_per_lane[kMiniMaxTopK];
+  __shared__ float smem_scores[kWarps];
+  __shared__ float smem_weights[kWarps];
+  __shared__ int smem_ids[kWarps];
+
+  const int hidden_offset = group_id * kMiniMaxBlockK + tid;
+  float hidden_val = 0.0f;
+  if (hidden_offset < hidden_size) {
+    hidden_val = static_cast<float>(
+        hidden_states[token_id * hidden_stride_m + hidden_offset]);
+  }
+
+  const float absmax =
+      block_reduce_max(fmaxf(fabsf(hidden_val), kQuantEps), smem_scores);
+  const float scale = absmax / kFp8E4M3Max;
+
+  if (tid == 0) {
+    a1q_scale[token_id * a1q_scale_stride_m + group_id] = scale;
+  }
+  if (hidden_offset < hidden_size) {
+    const float q = fminf(fmaxf(hidden_val / scale, kFp8E4M3Min),
+                          kFp8E4M3Max);
+    a1q[token_id * a1q_stride_m + hidden_offset] = __nv_fp8_e4m3(q);
+  }
+
+  if (group_id != 0) {
+    return;
+  }
+
+  float scores_per_thread[2];
+  float weights_per_thread[2];
+  int expert_ids_per_thread[2];
 
 #pragma unroll
-    for (int i = 0; i < kMiniMaxTopK; ++i) {
-      const int expert_id = lane_id + i * WARP_SIZE;
-      float weight = sigmoidf_stable(
-          router_logits[token_id * logits_stride_m + expert_id]);
-      weights_per_lane[i] = weight;
-      scores_per_lane[i] =
-          weight + e_score_correction_bias[expert_id];
-      expert_ids_per_lane[i] = expert_id;
+  for (int i = 0; i < 2; ++i) {
+    const int expert_id = tid + i * kThreads;
+    const float weight = sigmoidf_stable(
+        router_logits[token_id * logits_stride_m + expert_id]);
+    weights_per_thread[i] = weight;
+    scores_per_thread[i] = weight + e_score_correction_bias[expert_id];
+    expert_ids_per_thread[i] = expert_id;
+  }
+
+  float selected_weights[kMiniMaxTopK];
+  float selected_sum = 0.0f;
+
+#pragma unroll
+  for (int k_idx = 0; k_idx < kMiniMaxTopK; ++k_idx) {
+    float best_score = -INFINITY;
+    float best_weight = 0.0f;
+    int best_id = -1;
+
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const int expert_id = expert_ids_per_thread[i];
+      const float score = scores_per_thread[i];
+      if (score > best_score ||
+          (score == best_score && expert_id >= 0 &&
+           (best_id < 0 || expert_id < best_id))) {
+        best_score = score;
+        best_weight = weights_per_thread[i];
+        best_id = expert_id;
+      }
     }
 
-    float selected_weights[kMiniMaxTopK];
-    float selected_sum = 0.0f;
+    block_argmax(best_score, best_id, best_weight, smem_scores, smem_ids,
+                 smem_weights);
+    const int selected_id = best_id;
+    const float selected_weight = best_weight;
 
-#pragma unroll
-    for (int k_idx = 0; k_idx < kMiniMaxTopK; ++k_idx) {
-      float best_score = -INFINITY;
-      float best_weight = 0.0f;
-      int best_id = -1;
-
-#pragma unroll
-      for (int i = 0; i < kMiniMaxTopK; ++i) {
-        const int expert_id = expert_ids_per_lane[i];
-        const float score = scores_per_lane[i];
-        if (score > best_score ||
-            (score == best_score && expert_id >= 0 &&
-             (best_id < 0 || expert_id < best_id))) {
-          best_score = score;
-          best_weight = weights_per_lane[i];
-          best_id = expert_id;
-        }
-      }
-
-      warp_argmax(best_score, best_id, best_weight, full_mask);
-      const int selected_id = __shfl_sync(full_mask, best_id, 0);
-      const float selected_weight = __shfl_sync(full_mask, best_weight, 0);
-
-      if (lane_id == 0) {
-        selected_weights[k_idx] = selected_weight;
-        selected_sum += selected_weight;
-        topk_ids[token_id * topk_ids_stride_m + k_idx] = selected_id;
-      }
-
-#pragma unroll
-      for (int i = 0; i < kMiniMaxTopK; ++i) {
-        if (expert_ids_per_lane[i] == selected_id) {
-          scores_per_lane[i] = -INFINITY;
-        }
-      }
+    if (tid == 0) {
+      selected_weights[k_idx] = selected_weight;
+      selected_sum += selected_weight;
+      topk_ids[token_id * topk_ids_stride_m + k_idx] = selected_id;
     }
 
-    if (lane_id == 0) {
-      const float inv_sum = selected_sum > 0.0f ? 1.0f / selected_sum : 1.0f;
 #pragma unroll
-      for (int k_idx = 0; k_idx < kMiniMaxTopK; ++k_idx) {
-        topk_weights[token_id * topk_weights_stride_m + k_idx] =
-            selected_weights[k_idx] * inv_sum;
+    for (int i = 0; i < 2; ++i) {
+      if (expert_ids_per_thread[i] == selected_id) {
+        scores_per_thread[i] = -INFINITY;
       }
     }
   }
 
-  for (int group_id = warp_id; group_id < num_groups; group_id += 8) {
-    const int hidden_base = group_id * kMiniMaxBlockK + lane_id * 4;
-    float vals[4];
-    float local_absmax = kQuantEps;
-
+  if (tid == 0) {
+    const float inv_sum = selected_sum > 0.0f ? 1.0f / selected_sum : 1.0f;
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int hidden_offset = hidden_base + i;
-      float v = 0.0f;
-      if (hidden_offset < hidden_size) {
-        v = static_cast<float>(
-            hidden_states[token_id * hidden_stride_m + hidden_offset]);
-      }
-      vals[i] = v;
-      local_absmax = fmaxf(local_absmax, fabsf(v));
-    }
-
-    const float absmax = __shfl_sync(full_mask,
-                                     warp_reduce_max(local_absmax, full_mask),
-                                     0);
-    const float scale = absmax / kFp8E4M3Max;
-
-    if (lane_id == 0) {
-      a1q_scale[token_id * a1q_scale_stride_m + group_id] = scale;
-    }
-
-
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int hidden_offset = hidden_base + i;
-      if (hidden_offset < hidden_size) {
-        float q = fminf(fmaxf(vals[i] / scale, kFp8E4M3Min),
-                        kFp8E4M3Max);
-        a1q[token_id * a1q_stride_m + hidden_offset] = __nv_fp8_e4m3(q);
-      }
+    for (int k_idx = 0; k_idx < kMiniMaxTopK; ++k_idx) {
+      topk_weights[token_id * topk_weights_stride_m + k_idx] =
+          selected_weights[k_idx] * inv_sum;
     }
   }
 }
@@ -240,11 +285,13 @@ void minimax_m2_topk_sigmoid_quant(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(hidden_states));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid(static_cast<unsigned int>(num_tokens),
+                  static_cast<unsigned int>(num_groups));
 
   VLLM_DISPATCH_HALF_TYPES(
       hidden_states.scalar_type(), "minimax_m2_topk_sigmoid_quant", ([&] {
         vllm::moe::minimax_m2_topk_sigmoid_quant_kernel<scalar_t>
-            <<<num_tokens, vllm::moe::kThreads, 0, stream>>>(
+            <<<grid, vllm::moe::kThreads, 0, stream>>>(
                 static_cast<const scalar_t*>(hidden_states.data_ptr()),
                 static_cast<const float*>(router_logits.data_ptr()),
                 static_cast<const float*>(e_score_correction_bias.data_ptr()),
@@ -254,7 +301,6 @@ void minimax_m2_topk_sigmoid_quant(
                 static_cast<float*>(a1q_scale.data_ptr()),
                 hidden_states.stride(0), router_logits.stride(0),
                 a1q.stride(0), topk_weights.stride(0), topk_ids.stride(0),
-                a1q_scale.stride(0), static_cast<int>(hidden_size),
-                static_cast<int>(num_groups));
+                a1q_scale.stride(0), static_cast<int>(hidden_size));
       }));
 }
