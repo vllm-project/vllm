@@ -21,6 +21,10 @@ logger = init_logger(__name__)
 # Sentinel for a slot that is queued or currently being looked up.
 _IN_FLIGHT = object()
 
+# Sentinel placed in the queue by notify_end_of_step() to guarantee the
+# worker wakes and drains any trailing keys added late in a step.
+_END_OF_STEP = object()
+
 # Result constants stored in _async_results.
 NOT_FOUND: int = -1
 FOUND: int = 1
@@ -61,12 +65,11 @@ class AsyncLookupWorker:
         self._tiers = tiers
         self._max_results = max_results
         self._lock = threading.Lock()
-        self._step_event = threading.Event()
         # slot → _IN_FLIGHT | NOT_FOUND | FOUND
         self._async_results: OrderedDict[int, object] = OrderedDict()
         # slot → tier_idx, populated only when FOUND
         self._result_tier: dict[int, int] = {}
-        self._queue: queue.Queue[tuple[OffloadKey, ReqContext]] = queue.Queue()
+        self._queue: queue.Queue[tuple[OffloadKey, ReqContext] | object] = queue.Queue()
         self._shutdown_event = threading.Event()
         self._thread = threading.Thread(
             target=self._worker,
@@ -102,10 +105,11 @@ class AsyncLookupWorker:
     def notify_end_of_step(self) -> None:
         """Signal that all lookup() calls for this engine step are done.
 
-        Called from TieringOffloadingManager.take_events().  Wakes the
-        worker so it processes all queued keys as a single batch.
+        Called from TieringOffloadingManager.take_events().  Places a
+        sentinel in the queue so the worker wakes and drains any trailing
+        keys that arrived late in the step.
         """
-        self._step_event.set()
+        self._queue.put_nowait(_END_OF_STEP)
 
     def update_cached_exists(
         self, keys: Collection[OffloadKey], tier_idx: int
@@ -133,7 +137,7 @@ class AsyncLookupWorker:
     def shutdown(self) -> None:
         """Stop the worker thread."""
         self._shutdown_event.set()
-        self._step_event.set()  # unblock wait() if sleeping
+        self._queue.put_nowait(_END_OF_STEP)  # unblock queue.get() if sleeping
         self._thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
@@ -170,25 +174,31 @@ class AsyncLookupWorker:
 
     def _worker(self) -> None:
         while not self._shutdown_event.is_set():
-            # Wait for end-of-step signal; fall back to timeout so the
-            # worker doesn't stall indefinitely if take_events() is skipped.
-            self._step_event.wait(timeout=0.1)
-            # Clear BEFORE draining so a signal that arrives during
-            # processing is not lost.
-            self._step_event.clear()
+            # Block until the first item arrives (key or end-of-step sentinel).
+            try:
+                item = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
 
             if self._shutdown_event.is_set():
                 break
 
-            # Drain the entire queue and group by req_id.
+            # Drain the rest of the queue and group keys by req_id.
+            # Sentinels (_END_OF_STEP) are discarded.
             batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
-            while True:
-                try:
-                    key, req_context = self._queue.get_nowait()
+
+            def _add(item: object) -> None:
+                if item is not _END_OF_STEP:
+                    key, req_context = item  # type: ignore[misc]
                     req_id = req_context.req_id
                     if req_id not in batches:
                         batches[req_id] = (req_context, [])
                     batches[req_id][1].append(key)
+
+            _add(item)
+            while True:
+                try:
+                    _add(self._queue.get_nowait())
                 except queue.Empty:
                     break
 
