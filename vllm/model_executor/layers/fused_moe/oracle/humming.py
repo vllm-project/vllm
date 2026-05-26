@@ -306,7 +306,7 @@ def _process_single_sublayer(
     Process a single sublayer: convert, optionally requant, prepare, and transform.
 
     This combines the common logic from convert_to_humming_moe_kernel_format
-    and prepare_humming_moe_layer for processing a single sublayer.
+    for processing a single sublayer.
 
     Args:
         layer: The RoutedExperts layer
@@ -408,7 +408,7 @@ def convert_to_humming_moe_kernel_format(
     # Build schemas from quant_config if not provided
     has_bias = layer.moe_config.has_bias
     num_experts = layer.moe_config.num_experts
-    param_dtype = layer.param_dtype
+    param_dtype = layer.params_dtype
 
     if weight_schema is None or input_schema is None:
         if quant_config is None:
