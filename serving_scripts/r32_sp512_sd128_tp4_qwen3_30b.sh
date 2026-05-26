@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059]
-#SBATCH --job-name=r32_sp256_sd2048_tp4_qwen3_30b
+#SBATCH --job-name=r32_sp512_sd128_tp4_qwen3_30b
 #SBATCH --nodes=1
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
-#SBATCH --time=01:30:00
+#SBATCH --time=00:30:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -818,10 +818,10 @@ copy_ray_logs_from_node() {
 
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
-SP="${SP:-256}"
-SD="${SD:-2048}"
+SP="${SP:-512}"
+SD="${SD:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
-REQUEST_RATE="${REQUEST_RATE:-0.05}"
+REQUEST_RATE="${REQUEST_RATE:-1}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 

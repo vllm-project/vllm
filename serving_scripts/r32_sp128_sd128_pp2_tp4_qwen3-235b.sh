@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-#SBATCH --nodelist=htc-g[059]
-#SBATCH --job-name=r32_sp2048_sd256_tp4_qwen3_30b
-#SBATCH --nodes=1
+#SBATCH --nodelist=htc-g[059-060]
+#SBATCH --job-name=r32_sp128_sd128_pp2_tp4_qwen3-235b
+#SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -17,15 +17,16 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-tp4-pp1-single-node-workers-nsys-arc-slurm-tmp-v1"
+SCRIPT_VERSION="arc-ray-qwen3-235b-a22b-tp4-pp2-workers-nsys-arc-slurm-tmp-v2"
 
 # Configuration:
-#   1 node x 4 H100s/node = 4 total GPUs
-#   TP=4 within the single node
-#   PP=1
+#   2 nodes x 4 H100s/node = 8 total GPUs
+#   TP=4 within each node
+#   PP=2 across the two nodes
 #
 # Layout:
-#   htc-g059 or htc-g060: 4-GPU TP group for the whole model
+#   htc-g059: 4-GPU TP group for PP stage 0
+#   htc-g060: 4-GPU TP group for PP stage 1
 #
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
@@ -70,14 +71,14 @@ WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
 
 # After stopping the vLLM API server, keep Ray alive this long while waiting
 # for real worker_process_*.nsys-rep files to appear and be copied.
-WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-300}"
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-900}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
 
 # Treat files smaller than this as placeholders, not useful reports.
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 # Ray compiled-DAG get timeout. Nsight + cold-start can exceed Ray's default 300s.
-RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-900}"
+RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-1400}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-${RAY_CGRAPH_GET_TIMEOUT}}"
 export RAY_CGRAPH_submit_timeout="${RAY_CGRAPH_submit_timeout:-1800}"
 
@@ -818,10 +819,10 @@ copy_ray_logs_from_node() {
 
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
-SP="${SP:-2048}"
-SD="${SD:-256}"
+SP="${SP:-128}"
+SD="${SD:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
-REQUEST_RATE="${REQUEST_RATE:-0.05}"
+REQUEST_RATE="${REQUEST_RATE:-1}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
@@ -835,11 +836,7 @@ HEAD_NODE="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)"
 export WORKER_NODES
 WORKER_NODES="$(scontrol show hostnames "$SLURM_NODELIST" | tail -n+2)"
 
-if [ -n "${WORKER_NODES}" ]; then
-  echo "Warning: this is intended to be a single-node script, but WORKER_NODES is non-empty: ${WORKER_NODES}" >&2
-fi
-
-echo "=== vLLM single-node Qwen3-30B TP4 host job ==="
+echo "=== vLLM multi-node Qwen3-235B host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "Date: $(date -Is 2>/dev/null || date)"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
@@ -926,21 +923,21 @@ fi
 
 VENV_DIR="${REPO_ROOT}/.venv"
 
-MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-235B-A22B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-# Recommended layout for 1 node x 4 GPUs/node.
+# Recommended layout for 2 nodes x 4 GPUs/node.
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
-NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-1}}"
+NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
 TOTAL_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
 
-# TP stays inside the single node; PP is disabled.
+# TP stays inside each node; PP spans the two nodes.
 TP="${TP:-${GPUS_PER_NODE}}"
-PP="${PP:-1}"
+PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
 
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -948,7 +945,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
-# With TP=4 and PP=1, expect one Ray worker report per GPU, i.e. 4 on the single node.
+# With TP=4 and PP=2, expect one Ray worker report per GPU, i.e. 4 per node.
 EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"

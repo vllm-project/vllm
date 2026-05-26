@@ -41,7 +41,7 @@ python -m pip install -U pip
 
 DATASET_PATH="${DATASET_PATH:-${REPO_ROOT}/datasets/sharegpt_buckets/Qwen_Qwen3-30B-A3B-Instruct-2507/sharegpt_sp128.jsonl}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
-REQUEST_RATE="${REQUEST_RATE:-1.0}"
+REQUEST_RATE="${REQUEST_RATE:-1}"
 BURSTINESS="${BURSTINESS:-1.0}"
 SEED="${SEED:-100}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
