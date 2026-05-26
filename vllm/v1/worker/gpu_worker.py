@@ -106,6 +106,24 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+class _NoOpWarmupKVConnector:
+    def set_disabled(self, disabled: bool) -> None:
+        return
+
+
+class _V1WarmupModelRunnerAdapter:
+    """Shim V1 model runner to the narrower warmup_kernels interface."""
+
+    def __init__(self, model_runner: Any) -> None:
+        self._model_runner = model_runner
+        self.num_speculative_steps = getattr(model_runner, "num_spec_tokens", 0)
+        self.is_last_pp_rank = get_pp_group().is_last_rank
+        self.kv_connector = _NoOpWarmupKVConnector()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model_runner, name)
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -682,10 +700,17 @@ class Worker(WorkerBase):
 
             logger.debug(msg)
 
-        if self.use_v2_model_runner:
-            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
-        elif get_pp_group().is_last_rank:
+        # Run real prefill/decode steps through execute_model before serving.
+        # Dummy runs bypass some inference-only Triton kernels such as slot
+        # mapping, which can otherwise first-JIT on the first live request.
+        warmup_runner = (
+            self.model_runner
+            if self.use_v2_model_runner
+            else _V1WarmupModelRunnerAdapter(self.model_runner)
+        )
+        warmup_kernels(warmup_runner, self.execute_model, self.sample_tokens)
+
+        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.

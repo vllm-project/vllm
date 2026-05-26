@@ -140,6 +140,57 @@ class AgRsAll2AllManager(All2AllManagerBase):
         pass
 
 
+class NcclAllToAllManager(All2AllManagerBase):
+    """
+    Real all2all communication based on torch.distributed.all_to_all_single.
+
+    The token routing logic is implemented in a dedicated MoE
+    Prepare/Finalize path, so this manager is intentionally lightweight.
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
+
+    def get_handle(self, kwargs):
+        return self
+
+    def dispatch_router_logits(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "nccl_alltoall does not support monolithic router-logits "
+            "dispatch. Use a modular MoE kernel path."
+        )
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "nccl_alltoall token routing is implemented in the modular "
+            "MoE prepare/finalize path."
+        )
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "nccl_alltoall token combine is implemented in the modular "
+            "MoE prepare/finalize path."
+        )
+
+    def destroy(self):
+        pass
+
+
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
     """
     All2All communication based on DeepEP High-Throughput kernels.

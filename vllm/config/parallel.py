@@ -40,6 +40,7 @@ EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
+    "nccl_alltoall",
     "deepep_high_throughput",
     "deepep_low_latency",
     "mori",
@@ -175,6 +176,7 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "nccl_alltoall": all2all based on torch.distributed/NCCL
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori": Use mori kernels
@@ -619,6 +621,7 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "allgather_reducescatter",
+                "nccl_alltoall",
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
