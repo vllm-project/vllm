@@ -20,9 +20,9 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.triton_swap import (
-    _MIN_N,
-    _NUM_SMS,
-    _THRESHOLD_BYTES,
+    MIN_N,
+    NUM_SMS,
+    THRESHOLD_BYTES,
     _swap_blocks_kernel,
 )
 from vllm.v1.kv_offload.worker.worker import (
@@ -50,7 +50,7 @@ def _select_swap_blocks_fn(
     # Triton wins only on small, 8-byte-aligned payloads.
     if (
         not page_sizes
-        or max(page_sizes) >= _THRESHOLD_BYTES
+        or max(page_sizes) >= THRESHOLD_BYTES
         or any(s % 8 for s in page_sizes)
     ):
         return ops.swap_blocks_batch
@@ -59,7 +59,7 @@ def _select_swap_blocks_fn(
     def _swap(src_addrs, dst_addrs, sizes, is_src_access_order_any=False):
         n = src_addrs.numel()
         # Too few descriptors to amortize Triton's launch cost.
-        if n < _MIN_N:
+        if n < MIN_N:
             ops.swap_blocks_batch(
                 src_addrs,
                 dst_addrs,
@@ -67,7 +67,7 @@ def _select_swap_blocks_fn(
                 is_src_access_order_any=is_src_access_order_any,
             )
             return
-        _swap_blocks_kernel[(min(_NUM_SMS, n),)](
+        _swap_blocks_kernel[(min(NUM_SMS, n),)](
             src_addrs.to("cuda", non_blocking=True),
             dst_addrs.to("cuda", non_blocking=True),
             sizes.to("cuda", non_blocking=True),

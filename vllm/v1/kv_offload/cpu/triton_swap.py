@@ -7,15 +7,15 @@ from __future__ import annotations
 from vllm.triton_utils import tl, triton
 
 # Constants tuned empirically on H100 (PCIe Gen5):
-#   _NUM_SMS - smallest SM slice that's within 5% of peak bandwidth at
-#              the 8-32 KB block sizes that matter in practice
-#   _THRESHOLD_BYTES - max payload per descriptor where Triton beats DMA;
-#                      above this the C++ cuMemcpyBatchAsync path takes the lead
-#   _MIN_N - minimum batch size where Triton's per-launch cost is amortized;
-#            below this DMA wins
-_NUM_SMS = 12
-_THRESHOLD_BYTES = 28 * 1024
-_MIN_N = 16
+#   NUM_SMS         - smallest SM slice within 5% of peak bandwidth at the
+#                     8-32 KB block sizes that matter in practice
+#   THRESHOLD_BYTES - max payload per descriptor where Triton beats DMA; above
+#                     this the C++ cuMemcpyBatchAsync path takes the lead
+#   MIN_N           - minimum batch size where Triton's per-launch cost is
+#                     amortized; below this DMA wins
+NUM_SMS = 12
+THRESHOLD_BYTES = 28 * 1024
+MIN_N = 16
 
 
 @triton.jit
