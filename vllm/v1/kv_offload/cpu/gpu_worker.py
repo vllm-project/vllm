@@ -85,6 +85,9 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+    batch_src: torch.Tensor
+    batch_dst: torch.Tensor
+    batch_sizes: torch.Tensor
 
 
 def compute_sub_block_ptrs(
@@ -157,6 +160,17 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             region.total_size_bytes / 1e9,
         )
         region.is_pinned = True
+
+
+def _new_descriptor_buffers(
+    num_copy_ops: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pin = is_pin_memory_available()
+    return (
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
+    )
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -232,6 +246,8 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
+        # list of pinned descriptor buffer sets available for re-use
+        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -281,13 +297,21 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         ):
             num_copy_ops += group_size * len(group_data_refs)
 
-        _pin = is_pin_memory_available()
-        batch_src = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
-        batch_dst = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
-        batch_sizes = torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=_pin)
-        all_src = batch_src.numpy()
-        all_dst = batch_dst.numpy()
-        all_sizes = batch_sizes.numpy()
+        # reuse a pooled buffer set, growing it if this transfer needs more room
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop()
+            if self._buffer_pool
+            else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+        all_src = src.numpy()
+        all_dst = dst.numpy()
+        all_sizes = sizes.numpy()
 
         src_offset = 0
         dst_offset = 0
@@ -350,7 +374,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        # batch_src/dst/sizes are the pinned tensors backing all_src/dst/sizes.
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
         start_event = (
             self._event_pool.pop()
@@ -382,9 +405,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             start_event.record(stream)
             if num_copy_ops > 0:
                 self._swap_blocks_batch(
-                    batch_src,
-                    batch_dst,
-                    batch_sizes,
+                    src,
+                    dst,
+                    sizes,
                     is_src_access_order_any=is_src_access_order_any,
                 )
             end_event.record(stream)
@@ -397,6 +420,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=num_transfer_bytes,
+                batch_src=batch_src,
+                batch_dst=batch_dst,
+                batch_sizes=batch_sizes,
             )
         )
 
@@ -422,6 +448,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
+            self._buffer_pool.append(
+                (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
+            )
             del self._transfer_events[transfer.job_id]
         return results
 
@@ -438,6 +467,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
+        self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
         if self._mmap_region is not None:
