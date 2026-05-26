@@ -88,7 +88,11 @@ def _resolve_token_placeholder(
     if m is None:
         return token, None
     token_id = int(m.group(1))
-    token_str = tokenizer.convert_ids_to_tokens([token_id])[0]
+    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
+    if token_repr is None:
+        return token, None
+    # Decode the tokenizer internal symbols to text
+    token_str = tokenizer.convert_tokens_to_string([token_repr])
     try:
         token_bytes: list[int] | None = list(token_str.encode("utf-8"))
     except (UnicodeEncodeError, AttributeError):
