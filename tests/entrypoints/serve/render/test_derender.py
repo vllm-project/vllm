@@ -418,7 +418,7 @@ async def test_derender_completion_prompt_tokens_length_mismatch(client):
             "prompt_tokens": [5, 10],
         },
     )
-    assert response.status_code == 422
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio
