@@ -38,6 +38,28 @@ steps:
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
+- label: Deepseek V4 Kernel Test (H100)
+  key: deepseek-v4-kernel-test-h100
+  timeout_in_minutes: 15
+  device: h100
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  commands:
+    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+
+- label: Deepseek V4 Kernel Test (B200)
+  key: deepseek-v4-kernel-test-b200
+  timeout_in_minutes: 15
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  commands:
+    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+
 - label: Kernels Attention Test %N
   key: kernels-attention-test
   timeout_in_minutes: 35
