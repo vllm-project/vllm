@@ -26,12 +26,14 @@ class TestPolicyIncludeAlways:
         for make in (make_base, make_chat, make_completion, make_disagg):
             s = make(UsagePolicy(include_usage="always"))
 
-            assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-                True,
-                False,
-            )
+            assert s.should_include_usage(
+                is_streaming=True, include_usage=False, continuous_usage=False
+            ) == (True, False)
             assert s.should_include_usage(
                 is_streaming=True, include_usage=True, continuous_usage=True
+            ) == (True, True)
+            assert s.should_include_usage(
+                is_streaming=True, include_usage=False, continuous_usage=True
             ) == (True, True)
 
     def test_anthropic(self):
@@ -46,7 +48,7 @@ class TestPolicyIncludeAlways:
             is_streaming=True, include_usage=True, continuous_usage=True
         ) == (True, True)
 
-    def test_all_endpoints_always_policy(self):
+    def test_non_streaming(self):
         """all non-streaming return (True, False)."""
         p = UsagePolicy(include_usage="always")
         for make in (make_base, make_chat, make_completion, make_disagg):
@@ -59,9 +61,8 @@ class TestPolicyBothAlways:
 
     def test_non_streaming(self):
         """all non-streaming return (True, False)."""
-        p = UsagePolicy(include_usage="always", continuous_usage="always")
         for make in (make_base, make_chat, make_completion, make_disagg):
-            s = make(p)
+            s = make(UsagePolicy(include_usage="always", continuous_usage="always"))
             assert s.should_include_usage(is_streaming=False) == (True, False)
 
     def test_endpoints(self):
@@ -74,6 +75,12 @@ class TestPolicyBothAlways:
                 True,
                 True,
             )
+            assert s.should_include_usage(
+                is_streaming=True, include_usage=False, continuous_usage=True
+            ) == (True, True)
+            assert s.should_include_usage(
+                is_streaming=True, include_usage=True, continuous_usage=True
+            ) == (True, True)
 
     def test_anthropic(self):
         """Anthropic ignores policy, still (True, True)."""

@@ -56,6 +56,9 @@ class TestStreamingDefault:
                 is_streaming=True, include_usage=True
             ) == (True, False)
             assert entryoint.should_include_usage(
+                is_streaming=True, include_usage=False, continuous_usage=True
+            ) == (False, False)
+            assert entryoint.should_include_usage(
                 is_streaming=True, include_usage=True, continuous_usage=True
             ) == (True, True)
 
