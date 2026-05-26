@@ -2,10 +2,14 @@
 
 #ifndef _marlin_cuh
   #define _marlin_cuh
-  #include <torch/all.h>
-
-  #include <ATen/cuda/CUDAContext.h>
-  #include <c10/cuda/CUDAGuard.h>
+  // These torch headers are only needed by non-stable callers (e.g. ops.cu).
+  // Guard them so that stable ABI targets can still include marlin.cuh
+  // for Vec, constants, and cp_async helpers without pulling in torch/all.h.
+  #ifndef TORCH_TARGET_VERSION
+    #include <torch/all.h>
+    #include <ATen/cuda/CUDAContext.h>
+    #include <c10/cuda/CUDAGuard.h>
+  #endif
   #include <cuda.h>
   #include <cuda_fp16.h>
   #include <cuda_runtime.h>
