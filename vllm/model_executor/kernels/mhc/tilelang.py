@@ -24,6 +24,75 @@ def _torch_hc_prenorm_gemm(
     sqrsum[0].copy_(x_float.square().sum(dim=-1))
 
 
+def _tilelang_hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    hidden_size: int,
+    hc_mult: int,
+    tile_n: int = 12,
+    n_thr: int = 512,
+    n_splits: int = 1,
+) -> None:
+    from vllm._tilelang_ops import (
+        hc_prenorm_gemm_block_m_tilelang,
+        hc_prenorm_gemm_tilelang,
+    )
+
+    assert out.shape[0] == n_splits
+    assert sqrsum.shape[0] == n_splits
+    assert x.shape[1] == hc_mult * hidden_size
+    assert x.shape[1] % n_splits == 0
+    assert (x.shape[1] // n_splits) % n_thr == 0
+    use_default_config = tile_n == 12 and n_thr == 512
+    if n_splits == 1 and use_default_config and x.shape[0] >= 1024:
+        hc_prenorm_gemm_block_m_tilelang(
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            fn.shape[0],
+            n_thr,
+            tile_n,
+            2,
+        )
+        return
+    if (
+        n_splits == 1
+        and use_default_config
+        and x.shape[0] < 128
+        and x.shape[1] % 1024 == 0
+    ):
+        hc_prenorm_gemm_tilelang(
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+            fn.shape[0],
+            1024,
+            4,
+            n_splits,
+        )
+        return
+    hc_prenorm_gemm_tilelang(
+        x,
+        fn,
+        out,
+        sqrsum,
+        hidden_size,
+        hc_mult,
+        fn.shape[0],
+        n_thr,
+        tile_n,
+        n_splits,
+    )
+
+
 def mhc_pre_tilelang(
     residual: torch.Tensor,
     fn: torch.Tensor,
@@ -137,7 +206,14 @@ def mhc_pre_tilelang(
             n_splits,
         )
     else:
-        _torch_hc_prenorm_gemm(residual_2d, fn, gemm_out_mul, gemm_out_sqrsum)
+        _tilelang_hc_prenorm_gemm(
+            residual_2d,
+            fn,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hidden_size,
+            hc_mult,
+        )
 
     if norm_weight is None:
         mhc_pre_big_fuse_tilelang(
@@ -422,8 +498,13 @@ def mhc_fused_post_pre_tilelang(
                 n_splits,
             )
         else:
-            _torch_hc_prenorm_gemm(
-                residual_cur_2d, fn, gemm_out_mul, gemm_out_sqrsum
+            _tilelang_hc_prenorm_gemm(
+                residual_cur_2d,
+                fn,
+                gemm_out_mul,
+                gemm_out_sqrsum,
+                hidden_size,
+                hc_mult,
             )
 
     if norm_weight is None:

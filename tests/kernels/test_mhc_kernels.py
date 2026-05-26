@@ -4,6 +4,10 @@ import pytest
 import torch
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
+from vllm.model_executor.kernels.mhc.tilelang import (
+    _tilelang_hc_prenorm_gemm,
+    _torch_hc_prenorm_gemm,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.utils.import_utils import has_tilelang
@@ -143,6 +147,50 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
 
     for actual, expected in zip(out, ref, strict=True):
         torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() and has_tilelang()),
+    reason="CUDA or ROCm and tilelang required",
+)
+@pytest.mark.parametrize(
+    ("num_tokens", "hidden_size"),
+    [
+        (1, 1280),
+        (512, 1280),
+        (2048, 1280),
+        (1, 4096),
+        (64, 4096),
+        (512, 4096),
+        (2048, 4096),
+        (1, 7168),
+        (64, 7168),
+        (512, 7168),
+        (2048, 7168),
+    ],
+)
+def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    hc_mult = 4
+    hc_mult3 = 2 * hc_mult + hc_mult * hc_mult
+    x = torch.randn(
+        (num_tokens, hc_mult * hidden_size), dtype=torch.bfloat16
+    )
+    fn = torch.randn(
+        (hc_mult3, hc_mult * hidden_size), dtype=torch.float32
+    ) * 1e-4
+    out_ref = torch.empty((1, num_tokens, hc_mult3), dtype=torch.float32)
+    sqrsum_ref = torch.empty((1, num_tokens), dtype=torch.float32)
+    out = torch.empty_like(out_ref)
+    sqrsum = torch.empty_like(sqrsum_ref)
+
+    _torch_hc_prenorm_gemm(x, fn, out_ref, sqrsum_ref)
+    _tilelang_hc_prenorm_gemm(x, fn, out, sqrsum, hidden_size, hc_mult)
+
+    torch.testing.assert_close(out, out_ref, atol=1e-5, rtol=1e-4)
+    torch.testing.assert_close(sqrsum, sqrsum_ref, atol=8.0, rtol=5e-4)
 
 
 @pytest.mark.skipif(
