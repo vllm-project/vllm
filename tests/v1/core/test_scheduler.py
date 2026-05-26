@@ -2622,7 +2622,7 @@ def test_priority_combined_max_num_seqs_and_kv_preemption():
     scheduler.add_request(lo1)
     scheduler.add_request(lo2)
 
-    output = scheduler.schedule()
+    scheduler.schedule()
     assert len(scheduler.running) == 2
 
     # Intentionally skip update_from_output so lo1/lo2 are not in decode
