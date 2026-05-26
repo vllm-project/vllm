@@ -227,34 +227,37 @@ def _transform_single(
     return _standardize(out).squeeze(0), w_bar, h_bar
 
 
-def _fetch_image(
-    src: Any,
-    allowed_media_domains: list[str] | None = None,
-    allowed_local_media_path: str | None = None,
-) -> Image.Image:
-    # Route string sources through MediaConnector so this surface inherits
-    # the URL-scheme allowlist (allowed_media_domains) and the
-    # allowed_local_media_path policy that already harden the OpenAI chat
-    # path via vllm/entrypoints/chat_utils.py. Direct requests.get and
-    # Image.open on caller-supplied strings would otherwise reach cloud
-    # metadata endpoints and arbitrary local files.
-    #
-    # The allowlist + local-path policy is threaded in from the deployer's
-    # ModelConfig (see MiMoV2OmniProcessingInfo.get_hf_processor) so
-    # constructing MediaConnector() with default empty arguments here
-    # would silently no-op the guard.
-    from vllm.multimodal.media.connector import MediaConnector
+def _normalize_media_str(src: str) -> str:
+    """Prepend ``file://`` to bare local paths so MediaConnector can route them.
 
+    Preserves backward-compat with offline ``LLM.generate`` callers that pass
+    raw filesystem paths (e.g. ``/data/img.jpg``). ``file://`` strings traverse
+    MediaConnector's ``_load_file_url`` which still enforces the deployer's
+    ``allowed_local_media_path`` policy, so the security guarantee is intact.
+    Pass-through for ``http://`` / ``https://`` / ``file://`` / ``data:``.
+    """
+    lo = src[:8].lower()
+    if (
+        lo.startswith("http://")
+        or lo.startswith("https://")
+        or lo.startswith("file://")
+        or src[:5].lower() == "data:"
+    ):
+        return src
+    return "file://" + src
+
+
+def _fetch_image(src: Any, media_connector: Any) -> Image.Image:
+    """Fetch an image, routing ``str`` inputs through MediaConnector.
+
+    See ``MiMoVLProcessor`` for the SSRF/LFI hardening rationale.
+    """
     if isinstance(src, Image.Image):
         return _to_rgb(src)
     if isinstance(src, bytes):
         return _to_rgb(copy.deepcopy(Image.open(BytesIO(src))))
     if isinstance(src, str):
-        connector = MediaConnector(
-            allowed_local_media_path=allowed_local_media_path,
-            allowed_media_domains=allowed_media_domains,
-        )
-        return _to_rgb(connector.fetch_image(src))
+        return _to_rgb(media_connector.fetch_image(_normalize_media_str(src)))
     raise ValueError(f"Unrecognized image source: {type(src)}")
 
 
@@ -268,6 +271,13 @@ class MiMoVLProcessor:
 
     Handles image/video/audio preprocessing and token sequence construction.
     Ported from SGLang's MiMoVLProcessor.
+
+    Security: caller-supplied media strings (image / audio) are routed through
+    a single cached :class:`MediaConnector` so this surface inherits the
+    ``allowed_media_domains`` URL allowlist and the ``allowed_local_media_path``
+    policy that already harden the OpenAI chat path via ``chat_utils.py``.
+    Both settings are threaded in from ``ModelConfig`` by
+    :meth:`MiMoV2OmniProcessingInfo.get_hf_processor`.
     """
 
     def __init__(
@@ -323,12 +333,20 @@ class MiMoVLProcessor:
         self.tokenizer = tokenizer
         self.video_process_num_threads = video_process_num_threads
         self.device = torch.device(device) if isinstance(device, str) else device
-        # SSRF / local-path policy threaded from
-        # MiMoV2OmniProcessingInfo.get_hf_processor. Without these,
-        # MediaConnector() defaults to empty allowed_media_domains
-        # (allowlist no-op) and None allowed_local_media_path.
+        # MediaConnector expects allowed_local_media_path as a non-None str
+        # (empty string = no-op policy); ModelConfig surfaces it as str | None.
         self._allowed_media_domains = allowed_media_domains
-        self._allowed_local_media_path = allowed_local_media_path
+        self._allowed_local_media_path: str = allowed_local_media_path or ""
+        # Cache one MediaConnector instance — per-call construction defeats
+        # the connector's internal LRU byte cache for repeated URLs in a batch.
+        # Local import keeps the dependency confined and avoids a top-of-module
+        # cycle if a future refactor moves things around.
+        from vllm.multimodal.media.connector import MediaConnector
+
+        self._media_connector = MediaConnector(
+            allowed_local_media_path=self._allowed_local_media_path,
+            allowed_media_domains=self._allowed_media_domains,
+        )
 
         self.rope_type = "rope" if rope_type == "1d" else rope_type
         assert self.rope_type in ("rope", "mrope"), (
@@ -491,18 +509,11 @@ class MiMoVLProcessor:
                     waveform = samples.data
                     original_sr = samples.sample_rate
                 else:
-                    # URL or local-path strings go through MediaConnector for
-                    # the same SSRF allowlist + allowed_local_media_path policy
-                    # that hardens the OpenAI chat path (see _fetch_image).
-                    # The allowlist + local-path settings are threaded from the
-                    # deployer's ModelConfig via __init__.
-                    from vllm.multimodal.media.connector import MediaConnector
-
-                    connector = MediaConnector(
-                        allowed_local_media_path=self._allowed_local_media_path,
-                        allowed_media_domains=self._allowed_media_domains,
+                    # URL or local-path strings go through the cached
+                    # MediaConnector — see class docstring for rationale.
+                    waveform_np, original_sr = self._media_connector.fetch_audio(
+                        _normalize_media_str(audio)
                     )
-                    waveform_np, original_sr = connector.fetch_audio(audio)
                     waveform = torch.from_numpy(waveform_np)
             else:
                 raise ValueError(f"Unsupported audio source type: {type(audio)}")
@@ -533,11 +544,7 @@ class MiMoVLProcessor:
         kw = self._resolve_img_kw(image)
         src = image.image
         if isinstance(src, (str, bytes)):
-            src = _fetch_image(
-                src,
-                allowed_media_domains=self._allowed_media_domains,
-                allowed_local_media_path=self._allowed_local_media_path,
-            )
+            src = _fetch_image(src, self._media_connector)
         tensor, _, _ = _transform_single(
             src,
             factor=self.patch_size * self.merge_size,
@@ -1057,9 +1064,9 @@ class MiMoOmniProcessor(ProcessorMixin):
     ) -> "MiMoOmniProcessor":
         """Convenience factory: instantiate directly from an HF model config object.
 
-        allowed_media_domains and allowed_local_media_path forward the deployer's
-        ModelConfig SSRF / local-path policy to the MediaConnector instances
-        constructed inside MiMoVLProcessor (see _fetch_image and preprocess_audio).
+        ``allowed_media_domains`` / ``allowed_local_media_path`` forward the
+        deployer's ModelConfig policy to ``MiMoVLProcessor`` (see its docstring
+        for the SSRF / LFI hardening rationale).
         """
         vc = hf_config.vision_config
         if isinstance(vc, dict):
