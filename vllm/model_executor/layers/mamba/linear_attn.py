@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 @CustomOp.register("minimax_text01_rmsnorm_tp")
@@ -246,8 +247,8 @@ class MiniMaxText01LinearKernel:
 
 class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     @property
-    def mamba_type(self) -> str:
-        return "linear_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.LINEAR
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None
