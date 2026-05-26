@@ -38,7 +38,6 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
-
 logger = init_logger(__name__)
 
 
@@ -46,6 +45,7 @@ SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
     try:
         from vllm.spinloop import spinloop
+
         SPINLOOP_EXT_ENABLED = True
     except ImportError:
         logger.warning(
