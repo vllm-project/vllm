@@ -29,7 +29,7 @@
 //   4. The bf16 dispatch with M >= 16 forwards to the WMMA kernel in
 //      q_gemm_rdna3_wmma.cu (separate translation unit) where
 //      v_wmma_f32_16x16x16_bf16_w32 wins. The fp16 path always stays
-//      scalar — see README_RDNA3.md for the dispatch decision rationale.
+//      scalar (the bit-trick dequant beats WMMA below M=64).
 
 #include <cstdint>
 #include <cstdio>
