@@ -175,33 +175,6 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekCompressor(nn.Module):
-    _compressed_kv_buffers: ClassVar[dict[tuple[str, int, int], torch.Tensor]] = {}
-
-    @classmethod
-    def _get_compressed_kv_buffer(
-        cls,
-        device: str,
-        max_num_tokens: int,
-        head_dim: int,
-    ) -> torch.Tensor:
-        if device == "cuda" and torch.accelerator.is_available():
-            device_key = f"cuda:{torch.accelerator.current_device_index()}"
-            alloc_device = torch.device(device_key)
-        else:
-            device_key = str(device)
-            alloc_device = torch.device(device)
-
-        key = (device_key, max_num_tokens, head_dim)
-        buffer = cls._compressed_kv_buffers.get(key)
-        if buffer is None:
-            buffer = torch.empty(
-                (max_num_tokens, head_dim),
-                dtype=torch.float32,
-                device=alloc_device,
-            )
-            cls._compressed_kv_buffers[key] = buffer
-        return buffer
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -412,7 +385,11 @@ class DeepseekCompressor(nn.Module):
                     overlap=self.overlap,
                 )
             else:
-                compressed_kv = self._compressed_kv_buffer[:num_actual]
+                compressed_kv = torch.empty(
+                    (num_actual, self.head_dim),
+                    dtype=torch.float32,
+                    device=state_cache.device,
+                )
                 self._compress_kernel(
                     state_cache,
                     token_to_req_indices,
