@@ -1017,8 +1017,6 @@ def get_requirements() -> list[str]:
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
-            if "humming-kernels[cu13]" in req and cuda_major == "12":
-                req = req.replace("humming-kernels[cu13]", "humming-kernels[cu12]")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
@@ -1195,6 +1193,11 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
+        "triton-cpu": [
+            "triton @ "
+            "git+https://github.com/triton-lang/triton-cpu.git@270e696d ; "
+            "platform_machine == 'x86_64'",
+        ],  # Remove after stable release
     },
     cmdclass=cmdclass,
     package_data=package_data,
