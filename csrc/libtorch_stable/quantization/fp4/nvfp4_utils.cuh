@@ -23,7 +23,7 @@
 #include "cuda_vec_utils.cuh"
 
 #if defined(NVFP4_ENABLE_ELTS16) && defined(CUDA_VERSION) && \
-    CUDA_VERSION >= 12090
+    CUDART_VERSION >= 12090
   #define ELTS_PER_THREAD 16
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
 constexpr bool CVT_FP4_PACK16 = true;
