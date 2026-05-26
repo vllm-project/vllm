@@ -70,7 +70,6 @@ class ServingTokens(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
         usage_policy: UsagePolicy | None = None,
-        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -78,7 +77,6 @@ class ServingTokens(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             usage_policy=usage_policy,
-            enable_force_include_usage=enable_force_include_usage,
         )
         self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details

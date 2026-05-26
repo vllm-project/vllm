@@ -34,14 +34,12 @@ class OpenAIServingRealtime(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            enable_force_include_usage=enable_force_include_usage,
             usage_policy=usage_policy,
         )
 

@@ -71,7 +71,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
@@ -88,7 +87,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_auto_tools=enable_auto_tools,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
-            enable_force_include_usage=enable_force_include_usage,
             usage_policy=usage_policy,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )

@@ -101,7 +101,6 @@ class OpenAIServingChat(OpenAIServing):
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
@@ -113,7 +112,6 @@ class OpenAIServingChat(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             usage_policy=usage_policy,
-            enable_force_include_usage=enable_force_include_usage,
         )
 
         self.openai_serving_render = openai_serving_render
@@ -153,7 +151,6 @@ class OpenAIServingChat(OpenAIServing):
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -1625,9 +1622,6 @@ class OpenAIServingChat(OpenAIServing):
                 else False
             )
             return (True, in_chunks)
-
-        if self.enable_force_include_usage:
-            return (True, True)
 
         if include_usage is not None:
             in_chunks = bool(include_usage and continuous_usage)

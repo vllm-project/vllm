@@ -62,7 +62,6 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
@@ -71,12 +70,10 @@ class OpenAIServingCompletion(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             usage_policy=usage_policy,
-            enable_force_include_usage=enable_force_include_usage,
         )
 
         self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -717,9 +714,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 else False
             )
             return (True, in_chunks)
-
-        if self.enable_force_include_usage:
-            return (True, True)
 
         if include_usage is not None:
             in_chunks = bool(include_usage and continuous_usage)

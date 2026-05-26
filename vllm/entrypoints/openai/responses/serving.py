@@ -167,7 +167,6 @@ class OpenAIServingResponses(OpenAIServing):
         tool_parser: str | None = None,
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -177,7 +176,6 @@ class OpenAIServingResponses(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
             usage_policy=usage_policy,
         )
 
@@ -196,7 +194,6 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=self.model_config.model,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config

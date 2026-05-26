@@ -283,17 +283,31 @@ def _make_render_mock(models):
     return mr
 
 
+def _with_force_usage(policy, enable_force, *, set_continuous):
+    """Test helper: convert deprecated flag to UsagePolicy."""
+    from vllm.entrypoints.chat_utils import UsagePolicy
+
+    if enable_force and (policy is None or policy.include_usage is None):
+        return UsagePolicy(
+            include_usage="always",
+            continuous_usage="always" if set_continuous else None,
+        )
+    return policy
+
+
 def make_base(usage_policy=None, enable_force_include_usage=False):
     from vllm.entrypoints.openai.engine.serving import OpenAIServing
 
     engine = _make_engine()
     models = _make_models(engine)
+    policy = _with_force_usage(
+        usage_policy, enable_force_include_usage, set_continuous=False
+    )
     return OpenAIServing(
         engine_client=engine,
         models=models,
         request_logger=None,
-        usage_policy=usage_policy,
-        enable_force_include_usage=enable_force_include_usage,
+        usage_policy=policy,
     )
 
 
@@ -302,6 +316,9 @@ def make_chat(usage_policy=None, enable_force_include_usage=False):
 
     engine = _make_engine()
     models = _make_models(engine)
+    policy = _with_force_usage(
+        usage_policy, enable_force_include_usage, set_continuous=True
+    )
     return OpenAIServingChat(
         engine_client=engine,
         models=models,
@@ -310,8 +327,7 @@ def make_chat(usage_policy=None, enable_force_include_usage=False):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
-        usage_policy=usage_policy,
-        enable_force_include_usage=enable_force_include_usage,
+        usage_policy=policy,
     )
 
 
@@ -320,13 +336,15 @@ def make_completion(usage_policy=None, enable_force_include_usage=False):
 
     engine = _make_engine()
     models = _make_models(engine)
+    policy = _with_force_usage(
+        usage_policy, enable_force_include_usage, set_continuous=True
+    )
     return OpenAIServingCompletion(
         engine_client=engine,
         models=models,
         openai_serving_render=_make_render_mock(models),
         request_logger=None,
-        usage_policy=usage_policy,
-        enable_force_include_usage=enable_force_include_usage,
+        usage_policy=policy,
     )
 
 
@@ -341,7 +359,6 @@ def make_disagg(usage_policy=None, enable_force_include_usage=False):
         openai_serving_render=_make_render_mock(models),
         request_logger=None,
         usage_policy=usage_policy,
-        enable_force_include_usage=enable_force_include_usage,
     )
 
 
@@ -350,6 +367,9 @@ def make_anthropic(usage_policy=None, enable_force_include_usage=False):
 
     engine = _make_engine()
     models = _make_models(engine)
+    policy = _with_force_usage(
+        usage_policy, enable_force_include_usage, set_continuous=True
+    )
     return AnthropicServingMessages(
         engine_client=engine,
         models=models,
@@ -358,6 +378,5 @@ def make_anthropic(usage_policy=None, enable_force_include_usage=False):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
-        usage_policy=usage_policy,
-        enable_force_include_usage=enable_force_include_usage,
+        usage_policy=policy,
     )

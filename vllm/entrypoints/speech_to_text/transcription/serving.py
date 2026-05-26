@@ -37,7 +37,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        enable_force_include_usage: bool = False,
         usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
@@ -46,7 +45,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
-            enable_force_include_usage=enable_force_include_usage,
             usage_policy=usage_policy,
         )
 

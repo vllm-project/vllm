@@ -145,7 +145,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         usage_policy: UsagePolicy | None = None,
-        enable_force_include_usage: bool = False,
     ):
         super().__init__()
 
@@ -155,13 +154,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.usage_policy = usage_policy
-        self.enable_force_include_usage = enable_force_include_usage
-        if enable_force_include_usage:
-            logger.warning_once(
-                "`--enable-force-include-usage` is deprecated. "
-                "Consider using `--include-usage-policy` and "
-                "`--continuous-usage-policy` instead."
-            )
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -629,19 +621,17 @@ class OpenAIServing(BeamSearchOnlineMixin):
                   chunk.
 
         Resolution order:
-            1. ``usage_policy.include_usage == "always"``: force include,
+            1. `usage_policy.include_usage == "always"`: force include,
                override everything else.
-            2. ``enable_force_include_usage == True`` (deprecated): force
-               include usage in the final chunk only.
-            3. Per-request ``include_usage`` / ``continuous_usage``: use the
+            2. Per-request `include_usage` / `continuous_usage`: use the
                user-supplied values if they were explicitly provided.
-            4. Default: include usage in the final chunk for streaming
+            3. Default: include usage in the final chunk for streaming
                requests.
 
         Subclass override note:
             Subclasses may override this method to customize usage behavior.
             When overridden, the method can either:
-            1. Consult ``self.usage_policy`` and request-level parameters, or
+            1. Consult `self.usage_policy` and request-level parameters, or
             2. Ignore all parameters and implement fixed behavior
                (e.g., always return (False, False) for APIs that never
                return usage, or always return (True, True) for APIs that
@@ -661,9 +651,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 else False
             )
             return (True, in_chunks)
-
-        if self.enable_force_include_usage:
-            return (True, False)
 
         if include_usage is not None:
             in_chunks = bool(include_usage and continuous_usage)

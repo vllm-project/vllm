@@ -153,15 +153,16 @@ class BaseFrontendArgs:
     """
     enable_force_include_usage: bool = False
     """
-    [Deprecated] Consider using `--include-usage-policy` and
+    [Deprecated] Use `--include-usage-policy` and
     `--continuous-usage-policy` instead.
 
     If set to True, force-include usage in streaming responses.
+    Internally converted to ``--include-usage-policy=always``
+    (plus ``--continuous-usage-policy=always`` for Chat / Completion
+    endpoints).
 
-    Configuring this parameter together with `--include-usage-policy` or
-    `--continuous-usage-policy` is not recommended. The two mechanisms
-    currently coexist without validation, but the behavior may change in
-    future versions.
+    Must NOT be combined with ``--include-usage-policy`` or
+    ``--continuous-usage-policy``.
     """
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat

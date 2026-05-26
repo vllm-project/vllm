@@ -90,6 +90,5 @@ async def init_generative_scoring_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
-        enable_force_include_usage=args.enable_force_include_usage,
         usage_policy=usage_policy,
     )
