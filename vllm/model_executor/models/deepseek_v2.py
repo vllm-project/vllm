@@ -304,10 +304,7 @@ class DeepseekV2MoE(nn.Module):
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
         ):
-            # Emit bf16 router logits to match the gate's native dtype. AITER's
-            # biased_grouped_topk dispatches on the gating_output dtype and
-            # requires the correction bias to match; this avoids a per-layer
-            # bf16->fp32 cast (the kernel still accumulates in fp32).
+            # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
 
         if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:

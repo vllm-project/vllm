@@ -375,9 +375,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             (1, 1), dtype=torch.int32, device=self.device
         )
 
-        # zeros (not empty): build() only re-zeros the shrink-tail, and
-        # CUDA-graph-captured kernels may read padded positions beyond the
-        # active token range.
         self.req_id_per_token_buffer = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -461,8 +458,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
 
-        # Per-step memo state for the shrink-tail fills and the
-        # get_mla_metadata_v1 cache in build().
         self._prev_req_extent: int = 0
         self._prev_indices_extent: int = 0
         self._prev_metadata_key: tuple | None = None
@@ -526,7 +521,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        #
         # The output is a deterministic function of (num_tokens, max_query_len,
         # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
         # and skip the launch when nothing changed.
