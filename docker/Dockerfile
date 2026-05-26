@@ -220,7 +220,8 @@ COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
-        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt; \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
+        sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
     fi \
     && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
@@ -746,7 +747,8 @@ COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
-        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' /tmp/requirements-cuda.txt; \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
+        sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
     fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
