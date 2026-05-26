@@ -51,7 +51,7 @@ __device__ __forceinline__ float wave64_sum(float v) {
 }
 
 template <typename T, int HEAD_SIZE>
-__global__ __launch_bounds__(THREADS, 8)
+__global__ __launch_bounds__(THREADS, 1)
 void pth_decode_int4_kernel(
     T* __restrict__ out,
     const T* __restrict__ q,
@@ -69,12 +69,17 @@ void pth_decode_int4_kernel(
     int64_t stride_ks_blk, int64_t stride_ks_slot, int64_t stride_ks_head,
     int64_t stride_vs_blk, int64_t stride_vs_slot, int64_t stride_vs_head,
     int64_t stride_o_seq, int64_t stride_o_head) {
+  // K-parallel FlashAttention-decode for INT4 packed KV. Same wave-merge as
+  // the INT8 sibling; the only structural difference is the packed-nibble
+  // dequant in the Q·K and V·P inner loops.
   constexpr int BYTES_PER_ROW = HEAD_SIZE / 2;
-  constexpr int OWN_BYTES = BYTES_PER_ROW / THREADS;  // bytes (= 2*OWN_D nibbles) per thread
+  constexpr int OWN_D = HEAD_SIZE / THREADS;       // owned output dims/lane
   static_assert(BYTES_PER_ROW >= THREADS,
                 "INT4 decode requires HEAD_SIZE >= 128 (so >=64 bytes/row)");
-  static_assert(BYTES_PER_ROW % THREADS == 0,
-                "HEAD_SIZE/2 must be a multiple of 64");
+  static_assert(HEAD_SIZE % THREADS == 0,
+                "HEAD_SIZE must be a multiple of 64");
+  constexpr int O_LDS_STRIDE = HEAD_SIZE + 1;      // +1 to break bank periodicity
+
   int seq_idx = blockIdx.x;
   int head_idx = blockIdx.y;
   int tid = threadIdx.x;
@@ -83,21 +88,22 @@ void pth_decode_int4_kernel(
   int seq_len = seq_lens[seq_idx];
 
   __shared__ T Q_lds[HEAD_SIZE];
+  __shared__ float O_lds[THREADS * O_LDS_STRIDE];
   for (int d = tid; d < HEAD_SIZE; d += THREADS) {
     Q_lds[d] = q[(int64_t)seq_idx * stride_q_seq +
                   head_idx * stride_q_head + d];
   }
   __syncthreads();
 
+  // Each lane keeps the full HEAD_SIZE per-lane output partial.
   float m_local = -INFINITY;
   float l_local = 0.f;
-  float o_local[OWN_BYTES * 2];  // 2 output dims per owned byte
+  float o_local[HEAD_SIZE];
   #pragma unroll
-  for (int i = 0; i < OWN_BYTES * 2; ++i) o_local[i] = 0.f;
+  for (int d = 0; d < HEAD_SIZE; ++d) o_local[d] = 0.f;
 
-  // Each thread iterates ALL k positions (see comment in
-  // pth_decode_int8_cdna.cu); only the V slice it owns is updated per k.
-  for (int k = 0; k < seq_len; ++k) {
+  // K-loop: lane t handles k = t, t+THREADS, ... < seq_len.
+  for (int k = tid; k < seq_len; k += THREADS) {
     int log_blk = k / block_size;
     int slot = k - log_blk * block_size;
     int p_blk = block_table[seq_idx * max_blocks_per_seq + log_blk];
@@ -121,7 +127,7 @@ void pth_decode_int4_kernel(
     unpack_scale_zp(k_packed, k_sc, k_zp);
     unpack_scale_zp(v_packed, v_sc, v_zp);
 
-    // Full Q · K dot — every thread reads the full packed K row.
+    // Q · K dot, 8 bytes (16 dims) per chunk.
     float s = 0.f;
     #pragma unroll
     for (int b = 0; b < BYTES_PER_ROW; b += 8) {
@@ -137,6 +143,7 @@ void pth_decode_int4_kernel(
     }
     s = s * sm_scale * k_sc;
 
+    // Per-lane online softmax.
     float m_new = fmaxf(m_local, s);
     float alpha = (m_local == -INFINITY) ? 0.f : __expf(m_local - m_new);
     float pij = (m_new == -INFINITY) ? 0.f : __expf(s - m_new);
@@ -144,28 +151,56 @@ void pth_decode_int4_kernel(
     m_local = m_new;
     float p_v = pij * v_sc;
 
-    // Update only this thread's owned bytes from V.
+    // V · P over ALL HEAD_SIZE output dims (8 bytes = 16 dims per chunk).
     #pragma unroll
-    for (int i = 0; i < OWN_BYTES; ++i) {
-      uint8_t byte = v_row[tid * OWN_BYTES + i];
-      int lo = (int)(byte & 0xFu) - v_zp;
-      int hi = (int)((byte >> 4) & 0xFu) - v_zp;
-      o_local[2 * i + 0] = o_local[2 * i + 0] * alpha + p_v * (float)lo;
-      o_local[2 * i + 1] = o_local[2 * i + 1] * alpha + p_v * (float)hi;
+    for (int b = 0; b < BYTES_PER_ROW; b += 8) {
+      uint8_t bytes[8];
+      *(int2*)bytes = *(const int2*)(v_row + b);
+      #pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        int lo = (int)(bytes[i] & 0xFu) - v_zp;
+        int hi = (int)((bytes[i] >> 4) & 0xFu) - v_zp;
+        int d_lo = b * 2 + 2 * i + 0;
+        int d_hi = b * 2 + 2 * i + 1;
+        o_local[d_lo] = o_local[d_lo] * alpha + p_v * (float)lo;
+        o_local[d_hi] = o_local[d_hi] * alpha + p_v * (float)hi;
+      }
     }
   }
 
-  // Every thread saw all k positions, so m_local and l_local are globally
-  // correct. No cross-thread merge needed for the output.
-  float inv_l = 1.f / (l_local + 1e-10f);
+  // Wave-wide online-softmax merge (same identity as INT8 sibling).
+  float m_global = wave64_max(m_local);
+  float alpha_lane = (m_local == -INFINITY) ? 0.f
+                                            : __expf(m_local - m_global);
+  float l_global = wave64_sum(alpha_lane * l_local);
+  float inv_l = 1.f / (l_global + 1e-10f);
+  #pragma unroll
+  for (int d = 0; d < HEAD_SIZE; ++d) {
+    o_local[d] *= alpha_lane;
+  }
+
+  // LDS transpose: lane-rows → dim-columns, then column-sum + write. No
+  // pre-write barrier: Q_lds and O_lds are distinct LDS allocations, and
+  // the K-loop's Q_lds reads have all retired at the loop convergence
+  // point. Only the post-write barrier is required (lane d reads other
+  // lanes' rows in the column-sum).
+  #pragma unroll
+  for (int d = 0; d < HEAD_SIZE; ++d) {
+    O_lds[tid * O_LDS_STRIDE + d] = o_local[d];
+  }
+  __syncthreads();
 
   T* out_row = out + (int64_t)seq_idx * stride_o_seq +
                head_idx * stride_o_head;
   #pragma unroll
-  for (int i = 0; i < OWN_BYTES; ++i) {
-    int d_base = (tid * OWN_BYTES + i) * 2;
-    out_row[d_base + 0] = from_float_rn<T>(o_local[2 * i + 0] * inv_l);
-    out_row[d_base + 1] = from_float_rn<T>(o_local[2 * i + 1] * inv_l);
+  for (int i = 0; i < OWN_D; ++i) {
+    int d = tid * OWN_D + i;
+    float sum_d = 0.f;
+    #pragma unroll
+    for (int t = 0; t < THREADS; ++t) {
+      sum_d += O_lds[t * O_LDS_STRIDE + d];
+    }
+    out_row[d] = from_float_rn<T>(sum_d * inv_l);
   }
 }
 
