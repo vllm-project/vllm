@@ -1117,6 +1117,7 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -1130,6 +1131,9 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
 
     compare_all_settings(
@@ -1139,6 +1143,7 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
+        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1150,6 +1155,7 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -1160,7 +1166,15 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
+
+    if force_v1_runner:
+        all_envs = [
+            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
+        ]
 
     trust_remote_code = False
     for args in all_args:
@@ -1349,43 +1363,38 @@ def multi_process_parallel(
 ) -> None:
     import ray
 
-    # Using ray helps debugging the error when it failed
-    # as compared to multiprocessing.
-    # NOTE: We need to set working_dir for distributed tests,
-    # otherwise we may get import errors on ray workers
-    # NOTE: Force ray not to use gitignore file as excluding, otherwise
-    # it will not move .so files to working dir.
-    # So we have to manually add some of large directories
-    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    # Using ray helps debugging the error when it failed as compared to
+    # multiprocessing. For local Ray workers, putting the repo root on
+    # PYTHONPATH is enough and avoids uploading the full source tree, which
+    # exceeds Ray's working_dir package size limit on CI.
+    env_vars = {
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+        ),
+        **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
+    }
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes": [
-                "build",
-                ".git",
-                "cmake-build-*",
-                "shellcheck",
-                "dist",
-                "ep_kernels_workspace",
-            ],
+            "env_vars": env_vars,
         }
     )
 
     distributed_init_port = get_open_port()
-    refs = []
-    for rank in range(tp_size * pp_size):
-        refs.append(
-            test_target.remote(
-                monkeypatch,
-                tp_size,
-                pp_size,
-                rank,
-                distributed_init_port,
-            ),
-        )
-    ray.get(refs)
-
-    ray.shutdown()
+    try:
+        refs = []
+        for rank in range(tp_size * pp_size):
+            refs.append(
+                test_target.remote(
+                    monkeypatch,
+                    tp_size,
+                    pp_size,
+                    rank,
+                    distributed_init_port,
+                ),
+            )
+        ray.get(refs)
+    finally:
+        ray.shutdown()
 
 
 @contextmanager
