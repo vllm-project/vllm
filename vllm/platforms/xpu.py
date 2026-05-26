@@ -366,30 +366,6 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
-    def insert_blocks_to_device(
-        cls,
-        src_cache: torch.Tensor,
-        dst_cache: torch.Tensor,
-        src_block_indices: torch.Tensor,
-        dst_block_indices: torch.Tensor,
-    ) -> None:
-        """Copy blocks from src_cache to dst_cache on XPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
-
-    @classmethod
-    def swap_out_blocks_to_host(
-        cls,
-        src_cache: torch.Tensor,
-        dst_cache: torch.Tensor,
-        src_block_indices: torch.Tensor,
-        dst_block_indices: torch.Tensor,
-    ) -> None:
-        """Copy blocks from XPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
-
-    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units
 

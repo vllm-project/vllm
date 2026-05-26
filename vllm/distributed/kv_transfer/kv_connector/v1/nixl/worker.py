@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side logic for the NIXL connector."""
 
+import functools
 import logging
 import os
 import queue
@@ -635,7 +636,13 @@ class NixlConnectorWorker:
         self.host_xfer_buffers = xfer_buffers
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
-        """Assign copy (d2h, h2d) operations when host buffer is used."""
+        """Assign copy (d2h, h2d) operations when host buffer is used.
+
+        Wraps *copy_operation* with the correct ``block_dim`` derived from
+        :pymethod:`AttentionBackend.get_kv_cache_block_dim` so that
+        backends whose block dimension differs from 1 (e.g. Triton,
+        FlashInfer) are handled correctly.
+        """
         # Set a no-op if the host buffer is not cpu.
         if self.kv_buffer_device != "cpu":
             return
@@ -643,7 +650,16 @@ class NixlConnectorWorker:
         if self.device_type == "cpu":
             return
         assert self.use_host_buffer
-        self.copy_blocks = copy_operation
+
+        block_dim = self.attn_backends[0].get_kv_cache_block_dim(
+            block_size=self.block_size,
+            num_kv_heads=self.model_config.get_num_kv_heads(
+                self.vllm_config.parallel_config
+            ),
+            head_size=self.model_config.get_head_size(),
+            cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
+        )
+        self.copy_blocks = functools.partial(copy_operation, block_dim=block_dim)
 
     def _log_failure(
         self,

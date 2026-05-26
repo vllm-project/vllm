@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+
 CopyBlocksOp = Callable[
     [
         dict[str, torch.Tensor],
@@ -78,6 +78,7 @@ CopyBlocksOp = Callable[
     ],
     None,
 ]
+
 
 logger = init_logger(__name__)
 

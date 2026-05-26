@@ -190,6 +190,8 @@ def copy_kv_blocks(
     src_block_ids: list[int],
     dst_block_ids: list[int],
     direction: Literal["h2d", "d2h"],
+    *,
+    block_dim: int = 1,
 ) -> None:
     """Copy kv blocks between different buffers."""
     if (
@@ -218,7 +220,15 @@ def copy_kv_blocks(
     for layer_name in src_kv_caches:
         src_tensor = src_kv_caches[layer_name]
         dst_tensor = dst_kv_caches[layer_name]
-        copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+
+        if block_dim == 1:
+            copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+        else:
+            # This is to support the non-standard layout. For ex. Triton backend has
+            # block_dim=1 whereas flash attention backend has block_dim=2
+            src_t = src_tensor.movedim(block_dim, 1)
+            dst_t = dst_tensor.movedim(block_dim, 1)
+            copy_fn(src_t, dst_t, src_indices, dst_indices)
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
