@@ -451,6 +451,8 @@ class TritonAttentionImpl(AttentionImpl):
         )
         self._v_scale_cache.fill_(1.0)
 
+    _cdna_dispatch_logged: ClassVar[set[str]] = set()
+
     def _maybe_dispatch_cdna_pth(
         self,
         query: torch.Tensor,
@@ -520,6 +522,10 @@ class TritonAttentionImpl(AttentionImpl):
         # Compute per-seq query length on-device but avoid a host sync: if
         # max_query_len > 1 we assume all-prefill; otherwise all-decode.
         if attn_metadata.max_query_len <= 1:
+            tag = f"decode-{'int4' if is_int4 else 'int8'}-hs{head_size}"
+            if tag not in TritonAttentionImpl._cdna_dispatch_logged:
+                TritonAttentionImpl._cdna_dispatch_logged.add(tag)
+                logger.info("[CDNA-PTH] dispatching %s kernel", tag)
             # All-decode: use the decode kernel.
             decode_op = (
                 torch.ops._C.pth_decode_int4_cdna if is_int4
@@ -532,6 +538,10 @@ class TritonAttentionImpl(AttentionImpl):
             )
             return True
 
+        tag = f"prefill-{'int4' if is_int4 else 'int8'}-hs{head_size}"
+        if tag not in TritonAttentionImpl._cdna_dispatch_logged:
+            TritonAttentionImpl._cdna_dispatch_logged.add(tag)
+            logger.info("[CDNA-PTH] dispatching %s kernel", tag)
         # All-prefill (possibly with continuation context).
         op(
             output,            # [num_tokens, num_heads, head_size]
