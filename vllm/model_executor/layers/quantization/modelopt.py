@@ -728,8 +728,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
 
-        if hasattr(self, "fp8_linear"):
-            self.fp8_linear.process_weights_after_loading(layer)
+        self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
