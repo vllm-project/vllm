@@ -1023,6 +1023,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        from vllm._aiter_ops import rocm_aiter_ops
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:

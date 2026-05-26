@@ -742,6 +742,7 @@ class FusedMoE(PluggableLayer):
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
+                # If there is no available weight to load for this TP rank
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
@@ -781,6 +782,7 @@ class FusedMoE(PluggableLayer):
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
+                # If there is no available weight to load for this TP rank
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
