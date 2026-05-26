@@ -1263,7 +1263,7 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        return [EmbeddingRequestOutput.from_base(item) for item in items]
+        return EmbeddingRequestOutput.from_base_batch(items)
 
     def classify(
         self,
@@ -1308,7 +1308,7 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        return [ClassificationRequestOutput.from_base(item) for item in items]
+        return ClassificationRequestOutput.from_base_batch(items)
 
     def reward(
         self,
@@ -1467,7 +1467,7 @@ class LLM:
             ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries),
         )
 
-        return [ScoringRequestOutput.from_base(item) for item in outputs]
+        return ScoringRequestOutput.from_base_batch(outputs)
 
     def start_profile(self, profile_prefix: str | None = None) -> None:
         """Start profiling with optional custom trace prefix.

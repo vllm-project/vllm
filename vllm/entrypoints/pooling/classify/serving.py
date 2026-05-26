@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
-from vllm.outputs import ClassificationOutput
+from vllm.outputs import ClassificationRequestOutput
 
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
@@ -38,10 +38,11 @@ class ServingClassification(PoolingServing):
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
-        for idx, final_res in enumerate(ctx.final_res_batch):
-            classify_res = ClassificationOutput.from_base(final_res.outputs)
-
-            probs = classify_res.probs
+        classify_batch = ClassificationRequestOutput.from_base_batch(ctx.final_res_batch)
+        for idx, (classify_res, final_res) in enumerate(
+            zip(classify_batch, ctx.final_res_batch)
+        ):
+            probs = classify_res.outputs.probs
             predicted_index = int(np.argmax(probs))
             label = id2label.get(predicted_index)
 

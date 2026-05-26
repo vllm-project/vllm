@@ -10,7 +10,7 @@ from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.outputs import EmbeddingRequestOutput, PoolingRequestOutput
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.serving import PoolingServing
@@ -18,7 +18,6 @@ from ..typing import PoolingServeContext
 from ..utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
-    encode_pooling_output_float,
     get_json_response_cls,
 )
 from .io_processor import EmbedIOProcessor
@@ -104,26 +103,30 @@ class ServingEmbedding(PoolingServing):
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> JSONResponse:
-        encode_fn = cast(
-            Callable[[PoolingRequestOutput], list[float] | str],
-            (
-                encode_pooling_output_float
-                if encoding_format == "float"
-                else partial(
+        encoded_outputs: list[list[float] | str]
+        if encoding_format == "float":
+            embedding_batch = EmbeddingRequestOutput.from_base_batch(final_res_batch)
+            encoded_outputs = [item.outputs.embedding for item in embedding_batch]
+        else:
+            encode_fn = cast(
+                Callable[[PoolingRequestOutput], str],
+                partial(
                     encode_pooling_output_base64,
                     embed_dtype=embed_dtype,
                     endianness=endianness,
-                )
-            ),
-        )
+                ),
+            )
+            encoded_outputs = [encode_fn(final_res) for final_res in final_res_batch]
 
         items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
-        for idx, final_res in enumerate(final_res_batch):
+        for idx, (final_res, encoded_output) in enumerate(
+            zip(final_res_batch, encoded_outputs)
+        ):
             item = EmbeddingResponseData(
                 index=idx,
-                embedding=encode_fn(final_res),
+                embedding=encoded_output,
             )
             prompt_token_ids = final_res.prompt_token_ids
 
@@ -190,7 +193,8 @@ class ServingEmbedding(PoolingServing):
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
 
-        all_floats = [encode_pooling_output_float(out) for out in ctx.final_res_batch]
+        embedding_batch = EmbeddingRequestOutput.from_base_batch(ctx.final_res_batch)
+        all_floats = [item.outputs.embedding for item in embedding_batch]
         total_tokens = sum(len(out.prompt_token_ids) for out in ctx.final_res_batch)
 
         image_tokens = total_tokens if request.images is not None else 0

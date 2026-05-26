@@ -237,6 +237,84 @@ class PoolingRequestOutput(Generic[_O]):
         )
 
 
+def _batch_vector_data_to_lists(
+    request_outputs: list[PoolingRequestOutput],
+    error_message: str,
+) -> list[list[float]]:
+    if not request_outputs:
+        return []
+
+    batch: list[torch.Tensor] = []
+    for request_output in request_outputs:
+        pooled_data = request_output.outputs.data
+        if pooled_data.ndim != 1:
+            raise ValueError(error_message)
+        batch.append(pooled_data)
+
+    batched_tensor = _try_rebuild_batched_tensor(batch)
+    if batched_tensor is None:
+        batched_tensor = torch.stack(batch)
+
+    return batched_tensor.tolist()
+
+
+def _batch_scalar_data_to_floats(
+    request_outputs: list[PoolingRequestOutput],
+) -> list[float]:
+    if not request_outputs:
+        return []
+
+    batch: list[torch.Tensor] = []
+    for request_output in request_outputs:
+        pooled_data = request_output.outputs.data
+        if pooled_data.squeeze().ndim != 0:
+            raise ValueError("pooled_data should be a scalar score")
+        batch.append(pooled_data.reshape(-1))
+
+    batched_tensor = _try_rebuild_batched_tensor(batch)
+    if batched_tensor is None:
+        batched_tensor = torch.stack(batch)
+
+    return batched_tensor.reshape(-1).tolist()
+
+
+def _try_rebuild_batched_tensor(batch: list[torch.Tensor]) -> torch.Tensor | None:
+    if not batch:
+        return None
+
+    first = batch[0]
+    first_shape = first.shape
+    first_stride = first.stride()
+    first_storage = first.untyped_storage().data_ptr()
+    first_offset = first.storage_offset()
+
+    if len(batch) == 1:
+        return first.unsqueeze(0)
+
+    second_offset = batch[1].storage_offset()
+    row_stride = second_offset - first_offset
+    if row_stride <= 0:
+        return None
+
+    for idx, tensor in enumerate(batch):
+        if tensor.shape != first_shape:
+            return None
+        if tensor.stride() != first_stride:
+            return None
+        if tensor.dtype != first.dtype or tensor.device != first.device:
+            return None
+        if tensor.untyped_storage().data_ptr() != first_storage:
+            return None
+        if tensor.storage_offset() != first_offset + idx * row_stride:
+            return None
+
+    return first.as_strided(
+        size=(len(batch), *first_shape),
+        stride=(row_stride, *first_stride),
+        storage_offset=first_offset,
+    )
+
+
 @dataclass
 class EmbeddingOutput:
     """The output data of one embedding output of a request.
@@ -274,6 +352,25 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
+
+    @staticmethod
+    def from_base_batch(
+        request_outputs: list[PoolingRequestOutput],
+    ) -> list["EmbeddingRequestOutput"]:
+        embeddings = _batch_vector_data_to_lists(
+            request_outputs,
+            "pooled_data should be a 1-D embedding vector",
+        )
+        return [
+            EmbeddingRequestOutput(
+                request_id=request_output.request_id,
+                outputs=EmbeddingOutput(embedding),
+                prompt_token_ids=request_output.prompt_token_ids,
+                num_cached_tokens=request_output.num_cached_tokens,
+                finished=request_output.finished,
+            )
+            for request_output, embedding in zip(request_outputs, embeddings)
+        ]
 
 
 @dataclass
@@ -315,6 +412,25 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
             finished=request_output.finished,
         )
 
+    @staticmethod
+    def from_base_batch(
+        request_outputs: list[PoolingRequestOutput],
+    ) -> list["ClassificationRequestOutput"]:
+        probs_batch = _batch_vector_data_to_lists(
+            request_outputs,
+            "pooled_data should be a 1-D probability vector",
+        )
+        return [
+            ClassificationRequestOutput(
+                request_id=request_output.request_id,
+                outputs=ClassificationOutput(probs),
+                prompt_token_ids=request_output.prompt_token_ids,
+                num_cached_tokens=request_output.num_cached_tokens,
+                finished=request_output.finished,
+            )
+            for request_output, probs in zip(request_outputs, probs_batch)
+        ]
+
 
 @dataclass
 class ScoringOutput:
@@ -351,3 +467,19 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
+
+    @staticmethod
+    def from_base_batch(
+        request_outputs: list[PoolingRequestOutput],
+    ) -> list["ScoringRequestOutput"]:
+        scores = _batch_scalar_data_to_floats(request_outputs)
+        return [
+            ScoringRequestOutput(
+                request_id=request_output.request_id,
+                outputs=ScoringOutput(score),
+                prompt_token_ids=request_output.prompt_token_ids,
+                num_cached_tokens=request_output.num_cached_tokens,
+                finished=request_output.finished,
+            )
+            for request_output, score in zip(request_outputs, scores)
+        ]
