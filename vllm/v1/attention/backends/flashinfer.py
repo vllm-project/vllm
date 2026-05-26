@@ -623,6 +623,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
+                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
+                # Fail fast at init rather than crashing on the first request.
+                if not current_platform.is_device_capability_family(100):
+                    raise ValueError(
+                        "--kv-cache-dtype nvfp4 requires sm100f, "
+                        "please try a different dtype or remove"
+                    )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
