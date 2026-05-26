@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from collections.abc import Callable
 
 import torch
@@ -18,11 +19,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+# Defined in allreduce_rms_fusion only when flashinfer_comm is importable.
+# On non-CUDA or CUDA without FlashInfer, leave them None and let the call
+# sites fall back to a tensor_model_parallel_all_reduce path.
+ar_fusion_patterns = None
+flashinfer_trtllm_fused_allreduce_norm = None
 if current_platform.is_cuda():
-    from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
-        ar_fusion_patterns,
-        flashinfer_trtllm_fused_allreduce_norm,
-    )
+    with contextlib.suppress(ImportError):
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            ar_fusion_patterns,
+            flashinfer_trtllm_fused_allreduce_norm,
+        )
 
 
 def _allreduce_rms_norm_fp8_static_tensor(
@@ -35,7 +42,12 @@ def _allreduce_rms_norm_fp8_static_tensor(
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     out_q = torch.empty(x.shape, dtype=current_platform.fp8_dtype(), device=x.device)
 
-    if needs_ar and residual is not None and x.ndim == 2:
+    if (
+        flashinfer_trtllm_fused_allreduce_norm is not None
+        and needs_ar
+        and residual is not None
+        and x.ndim == 2
+    ):
         flashinfer_trtllm_fused_allreduce_norm(
             allreduce_in=x,
             residual=residual,
@@ -87,7 +99,12 @@ def _allreduce_rms_norm_nvfp4(
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     from vllm._custom_ops import create_fp4_output_tensors, scaled_fp4_quant
 
-    if needs_ar and residual is not None and x.ndim == 2:
+    if (
+        flashinfer_trtllm_fused_allreduce_norm is not None
+        and needs_ar
+        and residual is not None
+        and x.ndim == 2
+    ):
         m, n = x.shape
         out_q, scale_out = create_fp4_output_tensors(
             m, n, x.device, is_sf_swizzled_layout=True
@@ -132,7 +149,7 @@ def _allreduce_rms_norm(
     needs_ar: bool,
     max_token_num: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if needs_ar and x.ndim == 2:
+    if flashinfer_trtllm_fused_allreduce_norm is not None and needs_ar and x.ndim == 2:
         if residual is not None:
             # AR + add + RMSNorm: x is mutated to the norm result.
             flashinfer_trtllm_fused_allreduce_norm(
