@@ -2129,6 +2129,63 @@ class rocm_aiter_ops:
         return y
 
     @staticmethod
+    def hip_qk_norm_rope_and_cache(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_dim: int,
+        is_neox: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        k_out: torch.Tensor | None,
+        v_out: torch.Tensor | None,
+        return_kv: bool,
+        use_shuffle_layout: bool,
+        block_size: int,
+        x: int,
+    ):
+        from aiter.ops.fused_qk_norm_rope_cache_quant import (
+            fused_qk_norm_rope_cache_pts_quant_shuffle,
+        )
+
+        fused_qk_norm_rope_cache_pts_quant_shuffle(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            qkv.size(0),
+            num_heads_q,
+            num_heads_k,
+            num_heads_v,
+            head_dim,
+            is_neox,
+            rms_norm_eps,
+            q_out,
+            k_cache,
+            v_cache,
+            slot_mapping,
+            k_scale,
+            v_scale,
+            k_out,
+            v_out,
+            return_kv,
+            use_shuffle_layout,
+            block_size,
+            x,
+        )
+
+    @staticmethod
     def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,

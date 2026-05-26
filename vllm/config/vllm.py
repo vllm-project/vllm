@@ -185,6 +185,71 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
 
 
+# Architectures where QK-norm is hardcoded (not a config option).
+# The fused_qk_norm_rope kernel matches the pattern:
+#   split(QKV) -> view -> RMSNorm(Q) -> view -> RMSNorm(K) -> view -> RoPE
+# Add model_type values here when new architectures hardcode QK-norm
+# with vllm's standard RMSNorm.
+_QK_NORM_MODEL_TYPES = frozenset(
+    {
+        "qwen3",
+        "qwen3_moe",
+    }
+)
+
+
+def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
+    """Enable fused QK-norm + RoPE + KV cache update for models with
+    QK-norm on ROCm with AITER. Requires rotary embedding custom op.
+
+    Note: use_inductor_graph_partition is NOT checked here because
+    CompilationConfig.__post_init__ auto-enables it when this flag is
+    True (the callable runs during optimization-level default
+    application, before __post_init__ can set the dependent flags)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    if cfg.model_config is None:
+        return False
+    hf_config = cfg.model_config.hf_text_config
+    has_qk_norm = getattr(hf_config, "qk_norm", False)
+    model_type = getattr(hf_config, "model_type", "")
+    if not has_qk_norm and model_type not in _QK_NORM_MODEL_TYPES:
+        return False
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+
+
+def enable_qk_norm_rope(cfg: "VllmConfig") -> bool:
+    """Enable QK-norm + RoPE fusion for models with QK-norm layers.
+
+    Detection uses two strategies:
+    1. Explicit config: checks ``hf_config.qk_norm`` for models that
+       expose QK-norm as a config option (e.g. BAGEL uses the Qwen2
+       architecture with ``qk_norm=True`` injected at load time).
+    2. Architecture: checks ``hf_config.model_type`` against
+       ``_QK_NORM_MODEL_TYPES`` for models that hardcode QK-norm
+       in their architecture without a config.json field
+       (e.g. Qwen3 and Qwen3-MoE always use QK-norm).
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda_alike():
+        return False
+    if cfg.model_config is None:
+        return False
+    hf_config = cfg.model_config.hf_text_config
+    # Some models inject qk_norm at load time (e.g. BAGEL on Qwen2 arch)
+    if getattr(hf_config, "qk_norm", False):
+        return True
+    # Qwen3/Qwen3-MoE hardcode QK-norm - no config.json field exists
+    model_type = getattr(hf_config, "model_type", "")
+    return model_type in _QK_NORM_MODEL_TYPES
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -197,6 +262,8 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
@@ -218,6 +285,8 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
@@ -239,6 +308,8 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -260,6 +331,8 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": enable_qk_norm_rope,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -1115,6 +1188,27 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        # Fusion flags may have been auto-enabled by optimization-level
+        # callables above.  CompilationConfig.__post_init__ already ran
+        # (during construction) when these flags were still None, so we
+        # must apply the dependent settings here.
+        pass_config = self.compilation_config.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.compilation_config.custom_ops
+        ):
+            self.compilation_config.custom_ops.append("+rotary_embedding")
+        if pass_config.fuse_qk_norm_rope_kvcache:
+            if "+rotary_embedding" not in self.compilation_config.custom_ops:
+                self.compilation_config.custom_ops.append("+rotary_embedding")
+            if not self.compilation_config.use_inductor_graph_partition:
+                self.compilation_config.use_inductor_graph_partition = True
+                logger.info(
+                    "Enabling use_inductor_graph_partition for "
+                    "fuse_qk_norm_rope_kvcache (requires "
+                    "unified_kv_cache_update in compiled graph)."
+                )
+
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
@@ -1843,6 +1937,21 @@ class VllmConfig:
                     logger.debug(
                         "Max num batched tokens below rope+kvcache fusion threshold, "
                         "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
+                    )
+
+        if compilation_config.pass_config.fuse_qk_norm_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_endpoints.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below qk_norm+rope+kvcache "
+                        "fusion threshold, fusion enabled for "
+                        "num_tokens <= %d.",
                         compile_range_end,
                     )
 
