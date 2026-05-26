@@ -89,9 +89,6 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
   }
 };
 
-// Forward declaration
-struct FP32Vec16;
-
 struct FP16Vec16 : public Vec<FP16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   ss16x8x2_t reg;
@@ -101,7 +98,6 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
 
-  // Non-temporal load constructor (stub → regular load)
   explicit FP16Vec16(bool, const void* ptr) : FP16Vec16(ptr) {}
 
   explicit FP16Vec16(const FP32Vec16&);
@@ -133,9 +129,7 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
 
-  // Non-temporal load constructor (stub - VSX doesn't have direct NT load support)
   explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {
-    // Falls back to regular load (same as ARM ASIMD approach)
   }
 
   explicit BF16Vec16(const FP32Vec16&);
@@ -417,9 +411,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_xl(48, ptr);
   }
 
-  // Non-temporal load constructor (stub - VSX doesn't have direct NT load support)
   explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {
-    // Falls back to regular load (same as ARM ASIMD approach)
   }
 
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
@@ -779,43 +771,34 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
 #endif
 }
 
-// FP16Vec16 <-> FP32Vec16 conversions
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
-  // Convert FP32 to FP16 using c10::Half
   alignas(16) float temp_fp32[16];
   alignas(16) c10::Half temp_fp16[16];
   
-  // Store FP32 values
   vec_xst(v.reg.val[0], 0, temp_fp32);
   vec_xst(v.reg.val[1], 16, temp_fp32);
   vec_xst(v.reg.val[2], 32, temp_fp32);
   vec_xst(v.reg.val[3], 48, temp_fp32);
-  
-  // Convert using c10::Half
+ 
   for (int i = 0; i < 16; i++) {
     temp_fp16[i] = c10::Half(temp_fp32[i]);
   }
-  
-  // Load as FP16
+ 
   reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)temp_fp16);
   reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)temp_fp16);
 }
 
 inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
-  // Convert FP16 to FP32 using c10::Half
   alignas(16) c10::Half temp_fp16[16];
   alignas(16) float temp_fp32[16];
   
-  // Store FP16 values
   vec_xst(v.reg.val[0], 0, (signed short*)temp_fp16);
   vec_xst(v.reg.val[1], 16, (signed short*)temp_fp16);
   
-  // Convert using c10::Half
   for (int i = 0; i < 16; i++) {
     temp_fp32[i] = float(temp_fp16[i]);
   }
   
-  // Load as FP32
   reg.val[0] = vec_xl(0, temp_fp32);
   reg.val[1] = vec_xl(16, temp_fp32);
   reg.val[2] = vec_xl(32, temp_fp32);
@@ -882,7 +865,6 @@ inline void prefetch(const void* addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
 }
 
-// INT8Vec64 - 64 bytes = 4 VSX vectors (4 × 16 bytes)
 struct INT8Vec64 {
   __vector signed char data[4];
 
@@ -895,9 +877,7 @@ struct INT8Vec64 {
     data[3] = vec_xl(48, ptr);
   }
 
-  // Non-temporal load constructor (stub → regular load)
   explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {
-    // Non-temporal load stub - falls back to regular load
   }
 
   void save(int8_t* ptr) const {
@@ -917,12 +897,10 @@ struct INT8Vec64 {
     
     int remaining = elem_num % 16;
     if (remaining > 0 && full_vecs < 4) {
-      // Use vec_xst_len for partial vector store
       vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
     }
   }
 
-  // Non-temporal save (stub → regular save)
   void nt_save(int8_t* ptr) const {
     save(ptr);
   }
