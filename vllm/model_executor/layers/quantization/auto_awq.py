@@ -73,6 +73,104 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# AWQ uses a non-standard packing order within int32 values.
+# For 4-bit: standard order stores values at bit positions [0,4,8,12,16,20,24,28]
+# for indices [0,1,2,3,4,5,6,7], while AWQ stores them for indices
+# [0,4,1,5,2,6,3,7]. This permutation reverses that ordering.
+_REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def _replace_or_register_parameter(
+    layer: torch.nn.Module,
+    name: str,
+    value: torch.Tensor | None,
+) -> None:
+    if value is None:
+        return
+    if hasattr(layer, name):
+        replace_parameter(layer, name, value)
+    else:
+        layer.register_parameter(name, Parameter(value, requires_grad=False))
+
+
+def _convert_awq_to_standard_format(
+    layer: torch.nn.Module,
+    w_q_name: str,
+    w_zp_name: str,
+    size_bits: int,
+) -> None:
+    """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
+
+    AWQ packs qweight along the output dim with a non-standard bit order.
+    This converts to standard bit order and repacks qweight along the input
+    dim, matching the format expected by the MPLinearKernel framework.
+    """
+    pack_factor = 32 // size_bits
+    mask = (1 << size_bits) - 1
+    device = getattr(layer, w_q_name).device
+    reverse_order = torch.tensor(
+        _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
+    )
+    shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
+
+    # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
+    qw = getattr(layer, w_q_name).data
+    K, N_packed = qw.shape
+    N = N_packed * pack_factor
+
+    # Unpack int32 → individual values, fix AWQ ordering
+    unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
+    unpacked = unpacked[:, :, reverse_order]
+    unpacked = unpacked.reshape(K, N)  # (K, N)
+
+    # Repack along input dim (dim 0)
+    unpacked = unpacked.reshape(K // pack_factor, pack_factor, N)
+    new_qw = (unpacked.to(torch.int32) << shifts[None, :, None]).sum(
+        dim=1, dtype=torch.int32
+    )
+
+    def _noop_loader(*args, **kwargs):
+        pass
+
+    new_param = PackedvLLMParameter(
+        data=new_qw.contiguous(),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=0,
+        packed_factor=pack_factor,
+        weight_loader=_noop_loader,
+    )
+    setattr(layer, w_q_name, new_param)
+
+    # --- Convert qzeros: fix AWQ bit ordering and repack
+    # AWQ qzeros: (G, N // pack) packed along dim 1, AWQ bit order
+    # Target: (N // pack, G) packed along dim 0, standard bit order
+    # This matches the CompressedTensors layout expected by the kernels.
+    qz = getattr(layer, w_zp_name).data
+    G, _ = qz.shape
+
+    unpacked_zp = (qz.unsqueeze(-1) >> shifts) & mask  # (G, N_packed, pack_factor)
+    unpacked_zp = unpacked_zp[:, :, reverse_order]
+    unpacked_zp = unpacked_zp.reshape(G, N)  # (G, N) individual values
+
+    # Transpose and repack along dim 0 (output dim)
+    unpacked_zp = unpacked_zp.T  # (N, G)
+    unpacked_zp = unpacked_zp.reshape(N // pack_factor, pack_factor, G)
+    new_qz = (unpacked_zp.to(torch.int32) << shifts[None, :, None]).sum(
+        dim=1, dtype=torch.int32
+    )
+
+    new_zp_param = PackedvLLMParameter(
+        data=new_qz.contiguous(),
+        output_dim=0,
+        input_dim=1,
+        packed_dim=0,
+        packed_factor=pack_factor,
+        weight_loader=_noop_loader,
+    )
+    setattr(layer, w_zp_name, new_zp_param)
+
+
 
 class AutoAWQConfig(QuantizationConfig):
     """Config class for AutoAWQ quantization.
@@ -307,103 +405,6 @@ class AutoAWQConfig(QuantizationConfig):
         }
         self.modules_to_not_convert = list(layers - quant_layers)
 
-
-# AWQ uses a non-standard packing order within int32 values.
-# For 4-bit: standard order stores values at bit positions [0,4,8,12,16,20,24,28]
-# for indices [0,1,2,3,4,5,6,7], while AWQ stores them for indices
-# [0,4,1,5,2,6,3,7]. This permutation reverses that ordering.
-_REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
-
-
-def _replace_or_register_parameter(
-    layer: torch.nn.Module,
-    name: str,
-    value: torch.Tensor | None,
-) -> None:
-    if value is None:
-        return
-    if hasattr(layer, name):
-        replace_parameter(layer, name, value)
-    else:
-        layer.register_parameter(name, Parameter(value, requires_grad=False))
-
-
-def _convert_awq_to_standard_format(
-    layer: torch.nn.Module,
-    w_q_name: str,
-    w_zp_name: str,
-    size_bits: int,
-) -> None:
-    """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
-
-    AWQ packs qweight along the output dim with a non-standard bit order.
-    This converts to standard bit order and repacks qweight along the input
-    dim, matching the format expected by the MPLinearKernel framework.
-    """
-    pack_factor = 32 // size_bits
-    mask = (1 << size_bits) - 1
-    device = getattr(layer, w_q_name).device
-    reverse_order = torch.tensor(
-        _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
-    )
-    shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
-
-    # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
-    qw = getattr(layer, w_q_name).data
-    K, N_packed = qw.shape
-    N = N_packed * pack_factor
-
-    # Unpack int32 → individual values, fix AWQ ordering
-    unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (K, N_packed, pack_factor)
-    unpacked = unpacked[:, :, reverse_order]
-    unpacked = unpacked.reshape(K, N)  # (K, N)
-
-    # Repack along input dim (dim 0)
-    unpacked = unpacked.reshape(K // pack_factor, pack_factor, N)
-    new_qw = (unpacked.to(torch.int32) << shifts[None, :, None]).sum(
-        dim=1, dtype=torch.int32
-    )
-
-    def _noop_loader(*args, **kwargs):
-        pass
-
-    new_param = PackedvLLMParameter(
-        data=new_qw.contiguous(),
-        input_dim=0,
-        output_dim=1,
-        packed_dim=0,
-        packed_factor=pack_factor,
-        weight_loader=_noop_loader,
-    )
-    setattr(layer, w_q_name, new_param)
-
-    # --- Convert qzeros: fix AWQ bit ordering and repack
-    # AWQ qzeros: (G, N // pack) packed along dim 1, AWQ bit order
-    # Target: (N // pack, G) packed along dim 0, standard bit order
-    # This matches the CompressedTensors layout expected by the kernels.
-    qz = getattr(layer, w_zp_name).data
-    G, _ = qz.shape
-
-    unpacked_zp = (qz.unsqueeze(-1) >> shifts) & mask  # (G, N_packed, pack_factor)
-    unpacked_zp = unpacked_zp[:, :, reverse_order]
-    unpacked_zp = unpacked_zp.reshape(G, N)  # (G, N) individual values
-
-    # Transpose and repack along dim 0 (output dim)
-    unpacked_zp = unpacked_zp.T  # (N, G)
-    unpacked_zp = unpacked_zp.reshape(N // pack_factor, pack_factor, G)
-    new_qz = (unpacked_zp.to(torch.int32) << shifts[None, :, None]).sum(
-        dim=1, dtype=torch.int32
-    )
-
-    new_zp_param = PackedvLLMParameter(
-        data=new_qz.contiguous(),
-        output_dim=0,
-        input_dim=1,
-        packed_dim=0,
-        packed_factor=pack_factor,
-        weight_loader=_noop_loader,
-    )
-    setattr(layer, w_zp_name, new_zp_param)
 
 
 class AutoAWQLinearMethod(LinearMethodBase):
