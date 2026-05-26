@@ -48,6 +48,40 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
+def _check_router_weight_on_input(
+    topk_ids: torch.Tensor,
+    apply_router_weight_on_input: bool,
+) -> None:
+    if apply_router_weight_on_input:
+        topk = topk_ids.size(1)
+        assert topk == 1, "apply_router_weight_on_input is only implemented for topk=1"
+
+
+def _copy_cutlass_moe_output(
+    output: torch.Tensor,
+    expert_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    apply_router_weight_on_input: bool,
+) -> None:
+    m, num_topk = topk_ids.shape
+    k = output.size(1)
+    assert expert_output.shape == (m * num_topk, k)
+    assert output.dtype == expert_output.dtype
+    if apply_router_weight_on_input:
+        _check_router_weight_on_input(topk_ids, apply_router_weight_on_input)
+        output.copy_(expert_output.view(m, k), non_blocking=True)
+        return
+
+    output.copy_(
+        (
+            expert_output.view(m, num_topk, k)
+            * topk_weights.view(m, num_topk, 1).to(output.dtype)
+        ).sum(dim=1),
+        non_blocking=True,
+    )
+
+
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -73,6 +107,7 @@ def run_cutlass_moe_fp8(
     per_out_ch: bool,
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
+    apply_router_weight_on_input: bool = False,
 ):
     a1q = hidden_states
 
@@ -251,14 +286,17 @@ def run_cutlass_moe_fp8(
     if use_batched_format:
         output.copy_(mm2_out.reshape(local_E, padded_M, K), non_blocking=True)
     else:
+        assert topk_weights is not None
+        _check_router_weight_on_input(topk_ids, apply_router_weight_on_input)
         # for non-chunking mode the output is resized from workspace13
         # so we need to make sure mm2_out uses workspace2.
         moe_unpermute(
             out=output,
             permuted_hidden_states=mm2_out,
-            topk_weights=topk_weights,
+            topk_weights=None if apply_router_weight_on_input else topk_weights,
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
+            topk=topk_ids.size(1),
         )
 
 
@@ -379,6 +417,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             self.per_out_ch_quant,
             use_batched_format,
             topk_weights,
+            apply_router_weight_on_input,
         )
 
 
@@ -575,12 +614,7 @@ def run_cutlass_moe_fp4(
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
 
-    if apply_router_weight_on_input:
-        # TODO: this only works for topK=1, will need to update for topK>1
-        assert num_topk == 1, (
-            "apply_router_weight_on_input is only implemented for topk=1"
-        )
-        a.mul_(topk_weights.to(out_dtype))
+    _check_router_weight_on_input(topk_ids, apply_router_weight_on_input)
 
     # problem shapes should have [m, n, k]
     # Note that problem sizes are based on logical number of elements.
@@ -650,16 +684,9 @@ def run_cutlass_moe_fp4(
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
-    if not apply_router_weight_on_input:
-        output.copy_(
-            (
-                c3.view(m, num_topk, k)
-                * topk_weights.view(m, num_topk, 1).to(out_dtype)
-            ).sum(dim=1),
-            non_blocking=True,
-        )
-    else:
-        output.copy_(c3.view(m, num_topk, k).sum(dim=1), non_blocking=True)
+    _copy_cutlass_moe_output(
+        output, c3, topk_weights, topk_ids, apply_router_weight_on_input
+    )
     return
 
 
@@ -851,11 +878,7 @@ def run_cutlass_moe_mxfp4(
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
 
-    if apply_router_weight_on_input:
-        assert num_topk == 1, (
-            "apply_router_weight_on_input is only implemented for topk=1"
-        )
-        a.mul_(topk_weights.to(out_dtype))
+    _check_router_weight_on_input(topk_ids, apply_router_weight_on_input)
 
     ops.get_cutlass_moe_mm_data(
         topk_ids,
@@ -919,16 +942,9 @@ def run_cutlass_moe_mxfp4(
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
-    if not apply_router_weight_on_input:
-        output.copy_(
-            (
-                c3.view(m, num_topk, k)
-                * topk_weights.view(m, num_topk, 1).to(out_dtype)
-            ).sum(dim=1),
-            non_blocking=True,
-        )
-    else:
-        output.copy_(c3.view(m, num_topk, k).sum(dim=1), non_blocking=True)
+    _copy_cutlass_moe_output(
+        output, c3, topk_weights, topk_ids, apply_router_weight_on_input
+    )
     return
 
 
@@ -1120,6 +1136,7 @@ def run_cutlass_moe_w4a8_fp8(
     per_out_ch: bool,
     use_batched_format: bool,
     topk_weights: torch.Tensor | None,
+    apply_router_weight_on_input: bool,
     group_size: int,
 ):
     a1q = hidden_states
@@ -1223,12 +1240,15 @@ def run_cutlass_moe_w4a8_fp8(
 
     # for non-chunking mode the output is resized from workspace13
     # so we need to make sure mm2_out uses workspace2.
+    assert topk_weights is not None
+    _check_router_weight_on_input(topk_ids, apply_router_weight_on_input)
     moe_unpermute(
         out=output,
         permuted_hidden_states=mm2_out,
-        topk_weights=topk_weights,
+        topk_weights=None if apply_router_weight_on_input else topk_weights,
         inv_permuted_idx=inv_perm,
         expert_first_token_offset=expert_first_token_offset,
+        topk=topk_ids.size(1),
     )
 
 
@@ -1408,5 +1428,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             self.per_out_ch_quant,
             use_batched_format,
             topk_weights,
+            apply_router_weight_on_input,
             self.group_size,
         )

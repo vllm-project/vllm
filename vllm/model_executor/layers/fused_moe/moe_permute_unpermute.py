@@ -100,9 +100,10 @@ def moe_permute(
 def moe_unpermute(
     out: torch.Tensor,
     permuted_hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
+    topk_weights: torch.Tensor | None,
     inv_permuted_idx: torch.Tensor,
     expert_first_token_offset: torch.Tensor | None = None,
+    topk: int | None = None,
 ) -> None:
     """
     This function expands and permutes activation to gathering uncontinuous
@@ -110,20 +111,28 @@ def moe_unpermute(
     Parameters:
     - out (torch.Tensor): output tensor
     - permuted_hidden_states (torch.Tensor): permuted activation.
-    - topk_weights (torch.Tensor): topk expert route weight for each token.
+    - topk_weights (Optional[torch.Tensor]): topk expert route weight for each
+      token. If None, rows are reduced without output-side weighting.
     - inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
     - expert_first_token_offset (Optional[torch.Tensor]): offset of the first
       token of each expert for grouped gemm.
+    - topk (Optional[int]): required when topk_weights is None.
     Returns:
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
     """
-    topk = topk_weights.size(1)
+    if topk_weights is None:
+        assert topk is not None, "topk must be provided when topk_weights is None"
+    else:
+        weights_topk = topk_weights.size(1)
+        assert topk is None or topk == weights_topk
+        topk = weights_topk
     n_hidden = permuted_hidden_states.size(-1)
     assert (n_hidden * permuted_hidden_states.element_size()) % 16 == 0, (
         "unpermue kernel need hidden dim align to 16B"
     )
 
+    assert topk is not None
     torch.ops._moe_C.moe_unpermute(
         permuted_hidden_states,
         topk_weights,

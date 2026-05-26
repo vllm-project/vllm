@@ -8,8 +8,19 @@ import random
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.utils import torch_moe_single
 from vllm import _custom_ops as ops
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import mxfp4_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    CutlassExpertsMxfp4,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    make_moe_prepare_and_finalize_no_dp_ep,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -58,6 +69,43 @@ def compute_ref_output(
     return torch_moe_single(
         input_tensor, torch.stack(weight_list, dim=0), score, topk=1
     )
+
+
+def make_mxfp4_moe_weights(
+    num_experts: int,
+    n: int,
+    k: int,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def quantize_weights(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        e, rows, cols = weight.shape
+        flat_weight = weight.reshape(e * rows, cols)
+        expert_offsets = torch.arange(
+            0, (e + 1) * rows, rows, device="cuda", dtype=torch.int32
+        )
+        blockscale_offsets = torch.arange(
+            0, (e + 1) * align(rows), align(rows), device="cuda", dtype=torch.int32
+        )
+
+        weight_quant, weight_sf = ops.mxfp4_experts_quant(
+            flat_weight,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+            topk=1,
+        )
+
+        weight_quant = weight_quant[: e * rows].view(e, rows, cols // 2)
+        scales_per_row = cols // MXFP4_BLOCK_SIZE
+        weight_sf = weight_sf.view(-1)[: e * rows * scales_per_row]
+        return weight_quant, weight_sf.view(e, rows, scales_per_row)
+
+    w1 = torch.randn((num_experts, 2 * n, k), device="cuda", dtype=dtype) * (k**-0.5)
+    w2 = torch.randn((num_experts, k, n), device="cuda", dtype=dtype) * (n**-0.5)
+
+    w1_q, w1_scale = quantize_weights(w1)
+    w2_q, w2_scale = quantize_weights(w2)
+    return w1_q, w2_q, w1_scale, w2_scale
 
 
 @pytest.mark.skipif(
@@ -242,6 +290,75 @@ def test_mxfp4_experts_quant_basic():
         f"MXFP4 experts quant: output shape={output.shape}, sf shape={output_sf.shape}"
     )
     print("PASSED")
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="CutlassExpertsMxfp4 requires CUDA SM100",
+)
+@torch.inference_mode()
+def test_cutlass_mxfp4_moe_router_weight_on_input(workspace_init):
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        m, n, k, e = 4, 1024, 1024, 8
+        dtype = torch.bfloat16
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_q, w2_q, w1_scale, w2_scale = make_mxfp4_moe_weights(e, n, k, dtype)
+
+        topk_ids = torch.arange(m, device="cuda", dtype=torch.int32).view(m, 1)
+        topk_weights = torch.tensor(
+            [[0.25], [0.5], [0.75], [0.875]], device="cuda", dtype=torch.float32
+        )
+        unit_topk_weights = torch.ones_like(topk_weights)
+        preweighted_a = (a * topk_weights.to(a.dtype)).contiguous()
+
+        quant_config = mxfp4_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            in_dtype=dtype,
+        )
+        kernel = mk.FusedMoEKernel(
+            make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=False),
+            CutlassExpertsMxfp4(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+        output_apply_on_input = kernel.apply(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=True,
+        )
+        output_preweighted = kernel.apply(
+            hidden_states=preweighted_a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=unit_topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+        torch.testing.assert_close(
+            output_apply_on_input, output_preweighted, atol=1e-1, rtol=1e-1
+        )
 
 
 if __name__ == "__main__":

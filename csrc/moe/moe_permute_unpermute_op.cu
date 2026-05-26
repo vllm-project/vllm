@@ -81,8 +81,8 @@ void moe_permute(
 
 void moe_unpermute(
     const torch::Tensor& permuted_hidden_states,  // [n_token * topk, hidden]
-    const torch::Tensor& topk_weights,            // [n_token, topk]
-    const torch::Tensor& inv_permuted_idx,        // [n_token, topk]
+    const std::optional<torch::Tensor>& topk_weights,  // [n_token, topk]
+    const torch::Tensor& inv_permuted_idx,             // [n_token, topk]
     const std::optional<torch::Tensor>&
         expert_first_token_offset,  // [n_local_expert+1]
     int64_t topk,
@@ -101,11 +101,15 @@ void moe_unpermute(
     valid_ptr =
         get_ptr<int64_t>(expert_first_token_offset.value()) + n_local_expert;
   }
+  float const* topk_weights_ptr = nullptr;
+  if (topk_weights.has_value()) {
+    topk_weights_ptr = get_ptr<float>(topk_weights.value());
+  }
 
   MOE_DISPATCH(hidden_states.scalar_type(), [&] {
     finalizeMoeRoutingKernelLauncher<scalar_t, scalar_t>(
         get_ptr<scalar_t>(permuted_hidden_states),
-        get_ptr<scalar_t>(hidden_states), get_ptr<float>(topk_weights),
+        get_ptr<scalar_t>(hidden_states), topk_weights_ptr,
         get_ptr<int>(inv_permuted_idx), n_token, n_hidden, topk, valid_ptr,
         stream);
   });
@@ -181,7 +185,8 @@ void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_ids,
 
 void moe_unpermute(
     const torch::Tensor& permuted_hidden_states,
-    const torch::Tensor& topk_weights, const torch::Tensor& inv_permuted_idx,
+    const std::optional<torch::Tensor>& topk_weights,
+    const torch::Tensor& inv_permuted_idx,
     const std::optional<torch::Tensor>& expert_first_token_offset, int64_t topk,
     torch::Tensor& hidden_states) {
   TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");

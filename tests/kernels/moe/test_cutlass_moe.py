@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -228,6 +229,9 @@ def run_8_bit(
     per_act_token: bool,
     per_out_ch: bool,
     num_local_experts: int | None = None,
+    hidden_states: torch.Tensor | None = None,
+    apply_router_weight_on_input: bool = False,
+    experts_cls: type[mk.FusedMoEExpertsModular] = CutlassExpertsFp8,
 ) -> torch.Tensor:
     assert not any(
         [
@@ -252,8 +256,11 @@ def run_8_bit(
         a1_scale=None,
     )
 
+    if hidden_states is None:
+        hidden_states = moe_tensors.a
+
     kwargs = {
-        "hidden_states": moe_tensors.a,
+        "hidden_states": hidden_states,
         "w1": moe_tensors.w1_q,  # type: ignore[union-attr]
         "w2": moe_tensors.w2_q,  # type: ignore[union-attr]
         "topk_weights": topk_weights,
@@ -261,7 +268,7 @@ def run_8_bit(
         "global_num_experts": moe_tensors.w1_q.shape[0],  # type: ignore[union-attr]
         "activation": MoEActivation.SILU,
         "expert_map": None,
-        "apply_router_weight_on_input": False,
+        "apply_router_weight_on_input": apply_router_weight_on_input,
     }
 
     num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
@@ -271,7 +278,7 @@ def run_8_bit(
             num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
             hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
             intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
-            in_dtype=moe_tensors.a.dtype,
+            in_dtype=hidden_states.dtype,
         )
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
@@ -280,7 +287,7 @@ def run_8_bit(
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            CutlassExpertsFp8(
+            experts_cls(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
@@ -295,6 +302,48 @@ def run_8_bit(
         quant_config,
         **kwargs,
     )
+
+
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+@torch.inference_mode()
+def test_cutlass_moe_8_bit_router_weight_on_input(workspace_init):
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        m, n, k, e = 4, 1024, 1024, 8
+        per_act_token = False
+        per_out_ch = False
+        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
+
+        topk_ids = torch.arange(m, device="cuda", dtype=torch.int32).view(m, 1)
+        topk_weights = torch.tensor(
+            [[0.25], [0.5], [0.75], [0.875]], device="cuda", dtype=torch.float32
+        )
+
+        cutlass_output = run_8_bit(
+            mt,
+            topk_weights,
+            topk_ids,
+            per_act_token,
+            per_out_ch,
+            apply_router_weight_on_input=True,
+            experts_cls=CutlassExpertsFp8,
+        )
+        triton_output = run_8_bit(
+            mt,
+            topk_weights,
+            topk_ids,
+            per_act_token,
+            per_out_ch,
+            apply_router_weight_on_input=True,
+            experts_cls=TritonExperts,
+        )
+
+        torch.testing.assert_close(triton_output, cutlass_output, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
