@@ -839,18 +839,6 @@ def unified_attention(
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
-    # RDNA3 prefill: BLOCK_M=32 doubles Q data reuse per K/V tile load.
-    # Benchmarked on RX 7900 XTX (gfx1100): +97% TFLOPS at seq_len=4096
-    # (49.2 vs 25.0 TF — from 41% to 81% of WMMA peak). Only applied to
-    # prefill (max_seqlen_q > 1) because decode's 3D path has different
-    # occupancy needs. Requires BLOCK_M to be a multiple of the original
-    # value so the GQA grouping (BLOCK_Q = BLOCK_M // num_queries_per_kv)
-    # stays an integer.
-    if current_platform.is_rocm() and max_seqlen_q > 1:
-        from vllm.platforms.rocm import on_gfx11
-
-        if on_gfx11() and BLOCK_M == 16:
-            BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -976,19 +964,6 @@ def unified_attention(
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
-    # RDNA3 (gfx11xx, wave32) launch tuning: with BLOCK_M=16 × TILE_SIZE=32,
-    # the per-block workload is small enough that 4 waves (Triton default)
-    # adds register pressure and sync overhead for no benefit.  Benchmarked
-    # on RX 7900 XTX (gfx1100): num_warps=2 gives +57% TFLOPS at
-    # seq_len=1024 (33.4 vs 21.3 TF) — from 35% to 55% of WMMA peak.
-    launch_kwargs: dict[str, int] = {}
-    if not use_3d and current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx11
-
-        if on_gfx11():
-            launch_kwargs["num_warps"] = 2
-            launch_kwargs["num_stages"] = 1
-
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -1058,7 +1033,6 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
-        **launch_kwargs,
     )
 
     if use_3d:
