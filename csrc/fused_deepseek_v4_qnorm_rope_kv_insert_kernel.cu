@@ -644,7 +644,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 #undef DISPATCH
 }
 
-template <typename scalar_t_in>
+template <typename scalar_t_in, int kNumHeadsQPadded>
 __global__ void deepseekV4QNormRopeKernel(
     scalar_t_in* __restrict__ q_inout,        // [N, H, 512] bf16, in place
     int64_t const* __restrict__ position_ids, // [N] i64
@@ -672,7 +672,7 @@ __global__ void deepseekV4QNormRopeKernel(
     uint4 const v0 = *reinterpret_cast<uint4 const*>(src_ptr);
     uint4 const v1 = *reinterpret_cast<uint4 const*>(src_ptr + 8);
 
-    processDeepseekV4Slot<scalar_t_in>(
+    processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded>(
         v0, v1, tokenIdx, headIdx, dim_base, laneId, num_heads_q, eps, q_inout,
         nullptr, nullptr, position_ids, cos_sin_cache, 0, 0);
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
@@ -708,7 +708,7 @@ __global__ void deepseekV4KVRopeQuantInsertKernel(
     uint4 const v1 = *reinterpret_cast<uint4 const*>(src_ptr + 8);
 
     // num_heads_q=0 and slotIdx=0 select the KV branch in processDeepseekV4Slot.
-    processDeepseekV4Slot<scalar_t_in>(
+    processDeepseekV4Slot<scalar_t_in, 0>(
         v0, v1, tokenIdx, 0, dim_base, laneId, 0, 0.0f, nullptr, k_cache,
         slot_mapping, position_ids, cos_sin_cache, cache_block_size,
         kv_block_stride);
@@ -717,12 +717,11 @@ __global__ void deepseekV4KVRopeQuantInsertKernel(
 #endif
 }
 
-template <typename scalar_t_in>
-void launchDeepseekV4QNormRope(scalar_t_in* q_inout,
-                               int64_t const* position_ids,
-                               float const* cos_sin_cache, float const eps,
-                               int const num_tokens, int const num_heads_q,
-                               cudaStream_t stream) {
+template <typename scalar_t_in, int kNumHeadsQPadded>
+void launchDeepseekV4QNormRopeTemplated(
+    scalar_t_in* q_inout, int64_t const* position_ids,
+    float const* cos_sin_cache, float const eps, int const num_tokens,
+    int const num_heads_q, cudaStream_t stream) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
   int64_t const total_warps =
@@ -736,8 +735,37 @@ void launchDeepseekV4QNormRope(scalar_t_in* q_inout,
               "sm_",
               sm_version);
 #endif
-  deepseekV4QNormRopeKernel<scalar_t_in><<<grid, kBlockSize, 0, stream>>>(
+  deepseekV4QNormRopeKernel<scalar_t_in, kNumHeadsQPadded>
+      <<<grid, kBlockSize, 0, stream>>>(
       q_inout, position_ids, cos_sin_cache, eps, num_tokens, num_heads_q);
+}
+
+template <typename scalar_t_in>
+void launchDeepseekV4QNormRope(scalar_t_in* q_inout,
+                               int64_t const* position_ids,
+                               float const* cos_sin_cache, float const eps,
+                               int const num_tokens, int const num_heads_q,
+                               cudaStream_t stream) {
+#define DISPATCH(N)                                                         \
+  case N:                                                                   \
+    launchDeepseekV4QNormRopeTemplated<scalar_t_in, N>(                     \
+        q_inout, position_ids, cos_sin_cache, eps, num_tokens, num_heads_q,  \
+        stream);                                                            \
+    return;
+
+  switch (num_heads_q) {
+    DISPATCH(8)
+    DISPATCH(16)
+    DISPATCH(32)
+    DISPATCH(64)
+    DISPATCH(128)
+    default:
+      TORCH_CHECK(false,
+                  "deepseek_v4_qnorm_rope: unsupported num_heads_q=",
+                  num_heads_q,
+                  " (compiled instantiations: 8, 16, 32, 64, 128).");
+  }
+#undef DISPATCH
 }
 
 template <typename scalar_t_in>

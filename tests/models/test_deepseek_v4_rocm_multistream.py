@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.models.deepseek_v4.amd import model as rocm_model
-from vllm.models.deepseek_v4.nvidia.ops import attention as dsv4_attention
+from vllm.models.deepseek_v4 import attention as dsv4_attention
+from vllm.models.deepseek_v4.nvidia import model as dsv4_model
 
 
 def test_deepseek_v4_rocm_aux_streams_enabled(monkeypatch):
@@ -12,13 +12,13 @@ def test_deepseek_v4_rocm_aux_streams_enabled(monkeypatch):
         assert kwargs == {"priority": -1}
         return streams.pop()
 
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(rocm_model.torch.cuda, "Stream", make_stream)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(dsv4_model.torch.cuda, "Stream", make_stream)
     monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "1")
     monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MS_STRATEGY", "overlap")
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is not None
     assert len(aux_streams) == 5
@@ -31,43 +31,43 @@ def test_deepseek_v4_rocm_aux_streams_enabled_by_default(monkeypatch):
         assert kwargs == {"priority": -1}
         return streams.pop()
 
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(rocm_model.torch.cuda, "Stream", make_stream)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(dsv4_model.torch.cuda, "Stream", make_stream)
     monkeypatch.delenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", raising=False)
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is not None
     assert len(aux_streams) == 5
 
 
 def test_deepseek_v4_rocm_aux_streams_disabled_by_env(monkeypatch):
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: False)
     monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "0")
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is None
 
 
 def test_deepseek_v4_rocm_aux_streams_strategy_off(monkeypatch):
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: False)
     monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MULTISTREAM", "1")
     monkeypatch.setenv("VLLM_ROCM_DSV4_CSA_MS_STRATEGY", "off")
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is None
 
 
 def test_deepseek_v4_rocm_aux_streams_xpu_fallback(monkeypatch):
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: True)
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is None
 
@@ -75,11 +75,11 @@ def test_deepseek_v4_rocm_aux_streams_xpu_fallback(monkeypatch):
 def test_deepseek_v4_aux_streams_cuda_behavior_unchanged(monkeypatch):
     streams = [object(), object(), object()]
 
-    monkeypatch.setattr(rocm_model.current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(rocm_model.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(rocm_model.torch.cuda, "Stream", streams.pop)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(dsv4_model.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(dsv4_model.torch.cuda, "Stream", streams.pop)
 
-    aux_streams = rocm_model.make_deepseek_v4_aux_streams()
+    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is not None
     assert len(aux_streams) == 3

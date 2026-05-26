@@ -457,12 +457,12 @@ def test_split_q_and_kv_match_combined(
     num_blocks = (num_tokens + block_size - 1) // block_size + 1
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    q_fused = q.clone()
     k_cache_fused = torch.zeros(
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
-    _call_fused(
-        q_fused,
+    q_fused = _call_fused(
+        q,
+        n_heads,
         kv,
         k_cache_fused,
         slot_mapping,
