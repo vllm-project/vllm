@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _moe_compute_type,
     _prepare_expert_assignment,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
@@ -152,6 +154,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            return (
+                (M * topk, activation_out_dim),
+                (M, topk, N),
+                (M, K),
+            )
+
         workspace1 = (M, topk, max(activation_out_dim, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
@@ -174,7 +183,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> torch.Tensor | None:
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -202,73 +211,102 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if global_num_experts == -1:
             global_num_experts = E
 
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
-            num_tokens,
-            block_shape=self.block_shape,
-        )
-
-        if hidden_states.dtype == torch.bfloat16:
-            compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
-            compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
-            compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-        ):
-            compute_type = tl.bfloat16
-        else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
-
-        # Note that the output tensor might be in workspace1
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
         cache2_dim = self.adjust_N_for_activation(N, activation)
-        intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, cache2_dim)
-        )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        use_unwrapped = envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped"
+        config = None
+        if not use_unwrapped:
+            config = try_get_optimal_moe_config(
+                w1.size(),
+                w2.size(),
+                top_k_num,
+                self.quant_config.config_name(hidden_states.dtype),
+                num_tokens,
+                block_shape=self.block_shape,
+            )
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            _prepare_expert_assignment(
+        compute_type = _moe_compute_type(hidden_states.dtype)
+
+        if use_unwrapped:
+            intermediate_cache1 = workspace2
+            intermediate_cache2 = workspace13
+            intermediate_cache3 = torch.empty(
+                (num_tokens, top_k_num, K),
+                dtype=workspace2.dtype,
+                device=workspace2.device,
+            )
+        else:
+            # The modular kernel owns allocation; Triton experts only carve the
+            # backend-specific cache views from the provided workspaces.
+            intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+            intermediate_cache2 = _resize_cache(
+                workspace13, (num_tokens * top_k_num, cache2_dim)
+            )
+            intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+
+        if use_unwrapped:
+            torch.ops.vllm.moe_expert_projection(
+                hidden_states,
+                w1,
+                intermediate_cache1,
+                None,  # topk_weights
                 topk_ids,
-                config,
+                a1q_scale if a1q_scale is not None else self.a1_scale,
+                self.w1_scale,
+                self.w1_bias,
+                expert_map,
                 num_tokens,
                 top_k_num,
                 global_num_experts,
-                expert_map,
+                N,
+                K,
+                top_k_num,
+                False,  # mul_routed_weights
+                self.quant_config.config_name(hidden_states.dtype),
+                self.block_shape,
+                self.quant_config.use_fp8_w8a8,
+                self.quant_config.use_int8_w8a8,
+                self.quant_config.use_int8_w8a16,
+                self.quant_config.use_int4_w4a16,
+                self.per_act_token_quant,
+            )
+        else:
+            assert config is not None
+            sorted_token_ids, expert_ids, num_tokens_post_padded = (
+                _prepare_expert_assignment(
+                    topk_ids,
+                    config,
+                    num_tokens,
+                    top_k_num,
+                    global_num_experts,
+                    expert_map,
+                    use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                    use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                    block_shape=self.block_shape,
+                )
+            )
+
+            invoke_fused_moe_triton_kernel(
+                hidden_states,
+                w1,
+                intermediate_cache1,
+                a1q_scale if a1q_scale is not None else self.a1_scale,
+                self.w1_scale,
+                None,  # topk_weights
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                False,  # mul_routed_weights
+                top_k_num,
+                config,
+                compute_type=compute_type,
+                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                use_int8_w8a8=self.quant_config.use_int8_w8a8,
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
+                B_bias=self.w1_bias,
             )
-        )
-
-        invoke_fused_moe_triton_kernel(
-            hidden_states,
-            w1,
-            intermediate_cache1,
-            a1q_scale if a1q_scale is not None else self.a1_scale,
-            self.w1_scale,
-            None,  # topk_weights
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,  # mul_routed_weights
-            top_k_num,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w1_bias,
-        )
 
         # LoRA w13: applied to intermediate_cache1 before activation, using
         # hidden_states as the lora_a input.  moe_lora_align_block_size is
@@ -328,28 +366,56 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 quantization_emulation=self.quantization_emulation,
             )
 
-        invoke_fused_moe_triton_kernel(
-            qintermediate_cache2,
-            w2,
-            intermediate_cache3,
-            a2q_scale,
-            self.w2_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            not apply_router_weight_on_input,
-            1,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            per_channel_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
-            B_bias=self.w2_bias,
-        )
+        if use_unwrapped:
+            torch.ops.vllm.moe_expert_projection(
+                qintermediate_cache2,
+                w2,
+                intermediate_cache3,
+                topk_weights,
+                topk_ids,
+                a2q_scale,
+                self.w2_scale,
+                self.w2_bias,
+                expert_map,
+                num_tokens,
+                top_k_num,
+                global_num_experts,
+                N,
+                K,
+                1,
+                not apply_router_weight_on_input,
+                self.quant_config.config_name(hidden_states.dtype),
+                self.block_shape,
+                self.quant_config.use_fp8_w8a8,
+                self.quant_config.use_int8_w8a8,
+                self.quant_config.use_int8_w8a16,
+                self.quant_config.use_int4_w4a16,
+                self.per_act_token_quant,
+            )
+        else:
+            assert config is not None
+            invoke_fused_moe_triton_kernel(
+                qintermediate_cache2,
+                w2,
+                intermediate_cache3,
+                a2q_scale,
+                self.w2_scale,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                not apply_router_weight_on_input,
+                1,
+                config,
+                compute_type=compute_type,
+                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                use_int8_w8a8=self.quant_config.use_int8_w8a8,
+                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                per_channel_quant=self.per_act_token_quant,
+                block_shape=self.block_shape,
+                B_bias=self.w2_bias,
+            )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
@@ -371,10 +437,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        return self.moe_sum(intermediate_cache3, output)
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> torch.Tensor | None:
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            reduced = torch.sum(input, dim=1)
+            if torch.compiler.is_compiling():
+                return reduced
+            output.copy_(reduced)
+            return output
+
         ops.moe_sum(input, output)
+        return None
 
 
 class TritonWNA16Experts(TritonExperts):
@@ -433,7 +507,7 @@ class TritonWNA16Experts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> torch.Tensor | None:
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -484,9 +558,10 @@ class TritonWNA16Experts(TritonExperts):
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-        # Note that the output tensor might be in workspace1
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
         activation_out_dim = self.adjust_N_for_activation(N, activation)
+        # The modular kernel owns allocation; Triton experts only carve the
+        # backend-specific cache views from the provided workspaces.
+        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
         intermediate_cache2 = _resize_cache(
             workspace13, (num_tokens * top_k_num, activation_out_dim)
         )
@@ -549,4 +624,4 @@ class TritonWNA16Experts(TritonExperts):
         )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        return self.moe_sum(intermediate_cache3, output)

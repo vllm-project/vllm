@@ -172,7 +172,8 @@ class WorkspaceManager:
             # allocation below. Without this, each resize may leave a
             # dead segment in reserved memory which can cause higher peak
             # memory usage.
-            torch.accelerator.empty_cache()
+            if not torch.compiler.is_compiling():
+                torch.accelerator.empty_cache()
             self._current_workspaces[ubatch_id] = torch.empty(
                 (required_bytes,), dtype=torch.uint8, device=self._device
             )

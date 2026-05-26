@@ -67,6 +67,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def supports_eplb(self) -> bool:
         return True
 
+    @property
+    def supports_unwrapped_forward(self) -> bool:
+        return True
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,

@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    VLLM_FUSED_MOE_WRAP_MODE: Literal["wrapped", "unwrapped"] = "wrapped"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -988,6 +989,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Controls whether native FusedMoE forwards use the custom op wrapper.
+    # Supported values:
+    # - "wrapped": always use the wrapper
+    # - "unwrapped": require the direct-call path; error if unsupported
+    "VLLM_FUSED_MOE_WRAP_MODE": env_with_choices(
+        "VLLM_FUSED_MOE_WRAP_MODE",
+        "wrapped",
+        ["wrapped", "unwrapped"],
+        case_sensitive=False,
+    ),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
     # Default: 512 MB

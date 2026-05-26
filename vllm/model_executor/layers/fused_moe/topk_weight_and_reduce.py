@@ -6,6 +6,7 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
@@ -59,7 +60,10 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         # Weight application and reduction operations are already done.
-        if output is None:
+        if output is None or (
+            envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped"
+            and torch.compiler.is_compiling()
+        ):
             return fused_expert_output
 
         # Skip self-copy when caller aliased fused_out to output upstream.
@@ -107,17 +111,25 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
         if not apply_router_weight_on_input:
             fused_expert_output.mul_(topk_weights.view(m, -1, 1))
 
-        if output is None:
-            output = torch.empty(
-                (m, k),
-                device=fused_expert_output.device,
-                dtype=fused_expert_output.dtype,
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            reduced = torch.sum(fused_expert_output, dim=1)
+            if output is None or torch.compiler.is_compiling():
+                return reduced
+            assert output.size() == (m, k), (
+                f"Expected output size {(m, k)}. But got {output.size()}"
             )
-        assert output.size() == (m, k), (
-            f"Expected output size {(m, k)}. But got {output.size()}"
-        )
-
-        ops.moe_sum(fused_expert_output, output)
+            output.copy_(reduced)
+        else:
+            if output is None:
+                output = torch.empty(
+                    (m, k),
+                    device=fused_expert_output.device,
+                    dtype=fused_expert_output.dtype,
+                )
+            assert output.size() == (m, k), (
+                f"Expected output size {(m, k)}. But got {output.size()}"
+            )
+            ops.moe_sum(fused_expert_output, output)
         return output
 
 

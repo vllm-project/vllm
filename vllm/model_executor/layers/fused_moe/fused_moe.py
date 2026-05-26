@@ -1582,6 +1582,123 @@ def _prepare_expert_assignment(
     )
 
 
+def _moe_compute_type(dtype: torch.dtype) -> tl.dtype:
+    if dtype == torch.bfloat16:
+        return tl.bfloat16
+    if dtype == torch.float16:
+        return tl.float16
+    if dtype == torch.float32:
+        return tl.float32
+    if dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        return tl.bfloat16
+    raise ValueError(f"Unsupported compute_type: {dtype}")
+
+
+def moe_expert_projection(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    topk_ids: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
+    B_bias: torch.Tensor | None,
+    expert_map: torch.Tensor | None,
+    num_tokens: int,
+    config_top_k: int,
+    global_num_experts: int,
+    intermediate_size: int,
+    hidden_dim: int,
+    kernel_top_k: int,
+    mul_routed_weight: bool,
+    config_dtype: str | None,
+    block_shape: list[int] | None,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    per_channel_quant: bool,
+) -> None:
+    config = try_get_optimal_moe_config(
+        (B.size(0), intermediate_size, hidden_dim),
+        (B.size(0), hidden_dim, intermediate_size),
+        config_top_k,
+        config_dtype,
+        num_tokens,
+        block_shape=block_shape,
+    )
+    sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
+        topk_ids,
+        config,
+        num_tokens,
+        config_top_k,
+        global_num_experts,
+        expert_map,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        block_shape=block_shape,
+    )
+
+    invoke_fused_moe_triton_kernel(
+        A,
+        B,
+        C,
+        A_scale,
+        B_scale,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        mul_routed_weight,
+        kernel_top_k,
+        config,
+        compute_type=_moe_compute_type(A.dtype),
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        per_channel_quant=per_channel_quant,
+        block_shape=block_shape,
+        B_bias=B_bias,
+    )
+
+
+def moe_expert_projection_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    topk_ids: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
+    B_bias: torch.Tensor | None,
+    expert_map: torch.Tensor | None,
+    num_tokens: int,
+    config_top_k: int,
+    global_num_experts: int,
+    intermediate_size: int,
+    hidden_dim: int,
+    kernel_top_k: int,
+    mul_routed_weight: bool,
+    config_dtype: str | None,
+    block_shape: list[int] | None,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    per_channel_quant: bool,
+) -> None:
+    pass
+
+
+direct_register_custom_op(
+    op_name="moe_expert_projection",
+    op_func=moe_expert_projection,
+    mutates_args=["C"],
+    fake_impl=moe_expert_projection_fake,
+)
+
+
 # TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
 # torch ops.
 def fused_experts(

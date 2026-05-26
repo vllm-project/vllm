@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -17,6 +18,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -42,6 +44,8 @@ from vllm.utils.torch_utils import (
     LayerName,
     direct_register_custom_op,
 )
+
+logger = init_logger(__name__)
 
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:
@@ -264,6 +268,34 @@ class MoERunner(MoERunnerInterface):
         self.layer_name = layer_name
 
         self._forward_entry = self._select_forward()
+        self.forward_mode = self._determine_forward_mode()
+
+    def _determine_forward_mode(self) -> str:
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "wrapped":
+            return "wrapped"
+
+        blockers: list[str] = []
+        if not current_platform.is_cuda_alike():
+            blockers.append("requires a CUDA-alike platform")
+        if self._shared_experts is not None:
+            blockers.append("shared experts are enabled")
+        if self.enable_dbo:
+            blockers.append("DBO is enabled")
+        if not self._quant_method.supports_unwrapped_forward:
+            blockers.append(f"{self._quant_method.method_name} is not supported")
+
+        if blockers:
+            reasons = ", ".join(blockers)
+            raise NotImplementedError(
+                "VLLM_FUSED_MOE_WRAP_MODE=unwrapped is only supported for the "
+                f"narrow unquantized compile path. Blockers: {reasons}."
+            )
+
+        logger.debug_once(
+            "Using unwrapped FusedMoE forward path for layer %s.",
+            self.layer_name,
+        )
+        return "unwrapped"
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
@@ -284,9 +316,25 @@ class MoERunner(MoERunnerInterface):
 
     # TODO(bnell): temporary hack, do not call this method.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        old_quant_method = self._quant_method
+        old_forward_mode = self.forward_mode
+        old_shared_quant_method: FusedMoEMethodBase | None = (
+            self._shared_experts._quant_method
+            if self._shared_experts is not None
+            else None
+        )
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
         self._quant_method = quant_method
+        try:
+            self.forward_mode = self._determine_forward_mode()
+        except Exception:
+            if self._shared_experts is not None:
+                assert old_shared_quant_method is not None
+                self._shared_experts._quant_method = old_shared_quant_method
+            self._quant_method = old_quant_method
+            self.forward_mode = old_forward_mode
+            raise
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.
@@ -364,12 +412,22 @@ class MoERunner(MoERunnerInterface):
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
 
-    @property
+    def _quant_method_is_monolithic(self) -> bool:
+        moe_kernel = getattr(self._quant_method, "moe_kernel", None)
+        if moe_kernel is not None:
+            return moe_kernel.is_monolithic
+
+        experts_cls = getattr(self._quant_method, "experts_cls", None)
+        if experts_cls is not None:
+            return experts_cls.is_monolithic()
+
+        return self._quant_method.is_monolithic
+
+    def _quant_method_skips_forward_padding(self) -> bool:
+        return self._quant_method.skip_forward_padding
+
     def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
+        return self._quant_method.output_is_reduced()
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -386,7 +444,7 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and self._fused_output_is_reduced
+            and self._fused_output_is_reduced()
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
@@ -409,7 +467,7 @@ class MoERunner(MoERunnerInterface):
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._fused_output_is_reduced
+            and not self._fused_output_is_reduced()
         ):
             states = tensor_model_parallel_all_reduce(states)
 
@@ -467,7 +525,7 @@ class MoERunner(MoERunnerInterface):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self._quant_method.skip_forward_padding
+            not self._quant_method_skips_forward_padding()
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -511,7 +569,11 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self._quant_method.is_monolithic:
+        # Get routing replay buffer from persistent layer attribute
+        # (set by bind_routing_capture_to_model during capturer init)
+        routing_replay_out = getattr(layer, "_routing_replay_out", None)
+
+        if self._quant_method_is_monolithic():
             fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
@@ -524,6 +586,10 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
+
+            # Write routing data for non-monolithic path (Triton, etc.)
+            if routing_replay_out is not None:
+                routing_replay_out[: topk_ids.shape[0]].copy_(topk_ids.to(torch.int16))
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
@@ -589,6 +655,22 @@ class MoERunner(MoERunnerInterface):
             result = result + zero_expert_output
         return result
 
+    def _forward_unwrapped(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        layer = get_layer_from_name(_resolve_layer_name(self._encode_layer_name()))
+        return self._forward_impl(
+            layer,
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -614,7 +696,6 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
-
         # Apply transform for routed experts (e.g., latent projection
         # for latent MoE)
         hidden_states, shared_experts_input = self.apply_routed_input_transform(
@@ -632,14 +713,22 @@ class MoERunner(MoERunnerInterface):
         )
         hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
-        result = self._forward_entry(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-            input_ids,
-            self._encode_layer_name(),
-            self._trtllm_mxfp4_unpadded_dim(),
-        )
+        if self.forward_mode == "unwrapped":
+            result = self._forward_unwrapped(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+            )
+        else:
+            result = self._forward_entry(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+                self._encode_layer_name(),
+                self._trtllm_mxfp4_unpadded_dim(),
+            )
 
         #
         # Note: there are two all-reduce points below. They are mutually
