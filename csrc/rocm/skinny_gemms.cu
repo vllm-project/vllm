@@ -421,8 +421,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -679,8 +678,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -913,8 +911,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -1822,8 +1819,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
