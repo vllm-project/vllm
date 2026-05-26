@@ -1205,7 +1205,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
 
-        image_token = hf_processor.image_token
+        image_token: str = hf_processor.image_token
         video_token_ids = [
             hf_config.video_start_token_id,
             hf_processor.video_token_id,
