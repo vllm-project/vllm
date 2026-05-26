@@ -408,8 +408,7 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     ) -> torch.Tensor:
         # Combine multiple auxiliary hidden states returned by Eagle3
         if self.model.fc_norm is not None:
-            chunks = hidden_states.chunk(self.model.num_aux_hidden_states,
-                                         dim=-1)
+            chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
             hidden_states = torch.cat(
                 [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
                 dim=-1,
