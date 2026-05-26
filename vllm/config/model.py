@@ -1297,10 +1297,10 @@ class ModelConfig:
         return getattr(self.hf_text_config, "oe_padding_token_id", 0)
 
     def get_oe_base_scale(self) -> float:
-        return getattr(self.hf_text_config, "oe_base_scale", 1.0)
+        return getattr(self.hf_text_config, "embed_scale", 1.0)
 
     def get_oe_output_scale(self) -> float:
-        return getattr(self.hf_text_config, "oe_output_scale", 1.0)
+        return getattr(self.hf_text_config, "over_embed_scale", 1.0)
 
     # NOTE(yxing): plt-related config
     def get_plt_num_loops(self) -> int:
