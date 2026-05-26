@@ -237,6 +237,37 @@ def test_single_request_warmup_builds_prefill_decode_cleanup() -> None:
     assert cleanup_output.finished_req_ids == {"_hybrid_single_request_warmup_"}
 
 
+def test_single_request_warmup_disables_kv_connector_on_failure() -> None:
+    connector_calls = []
+
+    class FakeKVConnector:
+        def set_disabled(self, disabled: bool) -> None:
+            connector_calls.append(disabled)
+
+    model_runner = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(
+            num_blocks=16,
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            ],
+        ),
+        kv_connector=FakeKVConnector(),
+    )
+    worker = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
+        model_runner=model_runner,
+        execute_model=lambda _scheduler_output: (_ for _ in ()).throw(
+            RuntimeError("single warmup failed")
+        ),
+        sample_tokens=lambda _grammar_output: None,
+    )
+
+    with pytest.raises(RuntimeError, match="single warmup failed"):
+        kernel_warmup._warmup_single_request_decode_kernels(worker)
+
+    assert connector_calls == [True, False]
+
+
 def test_scheduler_warmup_reenables_kv_connector_on_failure() -> None:
     connector_calls = []
 

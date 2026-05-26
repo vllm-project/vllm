@@ -45,7 +45,8 @@ def _clear_pending_execute_model_state(worker: "Worker") -> None:
         worker.sample_tokens(None)
     except Exception:
         runner.execute_model_state = None
-        runner.kv_connector_output = None
+        if hasattr(runner, "kv_connector_output"):
+            runner.kv_connector_output = None
 
 
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
@@ -174,46 +175,55 @@ def _warmup_single_request_decode_kernels(worker: "Worker") -> None:
     prefill_output.total_num_scheduled_tokens = prompt_len
     prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
+    kv_connector = getattr(runner, "kv_connector", None)
+    if kv_connector is not None:
+        kv_connector.set_disabled(True)
     try:
-        worker.execute_model(prefill_output)
-        worker.sample_tokens(None)
-
-        cached_req_data = CachedRequestData.make_empty()
-        cached_req_data.req_ids = [req_id]
-        cached_req_data.num_computed_tokens = [prompt_len]
-        cached_req_data.num_output_tokens = [1]
-        cached_req_data.new_block_ids = [
-            (
-                tuple(_alloc_blocks(n) for n in decode_block_deltas)
-                if any(decode_block_deltas)
-                else None
-            )
-        ]
-
-        decode_output = SchedulerOutput.make_empty()
-        decode_output.scheduled_cached_reqs = cached_req_data
-        decode_output.num_scheduled_tokens = {req_id: 1}
-        decode_output.total_num_scheduled_tokens = 1
-        decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
-
-        worker.execute_model(decode_output)
-        worker.sample_tokens(None)
-    except Exception:
-        _clear_pending_execute_model_state(worker)
-        raise
-    finally:
-        cleanup_output = SchedulerOutput.make_empty()
-        cleanup_output.finished_req_ids = {req_id}
         try:
-            worker.execute_model(cleanup_output)
+            worker.execute_model(prefill_output)
+            worker.sample_tokens(None)
+
+            cached_req_data = CachedRequestData.make_empty()
+            cached_req_data.req_ids = [req_id]
+            cached_req_data.num_computed_tokens = [prompt_len]
+            cached_req_data.num_output_tokens = [1]
+            cached_req_data.new_block_ids = [
+                (
+                    tuple(_alloc_blocks(n) for n in decode_block_deltas)
+                    if any(decode_block_deltas)
+                    else None
+                )
+            ]
+
+            decode_output = SchedulerOutput.make_empty()
+            decode_output.scheduled_cached_reqs = cached_req_data
+            decode_output.num_scheduled_tokens = {req_id: 1}
+            decode_output.total_num_scheduled_tokens = 1
+            decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+
+            worker.execute_model(decode_output)
+            worker.sample_tokens(None)
         except Exception:
-            logger.debug(
-                "Hybrid single-request warmup cleanup failed.",
-                exc_info=True,
-            )
+            _clear_pending_execute_model_state(worker)
+            raise
+        finally:
+            cleanup_output = SchedulerOutput.make_empty()
+            cleanup_output.finished_req_ids = {req_id}
+            try:
+                worker.execute_model(cleanup_output)
+            except Exception:
+                logger.debug(
+                    "Hybrid single-request warmup cleanup failed.",
+                    exc_info=True,
+                )
+    finally:
+        if kv_connector is not None:
+            kv_connector.set_disabled(False)
 
 
 def kernel_warmup(worker: "Worker"):
+    model = worker.get_model()
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
@@ -221,11 +231,9 @@ def kernel_warmup(worker: "Worker"):
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    model = worker.get_model()
     has_hybrid_warmup_targets = has_hybrid_gdn_mamba_mrope(model)
     hybrid_gdn_mamba_mrope_warmup(
         model,
