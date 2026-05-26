@@ -1337,6 +1337,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
         processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Glm46VProcessor and GLMGA handle image/video placeholders
@@ -1371,19 +1376,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-
-                unuse_metadata = ["do_sample_frames"]
-                video_mm_data["video_metadata"] = [
-                    [
-                        VideoMetadata(
-                            **{
-                                k: metadata[k]
-                                for k in metadata
-                                if k not in unuse_metadata
-                            }
-                        )
-                    ]
-                ]
+                video_mm_data["video_metadata"] = [[_to_video_metadata(metadata)]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1422,26 +1415,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             **video_outputs,
         )
         return BatchFeature(combined_outputs)
-
-    def _apply_hf_processor_text_only(
-        self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        # Glm46VProcessor (including GLMGA variant) uses generic replacement
-        # code that requires matching media inputs; bypass for text-only
-        # (cache path / dummy inputs) and tokenize directly.
-        tokenizer = self.info.get_tokenizer()
-        tokenizer_output = tokenizer(prompt_text, **tokenization_kwargs)
-        input_ids = tokenizer_output["input_ids"]
-        if not isinstance(input_ids, list):
-            input_ids = input_ids.tolist()
-
-        if input_ids and isinstance(input_ids[0], list):
-            (prompt_ids,) = input_ids
-            return prompt_ids
-
-        return input_ids
 
     def _get_mm_fields_config(
         self,
