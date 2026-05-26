@@ -553,18 +553,23 @@ struct StreamSmem {
   alignas(128) float score_buffer[kStreamNumStages][kSizePerStage];
 };
 
+// Streams data through shared memory in chunks, processing each chunk before loading the next
+// overwrites each buffer after processing it (the epilogue prefetch loads the next chunk into the same slot)
 template <typename SmemType, uint32_t kStages, uint32_t kBinBits, bool kIsScatter>
-__device__ void tma_stream_pass(const float* scores, uint32_t length,
-                                uint32_t thr_bin, int32_t* indices,
-                                uint32_t* phases, SmemType* smem) 
+__device__ void tma_stream_pass(const float* scores, 
+                                uint32_t length,
+                                uint32_t thr_bin, 
+                                int32_t* indices,
+                                uint32_t* phases, 
+                                SmemType* smem) 
 {
-  const auto tx = threadIdx.x;
+  const auto tx   = threadIdx.x;
   const auto lane = tx % kWarpSize;
-  const auto ni = (length + kSizePerStage - 1) / kSizePerStage;
-  const auto la = (length + 3u) & ~3u;
-  const auto pass = kIsScatter ? 1 : 0;
+  const auto ni   = (length + kSizePerStage - 1) / kSizePerStage; // total stages needed
+  const auto la   = (length + 3u) & ~3u; // length rounded up to float4 (TMA alignment)
+  const auto pass = kIsScatter ? 1 : 0;  // barrier dim: [0] for histogram, [1] for scatter
 
-  // Prologue: issue initial TMA loads
+  // Prologue: issue initial TMA loads - prefill the pipeline
   if (tx == 0) {
 #pragma unroll
     for (uint32_t i = 0; i < kStages; i++) {
@@ -574,21 +579,21 @@ __device__ void tma_stream_pass(const float* scores, uint32_t length,
       const auto o = i * kSizePerStage;
       const auto sz = min(kSizePerStage, la - o) * sizeof(float);
       tma_load(smem->score_buffer[i], scores + o, sz,
-                       &smem->barrier[pass][i]);
+                       &smem->barrier[pass][i]); // cp.async.bulk is non-blocking
       mbarrier_arrive_expect_tx(&smem->barrier[pass][i], sz);
     }
   }
 
   // Main loop: process stages
   for (uint32_t it = 0; it < ni; it++) {
-    const auto b = it % kStages;
+    const auto b = it % kStages; // which buffer slot (0 or 1)
     const auto o = it * kSizePerStage;
     const auto sz = min(kSizePerStage, length - o);
 
     if (lane == 0) {
-      mbarrier_wait(&smem->barrier[pass][b], phases[b] & 1);
+      mbarrier_wait(&smem->barrier[pass][b], phases[b] & 1); // wait for the data
     }
-    phases[b]++;
+    phases[b]++; // advances the phase for next time this slot is reused
     __syncwarp();
 
 #pragma unroll
@@ -598,8 +603,9 @@ __device__ void tma_stream_pass(const float* scores, uint32_t length,
         break;
       }
       const auto sc = smem->score_buffer[b][li];
-      const auto bn = extract_coarse_bin_N<kBinBits>(sc);
-      if constexpr (kIsScatter) {
+      const auto bn = extract_coarse_bin_N<kBinBits>(sc);      
+      if constexpr (kIsScatter) { // compile-time branch
+        // Scatter pass: place above-threshold and collect ties
         const auto gi = o + li;
         if (bn > thr_bin) {
           indices[atomicAdd(&smem->counter_gt, 1)] = gi;
@@ -610,10 +616,11 @@ __device__ void tma_stream_pass(const float* scores, uint32_t length,
           }
         }
       } else {
+        // Histogram pass: just count
         atomicAdd(&smem->histogram[bn], 1);
       }
     }
-    __syncthreads();
+    __syncthreads(); // ensures all threads finished processing their buffer before next TMA load
 
     // Epilogue: issue next TMA load
     if (tx == 0 && it + kStages < ni) {
@@ -820,8 +827,7 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   if constexpr (TopK <= kBlockSize) {
     // copy ties from tie_ws back to smem, then refine
     const uint32_t num_ties = min(s_total_equal, kMaxTies);
-    __syncthreads();
-    // TODO: could vectorize with uint2 (8 bytes = exactly one Tie)
+    // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
     for (uint32_t i = tx; i < num_ties; i += kBlockSize) {
       smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
     }
@@ -830,16 +836,19 @@ __device__ void large_topk_fused(const float* __restrict__ row_input,
   } else {
     // TopK=2048: process directly from tie_ws (GMEM)
     const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
-    __syncthreads();
     tie_handle_large<TopK>(tie_ws, num_ties, s_total_above, row_output, smem);
   }
 }
 
+// Fallback path when data doesn't fit in SMEM for single-pass.
+// Instead of keeping all TMA stages resident and rescanning, it streams data twice:
+// once for histogram, once for scatter.
 template <uint32_t TopK, uint32_t CS>
 __device__ void large_topk_twopass(const float* __restrict__ ri,
-                                     int32_t* __restrict__ ro,
-                                     uint32_t sl, ClusterState* state,
-                                     uint32_t* hp, uint32_t* sp, Tie* tie_ws) 
+                                   int32_t* __restrict__ ro,
+                                   uint32_t sl, 
+                                   ClusterState* state,
+                                   uint32_t* hp, uint32_t* sp, Tie* tie_ws) 
 {
   const auto rank = blockIdx.y, tx = threadIdx.x;
   extern __shared__ uint8_t smem_raw[];
@@ -852,6 +861,9 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   const auto ou = rank * b + min(rank, e);
   const auto ms = ou * kA, ml = min(ms + lu * kA, sl) - ms;
 
+  // Phase 0: Init. Histogram zeroed, counters zeroed. Unlike large_topk_fused, 
+  // there's no TMA prologue here.
+  // tma_stream_pass handles its own TMA issuing internally.
   if (tx < kHistBins) smem->histogram[tx] = 0;
   if (tx == 0) {
     smem->counter_gt = 0;
@@ -859,13 +871,16 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   }
   __syncthreads();
 
+  // Phase 1: Histogram pass.
   tma_stream_pass<Smem4, kNumStages4, kHistBits, false>(ri + ms, ml, 0, nullptr, hp, smem);
   __syncthreads();
 
+  // DSMEM all-reduce + find threshold
   dsmem_hist_reduce<CS>(smem->histogram);
   find_threshold<TopK>(smem->histogram, smem->warp_sum,
                   &smem->counter_gt, &smem->counter_eq, &smem->match);
 
+  // Phase 2: Scatter pass
   tma_stream_pass<Smem4, kNumStages4, kHistBits, true>(ri + ms, ml, smem->match.bin, s_topk, sp, smem);
   __syncthreads();
 
@@ -873,42 +888,54 @@ __device__ void large_topk_twopass(const float* __restrict__ ri,
   const uint32_t le_full = smem->counter_eq;
   const uint32_t le = min(le_full, kMaxTies);  // smem tie_buffer cap
 
+  // Phase 3: Output collection. Unlike large_topk_fused which uses DSMEM prefix sums, twopass uses
+  // global atomicAdd on state->output_counter.
   __shared__ uint32_t s_off;
+  // Step 1: Reserve slots for above-threshold indices.
   if (tx == 0) s_off = atomicAdd(&state->output_counter, (int)la);
   __syncthreads();
   for (uint32_t i = tx; i < la; i += kBlockSize) { ro[s_off + i] = s_topk[i] + ms; }
 
+  // Step 2: cluster.sync() - all blocks done writting above-threshold
   cooperative_groups::this_cluster().sync();
 
   __shared__ uint32_t s_toff, s_ta;
+  // Step 3: Read total above count (= how many positions filled so far)
   if (tx == 0) s_ta = state->output_counter;
   __syncthreads();
-  cooperative_groups::this_cluster().sync();
+  cooperative_groups::this_cluster().sync(); // ensure all blocks read same s_ta
+  // Step 4: Reserve slots for ties
   if (tx == 0) s_toff = atomicAdd(&state->output_counter, (int)le);
   __syncthreads();
-  if (s_ta >= TopK) return;
+  if (s_ta >= TopK) return; // all TopK already filled, no ties needed
+
+  // Phase 4: Write ties to global output and workspace for refinement
   for (uint32_t i = tx; i < le; i += kBlockSize) {
     const auto t = smem->tie_buffer[i];
     uint32_t p = s_toff + i;
     if (p < TopK) { ro[p] = t.idx + ms; }
     uint32_t tp = s_toff - s_ta + i;
-    if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) { tie_ws[tp] = Tie{t.idx + ms, t.score}; }
+    if (tp < (TopK <= kBlockSize ? kMaxTies : TopK)) { 
+      tie_ws[tp] = Tie{t.idx + ms, t.score}; 
+    }
   }
 
-  // cluster.sync() before tie refinement
+  // Phase 5: Tie refinement
   cooperative_groups::this_cluster().sync();
   if (rank != 0) return;
 
-  const auto tt = state->output_counter - s_ta;
-  if (tt <= TopK - s_ta) return;
-  __syncthreads();
-  for (uint32_t i = tx; i < min(tt, kMaxTies); i += kBlockSize) {
-    smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
-  }
-  __syncthreads();
+  const auto tt = state->output_counter - s_ta; // total ties across all blocks
+  if (tt <= TopK - s_ta) return; // all fit, no refinement needed
   if constexpr (TopK <= kBlockSize) {
+    // copy ties from tie_ws back to smem, then refine
+    // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
+    for (uint32_t i = tx; i < min(tt, kMaxTies); i += kBlockSize) {
+      smem->tie_buffer[i] = Tie{tie_ws[i].idx, tie_ws[i].score};
+    }
+    __syncthreads();
     tie_handle<TopK>(smem->tie_buffer, min(tt, kMaxTies), s_ta, ro, smem);
   } else {
+    // TopK=2048: process directly from tie_ws (GMEM)
     tie_handle_large<TopK>(tie_ws, min(tt, static_cast<uint32_t>(TopK)), s_ta, ro, smem);
   }
 }

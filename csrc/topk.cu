@@ -67,6 +67,7 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   params.tie_ws =
       reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>() + state_bytes);
 
+  // TODO (roberto): can't the workspace size be smaller now? - only used in large_topk_twopass
   TORCH_CHECK(
       workspace.size(0) >=
           static_cast<int64_t>(num_rows * (sizeof(ct::ClusterState) +
