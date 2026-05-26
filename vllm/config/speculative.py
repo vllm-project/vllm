@@ -489,6 +489,13 @@ class SpeculativeConfig:
             hf_config.model_type in ("step3p5", "step3p7")
             or hf_config.architectures[0] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration")
         ):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
