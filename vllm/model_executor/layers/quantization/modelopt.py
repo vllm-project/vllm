@@ -81,6 +81,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -182,7 +183,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
-            if isinstance(layer, LinearBase):
+            if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             return None
 
@@ -195,7 +196,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             return UnquantizedLinearMethod()
 
         # now, the layer is quantized, handle it here
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
             quant_method = self.LinearMethodCls(self)
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
@@ -2371,13 +2372,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         # Excluded layers
         if self.is_layer_excluded(prefix):
-            if isinstance(layer, LinearBase):
+            if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             return None
 
         quant_algo = self._resolve_quant_algo(prefix)
 
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
