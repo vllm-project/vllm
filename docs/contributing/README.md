@@ -304,6 +304,18 @@ review process:
   resources. The reviewer will add `ready` label to the PR when the PR is
   ready to merge or a full CI run is needed.
 
+### Escalating Stalled Contributions
+
+If you have an important contribution that has not yet received maintainer attention, please email us at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
+
 ## Thank You
 
 Finally, thank you for taking the time to read these guidelines and for your interest in contributing to vLLM.

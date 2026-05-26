@@ -600,6 +600,7 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
+    errored: bool = False
 
 
 async def _async_serving_chat_init():
@@ -859,6 +860,50 @@ async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_truncation_side_controls_prompt_truncation():
+    model_config = MockModelConfig()
+    model_config.model = MODEL_NAME_SHORT
+    model_config.tokenizer = MODEL_NAME_SHORT
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [
+        {
+            "role": "user",
+            "content": "Summarize how prompt truncation works in one sentence.",
+        }
+    ]
+
+    full_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+    )
+    assert len(full_token_ids) > 4
+
+    right_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="right",
+    )
+    assert right_token_ids == full_token_ids[:4]
+
+    left_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="left",
+    )
+    assert left_token_ids == full_token_ids[-4:]
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.
@@ -1109,6 +1154,37 @@ async def test_serving_chat_data_parallel_rank_extraction():
     # Verify that data_parallel_rank defaults to None
     assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
+
+
+async def _render_chat_prompt_token_ids(
+    serving_chat: OpenAIServingChat,
+    messages: list[dict[str, str]],
+    *,
+    model_name: str = MODEL_NAME,
+    truncate_prompt_tokens: int | None = None,
+    truncation_side: str | None = None,
+) -> list[int]:
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        return_token_ids=True,
+        truncate_prompt_tokens=truncate_prompt_tokens,
+        truncation_side=truncation_side,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert len(engine_inputs) == 1
+
+    prompt_token_ids = serving_chat._extract_prompt_components(
+        engine_inputs[0]
+    ).token_ids
+    assert prompt_token_ids is not None
+    return prompt_token_ids
 
 
 class TestServingChatWithHarmony:

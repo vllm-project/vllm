@@ -474,10 +474,9 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         timeout: Maximum time in seconds to wait for graceful shutdown
     """
     if timeout is None:
-        timeout = 0.0
-
-    # Allow at least 5 seconds for remaining procs to terminate.
-    timeout = max(timeout, 5.0)
+        # Keep a small grace period for best-effort cleanup paths that do not
+        # have a user-configured shutdown timeout.
+        timeout = 5.0
 
     # Shutdown the process.
     for proc in procs:
