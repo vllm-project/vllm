@@ -312,6 +312,15 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
         if self.is_hopper:
+            # avoid padding when M is already 4-aligned.
+            if A.shape[0] % 4 == 0:
+                return ops.cutlass_scaled_mm(
+                    A,
+                    B.T,
+                    out_dtype=out_dtype,
+                    scale_a=As,
+                    scale_b=Bs.T,
+                )
             return torch.ops.vllm.padded_cutlass(
                 A,
                 B,
