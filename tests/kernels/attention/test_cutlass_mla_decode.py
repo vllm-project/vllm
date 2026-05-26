@@ -9,6 +9,7 @@ import torch
 import vllm._custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+from vllm.utils.platform_utils import num_compute_units
 
 
 def cal_diff(
@@ -32,8 +33,8 @@ def cal_diff(
 
 
 CUTLASS_MLA_UNSUPPORTED_REASON = (
-    "Cutlass MLA Requires compute capability of 10 or above."
-    if not current_platform.is_device_capability(100)
+    "Cutlass MLA Requires compute capability of 100 or above."
+    if not current_platform.is_device_capability_family(100)
     else "Cutlass MLA is supported"
 )
 
@@ -68,7 +69,7 @@ def test_cutlass_mla_decode(
     init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.manual_seed(42)
     random.seed(42)
 
@@ -124,8 +125,7 @@ def test_cutlass_mla_decode(
             q_pe = q_pe_padded
 
         kv_cache_flat = blocked_k.squeeze(2)
-        device_properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
-        sm_count = device_properties.multi_processor_count
+        sm_count = num_compute_units(device.index)
         workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
             max_seqlen * block_size, b, sm_count, num_kv_splits=1
         )

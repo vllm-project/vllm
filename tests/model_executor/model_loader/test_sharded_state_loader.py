@@ -13,6 +13,7 @@ from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader import ShardedStateLoader
+from vllm.platforms import current_platform
 
 prompts = [
     "Hello, my name is",
@@ -60,18 +61,9 @@ def llama_3p2_1b_files():
 
 def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     llm_sharded_writer = LLM(model=input_dir, **kwargs)
-    # Check which engine version is being used
-    is_v1_engine = hasattr(llm_sharded_writer.llm_engine, "engine_core")
+
     # Dump worker states to output directory
-    if is_v1_engine:
-        # For V1 engine, we need to use engine_core.save_sharded_state
-        print("Using V1 engine save path")
-        llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
-    else:
-        # For V0 engine
-        print("Using V0 engine save path")
-        model_executor = llm_sharded_writer.llm_engine.model_executor
-        model_executor.save_sharded_state(path=output_dir)
+    llm_sharded_writer.llm_engine.engine_core.save_sharded_state(path=output_dir)
 
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
@@ -104,6 +96,10 @@ def test_sharded_state_loader(
     input_dir = llama_3p2_1b_files
     ctx = mp.get_context("spawn")
 
+    platform_args = {}
+    if current_platform.is_rocm():
+        platform_args["max_num_seqs"] = 1
+
     # Run in separate processes for memory & CUDA isolation
     with TemporaryDirectory() as output_dir:
         p = ctx.Process(
@@ -113,6 +109,7 @@ def test_sharded_state_loader(
                 tensor_parallel_size=tp_size,
                 gpu_memory_utilization=gpu_memory_utilization,
                 enforce_eager=True,
+                **platform_args,
             ),
         )
         p.start()
@@ -127,6 +124,7 @@ def test_sharded_state_loader(
                 enable_lora=enable_lora,
                 gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tp_size,
+                **platform_args,
             ),
         )
         p.start()
@@ -150,6 +148,7 @@ def test_sharded_state_loader(
                 gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tp_size,
                 load_format="sharded_state",
+                **platform_args,
             ),
         )
         p.start()

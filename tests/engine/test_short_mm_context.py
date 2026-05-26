@@ -22,7 +22,11 @@ def test_context_length_too_short(vllm_runner, image_assets, model):
     with pytest.raises(ValueError, match="longer than the maximum model length"):
         vllm_model = vllm_runner(
             model,
-            max_model_len=128,  # LLaVA has a feature size of 576
+            # LLaVA has a feature size of 576
+            # For the HF processor to execute successfully but still
+            # failing the overall context length check, we need the
+            # max_model_len to at least contain all image tokens
+            max_model_len=579,
             enforce_eager=True,
             load_format="dummy",
         )

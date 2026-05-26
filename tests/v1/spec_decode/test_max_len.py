@@ -6,6 +6,7 @@ import pytest
 
 from tests.utils import get_attn_backend_list_based_on_platform
 from vllm import LLM, SamplingParams
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 
@@ -38,53 +39,62 @@ def test_ngram_max_len(num_speculative_tokens: int):
 def test_eagle_max_len(
     monkeypatch: pytest.MonkeyPatch, num_speculative_tokens: int, attn_backend: str
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+    if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-        if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
-            pytest.skip(
-                "TRITON_ATTN does not support "
-                "multi-token eagle spec decode on current platform"
-            )
-
-        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
-            m.setenv("VLLM_ROCM_USE_AITER", "1")
-
-        llm = LLM(
-            model="meta-llama/Meta-Llama-3-8B-Instruct",
-            enforce_eager=True,  # For faster initialization.
-            speculative_config={
-                "method": "eagle",
-                "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
-                "num_speculative_tokens": num_speculative_tokens,
-                "max_model_len": 80,
-            },
-            max_model_len=200,
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3-8B-Instruct",
+        enforce_eager=True,  # For faster initialization.
+        speculative_config={
+            "method": "eagle",
+            "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+            "num_speculative_tokens": num_speculative_tokens,
+            "max_model_len": 80,
+        },
+        max_model_len=200,
+        attention_config={"backend": attn_backend},
+    )
+    sampling_params = SamplingParams(max_tokens=200, ignore_eos=True)
+    outputs = llm.generate(_PROMPTS, sampling_params)
+    for o in outputs:
+        assert o.outputs[0].finish_reason == "length", (
+            "This test is only meaningful if the output is truncated due to max length"
         )
-        sampling_params = SamplingParams(max_tokens=200, ignore_eos=True)
-        outputs = llm.generate(_PROMPTS, sampling_params)
-        for o in outputs:
-            assert o.outputs[0].finish_reason == "length", (
-                "This test is only meaningful if the output "
-                "is truncated due to max length"
-            )
 
-        sampling_params = SamplingParams(
-            max_tokens=200,
-            structured_outputs=StructuredOutputsParams(
-                regex="^" + "a b c d e " * 15 + "$"
-            ),
+    sampling_params = SamplingParams(
+        max_tokens=200,
+        structured_outputs=StructuredOutputsParams(regex="^" + "a b c d e " * 15 + "$"),
+    )
+    output = llm.generate(_PROMPTS, sampling_params)
+    for o in output:
+        assert o.prompt_token_ids is not None
+        assert (
+            len(o.prompt_token_ids)
+            < 80
+            < len(o.prompt_token_ids) + len(o.outputs[0].token_ids)
+            <= 200
+        ), (
+            "This test is only meaningful if the output "
+            "is longer than the eagle max length"
         )
-        output = llm.generate(_PROMPTS, sampling_params)
-        for o in output:
-            assert o.prompt_token_ids is not None
-            assert (
-                len(o.prompt_token_ids)
-                < 80
-                < len(o.prompt_token_ids) + len(o.outputs[0].token_ids)
-                < 200
-            ), (
-                "This test is only meaningful if the output "
-                "is longer than the eagle max length"
-            )
-            assert o.outputs[0].text == "a b c d e " * 15
+        assert o.outputs[0].text == "a b c d e " * 15
+
+
+@pytest.mark.parametrize("spec_max_model_len", [80, 150])
+def test_mtp_speculative_config_max_model_len(spec_max_model_len: int):
+    """Regression test for #41456: max_model_len in speculative config
+    should be respected for the draft model."""
+    model_config = ModelConfig(
+        model="XiaomiMiMo/MiMo-7B-Base",
+        runner="generate",
+        max_model_len=200,
+        trust_remote_code=True,
+    )
+    spec_config = SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        method="mtp",
+        num_speculative_tokens=1,
+        max_model_len=spec_max_model_len,
+    )
+    assert spec_config.draft_model_config.max_model_len == spec_max_model_len

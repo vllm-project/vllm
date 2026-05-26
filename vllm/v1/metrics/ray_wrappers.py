@@ -1,44 +1,70 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import time
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorPrometheus
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.perf import PerfMetricsProm
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
+    from ray import serve as ray_serve
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
+    ray_serve = None
 import regex as re
 
 
+def _get_replica_id() -> str | None:
+    """Get the current Ray Serve replica ID, or None if not in a Serve context."""
+    if ray_serve is None:
+        return None
+    try:
+        return ray_serve.get_replica_context().replica_id.unique_id
+    except ray_serve.exceptions.RayServeException:
+        return None
+
+
 class RayPrometheusMetric:
+    _is_labeled: bool = False
+
     def __init__(self):
         if ray_metrics is None:
             raise ImportError("RayPrometheusMetric requires Ray to be installed.")
-
         self.metric: Metric = None
+        self._tags: dict[str, str] = {"ReplicaId": _get_replica_id() or ""}
 
-    def labels(self, *labels, **labelskwargs):
-        if labelskwargs:
-            for k, v in labelskwargs.items():
-                if not isinstance(v, str):
-                    labelskwargs[k] = str(v)
+    @staticmethod
+    def _get_tag_keys(labelnames: list[str] | None) -> tuple[str, ...]:
+        labels = list(labelnames) if labelnames else []
+        labels.append("ReplicaId")
+        return tuple(labels)
 
-            self.metric.set_default_tags(labelskwargs)
-
+    def _build_tags(self, *labels, **labelskwargs) -> dict[str, str]:
         if labels:
-            if len(labels) != len(self.metric._tag_keys):
+            # -1 because ReplicaId was added automatically
+            expected = len(self.metric._tag_keys) - 1
+            if len(labels) != expected:
                 raise ValueError(
                     "Number of labels must match the number of tag keys. "
-                    f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
+                    f"Expected {expected}, got {len(labels)}"
                 )
+            labelskwargs.update(zip(self.metric._tag_keys, labels))
 
-            self.metric.set_default_tags(dict(zip(self.metric._tag_keys, labels)))
+        labelskwargs["ReplicaId"] = _get_replica_id() or ""
 
-        return self
+        return {k: v if isinstance(v, str) else str(v) for k, v in labelskwargs.items()}
+
+    def labels(self, *labels, **labelskwargs) -> "RayPrometheusMetric":
+        if self._is_labeled:
+            raise ValueError("labels() cannot be called on an already-labeled metric.")
+        clone = copy.copy(self)
+        clone._tags = self._build_tags(*labels, **labelskwargs)
+        clone._is_labeled = True
+        return clone
 
     @staticmethod
     def _get_sanitized_opentelemetry_name(name: str) -> str:
@@ -71,18 +97,23 @@ class RayGaugeWrapper(RayPrometheusMetric):
         # "mostrecent", "all", "sum" do not apply. This logic can be manually
         # implemented at the observability layer (Prometheus/Grafana).
         del multiprocess_mode
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+
+        super().__init__()
+        tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
+
         self.metric = ray_metrics.Gauge(
-            name=name, description=documentation, tag_keys=labelnames_tuple
+            name=name,
+            description=documentation,
+            tag_keys=tag_keys,
         )
 
     def set(self, value: int | float):
-        return self.metric.set(value)
+        return self.metric.set(value, tags=self._tags)
 
     def set_to_current_time(self):
         # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
-        return self.metric.set(time.time())
+        return self.set(time.time())
 
 
 class RayCounterWrapper(RayPrometheusMetric):
@@ -95,16 +126,19 @@ class RayCounterWrapper(RayPrometheusMetric):
         documentation: str | None = "",
         labelnames: list[str] | None = None,
     ):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        super().__init__()
+        tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Counter(
-            name=name, description=documentation, tag_keys=labelnames_tuple
+            name=name,
+            description=documentation,
+            tag_keys=tag_keys,
         )
 
     def inc(self, value: int | float = 1.0):
         if value == 0:
             return
-        return self.metric.inc(value)
+        return self.metric.inc(value, tags=self._tags)
 
 
 class RayHistogramWrapper(RayPrometheusMetric):
@@ -118,18 +152,20 @@ class RayHistogramWrapper(RayPrometheusMetric):
         labelnames: list[str] | None = None,
         buckets: list[float] | None = None,
     ):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        super().__init__()
+        tag_keys = self._get_tag_keys(labelnames)
         name = self._get_sanitized_opentelemetry_name(name)
+
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(
             name=name,
             description=documentation,
-            tag_keys=labelnames_tuple,
+            tag_keys=tag_keys,
             boundaries=boundaries,
         )
 
     def observe(self, value: int | float):
-        return self.metric.observe(value)
+        return self.metric.observe(value, tags=self._tags)
 
 
 class RaySpecDecodingProm(SpecDecodingProm):
@@ -142,9 +178,9 @@ class RaySpecDecodingProm(SpecDecodingProm):
     _counter_cls = RayCounterWrapper
 
 
-class RayKVConnectorPrometheus(KVConnectorPrometheus):
+class RayKVConnectorProm(KVConnectorProm):
     """
-    RayKVConnectorPrometheus is used by RayMetrics to log Ray
+    RayKVConnectorProm is used by RayMetrics to log Ray
     metrics. Provides the same metrics as KV connectors but
     uses Ray's util.metrics library.
     """
@@ -154,6 +190,16 @@ class RayKVConnectorPrometheus(KVConnectorPrometheus):
     _histogram_cls = RayHistogramWrapper
 
 
+class RayPerfMetricsProm(PerfMetricsProm):
+    """
+    RayPerfMetricsProm is used by RayMetrics to log Ray
+    metrics. Provides the same MFU metrics as PerfMetricsProm
+    uses Ray's util.metrics library.
+    """
+
+    _counter_cls = RayCounterWrapper
+
+
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
 
@@ -161,7 +207,8 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _counter_cls = RayCounterWrapper
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
-    _kv_connector_cls = RayKVConnectorPrometheus
+    _kv_connector_cls = RayKVConnectorProm
+    _perf_metrics_cls = RayPerfMetricsProm
 
     @staticmethod
     def _unregister_vllm_metrics():

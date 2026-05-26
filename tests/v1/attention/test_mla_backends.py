@@ -18,16 +18,25 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.ops.flashmla import is_flashmla_dense_supported
-from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.config.vllm import set_current_vllm_config
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
+    QueryLenSupport,
+    _DecodeConcatQuantFP8,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backends.mla.common import QueryLenSupport
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.prefill import (
+    MLAPrefillBackendEnum,
+    get_mla_prefill_backend,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -35,12 +44,16 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN_MLA,
     AttentionBackendEnum.FLASHINFER_MLA,
     AttentionBackendEnum.TRITON_MLA,
+    AttentionBackendEnum.TOKENSPEED_MLA,
 ]
+
+DEVICE_TYPE = current_platform.device_type
 
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 # Remove FLASH_ATTN_MLA from the list if not supported
 if not flash_attn_supports_mla():
@@ -49,6 +62,23 @@ if not flash_attn_supports_mla():
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
+
+# Remove TOKENSPEED_MLA if the optional package is not installed
+if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
+    try:
+        import tokenspeed_mla  # noqa: F401
+    except ImportError:
+        BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
+
+
+# Filtered per-test via validate_configuration (capability/deps/dims).
+PREFILL_BACKENDS_TO_TEST = [
+    MLAPrefillBackendEnum.FLASH_ATTN,
+    MLAPrefillBackendEnum.FLASHINFER,
+    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+]
+
 
 SPEC_DECODE_BACKENDS = []
 for backend in BACKENDS_TO_TEST:
@@ -61,7 +91,7 @@ for backend in BACKENDS_TO_TEST:
 
 BACKEND_BLOCK_SIZES = {}
 for backend in BACKENDS_TO_TEST:
-    supported_sizes = backend.get_class().supported_kernel_block_sizes
+    supported_sizes = backend.get_class().get_supported_kernel_block_sizes()
     if supported_sizes:
         default_size = supported_sizes[0]
         block_size = (
@@ -144,9 +174,8 @@ def create_and_prepopulate_kv_cache(
         common_attn_metadata: Common attention metadata
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
-        kv_cache_dtype: Optional kv cache dtype string. When set to
-                        "fp8_ds_mla" the cache is populated using the
-                        fp8 DeepSeek MLA layout via concat_and_cache_mla.
+        kv_cache_dtype: Optional kv cache dtype string. For fp8 cache dtype,
+                        the cache is populated via concat_and_cache_mla.
         scale: Scaling factor forwarded to concat_and_cache_mla when the
                fp8 cache layout is requested.
 
@@ -154,27 +183,30 @@ def create_and_prepopulate_kv_cache(
         MLA KV cache tensor
     """
     batch_size = len(kv_c_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
         common_attn_metadata.query_start_loc_cpu[1:]
         - common_attn_metadata.query_start_loc_cpu[:-1]
     )
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
+    fp8_attention = kv_cache_dtype and kv_cache_dtype.startswith("fp8")
     use_fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
 
-    if use_fp8_ds_mla:
-        if not kv_c_contexts:
-            raise ValueError(
-                "kv_c_contexts cannot be empty when using fp8_ds_mla cache dtype"
-            )
-        kv_lora_rank = kv_c_contexts[0].shape[-1]
-        rope_dim = k_pe_contexts[0].shape[-1]
-        entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+    if fp8_attention:
+        if use_fp8_ds_mla:
+            kv_lora_rank = kv_c_contexts[0].shape[-1]
+            rope_dim = k_pe_contexts[0].shape[-1]
+            # 4 * 4: 4 float32 scale values for 128-element tiles
+            # 2 * rope_dim: 16-bit RoPE values
+            kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+        else:
+            kv_entry_size = head_size
+
         kv_cache = torch.zeros(
-            num_blocks, block_size, entry_size, dtype=torch.uint8, device=device
+            num_blocks, block_size, kv_entry_size, dtype=torch.uint8, device=device
         )
         scale_tensor = (
             scale
@@ -201,14 +233,14 @@ def create_and_prepopulate_kv_cache(
 
         start = start_block_idx * block_size
 
-        if use_fp8_ds_mla:
+        if fp8_attention:
             slots = torch.arange(context_len, device=device, dtype=torch.long) + start
             ops.concat_and_cache_mla(
                 kv_c_context,
                 k_pe_context.squeeze(1),
                 kv_cache,
                 slots,
-                kv_cache_dtype="fp8_ds_mla",
+                kv_cache_dtype=kv_cache_dtype,
                 scale=scale_tensor,
             )
         else:
@@ -258,27 +290,189 @@ def create_and_prepopulate_kv_cache(
     return kv_cache
 
 
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
+class MockSparseMLAAttentionLayer:
+    """A mock sparse MLA attention layer for testing.
 
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        self._prob_scale = torch.tensor(1.0, device=device)
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+    Sparse MLA implementations only support forward_mqa (decode-style attention)
+    for all tokens, so this class only implements that path.
 
-    def forward(self, *_args, **_kwargs):
-        raise NotImplementedError
+    Unlike regular MLA impls, sparse MLA impls don't have W_UK_T and W_UV
+    attributes. These transformations are done by the layer (MLAAttention),
+    not the impl. This mock layer accepts these weight matrices directly.
+    """
 
-
-class MockMLAAttentionLayer(AttentionLayerBase):
-    """A mock MLA attention layer for populating static_forward_context."""
-
-    def __init__(self, impl):
+    def __init__(
+        self,
+        impl,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        device: torch.device,
+        W_UK: torch.Tensor,
+        W_UV: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
+    ):
         self.impl = impl
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+
+        # Compute weight matrices in the format expected by forward_impl
+        # W_UK shape: (L, N, P) -> W_UK_T shape: (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
+        # W_UV shape: (L, N, V) -> (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
+
+        # Scale attributes needed by attention backends
+        self._q_scale = torch.tensor(q_scale, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
+        self._prob_scale = torch.tensor(1.0, device=device)
+        self._q_scale_float = q_scale
+        self._k_scale_float = k_scale
+        self._v_scale_float = float("nan")
+
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward for sparse MLA - uses forward_mqa for all tokens."""
+        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+
+        # Write to KV cache
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+        num_tokens = q.shape[0]
+
+        # Sparse MLA uses forward_mqa for all tokens
+        # Split q into nope and pe parts
+        mqa_q_nope, mqa_q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+
+        # Convert from (B, N, P) to (N, B, P)
+        mqa_q_nope = mqa_q_nope.transpose(0, 1)
+
+        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+        mqa_ql_nope = torch.bmm(mqa_q_nope, self.W_UK_T)
+
+        # Convert from (N, B, L) to (B, N, L)
+        mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+        if fp8_attention and self.impl.supports_quant_query_input:
+            assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+            assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+            mqa_q = self._decode_concat_quant_fp8_op(
+                mqa_ql_nope, mqa_q_pe, self._q_scale
+            )
+        else:
+            mqa_q = (mqa_ql_nope, mqa_q_pe)
+
+        attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+        # v_up projection: multiply by W_UV
+        # attn_out shape: (B, N, L) where L = kv_lora_rank
+        # W_UV shape: (N, L, V)
+        # output shape: (B, N, V) -> flatten to (B, N*V)
+        decode_output = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
+        output[:num_tokens] = decode_output.reshape(
+            num_tokens, self.num_heads * self.v_head_dim
+        )
+
+        return output
+
+
+class MockMLAAttentionLayer(MLAAttention):
+    """A mock MLA attention layer for testing.
+
+    This replicates the forward_impl logic from MLAAttention to allow
+    testing MLA backends without the full layer infrastructure.
+
+    Subclasses MLAAttention so that backends that filter
+    `static_forward_context` by `isinstance(layer, MLAAttention)` (e.g.
+    FlashInfer prefill, which reads sm_scale through that filter) see the
+    mock as a real MLA layer. MLAAttention.__init__ is intentionally
+    skipped — it would create its own impl/prefill_backend and self-register
+    in static_forward_context, which fights what the test sets up below.
+    """
+
+    def __init__(
+        self,
+        impl,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        device: torch.device,
+        kv_b_proj,
+        q_scale: float,
+        k_scale: float,
+    ):
+        torch.nn.Module.__init__(self)
+        self.impl = impl
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+
+        # Compute weight matrices from kv_b_proj (like MLAAttention does)
+        # This replicates MLAAttention.process_weights_after_loading logic
+        kv_b_proj_weight = kv_b_proj.weight.T
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            kv_lora_rank,
+            num_heads,
+            qk_nope_head_dim + v_head_dim,
+        )
+        W_UK, W_UV = kv_b_proj_weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
+        # Convert from (L, N, V) to (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
+        # Convert from (L, N, P) to (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
+
+        # Scale attributes needed by attention backends
+        self._q_scale = torch.tensor(q_scale, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(float("nan"), device=device)
+        self._prob_scale = torch.tensor(1.0, device=device)
+        self._q_scale_float = q_scale
+        self._k_scale_float = k_scale
+        self._v_scale_float = float("nan")
+
+        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
+            compile_native=True,
+        )
 
     def get_attn_backend(self):
         raise NotImplementedError
@@ -286,10 +480,98 @@ class MockMLAAttentionLayer(AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config):
         raise NotImplementedError
 
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replicates MLAAttention.forward_impl logic for testing."""
+        # Write to KV cache
+        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+        # Determine decode vs prefill split
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        has_decode = (attn_metadata.num_decodes or 0) > 0
+        has_prefill = (attn_metadata.num_prefills or 0) > 0
+
+        # Run prefill with forward_mha
+        if has_prefill:
+            prefill_q = q[num_decode_tokens:]
+            prefill_k_pe = k_pe[num_decode_tokens:]
+            prefill_k_c = kv_c[num_decode_tokens:]
+            self.impl.forward_mha(
+                prefill_q,
+                prefill_k_c,
+                prefill_k_pe,
+                kv_cache,
+                attn_metadata,
+                self._k_scale,
+                output=output[num_decode_tokens:],
+            )
+
+        # Run decode with forward_mqa
+        if has_decode:
+            decode_q = q[:num_decode_tokens]
+
+            # Split q into nope and pe parts
+            mqa_q_nope, mqa_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Convert from (B, N, P) to (N, B, P)
+            mqa_q_nope = mqa_q_nope.transpose(0, 1)
+
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            mqa_ql_nope = torch.bmm(mqa_q_nope, self.W_UK_T)
+
+            # Convert from (N, B, L) to (B, N, L)
+            mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+            if fp8_attention and self.impl.supports_quant_query_input:
+                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                mqa_q = self._decode_concat_quant_fp8_op(
+                    mqa_ql_nope, mqa_q_pe, self._q_scale
+                )
+            else:
+                mqa_q = (mqa_ql_nope, mqa_q_pe)
+
+            attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+            # v_up projection: multiply by W_UV
+            # attn_out shape: (B, N, L) where L = kv_lora_rank
+            # W_UV shape: (N, L, V)
+            # output shape: (B, N, V) -> flatten to (B, N*V)
+            decode_output = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(
+                0, 1
+            )
+            output[:num_decode_tokens] = decode_output.reshape(
+                num_decode_tokens, self.num_heads * self.v_head_dim
+            )
+
+        return output
+
 
 def run_attention_backend(
     backend: AttentionBackendEnum,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: MLAAttentionSpec,
     layer_names: list[str],
     vllm_config,
     device: torch.device,
@@ -303,10 +585,17 @@ def run_attention_backend(
     qk_rope_head_dim: int,
     v_head_dim: int,
     mock_kv_b_proj,
+    q_scale: float,
+    k_scale: float,
+    kv_cache_dtype: str = "auto",
+    prefill_backend: MLAPrefillBackendEnum | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
+
+    # Force the prefill backend selection (None means auto-select).
+    vllm_config.attention_config.mla_prefill_backend = prefill_backend
 
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
@@ -319,7 +608,11 @@ def run_attention_backend(
             vllm_config.parallel_config
         )
         head_size = vllm_config.model_config.get_head_size()
-        scale = 1.0 / (head_size**0.5)
+        # Production MLA passes 1/sqrt(qk_head_dim) (the prefill scale) to the
+        # impl and forwards the same value to the prefill backend. FLASHINFER
+        # prefill reads sm_scale back from impl.scale via global_hyperparameters
+        # at plan() time, so impl.scale must agree with prefill_backend.scale.
+        scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -327,7 +620,7 @@ def run_attention_backend(
             num_kv_heads=num_kv_heads,
             alibi_slopes=None,
             sliding_window=None,
-            kv_cache_dtype="auto",
+            kv_cache_dtype=kv_cache_dtype,
             logits_soft_cap=None,
             attn_type="decoder",
             kv_sharing_target_layer_name=None,
@@ -340,14 +633,46 @@ def run_attention_backend(
             kv_b_proj=mock_kv_b_proj,
         )
 
-        # Process weights to create W_UK_T and W_UV attributes needed by MLA
+        # Process weights on the impl
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
+
+        # Initialize DCP attributes (normally set by MLAAttention.forward
+        # before calling forward_mha, see mla_attention.py:511-512)
+        if impl.dcp_world_size == -1:
+            impl.dcp_world_size = 1
+
+        # Create mock MLA layer
+        mock_layer = MockMLAAttentionLayer(
+            impl=impl,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            device=device,
+            kv_b_proj=mock_kv_b_proj,
+            q_scale=q_scale,
+            k_scale=k_scale,
+        )
+
+        # Attach prefill backend (normally created by MLAAttention.__init__)
+        prefill_scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        mock_layer.prefill_backend = prefill_backend_cls(
+            num_heads=num_heads,
+            scale=prefill_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            vllm_config=vllm_config,
+        )
 
         # Populate static_forward_context with mock attention layers
         for layer_name in layer_names:
             vllm_config.compilation_config.static_forward_context[layer_name] = (
-                MockMLAAttentionLayer(impl)
+                mock_layer
             )
 
         # Build metadata
@@ -357,18 +682,15 @@ def run_attention_backend(
             common_attn_metadata=common_attn_metadata,
         )
 
-        # Create mock layer and output buffer
-        mock_layer = MockAttentionLayer(device)
+        # Create output buffer
         num_tokens = query.shape[0]
         output = torch.empty(
             num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
         )
 
         # Run forward pass
-        # NOTE: The query, key, and value are already shaped correctly
-        # in the calling test function.
-        output = impl.forward(
-            mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+        output = mock_layer.forward_impl(
+            query, kv_c, k_pe, kv_cache, attn_metadata, output
         )
 
         return output
@@ -393,8 +715,20 @@ def run_attention_backend(
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
 def test_backend_correctness(
-    dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    kv_cache_dtype: str,
+    q_scale: float,
+    k_scale: float,
+    prefill_backend: MLAPrefillBackendEnum,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -417,9 +751,41 @@ def test_backend_correctness(
     head counts.
     """
 
+    # Filter backends to those that support the requested kv_cache_dtype
+    backends_to_test = [
+        b
+        for b in BACKENDS_TO_TEST
+        if kv_cache_dtype in b.get_class().supported_kv_cache_dtypes
+    ]
+    if (
+        q_scale != 1.0 or k_scale != 1.0
+    ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
+        # CUTLASS_MLA does not support non-1 Q/K scales
+        backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
+    if not backends_to_test:
+        pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
+
+    # Skip prefill backends that can't satisfy capability/deps/R1 constraints.
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
+
+    try:
+        prefill_invalid_reasons = prefill_backend.get_class().validate_configuration(
+            current_platform.get_device_capability(),
+            MLAPrefillSelectorConfig(dtype=torch.bfloat16, is_r1_compatible=True),
+        )
+    except ImportError:
+        prefill_invalid_reasons = ["ImportError"]
+    if prefill_invalid_reasons:
+        pytest.skip(
+            f"Prefill backend {prefill_backend.name} unavailable: "
+            f"{prefill_invalid_reasons}"
+        )
+
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
-    unique_block_sizes = sorted(set(BACKEND_BLOCK_SIZES.values()))
+    unique_block_sizes = sorted(set(BACKEND_BLOCK_SIZES[b] for b in backends_to_test))
     default_block_size = unique_block_sizes[0]
     required_blocks = sum(
         (seq_len + default_block_size - 1) // default_block_size
@@ -453,6 +819,7 @@ def test_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
@@ -467,7 +834,7 @@ def test_backend_correctness(
             method="ngram", num_speculative_tokens=query_len - 1
         )
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -486,7 +853,13 @@ def test_backend_correctness(
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
-    scale = 1.0 / (total_head_size**0.5)
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    prefill_scale = qk_head_dim**-0.5
+    # MLA reuses prefill_scale for the decode path: production sets
+    # impl.scale = 1/sqrt(qk_head_dim) and the decode kernels apply it even
+    # though the latent attention runs at head_size dimensions. Keeping the
+    # reference here in sync with run_attention_backend's impl.scale.
+    decode_scale = prefill_scale
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -500,9 +873,17 @@ def test_backend_correctness(
     W_UV = torch.randn(
         kv_lora_rank, num_q_heads, v_head_dim, dtype=dtype, device=device
     )
+
+    # Scale weights to produce realistic magnitude outputs.
+    # Without scaling, projection output has std ~sqrt(kv_lora_rank) ≈ 22.6,
+    # causing extreme attention scores and numerical instability in LSE merging.
+    weight_scale = 1.0 / (kv_lora_rank**0.5)
+    W_UK = W_UK * weight_scale
+    W_UV = W_UV * weight_scale
+
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(BACKENDS_TO_TEST):
+    for i, backend in enumerate(backends_to_test):
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -536,7 +917,7 @@ def test_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
+        for backend_idx, backend in enumerate(backends_to_test):
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -595,7 +976,7 @@ def test_backend_correctness(
         v_sdpa_in = v_mqa.unsqueeze(0).transpose(1, 2)
 
         sdpa_out_i_decode = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=decode_scale
         )
         sdpa_out_i_decode = sdpa_out_i_decode.transpose(1, 2).squeeze(
             0
@@ -631,12 +1012,12 @@ def test_backend_correctness(
 
         # Single attention call with custom mask
         sdpa_out_i_prefill = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=prefill_scale
         )
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
+        for backend_idx, backend in enumerate(backends_to_test):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -656,7 +1037,7 @@ def test_backend_correctness(
     kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
     k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
     sdpa_outputs = {}
-    for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
+    for backend_idx, backend in enumerate(backends_to_test):
         sdpa_outputs[backend] = torch.cat(all_sdpa_outputs[backend_idx], dim=0)
 
     # Create mock kv_b_proj using the same weights as reference implementation
@@ -724,12 +1105,14 @@ def test_backend_correctness(
             num_blocks=num_blocks_for_size,
             common_attn_metadata=common_attn_metadata,
             randomize_blocks=True,
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
         )
         kv_cache_per_block_size[block_size] = kv_cache
 
     # 4. Run vLLM backends and compare
     failures = []
-    for backend_idx, backend_name in enumerate(BACKENDS_TO_TEST):
+    for backend_idx, backend_name in enumerate(backends_to_test):
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
@@ -740,7 +1123,7 @@ def test_backend_correctness(
         kv_cache = kv_cache_per_block_size[block_size]
 
         # Create kv_cache_spec with the correct block_size for this backend
-        backend_kv_cache_spec = FullAttentionSpec(
+        backend_kv_cache_spec = MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=vllm_config.model_config.get_num_kv_heads(
                 vllm_config.parallel_config
@@ -748,6 +1131,7 @@ def test_backend_correctness(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             sliding_window=vllm_config.model_config.get_sliding_window(),
+            cache_dtype_str=kv_cache_dtype,
         )
 
         backend_output = run_attention_backend(
@@ -766,6 +1150,10 @@ def test_backend_correctness(
             qk_rope_head_dim,
             v_head_dim,
             mock_kv_b_proj,
+            prefill_backend=prefill_backend,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
         # Use backend_idx to get the correct SDPA output for this backend

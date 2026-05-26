@@ -7,11 +7,14 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -25,9 +28,8 @@ from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Qwen3NextConfig
+from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
-from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -146,18 +148,31 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        is_fse = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        num_experts = self.config.num_experts
+        if is_fse:
+            num_experts += 1
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=num_experts,
         )
+        num_routed = self.config.num_experts
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            # FSE: remap shared_expert weights to the fused expert slot
+            if is_fse and "mlp.shared_expert." in name:
+                name = name.replace(
+                    "mlp.shared_expert.",
+                    f"mlp.experts.{num_routed}.",
+                )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -220,7 +235,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
+class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -234,9 +249,11 @@ class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3NextMTP currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3NextMTP currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         self.quant_config = vllm_config.quant_config
 
@@ -252,9 +269,6 @@ class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
         self.set_moe_parameters()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -262,7 +276,7 @@ class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,

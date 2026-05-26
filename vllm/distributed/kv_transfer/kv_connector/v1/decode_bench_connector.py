@@ -32,7 +32,7 @@ Usage:
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -40,12 +40,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    SupportsHMA,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import AttentionMetadata
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -71,7 +74,7 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
     reqs_to_fill: dict[str, tuple[tuple[list[int], ...], int]]
 
 
-class DecodeBenchConnector(KVConnectorBase_V1):
+class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     """
     A KV Connector for decode instance performance testing.
 
@@ -84,7 +87,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -117,7 +120,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         # This connector doesn't save KV cache (benchmarking only)
@@ -160,6 +163,17 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.request_finished(request)
+        return False, None
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # HMA-enabled path: same cleanup as the single-group variant since
+        # this connector owns no external state per block.
         assert self.connector_scheduler is not None
         self.connector_scheduler.request_finished(request)
         return False, None

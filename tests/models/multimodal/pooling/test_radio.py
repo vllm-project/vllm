@@ -8,6 +8,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.models.radio import RadioModel
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -16,6 +17,8 @@ from ....conftest import ImageTestAssets
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @torch.inference_mode()
@@ -40,18 +43,18 @@ def run_radio_test(
         for image in images
     ]
 
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
     # RADIO model on HF does not properly handle torch_dtype argument
     # And relies on args["dtype"] which we have to patch manually:
-    config.args["dtype"] = torch_dtype
+    hf_config.args["dtype"] = torch_dtype
 
     hf_model = AutoModel.from_pretrained(
         model_id,
-        config=config,
+        config=hf_config,
         dtype=torch_dtype,
         trust_remote_code=True,
-    ).to("cuda")
+    ).to(DEVICE_TYPE)
     hf_model.eval()
 
     # A HF model has image normalization as a part of model's forward
@@ -62,25 +65,28 @@ def run_radio_test(
     hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).features for pixel_value in pixel_values
+        hf_model(pixel_value.to(DEVICE_TYPE)) for pixel_value in pixel_values
     ]
 
-    radio_config = RadioConfig(
-        model_name=config.args["model"], reg_tokens=config.args["register_multiple"]
+    vllm_config = RadioConfig(
+        model_name=hf_config.args["model"],
+        **hf_config.args,
     )
-    vllm_model = RadioModel(radio_config)
+    vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())
-    vllm_model = vllm_model.to("cuda", torch_dtype)
+    vllm_model = vllm_model.to(DEVICE_TYPE, torch_dtype)
 
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to("cuda")) for pixel_value in pixel_values
+        vllm_model(pixel_values=pixel_value.to(DEVICE_TYPE))
+        for pixel_value in pixel_values
     ]
     del vllm_model, hf_model
     cleanup_dist_env_and_memory()
 
     cos_similar = nn.CosineSimilarity(dim=-1)
     for vllm_output, hf_output in zip(vllm_outputs_per_image, hf_outputs_per_image):
-        assert cos_similar(vllm_output, hf_output).mean() > 0.99
+        assert cos_similar(vllm_output[0], hf_output[0]).mean() > 0.99
+        assert cos_similar(vllm_output[1], hf_output[1]).mean() > 0.99
 
 
 @pytest.mark.parametrize(
@@ -90,7 +96,9 @@ def run_radio_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
-def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
+def test_radio(
+    default_vllm_config, dist_init, image_assets, model_id, dtype: str
+) -> None:
     run_radio_test(
         image_assets,
         model_id,

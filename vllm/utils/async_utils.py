@@ -12,7 +12,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import ParamSpec
@@ -34,6 +34,7 @@ class AsyncMicrobatchTokenizer:
         tokenizer,
         max_batch_size: int = 32,
         batch_wait_timeout_s: float = 0.002,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_batch_size = max_batch_size
@@ -47,17 +48,21 @@ class AsyncMicrobatchTokenizer:
         self._batcher_tasks: list[Task] = []
 
         # Single-thread executor for blocking tokenizer calls.
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        # Accept an external executor to serialize with other tokenizer users.
+        self._executor = executor or ThreadPoolExecutor(max_workers=1)
 
     # === Public async API ===
-    async def __call__(self, prompt, **kwargs):
+    async def __call__(self, prompt, **kwargs) -> BatchEncoding:
         result_future: Future = self._loop.create_future()
         key = self._queue_key("encode", kwargs)
         queue = self._get_queue(self._loop, key)
         await queue.put((prompt, kwargs, result_future))
         return await result_future
 
-    async def decode(self, token_ids, **kwargs):
+    async def encode(self, prompt, **kwargs) -> list[int]:
+        return (await self(prompt, **kwargs)).input_ids
+
+    async def decode(self, token_ids, **kwargs) -> str:
         result_future: Future = self._loop.create_future()
         key = self._queue_key("decode", kwargs)
         queue = self._get_queue(self._loop, key)
@@ -255,6 +260,13 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
         return asyncio.get_running_loop() == event_loop
     except RuntimeError:
         return False
+
+
+# A hack to pass mypy
+if TYPE_CHECKING:
+
+    def anext(it: AsyncGenerator[T, None]):
+        return it.__anext__()
 
 
 async def merge_async_iterators(

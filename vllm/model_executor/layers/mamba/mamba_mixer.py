@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, NamedTuple
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+from typing import NamedTuple
 
 import torch
 from torch import nn
@@ -16,7 +13,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -27,23 +24,31 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    selective_scan_fn,
-    selective_state_update,
-)
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
-@CustomOp.register("mamba_mixer")
-class MambaMixer(MambaBase, CustomOp):
+# --8<-- [start:mamba_mixer]
+@PluggableLayer.register("mamba_mixer")
+class MambaMixer(MambaBase, PluggableLayer):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -53,6 +58,8 @@ class MambaMixer(MambaBase, CustomOp):
     invariant S4, and is why Mamba is called
     **selective** state spaces)
     """
+
+    # --8<-- [end:mamba_mixer]
 
     def __init__(
         self,
@@ -85,6 +92,7 @@ class MambaMixer(MambaBase, CustomOp):
             input_size=conv_kernel_size,
             output_size=intermediate_size,
             bias=use_conv_bias,
+            prefix=f"{prefix}.conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -93,7 +101,10 @@ class MambaMixer(MambaBase, CustomOp):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         self.in_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=use_bias
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=use_bias,
+            prefix=f"{prefix}.in_proj",
         )
 
         # selective projection used to make dt, B and C input dependent
@@ -101,12 +112,17 @@ class MambaMixer(MambaBase, CustomOp):
             intermediate_size,
             time_step_rank + ssm_state_size * 2,
             bias=False,
+            prefix=f"{prefix}.x_proj",
         )
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
         # as the bias is added in the selective scan kernel.
         self.dt_proj = ColumnParallelLinear(
-            time_step_rank, intermediate_size, bias=True, skip_bias_add=True
+            time_step_rank,
+            intermediate_size,
+            bias=True,
+            skip_bias_add=True,
+            prefix=f"{prefix}.dt_proj",
         )
 
         def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
@@ -139,6 +155,7 @@ class MambaMixer(MambaBase, CustomOp):
             hidden_size,
             bias=use_bias,
             input_is_parallel=True,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.dt_layernorm = (
@@ -185,11 +202,12 @@ class MambaMixer(MambaBase, CustomOp):
     def _ssm_transform(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.is_lora_enabled:
-            #  Lora kernel requires contiguous tensor.
-            ssm_params = self.x_proj(x.contiguous())[0]
-        else:
-            ssm_params = self.x_proj(x)[0]
+        # LoRA kernel requires contiguous tensor.
+        # ROCm: Non-contiguous tensors cause incorrect GEMM
+        # results when batch > 1.
+        if self.is_lora_enabled or current_platform.is_rocm():
+            x = x.contiguous()
+        ssm_params = self.x_proj(x)[0]
         time_step, B, C = torch.split(
             ssm_params,
             [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
@@ -202,6 +220,12 @@ class MambaMixer(MambaBase, CustomOp):
             time_step = self.dt_layernorm(time_step.contiguous())
             B = self.b_layernorm(B.contiguous())
             C = self.c_layernorm(C.contiguous())
+
+        # ROCm: tensor from split is non-contiguous, causing incorrect
+        # GEMM results in dt_proj.
+        if current_platform.is_rocm():
+            time_step = time_step.contiguous()
+
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, B, C
 
@@ -209,13 +233,10 @@ class MambaMixer(MambaBase, CustomOp):
         torch.ops.vllm.mamba_mixer(
             hidden_states,
             output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
-    def forward_native(self, hidden_states: torch.Tensor, output: torch.Tensor):
-        pass
-
-    def forward_cuda(self, hidden_states: torch.Tensor, output: torch.Tensor):
+    def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor):
         """
         Run the Mamba-1 SSM pipeline.
 
@@ -239,23 +260,29 @@ class MambaMixer(MambaBase, CustomOp):
         """
 
         forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
+        attn_metadata_raw = forward_context.attn_metadata
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
 
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
-            state_indices_tensor = attn_metadata.state_indices_tensor
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+            conv_state = (
+                self.kv_cache[0]
+                if is_conv_state_dim_first()
+                else self.kv_cache[0].transpose(-1, -2)
+            )
+            ssm_state = self.kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
-            num_padded_decodes = attn_metadata.num_padded_decodes
+            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -281,19 +308,15 @@ class MambaMixer(MambaBase, CustomOp):
         prefill_decode_split = split_batch_to_prefill_and_decode(
             hidden_states_BC,
             gate,
-            state_indices_tensor,
             num_prefill_tokens,
-            num_prefills,
-            num_padded_decodes,
+            num_decode_tokens,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
         gate_p = prefill_decode_split.gate_p
         gate_d = prefill_decode_split.gate_d
-        state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
-        state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
 
-        if prefix_caching_enabled:
+        if is_mamba_cache_all:
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
                 torch.split(
                     attn_metadata.block_idx_last_computed_token,
@@ -339,6 +362,7 @@ class MambaMixer(MambaBase, CustomOp):
                 initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
+                metadata=attn_metadata,
             )
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
@@ -365,11 +389,16 @@ class MambaMixer(MambaBase, CustomOp):
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                cu_chunk_seqlen=cu_chunk_seqlen_p,
+                last_chunk_indices=last_chunk_indices_p,
             )
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
-            if prefix_caching_enabled:
+            # state_indices_tensor_d is assigned when attn_metadata is not None,
+            # and has_decode is only True when attn_metadata is not None
+            assert state_indices_tensor_d is not None
+            if is_mamba_cache_all:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
@@ -407,8 +436,8 @@ class MambaMixer(MambaBase, CustomOp):
                 B_d,
                 C_d,
                 self.D,
-                gate_d.transpose(0, 1),
                 time_proj_bias,
+                z=gate_d.transpose(0, 1),
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
@@ -449,13 +478,8 @@ class MambaMixer(MambaBase, CustomOp):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba1"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
-
-        return Mamba1AttentionBackend
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA1
 
     def _time_proj_bias(self) -> torch.Tensor | None:
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
@@ -468,35 +492,24 @@ class PrefillDecodeSplit(NamedTuple):
     hidden_states_BC_d: torch.Tensor
     gate_p: torch.Tensor
     gate_d: torch.Tensor
-    state_indices_tensor_p: torch.Tensor
-    state_indices_tensor_d: torch.Tensor
 
 
 def split_batch_to_prefill_and_decode(
     hidden_states_BC: torch.Tensor,
     gate: torch.Tensor,
-    state_indices_tensor: torch.Tensor,
     num_prefill_tokens: int,
-    num_prefills: int,
-    num_padded_decodes: int,
+    num_decode_tokens: int,
 ) -> PrefillDecodeSplit:
-    num_actual_tokens = num_prefill_tokens + num_padded_decodes
+    num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
     # In v1, decode tokens come first, then prefill tokens.
     hidden_states_BC_d, hidden_states_BC_p = torch.split(
         hidden_states_BC[..., :num_actual_tokens],
-        [num_padded_decodes, num_prefill_tokens],
+        [num_decode_tokens, num_prefill_tokens],
         dim=-1,
     )
     gate_d, gate_p = torch.split(
-        gate[..., :num_actual_tokens], [num_padded_decodes, num_prefill_tokens], dim=-1
-    )
-
-    # num_padded_decodes accounts for CUDA graph padding when applicable
-    state_indices_tensor_d, state_indices_tensor_p = torch.split(
-        state_indices_tensor[: num_padded_decodes + num_prefills],
-        [num_padded_decodes, num_prefills],
-        dim=0,
+        gate[..., :num_actual_tokens], [num_decode_tokens, num_prefill_tokens], dim=-1
     )
 
     return PrefillDecodeSplit(
@@ -504,25 +517,24 @@ def split_batch_to_prefill_and_decode(
         hidden_states_BC_d=hidden_states_BC_d,
         gate_p=gate_p,
         gate_d=gate_d,
-        state_indices_tensor_p=state_indices_tensor_p,
-        state_indices_tensor_d=state_indices_tensor_d,
     )
 
 
 def mamba_mixer(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    self.forward_impl(hidden_states=hidden_states, output=output)
 
 
 def mamba_mixer_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

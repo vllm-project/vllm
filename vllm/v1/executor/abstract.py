@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -15,12 +16,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -56,9 +58,14 @@ class Executor(ABC):
                 )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            from vllm.v1.executor.ray_executor import RayDistributedExecutor
+            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
-            executor_class = RayDistributedExecutor
+                executor_class = RayExecutorV2
+            else:
+                from vllm.v1.executor.ray_executor import RayDistributedExecutor
+
+                executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -84,6 +91,7 @@ class Executor(ABC):
             )
         return executor_class
 
+    @instrument(span_name="Executor init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -113,7 +121,20 @@ class Executor(ABC):
         underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        self.collective_rpc("compile_or_warm_up_model")
+        compilation_times: list[CompilationTimes] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
+        # Propagate compilation time from workers back to the main process.
+        # With TP>1, compilation happens in worker processes, so the main
+        # process config is never updated. Use max across workers since they
+        # compile in parallel.
+        if compilation_times:
+            self.vllm_config.compilation_config.compilation_time = max(
+                t.language_model for t in compilation_times
+            )
+            self.vllm_config.compilation_config.encoder_compilation_time = max(
+                t.encoder for t in compilation_times
+            )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """
@@ -219,7 +240,7 @@ class Executor(ABC):
 
     def sample_tokens(
         self, grammar_output: GrammarOutput | None, non_block: bool = False
-    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "sample_tokens", args=(grammar_output,), non_block=non_block
         )
@@ -236,8 +257,8 @@ class Executor(ABC):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,
@@ -294,6 +315,10 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache in each worker to clear cached encoder outputs."""
+        self.collective_rpc("reset_encoder_cache")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
@@ -338,6 +363,13 @@ class Executor(ABC):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         raise NotImplementedError
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        """
+        Whether the executor supports async scheduling.
+        """
+        return False
 
 
 from vllm.v1.executor.uniproc_executor import (  # noqa: E402

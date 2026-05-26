@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
+from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
+# CK's pre-compiled MXFP4 MoE GEMM kernel instances require the
+# intermediate_size (after TP split) to be a multiple of this value.
+# This arises from FP4 packing (2 values per byte) combined with CK
+# tile size constraints. When violated, AITER raises:
+# "device_gemm ... does not support this GEMM problem".
+CK_MXFP4_MOE_DIM_ALIGNMENT = 256
 
-def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+
+def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
+    assert has_triton_kernels()
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
     from triton_kernels.numerics import InFlexData
     from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
@@ -37,15 +44,22 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from triton_kernels.tensor_details.layout import (
-            GFX950MXScaleLayout,
-            StridedLayout,
-        )
-
         from vllm.platforms.rocm import on_gfx950
 
         value_layout = StridedLayout
-        scale_layout = GFX950MXScaleLayout if on_gfx950() else StridedLayout
+        if on_gfx950():
+            try:
+                # triton < 3.6
+                from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
+
+                scale_layout = GFX950MXScaleLayout
+            except ImportError:
+                # triton >= 3.6
+                from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
+
+                scale_layout = CDNA4MXScaleLayout
+        else:
+            scale_layout = StridedLayout
     else:
         value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
             mx_axis=1
@@ -55,12 +69,18 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
                 mx_axis=1, num_warps=num_warps
             )
         )
-    if current_platform.is_cuda() and current_platform.is_device_capability(100):
-        constraints = {
-            "is_persistent": True,
-            "epilogue_subtile": 1,
-        }
-        opt_flags.update_opt_flags_constraints(constraints)
+    if current_platform.is_cuda():
+        if current_platform.is_device_capability(90):
+            constraints = {
+                "split_k": 1,
+            }
+            opt_flags.update_opt_flags_constraints(constraints)
+        elif current_platform.is_device_capability_family(100):
+            constraints = {
+                "is_persistent": True,
+                "epilogue_subtile": 1,
+            }
+            opt_flags.update_opt_flags_constraints(constraints)
     # transpose the tensor so that the quantization axis is on dim1
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
@@ -69,43 +89,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     )
     scale = convert_layout(wrap_torch_tensor(scale), scale_layout, **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
-
-
-def _can_support_mxfp4(
-    use_grouped_topk: bool = False,
-    topk_group: int | None = None,
-    num_expert_group: int | None = None,
-    expert_map: torch.Tensor | None = None,
-    custom_routing_function: Callable | None = None,
-    e_score_correction_bias: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    scoring_func: str = "softmax",
-    activation: str = "swigluoai",
-    expert_load_view: torch.Tensor | None = None,
-    logical_to_physical_map: torch.Tensor | None = None,
-    logical_replica_count: torch.Tensor | None = None,
-):
-    return not (
-        use_grouped_topk
-        or topk_group
-        or num_expert_group
-        or custom_routing_function
-        or e_score_correction_bias
-        or apply_router_weight_on_input
-        or scoring_func != "softmax"
-        or activation != "swigluoai"
-        or expert_load_view
-        or logical_to_physical_map
-        or logical_replica_count
-    )
-
-
-def get_padding_alignment():
-    return (
-        256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
-        else 128
-    )
 
 
 def _dequant_mxfp4(
@@ -179,3 +162,7 @@ try:
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4
 except AttributeError as error:
     raise error
+
+
+def xpu_mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.xpu_mxfp4_quantize(x)

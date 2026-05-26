@@ -1,36 +1,37 @@
-# --8<-- [start:installation]
+<!-- markdownlint-disable MD041 -->
+--8<-- [start:installation]
 
 vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
-Currently the CPU implementation for s390x architecture supports FP32 datatype only.
+Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16.
 
-!!! warning
-    There are no pre-built wheels or images for this device, so you must build vLLM from source.
-
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+--8<-- [end:installation]
+--8<-- [start:requirements]
 
 - OS: `Linux`
-- SDK: `gcc/g++ >= 12.3.0` or later with Command Line Tools
+- SDK: `gcc/g++ >= 14.0.0` or later with Command Line Tools
 - Instruction Set Architecture (ISA): VXE support is required. Works with Z14 and above.
-- Build install python packages: `pyarrow`, `torch` and `torchvision`
+- Build install python packages: `torchvision`, `llvmlite`, `numba`, `pyarrow (for testing)`, `opencv-headless`
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+--8<-- [end:requirements]
+--8<-- [start:set-up-using-python]
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+--8<-- [end:set-up-using-python]
+--8<-- [start:pre-built-wheels]
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+Currently, there are no pre-built IBM Z CPU wheels.
 
-Install the following packages from the package manager before building the vLLM. For example on RHEL 9.4:
+--8<-- [end:pre-built-wheels]
+--8<-- [start:build-wheel-from-source]
+
+Install the following packages from the package manager before building the vLLM. For example on RHEL 9.6:
 
 ```bash
 dnf install -y \
-    which procps findutils tar vim git gcc g++ make patch make cython zlib-devel \
+    which procps findutils tar vim git gcc-toolset-14 gcc-toolset-14-binutils gcc-toolset-14-libatomic-devel zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
-    openssl-devel openblas openblas-devel wget autoconf automake libtool cmake numactl-devel
+    openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy libsndfile \
+    clang llvm-devel llvm-static clang-devel
 ```
 
 Install rust>=1.80 which is needed for `outlines-core` and `uvloop` python packages installation.
@@ -43,13 +44,13 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 Execute the following commands to build and install vLLM from source.
 
 !!! tip
-    Please build the following dependencies, `torchvision`, `pyarrow` from source before building vLLM.
+    Please build the following dependencies, `torchvision`, `llvmlite`, `numba`, `llguidance`, `pyarrow`, `opencv-headless` from source before building vLLM.
 
 ```bash
-    sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
     uv pip install -v \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
         --torch-backend auto \
-        -r requirements/build.txt \
+        -r requirements/build/cpu.txt \
         -r requirements/cpu.txt \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
         uv pip install dist/*.whl
@@ -57,20 +58,21 @@ Execute the following commands to build and install vLLM from source.
 
 ??? console "pip"
     ```bash
-        sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
         pip install -v \
-            --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-            -r requirements/build.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements/build/cpu.txt \
             -r requirements/cpu.txt \
         VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
             pip install dist/*.whl
     ```
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+--8<-- [end:build-wheel-from-source]
+--8<-- [start:pre-built-images]
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+Currently, there are no pre-built IBM Z CPU images.
+
+--8<-- [end:pre-built-images]
+--8<-- [start:build-image-from-source]
 
 ```bash
 docker build -f docker/Dockerfile.s390x \
@@ -92,6 +94,6 @@ docker run --rm \
 !!! tip
     An alternative of `--privileged true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-# --8<-- [end:extra-information]
+--8<-- [end:build-image-from-source]
+--8<-- [start:extra-information]
+--8<-- [end:extra-information]

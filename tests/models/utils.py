@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,10 +10,11 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.model import ModelConfig, ModelDType, RunnerOption
+from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
+from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -276,7 +277,7 @@ def build_model_context(
     dtype: ModelDType = "auto",
     model_config_kwargs: dict[str, Any] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    limit_mm_per_prompt: dict[str, int] | None = None,
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]] | None = None,
     mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputProcessingContext for a given model.
@@ -292,10 +293,17 @@ def build_model_context(
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
     model_config_kwargs = model_config_kwargs or {}
-    limit_mm_per_prompt = limit_mm_per_prompt or {}
+    limit_mm_per_prompt = {
+        modality: dict(limit) if isinstance(limit, Mapping) else limit
+        for modality, limit in (limit_mm_per_prompt or {}).items()
+    }
     model_config = ModelConfig(
         model_id,
         runner=runner,
@@ -370,12 +378,17 @@ def softmax(data):
 @dataclass
 class ModelInfo:
     name: str
+    revision: str | None = None
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
     hf_dtype: str = "float32"
     hf_overrides: dict[str, Any] | None = None
-    default_pooling_type: str = ""
+    seq_pooling_type: SequencePoolingType | None = None
+    tok_pooling_type: TokenPoolingType | None = None
+    attn_type: AttnTypeStr | None = None
+    is_prefix_caching_supported: bool | None = None
+    is_chunked_prefill_supported: bool | None = None
     enable_test: bool = True
 
 
@@ -387,28 +400,9 @@ class EmbedModelInfo(ModelInfo):
 
 
 @dataclass
-class CLSPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingEmbedModelInfo(EmbedModelInfo):
-    default_pooling_type: str = "LAST"
-
-
-@dataclass
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
-
-
-@dataclass
-class CLSPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "CLS"
-
-
-@dataclass
-class LASTPoolingRerankModelInfo(RerankModelInfo):
-    default_pooling_type: str = "LAST"
+    chat_template_name: str | None = None
 
 
 @dataclass
@@ -457,13 +451,23 @@ def dummy_hf_overrides(
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """
-    hf_config.update(exist_overrides or {})
+    # Copy because this helper is called more than once
+    # while loading config, and we `.pop()`
+    exist_overrides = (exist_overrides or {}).copy()
+    text_config_override = exist_overrides.pop("text_config", None)
+    hf_config.update(exist_overrides)
 
     text_config = hf_config.get_text_config()
+    if text_config_override is not None:
+        # multimodal test models may override *some* text-model fields
+        text_config.update(text_config_override)
 
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
     n_group = getattr(text_config, "n_group", None)
+    # Kimi uses `num_expert_group` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "num_expert_group", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -475,7 +479,16 @@ def dummy_hf_overrides(
     else:
         # Use minimal layers for testing
         num_layers = 1
-        num_hidden_layers = 3 if model_arch == "Gemma3nForConditionalGeneration" else 1
+        num_hidden_layers = (
+            3
+            if model_arch
+            in (
+                "Gemma3nForConditionalGeneration",
+                "Gemma4ForCausalLM",
+                "Gemma4ForConditionalGeneration",
+            )
+            else 1
+        )
 
     update_dict = {
         "num_layers": num_layers,
@@ -483,16 +496,22 @@ def dummy_hf_overrides(
         "num_kv_shared_layers": 1,
     }
 
+    _hf_config = hf_config
+
     class DummyConfig:
+        hf_config = _hf_config
         hf_text_config = text_config
 
+    model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
-    if ModelConfig.get_num_experts(DummyConfig) > 0:
+    if model_arch_config.num_experts > 0:
         update_dict.update(
             {
                 "num_experts": num_experts,
                 "num_experts_per_tok": 2,
+                # Kimi uses `num_experts_per_token`.
+                "num_experts_per_token": 2,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,
@@ -507,6 +526,17 @@ def dummy_hf_overrides(
 
     text_config.update(update_dict)
 
+    # Update n_layers and moe configs for Moondream3 model
+    if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
+        text_config.update(
+            {
+                "n_layers": num_hidden_layers,
+                "moe_num_experts": num_experts,
+                "moe_experts_per_token": 2,
+                "moe_start_layer": num_hidden_layers,
+            }
+        )
+
     if hasattr(hf_config, "vision_config"):
         hf_config.vision_config.update(
             {
@@ -514,6 +544,9 @@ def dummy_hf_overrides(
                 "num_hidden_layers": 1,
             }
         )
+
+        if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
+            hf_config.vision_config.update({"enc_n_layers": 1})
 
     # e.g.: ibm-granite/granite-speech-3.3-2b
     if hasattr(hf_config, "encoder_config"):

@@ -4,11 +4,12 @@
 import dataclasses
 import importlib
 import pickle
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import Any, TypeAlias
+from typing import Any, ClassVar, TypeAlias, cast, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -16,6 +17,8 @@ import numpy as np
 import torch
 import zmq
 from msgspec import msgpack
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import core_schema
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -25,13 +28,12 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalFlatField,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.v1.engine import UtilityResult
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
@@ -50,6 +52,27 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 }
 
 bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
+
+
+class OOBTensorConsumer(ABC):
+    @abstractmethod
+    def __call__(self, tensor: torch.Tensor) -> dict | None:
+        """
+        Called with tensors for the current message.
+        Returns None to reject the tensor (falls back to regular serialization),
+        otherwise a dict with arbitrary placeholder data to be included
+        in the serialized message.
+        """
+        return None
+
+    @abstractmethod
+    def new_message(self) -> None:
+        """Called at the start of each new encoded message."""
+        pass
+
+
+# dtype, shape, metadata -> tensor
+OOBTensorProvider = Callable[[str, tuple[int, ...], dict], torch.Tensor]
 
 
 def _log_insecure_serialization_warning():
@@ -103,6 +126,13 @@ def _decode_type_info_recursive(
     return convert_fn(type_info, data)
 
 
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
+
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
@@ -111,9 +141,16 @@ class MsgpackEncoder:
 
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
+
+    When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will be
+    offered to it for out-of-band handling.
     """
 
-    def __init__(self, size_threshold: int | None = None):
+    def __init__(
+        self,
+        size_threshold: int | None = None,
+        oob_tensor_consumer: OOBTensorConsumer | None = None,
+    ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
@@ -122,11 +159,14 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
+        self.oob_tensor_consumer = oob_tensor_consumer
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
+            if self.oob_tensor_consumer is not None:
+                self.oob_tensor_consumer.new_message()
             self.aux_buffers = bufs = [b""]
             bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
@@ -139,6 +179,8 @@ class MsgpackEncoder:
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
+            if self.oob_tensor_consumer is not None:
+                self.oob_tensor_consumer.new_message()
             self.aux_buffers = [buf]
             bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)
@@ -166,9 +208,6 @@ class MsgpackEncoder:
 
         if isinstance(obj, MultiModalKwargsItems):
             return self._encode_mm_items(obj)
-
-        if isinstance(obj, MultiModalKwargs):
-            return self._encode_mm_kwargs(obj)
 
         if isinstance(obj, UtilityResult):
             result = obj.result
@@ -217,17 +256,19 @@ class MsgpackEncoder:
 
     def _encode_tensor(
         self, obj: torch.Tensor
-    ) -> tuple[str, tuple[int, ...], int | memoryview]:
-        assert self.aux_buffers is not None
+    ) -> tuple[str, tuple[int, ...], int | dict | memoryview]:
+        oob_consumer = self.oob_tensor_consumer
         # view the tensor as a contiguous 1D array of bytes
-        arr_data = tensor_data(obj)
-        if obj.nbytes < self.size_threshold:
+        if obj.nbytes < self.size_threshold and obj.is_cpu:
             # Smaller tensors are encoded inline, just like ndarrays.
-            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))
+        elif oob_consumer is not None and (data := oob_consumer(obj)) is not None:
+            assert isinstance(data, dict)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
+            assert self.aux_buffers is not None
             data = len(self.aux_buffers)
-            self.aux_buffers.append(arr_data)
+            self.aux_buffers.append(tensor_data(obj))
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
@@ -237,22 +278,15 @@ class MsgpackEncoder:
             for modality, itemlist in items.items()
         }
 
-    def _encode_mm_item(self, item: MultiModalKwargsItem) -> list[dict[str, Any]]:
-        return [self._encode_mm_field_elem(elem) for elem in item.values()]
+    def _encode_mm_item(self, item: MultiModalKwargsItem) -> dict[str, Any]:
+        return {key: self._encode_mm_field_elem(elem) for key, elem in item.items()}
 
     def _encode_mm_field_elem(self, elem: MultiModalFieldElem) -> dict[str, Any]:
         return {
-            "modality": elem.modality,
-            "key": elem.key,
             "data": (
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
             "field": self._encode_mm_field(elem.field),
-        }
-
-    def _encode_mm_kwargs(self, kw: MultiModalKwargs) -> dict[str, Any]:
-        return {
-            modality: self._encode_nested_tensors(data) for modality, data in kw.items()
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -269,10 +303,11 @@ class MsgpackEncoder:
         name = MMF_CLASS_TO_FACTORY.get(field.__class__)
         if not name:
             raise TypeError(f"Unsupported field type: {field.__class__}")
+
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        field_values = (getattr(field, f.name) for f in dataclasses.fields(field))
-        return name, *field_values
+        factory_kw = {f.name: getattr(field, f.name) for f in dataclasses.fields(field)}
+        return name, factory_kw
 
 
 class MsgpackDecoder:
@@ -280,14 +315,25 @@ class MsgpackDecoder:
 
     Note that unlike vanilla `msgspec` Decoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
+
+    ``oob_tensor_provider`` must be used when an OOBTensorConsumer is used on the
+    encoder side.
     """
 
-    def __init__(self, t: Any | None = None):
+    def __init__(
+        self,
+        t: Any | None = None,
+        share_mem: bool = True,
+        oob_tensor_provider: OOBTensorProvider | None = None,
+    ):
+        self.share_mem = share_mem
+        self.pin_tensors = is_pin_memory_available()
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
         )
         self.aux_buffers: Sequence[bytestr] = ()
+        self.oob_tensor_provider = oob_tensor_provider
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -314,8 +360,6 @@ class MsgpackDecoder:
                 return self._decode_mm_item(obj)
             if issubclass(t, MultiModalKwargsItems):
                 return self._decode_mm_items(obj)
-            if issubclass(t, MultiModalKwargs):
-                return self._decode_mm_kwargs(obj)
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj
@@ -347,21 +391,36 @@ class MsgpackDecoder:
         # zero-copy decode. We assume the ndarray will not be kept around,
         # as it now locks the whole received message buffer in memory.
         buffer = self.aux_buffers[data] if isinstance(data, int) else data
-        return np.frombuffer(buffer, dtype=dtype).reshape(shape)
+        arr = np.frombuffer(buffer, dtype=dtype)
+        if not self.share_mem:
+            arr = arr.copy()
+        return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
         dtype, shape, data = arr
-        # Copy from inline representation, to decouple the memory storage
-        # of the message from the original buffer. And also make Torch
-        # not complain about a readonly memoryview.
-        buffer = self.aux_buffers[data] if isinstance(data, int) else bytearray(data)
+        if isinstance(data, dict):
+            assert self.oob_tensor_provider, (
+                "Received OOB tensor but tensor provider is not set"
+            )
+            return self.oob_tensor_provider(dtype, shape, data)
+
+        is_aux = isinstance(data, int)
+        buffer = self.aux_buffers[data] if is_aux else data
+        buffer = buffer if isinstance(buffer, memoryview) else memoryview(buffer)
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
-        if not buffer:  # torch.frombuffer doesn't like empty buffers
+        if not buffer.nbytes:  # torch.frombuffer doesn't like empty buffers
             assert 0 in shape
             return torch.empty(shape, dtype=torch_dtype)
         # Create uint8 array
         arr = torch.frombuffer(buffer, dtype=torch.uint8)
+        # Clone ensures tensor is backed by pytorch-owned memory for safe
+        # future async CPU->GPU transfer.
+        # Pin larger tensors for more efficient CPU->GPU transfer.
+        if not is_aux:
+            arr = arr.clone()
+        elif not self.share_mem:
+            arr = arr.pin_memory() if self.pin_tensors else arr.clone()
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
@@ -373,9 +432,9 @@ class MsgpackDecoder:
             }
         )
 
-    def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
-        return MultiModalKwargsItem.from_elems(
-            [self._decode_mm_field_elem(v) for v in obj]
+    def _decode_mm_item(self, obj: dict[str, Any]) -> MultiModalKwargsItem:
+        return MultiModalKwargsItem(
+            {key: self._decode_mm_field_elem(elem) for key, elem in obj.items()}
         )
 
     def _decode_mm_field_elem(self, obj: dict[str, Any]) -> MultiModalFieldElem:
@@ -383,24 +442,16 @@ class MsgpackDecoder:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
         # Reconstruct the field processor using MultiModalFieldConfig
-        factory_meth_name, *field_args = obj["field"]
+        factory_meth_name, factory_kw = obj["field"]
         factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
 
         # Special case: decode the union "slices" field of
         # MultiModalFlatField
         if factory_meth_name == "flat":
-            field_args[0] = self._decode_nested_slices(field_args[0])
+            factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
 
-        obj["field"] = factory_meth(None, *field_args).field
+        obj["field"] = factory_meth("", **factory_kw).field
         return MultiModalFieldElem(**obj)
-
-    def _decode_mm_kwargs(self, obj: dict[str, Any]) -> MultiModalKwargs:
-        return MultiModalKwargs(
-            {
-                modality: self._decode_nested_tensors(data)
-                for modality, data in obj.items()
-            }
-        )
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):
@@ -457,3 +508,121 @@ def run_method(
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+
+class PydanticMsgspecMixin:
+    """Make a ``msgspec.Struct`` compatible with Pydantic for both
+    **validation** (JSON/dict -> Struct) and **serialization**
+    (Struct -> JSON-safe dict).
+
+    Subclasses may set ``__pydantic_msgspec_exclude__`` (a ``set[str]``)
+    to list non-underscore field names that should also be stripped from
+    serialized output.  Fields whose names start with ``_`` are always
+    excluded automatically.
+    """
+
+    # Subclasses can override to exclude additional public-but-internal keys.
+    __pydantic_msgspec_exclude__: ClassVar[set[str]] = set()
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Make msgspec.Struct compatible with Pydantic, respecting defaults.
+        Handle JSON=>msgspec.Struct. Used when exposing msgspec.Struct to the
+        API as input or in `/docs`. Note this is cached by Pydantic and not
+        called on every validation.
+        """
+        msgspec_fields = {f.name: f for f in msgspec.structs.fields(source_type)}
+        type_hints = get_type_hints(source_type)
+
+        # Build the Pydantic typed_dict_field for each msgspec field
+        fields = {}
+        for name, hint in type_hints.items():
+            if name not in msgspec_fields:
+                # Skip ClassVar and other non-struct annotations.
+                continue
+            # Skip private fields — they are excluded from serialization
+            # and should not appear in the generated JSON/OpenAPI schema.
+            if name.startswith("_"):
+                continue
+            msgspec_field = msgspec_fields[name]
+
+            # typed_dict_field using the handler to get the schema
+            field_schema = handler(hint)
+
+            # Add default value to the schema.
+            # Mark fields with defaults as not required so the generated
+            # JSON Schema stays consistent with ``omit_defaults=True``
+            # serialization (fields at their default value may be absent).
+            if msgspec_field.default_factory is not msgspec.NODEFAULT:
+                wrapped_schema = core_schema.with_default_schema(
+                    schema=field_schema,
+                    default_factory=msgspec_field.default_factory,
+                )
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False
+                )
+            elif msgspec_field.default is not msgspec.NODEFAULT:
+                wrapped_schema = core_schema.with_default_schema(
+                    schema=field_schema,
+                    default=msgspec_field.default,
+                )
+                fields[name] = core_schema.typed_dict_field(
+                    wrapped_schema, required=False
+                )
+            else:
+                # No default, so Pydantic will treat it as required
+                fields[name] = core_schema.typed_dict_field(field_schema)
+        typed_dict_then_convert = core_schema.no_info_after_validator_function(
+            cls._validate_msgspec,
+            core_schema.typed_dict_schema(fields),
+        )
+
+        # Build a serializer that strips private / excluded fields.
+        serializer = core_schema.plain_serializer_function_ser_schema(
+            cls._serialize_msgspec,
+            info_arg=False,
+        )
+
+        # Accept either an already-constructed msgspec.Struct instance or a
+        # JSON/dict-like payload.
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(source_type),
+                typed_dict_then_convert,
+            ],
+            serialization=serializer,
+        )
+
+    @classmethod
+    def _validate_msgspec(cls, value: Any) -> Any:
+        """Validate and convert input to msgspec.Struct instance."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            return cls(**value)
+        return msgspec.convert(value, type=cls)
+
+    @staticmethod
+    def _serialize_msgspec(value: Any) -> Any:
+        """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
+        private (``_``-prefixed) and explicitly excluded fields.
+
+        Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
+        so only fields that differ from their declared defaults are included.
+        """
+        raw = msgspec.to_builtins(value)
+        if not isinstance(raw, dict):
+            return raw
+
+        exclude: set[str] = cast(
+            set[str],
+            getattr(type(value), "__pydantic_msgspec_exclude__", set()),
+        )
+        for key in list(raw):
+            if key.startswith("_") or key in exclude:
+                del raw[key]
+
+        return raw

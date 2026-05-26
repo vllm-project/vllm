@@ -23,26 +23,19 @@ def is_gcs(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("gs://")
 
 
+def is_azure(model_or_path: str) -> bool:
+    return model_or_path.lower().startswith("az://")
+
+
 def is_cloud_storage(model_or_path: str) -> bool:
-    return is_s3(model_or_path) or is_gcs(model_or_path)
+    return is_s3(model_or_path) or is_gcs(model_or_path) or is_azure(model_or_path)
 
 
-def check_gguf_file(model: str | PathLike) -> bool:
-    """Check if the file is a GGUF model."""
-    model = Path(model)
-    if not model.is_file():
-        return False
-    elif model.suffix == ".gguf":
-        return True
-
-    try:
-        with model.open("rb") as f:
-            header = f.read(4)
-
-        return header == b"GGUF"
-    except Exception as e:
-        logger.debug("Error reading file %s: %s", model, e)
-        return False
+def without_trust_remote_code(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return kwargs without trust_remote_code without modifying original dict."""
+    if "trust_remote_code" not in kwargs:
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k != "trust_remote_code"}
 
 
 def modelscope_list_repo_files(

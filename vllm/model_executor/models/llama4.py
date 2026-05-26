@@ -19,14 +19,11 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention import Attention
-from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -35,7 +32,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.attention import (
+    Attention,
+    ChunkedLocalAttention,
+)
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -50,10 +54,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     extract_layer_index,
     fast_topk,
     is_pp_missing_parameter,
@@ -123,7 +130,7 @@ class Llama4MoE(nn.Module):
         self.n_physical_experts = self.n_local_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -131,7 +138,6 @@ class Llama4MoE(nn.Module):
             custom_routing_function=Llama4MoE.custom_routing_function,
             intermediate_size=intermediate_size_moe,
             apply_router_weight_on_input=True,
-            reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -147,19 +153,14 @@ class Llama4MoE(nn.Module):
 
         router_logits, _ = self.router(hidden_states)
 
-        shared_out, routed_out = self.experts(
+        experts_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        experts_out = routed_out + shared_out
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
             experts_out = experts_out[:num_tokens]
-        elif self.tp_size > 1:
-            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
-                experts_out
-            )
 
         return experts_out
 
@@ -171,8 +172,6 @@ class Llama4Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -208,7 +207,6 @@ class Llama4Attention(nn.Module):
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
@@ -246,10 +244,8 @@ class Llama4Attention(nn.Module):
         self.rotary_emb = (
             get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=int(rope_theta),
-                rope_scaling=rope_scaling if rope_scaling != "default" else None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=is_neox_style,
             )
             if not self.nope
@@ -331,8 +327,6 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
-        rope_theta = config.rope_theta
-        rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
 
         self.self_attn = Llama4Attention(
@@ -340,8 +334,6 @@ class Llama4DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,
@@ -425,7 +417,7 @@ class Llama4Model(LlamaModel):
             params_dict: The dictionary of module parameters.
             loaded_params: The set of already loaded parameters.
             expert_params_mapping: The mapping of expert parameters. Must be
-                generated by SharedFusedMoE.make_expert_params_mapping().
+                generated by fused_moe_make_expert_params_mapping().
             fused: Whether the expert weights are fused into a single weight
                 tensor or are separate weight tensors for each expert.
                 When fused is True, loaded_weight should have shape of:
@@ -511,7 +503,25 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    new_loaded_weight = new_loaded_weight[local_expert_indices]
+                    # Workaround for FP8 CPU indexing on older PyTorch:
+                    # https://github.com/vllm-project/vllm/issues/32862
+                    is_fp8_dtype = new_loaded_weight.dtype == (
+                        current_platform.fp8_dtype()
+                    ) or (
+                        new_loaded_weight.dtype.is_floating_point
+                        and new_loaded_weight.element_size() == 1
+                    )
+                    if (
+                        new_loaded_weight.device.type == "cpu"
+                        and is_fp8_dtype
+                        and not is_torch_equal_or_newer("2.11.0")
+                    ):
+                        # PyTorch < 2.11 doesn't support CPU float8 indexing.
+                        new_loaded_weight = new_loaded_weight.to(torch.float16)[
+                            local_expert_indices
+                        ].to(new_loaded_weight.dtype)
+                    else:
+                        new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights
@@ -547,7 +557,8 @@ class Llama4Model(LlamaModel):
         fused_experts_params = False
         # Expert parameter mapping for the case where the expert weights are
         # not fused into a single weight tensor.
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -556,7 +567,8 @@ class Llama4Model(LlamaModel):
         )
         # Expert parameter mapping for the case where the expert weights are
         # fused into a single weight tensor.
-        expert_params_mapping_fused = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping_fused = fused_moe_make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="gate_up_proj",
@@ -738,6 +750,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, Llama4DecoderLayer)
             if isinstance(layer.feed_forward, Llama4MoE):
                 # Pick last one layer since the first ones may be dense layers.
@@ -774,6 +789,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             if isinstance(layer.feed_forward, Llama4MoE):
                 moe = layer.feed_forward
                 moe.n_local_physical_experts = num_local_physical_experts
@@ -807,53 +825,38 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         name: str,
         loaded_weight: torch.Tensor,
     ) -> tuple[str, torch.Tensor]:
-        # Helper function to permute the weight's channels
-        def permute(w: torch.Tensor, n_heads: int, is_weight_scale: bool):
-            # Calculate the expected shape of the weight.
-            # Do not rely on w's shape, as it may be in another layout.
-            attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
+        modules = name.split(".")
+        # Permute Q/K weights and corresponding scales for rotary embedding.
+        # This pathway is validated against modelopt and compressed-tensors ckpts,
+        # and for per-tensor, per-group (e.g. GPTQ), and per-channel quant schemes.
+        # Note: permutations are not feasible only for per-block (e.g. DeepSeek 128x128)
+        # For per-block quantization, consider not quantizing q/k_proj.
+        is_weight = modules[-1] in ("weight", "weight_packed")
+        is_weight_scale = (
+            modules[-1] == "weight_scale"
+            and loaded_weight.numel() > 1  # no need to permute per-tensor scales
+        )
+        is_k_proj = "wk" in modules or "k_proj" in modules
+        is_q_proj = "wq" in modules or "q_proj" in modules
 
-            # If the weight is FP4 packed as uint8, we need to divide attn_out
-            # by 2.
-            if w.dtype == torch.uint8 and w.shape[1] * 2 == attn_out:
-                attn_out = attn_out // 2
+        if (is_weight or is_weight_scale) and (is_k_proj or is_q_proj):
+            original_ndim = loaded_weight.ndim
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.unsqueeze(-1)
 
-            # If the weight is a weight scale, we need to divide attn_out by
-            # block size, which is currently 16.
-            elif (
-                w.dtype == torch.float8_e4m3fn
-                and is_weight_scale
-                and w.shape[1] * 16 == attn_out
-            ):
-                attn_out = attn_out // 16
-
-            return (
-                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
+            f_out, f_in = loaded_weight.shape
+            n_heads = (
+                self.config.num_key_value_heads
+                if is_k_proj
+                else self.config.num_attention_heads
+            )
+            loaded_weight = (
+                loaded_weight.view(n_heads, f_out // n_heads // 2, 2, f_in)
                 .transpose(1, 2)
-                .reshape(attn_in, attn_out)
+                .reshape(f_out, f_in)
             )
 
-        modules = name.split(".")
-
-        # Permute Q/K weights and weight block scales for rotary embedding
-        is_weight = modules[-1] == "weight"
-        is_nvfp4_weight_scale = (
-            modules[-1] == "weight_scale" and loaded_weight.dtype == torch.float8_e4m3fn
-        )
-
-        if is_weight or is_nvfp4_weight_scale:
-            if "wk" in modules or "k_proj" in modules:
-                loaded_weight = permute(
-                    loaded_weight,
-                    self.config.num_key_value_heads,
-                    is_nvfp4_weight_scale,
-                )
-            elif "wq" in modules or "q_proj" in modules:
-                loaded_weight = permute(
-                    loaded_weight,
-                    self.config.num_attention_heads,
-                    is_nvfp4_weight_scale,
-                )
+            if original_ndim == 1:
+                loaded_weight = loaded_weight.squeeze(-1)
 
         return name, loaded_weight

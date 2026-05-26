@@ -3,6 +3,8 @@
 
 import pytest
 import torch
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -10,12 +12,10 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-# These have unsupported head_dim for FA. We do not
-# have a clean way to fall back, so we fail with
-# a clear msg when it happens.
-# https://github.com/vllm-project/vllm/issues/14524
-# NOTE(woosuk): Skipping these tests until V1 supports them.
-# REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
+# Models that require embedding scaling for prompt_embeds test
+EMBED_SCALING_MODELS = {
+    "openbmb/MiniCPM4.1-8B",
+}
 
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
@@ -46,7 +46,7 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
@@ -71,8 +71,8 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "openbmb/MiniCPM3-4B",
-            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=32)],
+            "openbmb/MiniCPM4.1-8B",  # minicpm
+            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
         ),
         pytest.param(
             "facebook/opt-125m",  # opt
@@ -100,9 +100,13 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param(
+            "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
+            marks=[large_gpu_mark(min_gb=32)],
+        ),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -128,12 +132,25 @@ def test_models(
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        if model == "TitanML/tiny-mixtral":
+            # Untrained model: near-uniform logits make argmax sensitive to
+            # AITER's bfloat16 rounding error in plain rms_norm.
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
         # needed as all the models will be calling AITER kernels
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
+
+    if model == "bigcode/starcoder2-3b":
+        # Replace example.txt's Test1 (an NL prompt) with a code prompt:
+        # starcoder2-3b is a code model, so NL prompts give near-uniform
+        # digit logits where HF<->vLLM bf16 drift can reorder top-K.
+        example_prompts = list(example_prompts)
+        example_prompts[1] = (
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
+        )
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -142,24 +159,42 @@ def test_models(
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
-        prompt_token_ids = []
         for prompt in example_prompts:
             token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
                 hf_model.model.device
             )
-            prompt_token_ids.append(token_ids)
             if prompt_embeds is not None:
-                prompt_embeds.append(
-                    hf_model.model.get_input_embeddings()(token_ids).squeeze(0)
-                )
+                embed = hf_model.model.get_input_embeddings()(token_ids)
+
+                if "gemma" in model.lower() and (
+                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
+                ):
+                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
+                    # embeddings are normalised in `get_prompt_embeddings`,
+                    # like Gemma 3. For older versions, we need to manually normalise.
+                    embed_scale = hf_model.config.hidden_size**0.5
+                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
+                    embed *= normalizer
+
+                # MiniCPM models apply scale_emb to embeddings internally.
+                # vLLM expects pre-scaled embeddings when using inputs_embeds.
+                if model in EMBED_SCALING_MODELS:
+                    config = hf_model.model.config
+                    embed = embed * config.scale_emb
+
+                prompt_embeds.append(embed.squeeze(0))
 
     with vllm_runner(
         model,
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
-        max_num_seqs=2,
+        # Remove the effects of batch variance on ROCm since batch invariance
+        # is not yet supported.
+        # See: https://github.com/vllm-project/vllm/issues/27433
+        max_num_seqs=1 if current_platform.is_rocm() else 2,
         enable_prompt_embeds=use_prompt_embeds,
+        compilation_config={"cudagraph_capture_sizes": [1, 2]},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -189,4 +224,4 @@ def test_models(
         # unit tests. On ROCm, when using AITER
         # the memory might not be deallocated completely
         # before running the next test case
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()

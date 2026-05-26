@@ -41,7 +41,7 @@ MODEL=meta-llama/Llama-3.3-70B-Instruct SYSTEM=TPU TP=8 DOWNLOAD_DIR='' INPUT_LE
 | --- | --- | --- |
 | `BASE` | **Required.** The absolute path to the parent directory of your vLLM repository directory. | `"$HOME"` |
 | `MODEL` | **Required.** The Hugging Face model identifier to be served by vllm. | `"meta-llama/Llama-3.1-8B-Instruct"` |
-| `SYSTEM`| **Required.** The hardware you are running on. Choices: `TPU` or `GPU`. (For other systems, it might not support saving profiles) | `"TPU"` |
+| `SYSTEM` | **Required.** The hardware you are running on. Choices: `TPU` or `GPU`. (For other systems, it might not support saving profiles) | `"TPU"` |
 | `TP` | **Required.** The tensor-parallelism size. | `1` |
 | `DOWNLOAD_DIR` | **Required.** Directory to download and load model weights from. | `""` (default download path) |
 | `INPUT_LEN` | **Required.** Request input length. | `4000` |
@@ -83,7 +83,7 @@ MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
 
-#### 2. Maximize Throughput with a Latency Requirement
+### 2. Maximize Throughput with a Latency Requirement
 
 - **Goal**: Find the best server parameters when P99 end-to-end latency must be below 500ms.
 - **Configuration**:
@@ -96,7 +96,7 @@ MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=500
 ```
 
-#### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+### 3. Maximize Throughput with Prefix Caching and Latency Requirements
 
 - **Goal**: Find the best server parameters assuming a 60% prefix cache hit rate and a latency requirement of 500ms.
 - **Configuration**:

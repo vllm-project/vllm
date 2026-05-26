@@ -105,6 +105,31 @@ jobs:
                   }
                 ],
               },
+              cpu: {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "CPU Backend",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "x86",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "ARM",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "Apple Silicon",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "IBM Z",
+                    searchIn: "title"
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],
@@ -295,20 +320,25 @@ jobs:
           script: |
             // Configuration: Map labels to GitHub users to CC
             // You can add multiple users per label, and multiple label configurations
+            // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],  // Add more users as needed: ['user1', 'user2', 'user3']
-                message: 'CC {users} for ROCm-related issue'  // {users} will be replaced with @mentions
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                message: 'CC {users} for ROCm-related issue',
+              },
+              mistral: {
+                users: ['patrickvonplaten', 'juliendenize', 'andylolu2'],
+                message: 'CC {users} for Mistral-related issue',
               },
               // Add more label -> user mappings here
               // Example:
               // cuda: {
               //   users: ['user1', 'user2'],
-              //   message: 'CC {users} for CUDA-related issue'
+              //   message: 'CC {users} for CUDA-related issue',
               // },
               // performance: {
               //   users: ['perfexpert'],
-              //   message: 'CC {users} for performance issue'
+              //   message: 'CC {users} for performance issue',
               // },
             };
             
@@ -359,3 +389,106 @@ jobs:
                 }
               }
             }
+
+      - name: Request missing ROCm info from issue author
+        if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          script: |
+            const body = (context.payload.issue.body || '').toLowerCase();
+
+            // Check for existing bot comments to avoid duplicate requests
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const botAlreadyAsked = comments.data.some(
+              c => c.user.type === 'Bot' && c.body.includes('<!-- rocm-info-request -->')
+            );
+            if (botAlreadyAsked) {
+              core.notice('ROCm info request already posted, skipping');
+              return;
+            }
+
+            // Define required information and detection patterns
+            const requiredInfo = [
+              {
+                name: 'Reproducer',
+                patterns: [
+                  /reproduc/i, /minimal.?example/i, /repro\b/i, /steps to reproduce/i,
+                  /code.?snippet/i, /sample.?code/i,
+                  /```python[\s\S]*?```/, /```bash[\s\S]*?```/, /```sh[\s\S]*?```/,
+                ],
+                ask: 'A minimal reproducer (code snippet or script that triggers the issue)',
+              },
+              {
+                name: 'Error message',
+                patterns: [
+                  /error/i, /traceback/i, /exception/i, /fault/i, /crash/i,
+                  /failed/i, /abort/i, /panic/i,
+                ],
+                ask: 'The full error message or traceback',
+              },
+              {
+                name: 'Installation method',
+                patterns: [
+                  /docker/i, /rocm\/pytorch/i, /dockerfile/i, /from source/i,
+                  /pip install/i, /build.?from/i, /container/i, /image/i,
+                  /wheel/i, /\.whl/i, /nightly/i,
+                ],
+                ask: 'How you installed vLLM (Docker image name, pip install, or build from source steps)',
+              },
+              {
+                name: 'Command',
+                patterns: [
+                  /vllm serve/i, /python\s+\S+\.py/i, /```bash[\s\S]*?```/,
+                  /```sh[\s\S]*?```/, /command/i, /launch/i, /run\s/i,
+                  /--model/i, /--tensor-parallel/i, /--gpu-memory/i,
+                ],
+                ask: 'The command you used to launch vLLM (e.g., `vllm serve ...` or the Python script)',
+              },
+              {
+                name: 'GFX architecture',
+                patterns: [
+                  /gfx\d{3,4}/i, /mi\d{3}/i, /mi\d{2}\b/i, /radeon/i,
+                  /gpu.?arch/i, /rocm-smi/i, /rocminfo/i, /navi/i,
+                  /instinct/i,
+                ],
+                ask: 'Your GPU model and GFX architecture (e.g., MI300X / gfx942) — run `rocminfo | grep gfx`',
+              },
+            ];
+
+            const issueBody = context.payload.issue.body || '';
+            const missing = requiredInfo.filter(info =>
+              !info.patterns.some(p => p.test(issueBody))
+            );
+
+            if (missing.length === 0) {
+              core.notice('All required ROCm info appears to be present');
+              return;
+            }
+
+            const author = context.payload.issue.user.login;
+            const checklist = requiredInfo.map(info => {
+              const found = !missing.includes(info);
+              return `- [${found ? 'x' : ' '}] ${info.ask}`;
+            }).join('\n');
+            const message = [
+              '<!-- rocm-info-request -->',
+              `Hi @${author}, thanks for reporting this ROCm issue!`,
+              '',
+              'To help us investigate, please make sure the following information is included:',
+              '',
+              checklist,
+              '',
+              'Please provide any unchecked items above. This will help us reproduce and resolve the issue faster. Thank you!',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message,
+            });
+            core.notice(`Requested missing ROCm info from @${author}: ${missing.map(m => m.name).join(', ')}`);

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
+from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -149,13 +151,30 @@ class MultiModalCacheStats(BaseCacheStats):
       that were queried.
     """
 
+    def record(self, num_queries: int, num_hits: int) -> None:
+        """Aggregate request information into the stats."""
+        self.requests += 1
+        self.queries += num_queries
+        self.hits += num_hits
+
+
+@dataclass
+class KVCacheEvictionEvent:
+    """Single KV cache block eviction sample."""
+
+    lifetime_seconds: float
+    idle_seconds: float
+    reuse_gaps_seconds: tuple[float, ...]
+
 
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
     num_running_reqs: int = 0
-    num_waiting_reqs: int = 0
+
+    num_waiting_reqs: int = 0  # length of the "waiting" request queue
+    num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
@@ -166,11 +185,17 @@ class SchedulerStats:
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
+    kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
+    cudagraph_stats: CUDAGraphStat | None = None
+
+    perf_stats: PerfStats | None = None
 
 
 @dataclass
@@ -200,6 +225,7 @@ class FinishedRequestStats:
     """Stats associated with a finished request."""
 
     finish_reason: "FinishReason"
+    request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
@@ -210,6 +236,90 @@ class FinishedRequestStats:
     decode_time: float = 0.0
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
+    num_cached_tokens: int = 0
+
+
+@dataclass
+class PrefillStats:
+    """Breakdown of a scheduled prefill computation.
+
+    Fields:
+        num_prompt_tokens: Total number of tokens to be prefilled.
+        num_computed_tokens: Tokens to be prefilled locally (actual compute work).
+        num_cached_tokens: Tokens to be prefilled without actual compute work.
+        num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
+        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
+    """
+
+    num_prompt_tokens: int = 0
+    num_computed_tokens: int = 0
+    num_cached_tokens: int = 0
+    num_local_cached_tokens: int = 0
+    num_external_cached_tokens: int = 0
+
+    def set(
+        self,
+        num_prompt_tokens: int,
+        num_local_cached_tokens: int,
+        num_external_cached_tokens: int,
+    ):
+        num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
+        assert num_cached_tokens <= num_prompt_tokens
+
+        self.num_prompt_tokens = num_prompt_tokens
+        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens
+        self.num_cached_tokens = num_cached_tokens
+        self.num_local_cached_tokens = num_local_cached_tokens
+        self.num_external_cached_tokens = num_external_cached_tokens
+
+
+@dataclass
+class PromptTokenStats:
+    """Breakdown of prompt tokens by source.
+
+    Fields:
+        computed: Tokens prefilled locally (actual compute work).
+        local_cache_hit: Tokens from local prefix cache.
+        external_kv_transfer: Tokens from external KV transfer.
+        cached_tokens: Tokens skipped during prefill (from scheduler).
+        total: Total prompt tokens.
+
+    Invariants:
+        computed + local_cache_hit + external_kv_transfer = total
+        local_cache_hit + external_kv_transfer = cached_tokens
+    """
+
+    ALL_SOURCES: tuple[str, ...] = (
+        "local_compute",
+        "local_cache_hit",
+        "external_kv_transfer",
+    )
+
+    computed: int = 0
+    local_cache_hit: int = 0
+    external_kv_transfer: int = 0
+    cached_tokens: int = 0
+    total: int = 0
+
+    def update_from_output(self, prefill_stats: PrefillStats) -> None:
+        """Update stats from a prefill output."""
+        self.computed += prefill_stats.num_computed_tokens
+        self.cached_tokens += prefill_stats.num_cached_tokens
+        self.total += prefill_stats.num_prompt_tokens
+
+        self.local_cache_hit += prefill_stats.num_local_cached_tokens
+        self.external_kv_transfer += prefill_stats.num_external_cached_tokens
+
+    def get_by_source(self, source: str) -> int:
+        """Get token count by source label."""
+        source_map = {
+            "local_compute": self.computed,
+            "local_cache_hit": self.local_cache_hit,
+            "external_kv_transfer": self.external_kv_transfer,
+        }
+        if source not in source_map:
+            raise ValueError(f"Unknown source: {source}")
+        return source_map[source]
 
 
 class IterationStats:
@@ -218,7 +328,7 @@ class IterationStats:
     def __init__(self):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
-        self.num_prompt_tokens = 0
+        self.prompt_token_stats = PromptTokenStats()
         self.num_preempted_reqs = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
@@ -231,6 +341,11 @@ class IterationStats:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
         return f"{self.__class__.__name__}({field_to_value_str})"
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        """Total prompt tokens (for backward compatibility)."""
+        return self.prompt_token_stats.total
+
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
@@ -240,7 +355,6 @@ class IterationStats:
         output: "EngineCoreOutput",
         engine_core_timestamp: float,
         is_prefilling: bool,
-        prompt_len: int,
         req_stats: RequestStateStats,
         lora_states: "LoRARequestStates",
         lora_name: str | None,
@@ -249,7 +363,8 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            self.num_prompt_tokens += prompt_len
+            if output.prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
@@ -313,9 +428,11 @@ class IterationStats:
     def update_from_finished_request(
         self,
         finish_reason: "FinishReason",
+        request_id: str,
         num_prompt_tokens: int,
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
+        num_cached_tokens: int = 0,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -343,6 +460,7 @@ class IterationStats:
 
         finished_req = FinishedRequestStats(
             finish_reason=finish_reason,
+            request_id=request_id,
             e2e_latency=e2e_latency,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=req_stats.num_generation_tokens,
@@ -353,6 +471,7 @@ class IterationStats:
             decode_time=decode_time,
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
+            num_cached_tokens=num_cached_tokens,
         )
         self.finished_requests.append(finished_req)
 

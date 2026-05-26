@@ -109,7 +109,7 @@ TEXT_GENERATION_MODELS = {
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
-    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
+    "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
@@ -130,6 +130,7 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-2-1b": PPTestSettings.fast(),
+    "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
     "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
@@ -246,6 +247,7 @@ def _compare_tp(
     hf_config = get_config(model_id, trust_remote_code)
     require_embed_inputs = model_info.require_embed_inputs
     max_num_seqs = model_info.max_num_seqs
+    enable_prefix_caching = model_info.enable_prefix_caching
 
     dtype = "float16"
     if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
@@ -299,6 +301,8 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+    if not enable_prefix_caching:
+        common_args.append("--no-enable-prefix-caching")
     if require_embed_inputs:
         common_args.extend(
             [
@@ -315,9 +319,6 @@ def _compare_tp(
         pp_env = {
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
-        # Temporary. Currently when zeromq + SPMD is used, it does not properly
-        # terminate because of a Ray Compiled Graph issue.
-        common_args.append("--disable-frontend-multiprocessing")
     elif distributed_backend == "mp":
         pp_env = None
     else:

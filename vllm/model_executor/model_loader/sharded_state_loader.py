@@ -4,7 +4,9 @@
 import collections
 import glob
 import os
+import time
 from collections.abc import Generator
+from copy import copy
 from typing import Any
 
 import torch
@@ -29,8 +31,8 @@ class ShardedStateLoader(BaseModelLoader):
     Model loader that directly loads each worker's model state dict, which
     enables a fast load path for large tensor-parallel models where each worker
     only needs to read its own shard rather than the entire checkpoint. See
-    `examples/offline_inference/save_sharded_state.py` for creating a sharded
-    checkpoint.
+    `examples/features/sharded_state/save_sharded_state_offline.py` for creating
+    a sharded checkpoint.
     """
 
     DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
@@ -41,7 +43,7 @@ class ShardedStateLoader(BaseModelLoader):
         extra_config = (
             {}
             if load_config.model_loader_extra_config is None
-            else load_config.model_loader_extra_config.copy()
+            else copy(load_config.model_loader_extra_config)
         )
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
         if extra_config:
@@ -109,8 +111,8 @@ class ShardedStateLoader(BaseModelLoader):
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
-        if hasattr(model_config, "model_weights"):
-            model_weights = model_config.model_weights
+        if model_weights_override := model_config.model_weights:
+            model_weights = model_weights_override
         local_model_path = model_weights
 
         rank = get_tensor_model_parallel_rank()
@@ -132,6 +134,7 @@ class ShardedStateLoader(BaseModelLoader):
                 f"pre-sharded checkpoints are currently supported!"
             )
         state_dict = self._filter_subtensors(model.state_dict())
+        counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
@@ -150,6 +153,11 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             param_data.copy_(tensor)
             state_dict.pop(key)
+        counter_after_loading_weights = time.perf_counter()
+        logger.info_once(
+            "Loading weights took %.2f seconds",
+            counter_after_loading_weights - counter_before_loading_weights,
+        )
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 

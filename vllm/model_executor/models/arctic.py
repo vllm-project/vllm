@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -17,9 +16,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import (
+    fused_experts,
+    fused_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -29,10 +31,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.deepspeedfp import (
-    DeepSpeedFPConfig,
-    DeepSpeedFPParameter,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -46,14 +44,13 @@ from vllm.transformers_utils.configs.arctic import ArcticConfig
 
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
+    AutoWeightsLoader,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
-
-logger = init_logger(__name__)
 
 
 class ArcticMLP(nn.Module):
@@ -128,7 +125,6 @@ class ArcticMoE(nn.Module):
         self.intermediate_size = config.intermediate_size // self.tp_size
 
         self.is_moe_layer = (layer_id + 1) % config.moe_layer_frequency == 0
-        self.is_quant = isinstance(quant_config, DeepSpeedFPConfig)
         self.reduce_results = reduce_results
         # Some other parameters
         if params_dtype is None:
@@ -151,40 +147,24 @@ class ArcticMoE(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.gate",
             )
-            if self.is_quant:
-                self.ws = DeepSpeedFPParameter(
-                    torch.Size(
-                        (self.num_experts, 2 * self.intermediate_size, self.hidden_size)
-                    ),
-                    params_dtype=params_dtype,
-                    quant_config=quant_config,
+            self.ws = nn.Parameter(
+                torch.empty(
+                    self.num_experts,
+                    2 * self.intermediate_size,
+                    self.hidden_size,
+                    device=current_platform.device_type,
+                    dtype=self.params_dtype,
                 )
-                self.w2s = DeepSpeedFPParameter(
-                    torch.Size(
-                        (self.num_experts, self.hidden_size, self.intermediate_size)
-                    ),
-                    params_dtype=params_dtype,
-                    quant_config=quant_config,
+            )
+            self.w2s = nn.Parameter(
+                torch.empty(
+                    self.num_experts,
+                    self.hidden_size,
+                    self.intermediate_size,
+                    device=current_platform.device_type,
+                    dtype=self.params_dtype,
                 )
-            else:
-                self.ws = nn.Parameter(
-                    torch.empty(
-                        self.num_experts,
-                        2 * self.intermediate_size,
-                        self.hidden_size,
-                        device=current_platform.device_type,
-                        dtype=self.params_dtype,
-                    )
-                )
-                self.w2s = nn.Parameter(
-                    torch.empty(
-                        self.num_experts,
-                        self.hidden_size,
-                        self.intermediate_size,
-                        device=current_platform.device_type,
-                        dtype=self.params_dtype,
-                    )
-                )
+            )
             set_weight_attrs(
                 self.ws,
                 {
@@ -206,7 +186,7 @@ class ArcticMoE(nn.Module):
         expert_id: int,
     ):
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param.ds_dequantize() if self.is_quant else param.data
+        param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
@@ -217,8 +197,6 @@ class ArcticMoE(nn.Module):
             ]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if self.is_quant:
-            param.ds_quantize_(param_data)
 
     def local_moe_fused(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -229,26 +207,10 @@ class ArcticMoE(nn.Module):
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states, router_logits, self.top_k, renormalize=do_normalize
         )
-        # topk_ids: (num_tokens, k)
-        if self.is_quant:
-            if 2 * num_tokens <= self.num_experts:
-                # If much fewer tokens than experts, use selective dequantize.
-                ws_dequantized = self.ws.ds_selective_dequantize(topk_ids.flatten())
-                w2s_dequantized = self.w2s.ds_selective_dequantize(topk_ids.flatten())
-                # We gathered the experts to the tokens so update the mapping.
-                topk_ids = torch.arange(
-                    0,
-                    topk_ids.numel(),
-                    device=topk_ids.device,
-                ).reshape(topk_ids.shape)
-            else:
-                ws_dequantized = self.ws.ds_dequantize()
-                w2s_dequantized = self.w2s.ds_dequantize()
-
         final_hidden_states = fused_experts(
             hidden_states,
-            ws_dequantized if self.is_quant else self.ws,
-            w2s_dequantized if self.is_quant else self.w2s,
+            self.ws,
+            self.w2s,
             topk_weights,
             topk_ids,
             inplace=True,
@@ -292,7 +254,6 @@ class ArcticAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
 
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
         self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
@@ -315,9 +276,8 @@ class ArcticAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=int(self.rope_theta),
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
 
@@ -425,6 +385,7 @@ class ArcticModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        self.config = config
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size, config.hidden_size, org_num_embeddings=self.vocab_size
@@ -447,7 +408,7 @@ class ArcticModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -467,57 +428,6 @@ class ArcticModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-
-class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
-    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.model = ArcticModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        self.vocab_size = config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
-        self.num_experts = config.num_local_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
-
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -528,25 +438,37 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
 
         mlp_params_mapping: list[tuple[str, str, int]] = []
         expert_params_mapping: list[tuple[str, str, int]] = []
-        num_layers = self.config.num_hidden_layers
 
-        for layer in range(num_layers):
-            mlp_params_mapping.append(
-                (
-                    f"layers.{layer}.residual_mlp.w13.weight",
-                    f"layers.{layer}.residual_mlp.w1.weight",
-                    0,
+        for layer in range(self.config.num_hidden_layers):
+            is_moe_layer = (layer + 1) % self.config.moe_layer_frequency == 0
+            if is_moe_layer and self.config.use_residual:
+                mlp_params_mapping.append(
+                    (
+                        f"layers.{layer}.residual_mlp.w13.weight",
+                        f"layers.{layer}.residual_mlp.w1.weight",
+                        0,
+                    )
                 )
-            )
-            mlp_params_mapping.append(
-                (
-                    f"layers.{layer}.residual_mlp.w13.weight",
-                    f"layers.{layer}.residual_mlp.w3.weight",
-                    1,
+                mlp_params_mapping.append(
+                    (
+                        f"layers.{layer}.residual_mlp.w13.weight",
+                        f"layers.{layer}.residual_mlp.w3.weight",
+                        1,
+                    )
                 )
-            )
-            if layer % 2 == 0:
-                # MLP layers
+
+            if is_moe_layer:
+                for expert_id in range(self.config.num_local_experts):
+                    expert_params_mapping.append(
+                        ("ws", f"experts.{expert_id}.w1.weight", expert_id)
+                    )
+                    expert_params_mapping.append(
+                        ("w2s", f"experts.{expert_id}.w2.weight", expert_id)
+                    )
+                    expert_params_mapping.append(
+                        ("ws", f"experts.{expert_id}.w3.weight", expert_id)
+                    )
+            else:
                 mlp_params_mapping.append(
                     (
                         f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
@@ -561,27 +483,10 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                         1,
                     )
                 )
-            else:
-                # MoE layers
-                for expert_id in range(self.config.num_local_experts):
-                    expert_params_mapping.append(
-                        ("ws", f"experts.{expert_id}.w1.weight", expert_id)
-                    )
-                    expert_params_mapping.append(
-                        ("w2s", f"experts.{expert_id}.w2.weight", expert_id)
-                    )
-                    expert_params_mapping.append(
-                        ("ws", f"experts.{expert_id}.w3.weight", expert_id)
-                    )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        logger.info(
-            "It will take ~10 minutes loading from the 16-bit weights. "
-            "Alternatively, use the prequantized 8-bit weights of arctic "
-            "and set load-format to `sharded_state` will accelerate loading."
-        )
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -626,10 +531,67 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                         if is_pp_missing_parameter(name, self):
                             continue
                         param = params_dict[name]
-
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.model = ArcticModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.vocab_size = config.vocab_size
+        self.lm_head = ParallelLMHead(
+            self.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        self.num_experts = config.num_local_experts
+        self.num_experts_per_tok = config.num_experts_per_tok
+
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)

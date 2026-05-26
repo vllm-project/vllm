@@ -4,6 +4,6 @@
 
 --8<-- "docs/cli/json_tip.inc.md"
 
-## Options
+## Arguments
 
---8<-- "docs/argparse/bench_sweep_plot.md"
+--8<-- "docs/generated/argparse/bench_sweep_plot.inc.md"

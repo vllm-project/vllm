@@ -28,13 +28,33 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
     ),
+    "deepseek_v4": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningParser",
+    ),
+    "poolside_v1": (
+        "poolside_v1_reasoning_parser",
+        "PoolsideV1ReasoningParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand3ReasoningParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand4ReasoningParser",
+    ),
     "ernie45": (
         "ernie45_reasoning_parser",
         "Ernie45ReasoningParser",
     ),
+    "gemma4": (
+        "gemma4_reasoning_parser",
+        "Gemma4ReasoningParser",
+    ),
     "glm45": (
-        "glm4_moe_reasoning_parser",
-        "Glm4MoeModelReasoningParser",
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningWithThinkingParser",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -44,13 +64,25 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "holo2": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningWithThinkingParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_reasoning_parser",
         "HunyuanA13BReasoningParser",
     ),
+    "hy_v3": (
+        "hy_v3_reasoning_parser",
+        "HYV3ReasoningParser",
+    ),
     "kimi_k2": (
-        "deepseek_r1_reasoning_parser",
-        "DeepSeekR1ReasoningParser",
+        "kimi_k2_reasoning_parser",
+        "KimiK2ReasoningParser",
+    ),
+    "mimo": (
+        "qwen3_reasoning_parser",
+        "Qwen3ReasoningParser",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -63,6 +95,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "mistral": (
         "mistral_reasoning_parser",
         "MistralReasoningParser",
+    ),
+    "nemotron_v3": (
+        "nemotron_v3_reasoning_parser",
+        "NemotronV3ReasoningParser",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
@@ -79,6 +115,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "step3": (
         "step3_reasoning_parser",
         "Step3ReasoningParser",
+    ),
+    "step3p5": (
+        "step3p5_reasoning_parser",
+        "Step3p5ReasoningParser",
     ),
 }
 

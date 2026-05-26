@@ -81,7 +81,7 @@ def _run_test(
         # Patch the issue where image_token_id
         # exceeds the maximum allowed vocab size
         hf_model.model.resize_token_embeddings(
-            hf_model.model.language_model.vocab_size + 1
+            hf_model.model.model.language_model.vocab_size + 1
         )
 
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)

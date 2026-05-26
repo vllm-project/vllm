@@ -41,7 +41,7 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supportedwhen speculative decoding is enabled."
+    "Custom logits processors are not supported when speculative decoding is enabled."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
@@ -202,10 +202,11 @@ def build_logitsprocs(
         if custom_logitsprocs:
             raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
         logger.warning(
-            "min_p, logit_bias, and min_tokens parameters won't currently work "
-            "with speculative decoding enabled."
+            "min_p and logit_bias parameters won't work with speculative decoding."
         )
-        return LogitsProcessors()
+        return LogitsProcessors(
+            [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
+        )
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
@@ -308,11 +309,15 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
         """
         if req_lp := self.new_req_logits_processor(params):
-            args = (
-                [prompt_ids, output_ids]
-                if (len(inspect.signature(req_lp).parameters) == 3)
-                else [output_ids]
-            )
+            if len(inspect.signature(req_lp).parameters) == 3:
+                if prompt_ids is None:
+                    raise ValueError(
+                        "Prompt token ids are required for this "
+                        "logits processor but were not provided."
+                    )
+                args = [prompt_ids, output_ids]
+            else:
+                args = [output_ids]
             return partial(req_lp, *args)
         return None
 

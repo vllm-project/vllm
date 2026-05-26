@@ -6,9 +6,8 @@ from collections.abc import Callable
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    ScaledMMLinearLayerConfig,
-    choose_scaled_mm_linear_kernel,
+from vllm.model_executor.kernels.linear import (
+    init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.parameter import (
@@ -22,8 +21,6 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
-    _kernel_backends_being_used: set[str] = set()
-
     def __init__(
         self,
         qscheme: str,
@@ -50,17 +47,23 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        scaled_mm_linear_kernel_config = ScaledMMLinearLayerConfig(
+        # Quark stores per-channel weight_scale as 1D [N]; reshape to [N, 1].
+        def _scale_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            *args,
+            **kwargs,
+        ):
+            if loaded_weight.dim() == 1:
+                loaded_weight = loaded_weight.unsqueeze(-1)
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        self.kernel = init_int8_linear_kernel(
             is_channelwise=(self.qscheme == "per_channel"),
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),
+            module_name=self.__class__.__name__,
         )
-
-        kernel_type = choose_scaled_mm_linear_kernel(scaled_mm_linear_kernel_config)
-
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for QuarkW8A8Int8", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # WEIGHT
         weight = ModelWeightParameter(
@@ -77,15 +80,15 @@ class QuarkW8A8Int8(QuarkScheme):
         # WEIGHT SCALE
         if self.qscheme == "per_channel":
             weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes)), dtype=torch.float32),
+                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.float32),
                 output_dim=0,
-                weight_loader=weight_loader,
+                weight_loader=_scale_weight_loader,
             )
             ChannelQuantZPParameter = ChannelQuantScaleParameter
             weight_zero_point = ChannelQuantZPParameter(
-                data=torch.empty((sum(output_partition_sizes)), dtype=torch.int8),
+                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.int8),
                 output_dim=0,
-                weight_loader=weight_loader,
+                weight_loader=_scale_weight_loader,
             )
         else:
             assert self.qscheme == "per_tensor"
@@ -102,25 +105,21 @@ class QuarkW8A8Int8(QuarkScheme):
         layer.register_parameter("weight_zero_point", weight_zero_point)
 
         # INPUT SCALE
+        input_zero_point = None
+        input_scale = None
         if self.is_static_input_scheme:
             input_scale = BasevLLMParameter(
                 data=torch.empty(1, dtype=torch.float32), weight_loader=weight_loader
             )
-            layer.register_parameter("input_scale", input_scale)
 
             input_zero_point = BasevLLMParameter(
                 data=torch.empty(1, dtype=torch.int8), weight_loader=weight_loader
             )
-            layer.register_parameter("input_zero_point", input_zero_point)
 
-        self.kernel = kernel_type(
-            c=scaled_mm_linear_kernel_config,
-            w_q_param_name="weight",
-            w_s_param_name="weight_scale",
-            i_s_param_name="input_scale",
-            i_zp_param_name="input_zero_point",
-            azp_adj_param_name="azp_adj",
-        )
+        layer.register_parameter("input_scale", input_scale)
+        layer.register_parameter("input_zero_point", input_zero_point)
+        if not hasattr(layer, "azp_adj"):
+            layer.register_parameter("azp_adj", None)
 
     # Checkpoints are serialized in quark format, which is
     # different from the format the kernel may want. Handle repacking here.

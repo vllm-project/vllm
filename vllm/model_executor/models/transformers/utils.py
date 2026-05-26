@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend utilities."""
+"""Transformers modeling backend utilities."""
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,12 +25,14 @@ from torch import nn
 
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.transformers_utils.config import is_rope_parameters_nested
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -92,7 +94,15 @@ def init_on_device_without_buffers(device: torch.device):
             setattr(torch, torch_function_name, old_torch_function)
 
 
-Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
+Style = Literal[
+    "colwise",
+    "rowwise",
+    "replicate",
+    "colwise_gather_output",
+    "rowwise_split_input",
+    "colwise_rep",
+    "rowwise_rep",
+]
 
 
 def replace_linear_class(
@@ -118,10 +128,14 @@ def replace_linear_class(
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise": (RowParallelLinear, {}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
         "replicate": (ReplicatedLinear, {}),
+        # Transformers v5
+        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
+        # Transformers v4
+        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
@@ -132,6 +146,45 @@ def replace_linear_class(
         prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
+    )
+
+
+TorchConv = nn.Conv2d | nn.Conv3d
+VllmConv = Conv2dLayer | Conv3dLayer
+
+
+def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
+    """Replace a Transformers Conv2d/Conv3d with vLLM's Conv2d/Conv3d.
+
+    Args:
+        conv: `nn.Conv2d` or `nn.Conv3d` to be replaced.
+    Returns:
+        The new `Conv2dLayer` or `Conv3dLayer`. If the conv module is not supported,
+        returns the original conv module.
+    """
+    # vLLM does not handle non-zero padding modes
+    if conv.padding_mode != "zeros":
+        return conv
+
+    vllm_conv_cls = {
+        nn.Conv2d: Conv2dLayer,
+        nn.Conv3d: Conv3dLayer,
+    }.get(type(conv))
+
+    if vllm_conv_cls is None:
+        return conv
+
+    return vllm_conv_cls(
+        in_channels=conv.in_channels,
+        out_channels=conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+        params_dtype=conv.weight.dtype,
     )
 
 
@@ -203,5 +256,10 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     """
     text_config = vllm_config.model_config.hf_config.get_text_config()
     # Dynamic rope scaling is not compatible with torch.compile
-    rope_scaling: dict = getattr(text_config, "rope_scaling", None) or {}
-    return rope_scaling.get("rope_type") != "dynamic"
+    rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
+    if rope_parameters:
+        # Nest rope_parameters if not nested already to simplify logic
+        if not is_rope_parameters_nested(rope_parameters):
+            rope_parameters = {"": rope_parameters}
+        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
+    return True

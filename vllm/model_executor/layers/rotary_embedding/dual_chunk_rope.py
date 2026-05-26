@@ -9,9 +9,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import rotate_gptj, rotate_neox
 
 
+# --8<-- [start:dual_chunk_rotary_embedding]
 @CustomOp.register("dual_chunk_rotary_embedding")
 class DualChunkRotaryEmbedding(CustomOp):
     """Rotary positional embedding for Dual Chunk Attention."""
+
+    # --8<-- [end:dual_chunk_rotary_embedding]
 
     def __init__(
         self,
@@ -33,7 +36,8 @@ class DualChunkRotaryEmbedding(CustomOp):
         self.chunk_size = chunk_size
         self.local_size = local_size
         self.dtype = dtype
-        self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        device_idx = torch.accelerator.current_device_index()
+        self.device = torch.device(f"cuda:{device_idx}")
         (q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache) = (
             self._compute_cos_sin_cache()
         )
@@ -191,10 +195,8 @@ class DualChunkRotaryEmbedding(CustomOp):
     def _apply_rotary_embedding(self, cos_sin, hidden_rot, hidden_pass):
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+            cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
+            sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)

@@ -42,6 +42,8 @@ def ensure_system_prompt(
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
+SEED = 42
+
 ARGS: list[str] = [
     "--enable-auto-tool-choice",
     "--max-model-len",
@@ -123,11 +125,17 @@ CONFIGS: dict[str, ServerConfig] = {
         "supports_parallel": True,
         "extended": True,
     },
-    "mistral": {
+    "mistral-7b": {
         "model": "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
             "--enforce-eager",
             "--no-enable-prefix-caching",
+            "--tokenizer_mode",
+            "hf",
+            "--load_format",
+            "hf",
+            "--config_format",
+            "hf",
             "--tool-call-parser",
             "mistral",
             "--chat-template",
@@ -139,22 +147,49 @@ CONFIGS: dict[str, ServerConfig] = {
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
     },
-    # V1 Test: Passing locally but failing in CI. This runs the
-    # V0 Engine because of CPU offloading. Need to debug why.
+    "mistral-small-3.2": {
+        "model": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "arguments": [
+            "--enforce-eager",
+            "--no-enable-prefix-caching",
+            "--tool-call-parser",
+            "mistral",
+            "--tokenizer-mode",
+            "mistral",
+            "--config-format",
+            "mistral",
+            "--load-format",
+            "mistral",
+            "--tensor-parallel-size",
+            "4",
+            '--ignore-patterns="consolidated.safetensors"',
+        ],
+        "system_prompt": "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
+        "extended": True,
+    },
+    # FIXME: This test currently fails, need to debug why.
     # "granite20b": {
-    #     "model":
-    #     "mbayser/granite-20b-functioncalling-FP8-KV",
+    #     "model": "mbayser/granite-20b-functioncalling-FP8-KV",
     #     "arguments": [
-    #         "--tool-call-parser", "granite-20b-fc", "--chat-template",
-    #         str(VLLM_PATH /
-    #             "examples/tool_chat_template_granite_20b_fc.jinja"),
-    #         "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
+    #         "--tool-call-parser",
+    #         "granite-20b-fc",
+    #         "--chat-template",
+    #         str(VLLM_PATH / "examples/tool_chat_template_granite_20b_fc.jinja"),
+    #         "--max_num_seqs",
+    #         "1",
+    #         "--enforce-eager",
+    #         "--cpu-offload-gb",
+    #         "20",
     #     ],
-    #     "supports_parallel":
-    #     False,
-    #     "supports_rocm":
-    #     False,
+    #     "supports_parallel": False,
+    #     "supports_rocm": False,
     # },
     "granite-3.0-8b": {
         "model": "ibm-granite/granite-3.0-8b-instruct",

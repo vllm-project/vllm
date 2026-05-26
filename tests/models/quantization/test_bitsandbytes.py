@@ -6,7 +6,9 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 """
 
 import pytest
+from packaging.version import Version
 from transformers import BitsAndBytesConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.platforms import current_platform
@@ -14,10 +16,13 @@ from vllm.platforms import current_platform
 from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
 
-pytestmark = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="bitsandbytes quantization not supported on ROCm (CUDA-only kernels)",
-)
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    pytestmark = pytest.mark.skipif(
+        on_gfx9(),
+        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+    )
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
@@ -135,6 +140,12 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     compare_two_settings(model_name, common_args, pp_args)
 
 
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+    reason="Need to add support for quantizing MoE experts with bnb"
+    " in transformers v5. See"
+    " https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1849",
+)
 @pytest.mark.skipif(
     not is_quant_method_supported("bitsandbytes"),
     reason="bitsandbytes is not supported on this GPU type.",
@@ -256,6 +267,9 @@ def validate_generated_texts(
         tensor_parallel_size=vllm_tp_size,
         enforce_eager=False,
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
+        load_format="hf",
+        config_format="hf",
     ) as llm:
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")

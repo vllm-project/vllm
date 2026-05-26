@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from copy import deepcopy
-from unittest.mock import MagicMock
 
 import pytest
 import regex as re
 from pydantic import TypeAdapter
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 pytestmark = pytest.mark.cpu_test
 
@@ -281,8 +280,6 @@ def test_structured_outputs_json_without_parameters(
 @pytest.mark.parametrize("empty_params", [False, True])
 @pytest.mark.parametrize("delta_len", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_streaming_output_valid(output, empty_params, delta_len):
-    self = MagicMock()
-
     output = deepcopy(output)
     if empty_params:
         output = [{"name": o["name"], "parameters": {}} for o in output]
@@ -295,14 +292,13 @@ def test_streaming_output_valid(output, empty_params, delta_len):
         delta_text = output_json[i : i + delta_len]
         current_text = previous_text + delta_text
 
-        delta_message, function_name_returned = (
-            OpenAIServingChat.extract_tool_call_required_streaming(
-                self,
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-            )
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
         )
 
         if delta_message:
@@ -311,6 +307,7 @@ def test_streaming_output_valid(output, empty_params, delta_len):
         previous_text = current_text
 
     assert len(messages) > 0
+
     combined_messages = "["
     for message in messages:
         if message.tool_calls[0].function.name:
@@ -328,3 +325,32 @@ def test_streaming_output_valid(output, empty_params, delta_len):
     combined_messages += "}]"
     assert json.loads(combined_messages) == output
     assert json.dumps(json.loads(combined_messages)) == output_json
+
+
+def test_streaming_output_valid_with_trailing_extra_data():
+    output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
+    output_json = json.dumps(output) + "\nDONE"
+
+    previous_text = ""
+    function_name_returned = False
+    messages = []
+    delta_len = 3
+    for i in range(0, len(output_json), delta_len):
+        delta_text = output_json[i : i + delta_len]
+        current_text = previous_text + delta_text
+
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
+        )
+
+        if delta_message:
+            messages.append(delta_message)
+
+        previous_text = current_text
+
+    assert len(messages) > 0

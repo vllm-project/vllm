@@ -10,12 +10,6 @@ import torch
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
-def set_random_seed(seed: int) -> None:
-    from vllm.platforms import current_platform
-
-    current_platform.seed_everything(seed)
-
-
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,
@@ -48,6 +42,60 @@ def set_weight_attrs(
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
+
+
+def replace_parameter(
+    layer: torch.nn.Module,
+    param_name: str,
+    new_data: torch.Tensor | None,
+    prefer_copy: bool = False,
+):
+    """
+    Replace a parameter of a layer while maintaining the ability to reload the weight.
+    Called within implementations of the `process_weights_after_loading` method.
+
+    This function should not be called on weights which are tied/shared
+
+    Args:
+        layer: Layer containing parameter to replace
+        param_name: Name of parameter to replace
+        new_data: New data of the new parameter, or None to set the parameter to None
+        prefer_copy: If True and the existing parameter is compatible with
+            ``new_data`` (same shape, dtype, and device), copy ``new_data``
+            into the existing parameter in place rather than re-registering
+            a new parameter. This preserves the parameter's storage address
+            (``data_ptr``), which is required for captured CUDA graphs to
+            remain valid across weight updates (e.g. in RL training loops).
+    """
+    # should not be used on a tied/shared param
+
+    # If new_data is None, set the parameter to None
+    if new_data is None:
+        setattr(layer, param_name, None)
+        return
+
+    if isinstance(new_data, torch.nn.Parameter):
+        new_data = new_data.data
+
+    old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
+
+    if (
+        prefer_copy
+        and old_param is not None
+        and old_param.shape == new_data.shape
+        and old_param.dtype == new_data.dtype
+        and old_param.device == new_data.device
+    ):
+        old_param.copy_(new_data)
+        return
+
+    new_param = torch.nn.Parameter(new_data, requires_grad=False)
+
+    if old_param is not None and hasattr(old_param, "weight_loader"):
+        weight_loader = old_param.weight_loader
+        set_weight_attrs(new_param, {"weight_loader": weight_loader})
+
+    setattr(layer, param_name, new_param)
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:

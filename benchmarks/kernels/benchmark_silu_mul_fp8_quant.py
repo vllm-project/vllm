@@ -20,12 +20,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.torch_utils import set_random_seed
 
 
 @triton.jit
@@ -207,7 +207,7 @@ def benchmark(
 ):
     def generate_data(seed_offset=0):
         """Generate input data with given seed offset"""
-        current_platform.seed_everything(42 + seed_offset)
+        set_random_seed(42 + seed_offset)
         y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 
         if gen_strategy == "random_imbalanced":
@@ -251,15 +251,15 @@ def benchmark(
         kernel(
             y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     # Benchmark
     latencies: list[float] = []
     for _ in range(runs):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         for i in range(iterations_per_run):

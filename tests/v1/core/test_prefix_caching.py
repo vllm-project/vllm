@@ -8,6 +8,7 @@ from collections.abc import Callable
 import pytest
 import torch
 
+import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
 from vllm.lora.request import LoRARequest
@@ -35,6 +36,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpecKind,
+    MambaSpec,
     SlidingWindowSpec,
 )
 
@@ -45,7 +48,7 @@ pytestmark = pytest.mark.cpu_test
 def _auto_init_hash_fn(request):
     hash_fn: Callable
     if "hash_fn" in request.fixturenames:
-        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+        hash_fn = request.getfixturevalue("hash_fn")
     else:
         hash_fn = sha256
     init_none_hash(hash_fn)
@@ -67,20 +70,22 @@ def make_request(
         for j, position in enumerate(mm_positions):
             identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -94,34 +99,107 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             )
         ],
     )
 
 
 def make_kv_cache_config_hybrid_model(
-    block_size: int, num_blocks: int
+    block_size: int,
+    num_blocks: int,
+    sliding_window_blocks: int,
+    second_spec_type: str = "sliding_window",
 ) -> KVCacheConfig:
+    if second_spec_type == "sliding_window":
+        second_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window_blocks * block_size,
+        )
+    elif second_spec_type == "mamba":
+        second_spec = MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        )
+
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32),
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                second_spec,
+            ),
+            KVCacheGroupSpec(
+                ["layer3"],
+                second_spec,
+            ),
+        ],
+    )
+
+
+def make_kv_cache_config_three_types(
+    block_size: int, num_blocks: int, third_spec_type: str = "mamba"
+) -> KVCacheConfig:
+    if third_spec_type == "mamba":
+        third_spec = MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        )
+    elif third_spec_type == "sliding_window":
+        third_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=4 * block_size,
+        )
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
                 SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
                 ),
             ),
             KVCacheGroupSpec(
                 ["layer3"],
-                SlidingWindowSpec(
-                    block_size, 1, 1, torch.float32, sliding_window=2 * block_size
-                ),
+                third_spec,
             ),
         ],
     )
@@ -134,6 +212,7 @@ def test_prefill(hash_fn):
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # Complete 3 blocks (48 tokens)
@@ -253,15 +332,17 @@ def test_prefill(hash_fn):
 def test_prefill_hybrid_model():
     block_size = 16
     manager = KVCacheManager(
-        make_kv_cache_config_hybrid_model(block_size, 21),
+        make_kv_cache_config_hybrid_model(block_size, 21, 2),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     hash_fn = sha256
 
     # Complete 3 blocks (48 tokens)
-    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    num_full_blocks = 3
+    common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
 
     # Fully cache miss
     # Incomplete 1 block (7 tokens)
@@ -302,6 +383,7 @@ def test_prefill_hybrid_model():
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
+    all_token_ids = common_token_ids + unique_token_ids
     req1 = make_request("1", common_token_ids + unique_token_ids, block_size, hash_fn)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
@@ -321,34 +403,13 @@ def test_prefill_hybrid_model():
     manager.free(req0)
     manager.free(req1)
 
-    cached_block_hash_to_block_bak = copy.copy(
-        manager.block_pool.cached_block_hash_to_block._cache
-    )
-
-    def test_partial_request_hit(
-        request_id: str,
-        hash_to_evict: list[BlockHashWithGroupId],
-        expect_hit_length: int,
-    ):
-        req = make_request(
-            request_id, common_token_ids + unique_token_ids, block_size, sha256
-        )
-        for hash_with_group_id in hash_to_evict:
-            manager.block_pool.cached_block_hash_to_block._cache.pop(hash_with_group_id)
-        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
-        assert len(req.block_hashes) == 3
-        assert num_computed_tokens == expect_hit_length * block_size
-        for block_per_group in computed_blocks.blocks:
-            assert len(block_per_group) == num_computed_tokens // block_size
-        for hash_with_group_id in hash_to_evict:
-            manager.block_pool.cached_block_hash_to_block._cache[hash_with_group_id] = (
-                cached_block_hash_to_block_bak[hash_with_group_id]
-            )
-        manager.free(req)
-
     # Evict the blocks outside sliding window, does not affect the hit length.
-    test_partial_request_hit(
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
         "2",
+        all_token_ids,
         [
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
@@ -357,13 +418,23 @@ def test_prefill_hybrid_model():
     )
 
     # Evict the first block of full attention, makes total cache miss.
-    test_partial_request_hit(
-        "3", [make_block_hash_with_group_id(block_hashes[0], 0)], 0
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "3",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[0], 0)],
+        0,
     )
 
     # Evict the last block of all layers, reduces the hit length to 2.
-    test_partial_request_hit(
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
         "4",
+        all_token_ids,
         [
             make_block_hash_with_group_id(block_hashes[2], 0),
             make_block_hash_with_group_id(block_hashes[2], 1),
@@ -373,18 +444,36 @@ def test_prefill_hybrid_model():
     )
 
     # Evict the last block of full attention, reduces the hit length to 2.
-    test_partial_request_hit(
-        "5", [make_block_hash_with_group_id(block_hashes[2], 0)], 2
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "5",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[2], 0)],
+        2,
     )
 
     # Evict the last block of sliding window, reduces the hit length to 2.
-    test_partial_request_hit(
-        "6", [make_block_hash_with_group_id(block_hashes[2], 1)], 2
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "6",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[2], 1)],
+        2,
     )
 
     # Evict the last block of sliding window, reduces the hit length to 2.
-    test_partial_request_hit(
-        "7", [make_block_hash_with_group_id(block_hashes[2], 2)], 2
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "7",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[2], 2)],
+        2,
     )
 
     # Evict different set of blocks for full attention and sliding window makes
@@ -393,8 +482,12 @@ def test_prefill_hybrid_model():
     # The cache hit length of sliding window is 2 * block_size.
     # Then it is cache miss as the two type of layers
     # have different hit length.
-    test_partial_request_hit(
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
         "8",
+        all_token_ids,
         [
             make_block_hash_with_group_id(block_hashes[2], 0),
             make_block_hash_with_group_id(block_hashes[0], 1),
@@ -402,6 +495,518 @@ def test_prefill_hybrid_model():
         ],
         0,
     )
+
+
+def test_prefill_hybrid_model_eagle():
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 3)
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    hash_fn = sha256
+
+    # Complete 6 blocks (96 tokens)
+    num_full_blocks = 6
+    common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
+
+    # Fully cache miss
+    # Incomplete 1 block (7 tokens)
+    unique_token_ids = [6] * 7
+    all_token_ids = common_token_ids + unique_token_ids
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert len(req0.block_hashes) == len(all_token_ids) // block_size
+    assert not computed_blocks.blocks[0]
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(all_token_ids), num_computed_tokens, computed_blocks
+    )
+    block_ids = (
+        [1, 2, 3, 4, 5, 6, 7],
+        [8, 9, 10, 11, 12, 13, 14],
+        [15, 16, 17, 18, 19, 20, 21],
+    )
+    assert blocks is not None and blocks.get_block_ids() == block_ids
+
+    # Check full block metadata
+    parent_block_hash = None
+    for i, full_block_ids in enumerate(zip(*(row[:-1] for row in block_ids))):
+        block_tokens = tuple(all_token_ids[i * block_size : (i + 1) * block_size])
+        block_hash = hash_block_tokens(hash_fn, parent_block_hash, block_tokens)
+        for group_id, block_id in enumerate(full_block_ids):
+            blk_hash = manager.block_pool.blocks[block_id].block_hash
+            assert blk_hash is not None
+            assert get_block_hash(blk_hash) == block_hash
+            assert get_group_id(blk_hash) == group_id
+            assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        parent_block_hash = block_hash
+
+    # Check partial block metadata
+    for partial_block_id in (row[-1] for row in block_ids):
+        assert manager.block_pool.blocks[partial_block_id].block_hash is None
+        assert manager.block_pool.blocks[partial_block_id].ref_cnt == 1
+
+    # Cache hit in the common prefix
+    # Incomplete 1 block (5 tokens)
+    unique_token_ids = [6] * 5
+    all_token_ids = common_token_ids + unique_token_ids
+    req1 = make_request("1", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert len(req1.block_hashes) == num_full_blocks
+    assert computed_blocks.get_block_ids() == (
+        [1, 2, 3, 4, 5],
+        [0, 0, 10, 11, 12],
+        [0, 0, 17, 18, 19],
+    )
+    assert num_computed_tokens == 5 * block_size
+    num_new_tokens = len(all_token_ids) - num_computed_tokens
+    blocks = manager.allocate_slots(
+        req1, num_new_tokens, num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None and blocks.get_block_ids() == (
+        [22, 23],
+        [24, 25],
+        [26, 27],
+    )
+    for block_per_group in computed_blocks.blocks:
+        for block in block_per_group:
+            if block != manager.block_pool.null_block:
+                assert block.ref_cnt == 2
+
+    block_hashes = req1.block_hashes
+    manager.free(req0)
+    manager.free(req1)
+
+    # Evict the blocks outside sliding window, does not affect the hit length.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "2",
+        all_token_ids,
+        [
+            make_block_hash_with_group_id(block_hashes[0], 1),
+            make_block_hash_with_group_id(block_hashes[0], 2),
+        ],
+        5,
+    )
+
+    # Evict the first block of full attention, makes total cache miss.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "3",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[0], 0)],
+        0,
+    )
+
+    # Evict the last block of all layers, reduces the hit length to 4.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "4",
+        all_token_ids,
+        [
+            make_block_hash_with_group_id(block_hashes[-1], 0),
+            make_block_hash_with_group_id(block_hashes[-1], 1),
+            make_block_hash_with_group_id(block_hashes[-1], 2),
+        ],
+        4,
+    )
+
+    # Evict the last block of full attention, reduces the hit length to 4.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "5",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[-1], 0)],
+        4,
+    )
+
+    # Since the last block of full attention is dropped for eagle, evict
+    # the second last block of sliding window, reduces the hit length to 3.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "6",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[-2], 1)],
+        3,
+    )
+
+    # Since the last block of full attention is dropped for eagle, evict
+    # the second last block of sliding window, reduces the hit length to 3.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "7",
+        all_token_ids,
+        [make_block_hash_with_group_id(block_hashes[-2], 2)],
+        3,
+    )
+
+    # Evict different set of blocks for full attention and sliding window.
+    # Full loses its last block so it drops to 4 full blocks after the eagle
+    # pop; SWA lost block 0 (outside the sliding window of the final hit),
+    # which is not required for the K+1 anchor at position 4. Coordinated
+    # single-drop aligns both groups at hit=4.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "8",
+        all_token_ids,
+        [
+            make_block_hash_with_group_id(block_hashes[-1], 0),
+            make_block_hash_with_group_id(block_hashes[0], 1),
+            make_block_hash_with_group_id(block_hashes[0], 2),
+        ],
+        4,
+    )
+
+
+def _test_partial_request_hit(
+    manager: KVCacheManager,
+    block_size: int,
+    num_full_blocks,
+    request_id: str,
+    prompt_token_ids: list[int],
+    hash_to_evict: list[BlockHashWithGroupId],
+    expect_hit_length: int,
+):
+    cached_block_hash_to_block_bak = copy.copy(
+        manager.block_pool.cached_block_hash_to_block._cache
+    )
+    req = make_request(request_id, prompt_token_ids, block_size, sha256)
+    for hash_with_group_id in hash_to_evict:
+        manager.block_pool.cached_block_hash_to_block._cache.pop(hash_with_group_id)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    assert len(req.block_hashes) == num_full_blocks
+    assert num_computed_tokens == expect_hit_length * block_size
+    for block_per_group in computed_blocks.blocks:
+        assert len(block_per_group) == num_computed_tokens // block_size
+    for hash_with_group_id in hash_to_evict:
+        manager.block_pool.cached_block_hash_to_block._cache[hash_with_group_id] = (
+            cached_block_hash_to_block_bak[hash_with_group_id]
+        )
+    manager.free(req)
+
+
+def _make_hybrid_kv_cache_config(
+    block_size: int, num_blocks: int, spec_types: list[str]
+) -> KVCacheConfig:
+    """
+    Create a KVCacheConfig with the specified spec types.
+
+    Args:
+        block_size: The block size for KV cache.
+        num_blocks: The number of blocks in the KV cache.
+        spec_types: List of spec type strings. Supported types:
+            - "full": FullAttentionSpec
+            - "sliding_window": SlidingWindowSpec with window=2*block_size
+            - "sliding_window_large": SlidingWindowSpec with window=4*block_size
+            - "mamba": MambaSpec
+    """
+    spec_map = {
+        "full": lambda: FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
+        "sliding_window": lambda: SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=2 * block_size,
+        ),
+        "sliding_window_large": lambda: SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=4 * block_size,
+        ),
+        "mamba": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+        ),
+        "mamba_align": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+    }
+
+    kv_cache_groups = [
+        KVCacheGroupSpec([f"layer{i}"], spec_map[spec_type]())
+        for i, spec_type in enumerate(spec_types)
+    ]
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
+    )
+
+
+# Test cases covering various combinations of KV cache spec types:
+# - Varying number of groups (2, 3, or 4)
+# - 0, 1, or 2 full attention groups
+# - Sliding window with different window sizes
+# - Interleaved group IDs (full attn and other types mixed)
+# - Mamba spec combinations
+_HYBRID_MODEL_TEST_CASES = [
+    # 2 groups: 1 full + 1 other
+    pytest.param(["full", "sliding_window"], id="2g-full+sw"),
+    pytest.param(["full", "mamba"], id="2g-full+mamba"),
+    # 2 groups: 0 full (all other types)
+    pytest.param(["sliding_window", "mamba"], id="2g-sw+mamba"),
+    pytest.param(["sliding_window", "sliding_window_large"], id="2g-sw+sw_large"),
+    # 3 groups: 1 full + 2 others (same type)
+    pytest.param(["full", "sliding_window", "sliding_window"], id="3g-full+2sw"),
+    pytest.param(["full", "mamba", "mamba"], id="3g-full+2mamba"),
+    # 3 groups: 1 full + 2 others (different types)
+    pytest.param(["full", "sliding_window", "mamba"], id="3g-full+sw+mamba"),
+    pytest.param(
+        ["full", "sliding_window", "sliding_window_large"],
+        id="3g-full+sw+sw_large",
+    ),
+    # 3 groups: 2 full + 1 other
+    pytest.param(["full", "full", "sliding_window"], id="3g-2full+sw"),
+    pytest.param(["full", "full", "mamba"], id="3g-2full+mamba"),
+    # 4 groups: interleaved (full, other, full, other)
+    pytest.param(
+        ["full", "sliding_window", "full", "sliding_window_large"],
+        id="4g-interleaved-full+sw+sw_large",
+    ),
+    pytest.param(
+        ["full", "mamba", "full", "mamba"],
+        id="4g-interleaved-full+mamba",
+    ),
+    # 4 groups: interleaved with different sliding windows
+    pytest.param(
+        ["full", "sliding_window", "full", "sliding_window_large"],
+        id="4g-interleaved-full+sw_mixed",
+    ),
+    # 4 groups: 0 full (all other types)
+    pytest.param(
+        ["sliding_window", "mamba", "sliding_window_large", "mamba"],
+        id="4g-sw+mamba+sw_large+mamba",
+    ),
+    # 4 groups: 2 full + 2 others (grouped)
+    pytest.param(
+        ["full", "full", "sliding_window", "mamba"],
+        id="4g-2full+sw+mamba",
+    ),
+]
+
+
+@pytest.mark.parametrize("spec_types", _HYBRID_MODEL_TEST_CASES)
+def test_prefill_hybrid_model_combinations(spec_types: list[str]):
+    """
+    Test prefix caching with hybrid models containing various combinations of
+    KV cache spec types.
+
+    This unified test covers:
+    - Various combinations (full attn + other attn types)
+    - Varying number of groups (2, 3, or 4)
+    - 0, 1, or 2 full attention groups in the combination
+    - Two sliding_window attn groups with different window sizes
+    - Interleaved group IDs (full attn and other types alternating)
+    - Mamba spec with other attention types
+    """
+    block_size = 16
+    num_groups = len(spec_types)
+    # Allocate enough blocks for all groups
+    num_blocks = 10 * num_groups
+
+    kv_cache_config = _make_hybrid_kv_cache_config(block_size, num_blocks, spec_types)
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # Complete 3 blocks (48 tokens)
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    unique_token_ids = [3] * 7
+    all_token_ids = common_token_ids + unique_token_ids
+
+    # First request: no cache hit initially
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+
+    assert len(req0.block_hashes) == 3
+    assert not computed_blocks.blocks[0]  # No cache hit initially
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(
+        req0, 55, len(computed_blocks.blocks[0]) * block_size, computed_blocks
+    )
+    assert blocks is not None
+    # Should have blocks for all groups
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.new_step_starts()
+
+    # Second request: should hit cached blocks for common prefix
+    req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    # Should hit cached blocks for all groups
+    assert num_computed_tokens == 3 * block_size
+    assert len(computed_blocks.blocks) == num_groups
+
+    # Allocate and verify blocks for second request
+    blocks = manager.allocate_slots(
+        req1,
+        len(common_token_ids) + 5 - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+# Test cases with eagle enabled: Only test a single simple case for now.
+# - 2 groups: 1 full + 1 other
+_EAGLE_HYBRID_MODEL_TEST_CASES = [
+    # 2 groups: 1 full + 1 other
+    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
+]
+
+
+@pytest.mark.parametrize("spec_types,expect_hit_length", _EAGLE_HYBRID_MODEL_TEST_CASES)
+def test_prefill_hybrid_model_combinations_eagle(
+    spec_types: list[str], expect_hit_length: int
+):
+    """
+    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
+    More complex hybrid models with EAGLE are not yet supported (see issue #32802).
+    """
+    block_size = 16
+    num_groups = len(spec_types)
+    # Allocate enough blocks for all groups
+    num_blocks = 10 * num_groups
+
+    kv_cache_config = _make_hybrid_kv_cache_config(block_size, num_blocks, spec_types)
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    hash_fn = sha256
+
+    # Complete 3 blocks (48 tokens)
+    num_full_blocks = 4
+    common_token_ids = [i for i in range(num_full_blocks) for _ in range(block_size)]
+    unique_token_ids = [4] * 7
+    all_token_ids = common_token_ids + unique_token_ids
+
+    # First request: no cache hit initially
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+
+    assert len(req0.block_hashes) == num_full_blocks
+    assert not computed_blocks.blocks[0]  # No cache hit initially
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(
+        req0, len(all_token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    # Should have blocks for all groups
+    assert len(blocks.get_block_ids()) == num_groups
+
+    # Second request: should hit cached blocks for common prefix
+    all_token_ids = common_token_ids + [6] * 5
+    req1 = make_request("1", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    # Should hit cached blocks for all groups
+    assert num_computed_tokens == expect_hit_length * block_size
+    assert len(computed_blocks.blocks) == num_groups
+    # Verify each group has the correct number of computed blocks
+    for block_per_group in computed_blocks.blocks:
+        assert len(block_per_group) == expect_hit_length
+
+    # Allocate and verify blocks for second request
+    blocks = manager.allocate_slots(
+        req1,
+        len(all_token_ids) - num_computed_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == num_groups
+
+    manager.free(req0)
+    manager.free(req1)
+
+
+def test_prefill_hybrid_model_mamba_align():
+    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34361.
+    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
+    null blocks. cache_full_blocks() correctly skips them, but
+    MambaManager.cache_blocks() must also skip null blocks when tracking
+    cached_blocks_this_step.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # 3 full blocks (48 tokens) + 7 partial tokens = 55 tokens total
+    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+
+    # First request: allocate_slots should not crash with the assertion error
+    # in MambaManager.cache_blocks() when null blocks are present.
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
+
+    manager.free(req0)
 
 
 def test_prefill_plp():
@@ -416,6 +1021,7 @@ def test_prefill_plp():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
     # the default hash function is sha256
     hash_fn = sha256
@@ -523,6 +1129,7 @@ def test_decode():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # Complete 3 blocks (48 tokens)
@@ -585,6 +1192,7 @@ def test_evict():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     last_token_id = 5 * 16 + 7
@@ -643,6 +1251,7 @@ def test_hash_block_correct_reuse():
         make_kv_cache_config(16, 2),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # Allocate 1 block and cache it.
@@ -683,6 +1292,7 @@ def test_computed_blocks_not_evicted():
         make_kv_cache_config(block_size, 3),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # Allocate a block and cache it.
@@ -741,6 +1351,7 @@ def test_basic_prefix_caching_disabled():
         make_kv_cache_config(block_size, 5),
         max_model_len=8192,
         enable_caching=False,
+        hash_block_size=block_size,
     )
 
     req1 = make_request(
@@ -790,6 +1401,7 @@ def test_cache_blocks(hash_fn):
     block_pool = BlockPool(
         num_gpu_blocks=5,
         enable_caching=True,
+        hash_block_size=block_size,
     )
     # Req:
     #  Block 0: [0, 1, 2, 3]
@@ -833,7 +1445,9 @@ def test_cache_blocks_multi_group():
     This tests that blocks are cached correctly for different kv cache groups.
     """
     block_size = 4
-    block_pool = BlockPool(num_gpu_blocks=10, enable_caching=True)
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
 
     # Req:
     #  Block 0/4: [0, 1, 2, 3]
@@ -921,6 +1535,7 @@ def test_mm_prefix_caching():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # Common prompt tokens (T is text tokens and P is image placeholder tokens)
@@ -956,20 +1571,24 @@ def test_mm_prefix_caching():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(all_token_ids[:block_size]), ("aaa",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(all_token_ids[:block_size]),
+            (("aaa", 11),),
+        )
     )
     assert block_hashes[1] == sha256(
         (
             block_hashes[0],
             tuple(all_token_ids[block_size : block_size * 2]),
-            ("aaa", "bbb"),
+            (("aaa", -5), ("bbb", 14)),
         )
     )
     assert block_hashes[2] == sha256(
         (
             block_hashes[1],
             tuple(all_token_ids[block_size * 2 : block_size * 3]),
-            ("bbb",),
+            (("bbb", -2),),
         )
     )
 
@@ -989,7 +1608,11 @@ def test_mm_prefix_caching():
     assert new_blocks is not None and len(new_blocks.blocks[0]) == 0
     assert len(block_hashes) == 4
     assert block_hashes[3] == sha256(
-        (block_hashes[2], tuple(all_token_ids[3 * block_size :] + [8] * 5), ("ccc",))
+        (
+            block_hashes[2],
+            tuple(all_token_ids[3 * block_size :] + [8] * 5),
+            (("ccc", 0),),
+        )
     )
 
     # Cache hit.
@@ -1020,6 +1643,7 @@ def test_cache_key_salting():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     # 3 complete blocks and an incomplete block with 11 tokens.
@@ -1101,6 +1725,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
     # Complete 3 blocks (48 tokens)
     # | Common-0 | Common-1 | Common-2 | ... |
@@ -1173,6 +1798,7 @@ def test_reset_prefix_cache():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
     )
 
     full_block_token_ids = [i for i in range(3) for _ in range(16)]
@@ -1213,6 +1839,7 @@ def test_prefix_cache_stats_disabled():
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
+        hash_block_size=block_size,
         log_stats=False,  # Disable logging stats
     )
     assert manager.prefix_cache_stats is None
@@ -1232,7 +1859,7 @@ def test_prefix_cache_stats_disabled():
 
 
 def test_maybe_evict_cached_block():
-    pool = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
     block_hash1 = make_block_hash_with_group_id(BlockHash(b"20"), 2000)
     block_hash2 = make_block_hash_with_group_id(BlockHash(b"30"), 3000)
@@ -1293,6 +1920,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         max_model_len=8192,
         enable_caching=True,
         enable_kv_cache_events=True,
+        hash_block_size=block_size,
     )
 
     num_tokens = block_size * blocks_to_cache
@@ -1307,6 +1935,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         == len(manager.block_pool.cached_block_hash_to_block)
     )
     assert len(block.token_ids) == block.block_size * len(block.block_hashes)
+    assert block.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert len(manager.block_pool.kv_event_queue) == 0
 
     stored_block_hash = block.block_hashes
@@ -1320,6 +1949,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     for blocks in events[:-1]:
+        assert isinstance(blocks, BlockRemoved)
         assert blocks.block_hashes[0] in stored_block_hash
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
@@ -1339,6 +1969,73 @@ def test_kv_cache_events(blocks_to_cache: int):
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 
 
+def test_null_parent_block_hash():
+    block_size = 1
+    num_cached_blocks = 2
+    num_full_blocks = 4
+    kv_cache_group_id = 0
+
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_null_parent",
+        prompt_token_ids=[10, 11, 12, 13],
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    assert len(req.block_hashes) == num_full_blocks
+
+    # Physical parent is `null_block` (no hash), while the logical parent hash
+    # still exists in `request.block_hashes[num_cached_blocks - 1]`.
+    assert pool.null_block.block_hash is None
+    new_blocks = pool.get_new_blocks(num_full_blocks - 1)
+    blocks = [
+        new_blocks[: num_cached_blocks - 1],
+        pool.null_block,  # physical parent
+        *new_blocks[num_cached_blocks - 1 :],
+    ]
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=num_cached_blocks,
+        num_full_blocks=num_full_blocks,
+        block_size=block_size,
+        kv_cache_group_id=kv_cache_group_id,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+
+    expected_parent = kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[num_cached_blocks - 1]
+    )
+    assert event.parent_block_hash == expected_parent
+    assert event.parent_block_hash is not None
+
+    expected_new_hashes = [
+        kv_cache_utils.maybe_convert_block_hash(h)
+        for h in req.block_hashes[num_cached_blocks:num_full_blocks]
+    ]
+    assert event.block_hashes == expected_new_hashes
+    assert event.group_idx == kv_cache_group_id
+    assert event.kv_cache_spec_kind is None
+    assert event.kv_cache_spec_sliding_window is None
+
+    # Ensure we didn't accidentally assign a hash to the null block.
+    assert pool.null_block.block_hash is None
+    # Sanity check: newly cached physical blocks should have hashes assigned.
+    assert blocks[num_cached_blocks].block_hash is not None
+    assert blocks[num_full_blocks - 1].block_hash is not None
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events_with_lora(blocks_to_cache: int):
     """Test BlockStored events contain correct lora_id when using LoRA requests."""
@@ -1351,6 +2048,7 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
         max_model_len=8192,
         enable_caching=True,
         enable_kv_cache_events=True,
+        hash_block_size=block_size,
     )
 
     # Test with LoRA request
@@ -1396,6 +2094,236 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
     assert block_stored_event.block_size == block_size
 
 
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_stored_event_group_idx(group_id: int):
+    """Test BlockStored events emitted by cache_full_blocks carry the correct
+    group_idx."""
+    block_size = 4
+    num_tokens = block_size * 2
+
+    manager = KVCacheManager(
+        make_kv_cache_config_three_types(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    pool = manager.block_pool
+
+    req = make_request(
+        "req_grp_idx",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    events = manager.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == group_id
+    assert (
+        events[0].kv_cache_spec_kind
+        == [
+            KVCacheSpecKind.FULL_ATTENTION.value,
+            KVCacheSpecKind.SLIDING_WINDOW.value,
+            KVCacheSpecKind.MAMBA.value,
+        ][group_id]
+    )
+    assert (
+        events[0].kv_cache_spec_sliding_window
+        == [
+            None,
+            2 * block_size,
+            None,
+        ][group_id]
+    )
+
+
+def test_block_stored_event_group_idx_multiple_groups():
+    """
+    Test BlockStored events for separate HMA groups that each carry the
+    correct group_idx.
+
+    Simulates the HMA scenario where full-attention blocks (group 0) and
+    sliding-window blocks (group 1) are cached independently and must be
+    distinguishable by consumers doing HMA-aware prefix-cache routing.
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=5,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer1"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["layer2"],
+                    SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=128,
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    pool = manager.block_pool
+
+    req = make_request(
+        "req_multi_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Cache blocks for group 0 (full-attention)
+    blocks_grp0 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp0,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    # Cache blocks for group 1 (sliding-window)
+    blocks_grp1 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp1,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=1,
+    )
+
+    events = manager.take_events()
+    assert len(events) == 2
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == 0
+    assert events[0].kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+    assert events[0].kv_cache_spec_sliding_window is None
+    assert isinstance(events[1], BlockStored)
+    assert events[1].group_idx == 1
+    assert events[1].kv_cache_spec_kind == KVCacheSpecKind.SLIDING_WINDOW.value
+    assert events[1].kv_cache_spec_sliding_window == 128
+
+
+def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
+    """Out-of-range group_idx events are returned without metadata annotation."""
+    block_size = 4
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    event = BlockStored(
+        block_hashes=[1],
+        parent_block_hash=None,
+        token_ids=list(range(block_size)),
+        block_size=block_size,
+        lora_id=None,
+        medium=None,
+        lora_name=None,
+        group_idx=1,
+    )
+    manager.block_pool.kv_event_queue.append(event)
+    warnings = []
+
+    def collect_warning(message, *args, **kwargs):
+        del kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(kv_cache_manager.logger, "warning", collect_warning)
+    events = manager.take_events()
+
+    assert events == [event]
+    assert event.kv_cache_spec_kind is None
+    assert event.kv_cache_spec_sliding_window is None
+    assert warnings == ["Group index `1` not in KV cache metadata"]
+
+
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_removed_event_group_idx(group_id: int):
+    """
+    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    from the evicted block's BlockHashWithGroupId via get_group_id().
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    # null block + 4 usable; allocate all 4, cache 2, free all, re-allocate
+    # all 4 so the 2 cached blocks are forced through _maybe_evict_cached_block.
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_evict_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Allocate all usable blocks and cache the first two for the target group.
+    all_blocks = pool.get_new_blocks(4)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=all_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    # Drain the BlockStored events so only eviction events remain later.
+    pool.take_events()
+
+    # Return all blocks to the free queue so they become eviction candidates.
+    pool.free_blocks(all_blocks)
+
+    # Re-allocate all blocks; the two with hashes trigger BlockRemoved events.
+    pool.get_new_blocks(4)
+
+    events = pool.take_events()
+    removed_events = [e for e in events if isinstance(e, BlockRemoved)]
+
+    assert len(removed_events) == 2
+    for event in removed_events:
+        assert event.group_idx == group_id
+
+
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""
@@ -1405,6 +2333,7 @@ def test_eagle_enabled_removes_last_block():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        hash_block_size=block_size,
     )
 
     # Request with 3 full blocks (48 tokens)
@@ -1437,6 +2366,7 @@ def test_eagle_with_partial_blocks():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        hash_block_size=block_size,
     )
     # 2 full blocks + 5 tokens (non-divisible length)
     token_ids = [0] * (2 * block_size + 5)
@@ -1476,6 +2406,7 @@ def test_eagle_with_sliding_window():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        hash_block_size=block_size,
     )
 
     # 2 full blocks + 5 tokens (non-divisible length)
@@ -1522,6 +2453,220 @@ def test_eagle_with_sliding_window():
     assert num_tokens == 0
 
 
+def test_different_block_size():
+    block_size = 16
+    # full attention and sliding window attention layers have the same page size:
+    # (32 tokens/block * float16 token, vs. 16 tokens/block * float32 token)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size * 2,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 10 blocks of 16 tokens each. Token ids are not strictly aligned for each block.
+    common_token_ids = [i for i in range(10) for _ in range(block_size)]
+
+    req0 = make_request("0", common_token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert not computed_blocks.blocks[0]
+    assert not computed_blocks.blocks[1]
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, 7 * block_size, len(computed_blocks.blocks[0]) * 16, computed_blocks
+    )
+    assert blocks.get_block_ids() == ([1, 2, 3, 4], [5, 6, 7, 8, 9, 10, 11])
+    req1 = make_request("1", common_token_ids[: 7 * block_size + 1], block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert len(computed_blocks.blocks[0]) == 3
+    assert len(computed_blocks.blocks[1]) == 6
+    assert num_computed_tokens == 6 * 16
+
+    req2 = make_request("2", common_token_ids[: 6 * block_size + 1], block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    assert len(computed_blocks.blocks[0]) == 3
+    assert len(computed_blocks.blocks[1]) == 6
+    assert num_computed_tokens == 6 * 16
+
+    # Evict some blocks to make sliding window cache hit length 5*16
+    # But should return 4 * 16 because full attention cache hit length must be
+    # a multiple of 32
+    manager.block_pool.cached_block_hash_to_block.pop(
+        make_block_hash_with_group_id(req1.block_hashes[6], 1), 11
+    )
+    manager.block_pool.cached_block_hash_to_block.pop(
+        make_block_hash_with_group_id(req1.block_hashes[5], 1), 10
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert len(computed_blocks.blocks[0]) == 2
+    assert len(computed_blocks.blocks[1]) == 4
+    assert num_computed_tokens == 4 * 16
+
+
+def test_hybrid_cache_blocks_swa_tail_window_only():
+    """Within each lcm-aligned segment, SWA's ``find_longest_cache_hit`` only
+    returns the trailing ``ceil((sliding_window - 1) / block_size)`` blocks
+    (its right-to-left scan stops once a contiguous match is found). Blocks
+    earlier in the segment can never serve a hit, so
+    ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
+    polluting the prefix-cache hash map."""
+    block_size = 8
+    # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
+    # tail = ceil(7/8) = 1; per_segment = 32/8 = 4.
+    # Per-segment template = [F, F, F, T]; only the last SWA block in each
+    # 32-token segment ends up in the prefix-cache hash map.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=4 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 8 hash-blocks of 8 tokens (64 tokens, two lcm-aligned segments).
+    token_ids = [i for i in range(8) for _ in range(block_size)]
+    req = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        8 * block_size,
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(req.block_hashes) == 8
+
+    pool = manager.block_pool
+    # SWA group_id=1: only hash 3 and hash 7 (the last block of each
+    # 32-token segment) should be cached. Hashes 0,1,2,4,5,6 cannot serve
+    # a hit at any lcm-aligned length, so they must NOT be cached.
+    expected_cached = {3, 7}
+    for i in range(8):
+        cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+        if i in expected_cached:
+            assert cached is not None, f"SWA hash {i} should be cached"
+        else:
+            assert cached is None, (
+                f"SWA hash {i} cannot serve any lcm-aligned hit; should not be cached"
+            )
+
+
+def test_hybrid_cache_blocks_clamped_to_lcm():
+    """HybridKVCacheCoordinator.cache_blocks() clamps to lcm_block_size.
+    Chunks past the last lcm-aligned boundary can never participate in a
+    cache hit (find_longest_cache_hit always returns lcm-aligned hits), so
+    caching them only pollutes the prefix-cache hash map and keeps blocks
+    on the LRU list that could otherwise return to the free pool."""
+    block_size = 16
+    # Full attn block_size=32, SWA block_size=16 -> lcm=32.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size * 2,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 7 hash-blocks of 16 tokens (112 tokens). With lcm=32 the clamp truncates
+    # to 96 tokens — SWA caches 6 hashes, full-attn caches 3.
+    token_ids = [i for i in range(7) for _ in range(block_size)]
+    req = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        7 * block_size,
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    assert len(req.block_hashes) == 7
+
+    pool = manager.block_pool
+    # SWA group_id=1: hashes 0..5 cached (6 blocks * 16 tokens = 96), hash 6
+    # spans tokens [96, 112) past the lcm boundary and must NOT be cached.
+    for i in range(6):
+        assert (
+            pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+            is not None
+        ), f"SWA hash {i} should be cached"
+    assert pool.get_cached_block(req.block_hashes[6], kv_cache_group_ids=[1]) is None, (
+        "SWA hash 6 spans tokens past the lcm boundary; should not be cached"
+    )
+
+
 def test_block_lookup_cache_single_block_per_key():
     cache = BlockHashToBlockMap()
     key0 = BlockHashWithGroupId(b"hash0")
@@ -1543,22 +2688,22 @@ def test_block_lookup_cache_single_block_per_key():
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 100) is None
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key0, block ID 0)
+    # block popped with (key0, block ID 0)
     assert cache.pop(key0, 0) is block0
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 1) is None
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key1, block ID 1)
+    # block popped with (key1, block ID 1)
     assert cache.pop(key1, 1) is block1
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -1595,3 +2740,113 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 11) is block11
     assert cache.get_one_block(key1) is None
     assert cache.pop(key1, 12) is None
+
+
+def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
+    """Hybrid full+SWA model with a pool sized at the startup minimum should
+    admit a prompt longer than the SWA cap, because SlidingWindowManager
+    recycles blocks during chunked prefill (issue #39734)."""
+    block_size = 16
+    sliding_window = 4 * block_size  # 64 tokens
+    max_num_batched_tokens = 8 * block_size  # 128 tokens
+    max_model_len = 64 * block_size  # 1024 tokens — much larger than the SWA cap
+    # Startup pool sizing: full demands cdiv(max_model_len, bs) = 64 blocks,
+    # SWA demands cdiv(SW-1+max_batched, bs) + 1 = cdiv(191, 16) + 1 = 13.
+    # Pool minimum = 64 + 13 = 77; +1 for the null block.
+    num_blocks = 64 + 13 + 1
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # A prompt that is shorter than max_model_len but longer than SW + chunk:
+    # cdiv(prompt_len, bs) = 32 blocks. Without the cap, admission would
+    # demand 32 (full) + 32 (SWA) = 64 blocks. With the cap, SWA contributes
+    # only 13, so total = 32 + 13 = 45 ≤ pool size.
+    prompt_len = 32 * block_size
+    req = make_request("long", list(range(prompt_len)), block_size, sha256)
+
+    assert (
+        manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is not None
+    )
+
+
+def test_can_fit_full_sequence_full_attention_still_gates_oversized():
+    """The cap only loosens the SWA group; a prompt that exceeds the
+    full-attention pool capacity must still be rejected."""
+    block_size = 16
+    sliding_window = 4 * block_size
+    max_num_batched_tokens = 8 * block_size
+    max_model_len = 64 * block_size
+    # Provide a tiny pool — even a small prompt should be rejected.
+    num_blocks = 5
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer_swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    manager = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 16 blocks of full attention demand alone exceeds the 5-block pool.
+    prompt_len = 16 * block_size
+    req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
+
+    assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None

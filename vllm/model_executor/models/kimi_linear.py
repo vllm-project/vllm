@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -12,11 +11,13 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.kda import KimiDeltaAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -27,6 +28,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -45,6 +48,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from .interfaces import HasInnerState, IsHybrid, MixtureOfExperts, SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_layers,
@@ -130,22 +134,6 @@ class KimiMoE(nn.Module):
 
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts))
 
-        self.experts = FusedMoE(
-            num_experts=num_experts,
-            top_k=config.num_experts_per_token,
-            hidden_size=hidden_size,
-            intermediate_size=moe_intermediate_size,
-            reduce_results=False,
-            renormalize=moe_renormalize,
-            quant_config=quant_config,
-            use_grouped_topk=config.use_grouped_topk,
-            num_expert_group=config.num_expert_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.moe_router_activation_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-        )
-
         if self.num_shared_experts is not None:
             intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
@@ -156,22 +144,33 @@ class KimiMoE(nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+        else:
+            self.shared_experts = None
+
+        self.experts = FusedMoE(
+            shared_experts=self.shared_experts,
+            num_experts=num_experts,
+            top_k=config.num_experts_per_token,
+            hidden_size=hidden_size,
+            intermediate_size=moe_intermediate_size,
+            renormalize=moe_renormalize,
+            quant_config=quant_config,
+            use_grouped_topk=config.use_grouped_topk,
+            num_expert_group=config.num_expert_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.moe_router_activation_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.num_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = (
-            self.experts(hidden_states=hidden_states, router_logits=router_logits)
-            * self.routed_scaling_factor
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
         )
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -190,9 +189,7 @@ class KimiMLAAttention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int | None,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
         use_nope: bool = False,
-        rope_scaling: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -210,11 +207,9 @@ class KimiMLAAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.use_nope = use_nope
         assert self.use_nope is True
         assert self.q_lora_rank is None
-        assert rope_scaling is None
         assert num_heads % tp_size == 0
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -396,7 +391,6 @@ class KimiLinearModel(nn.Module):
         parallel_config = vllm_config.parallel_config
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
@@ -476,86 +470,7 @@ class KimiLinearModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
-):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.model_config = vllm_config.model_config
-        self.vllm_config = vllm_config
-        self.config = self.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.quant_config = quant_config
-        self.model = KimiLinearModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-        logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.config.vocab_size, scale=logit_scale
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
-        )
-        return hidden_states
-
-    @classmethod
-    def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
-        )
-
-    @classmethod
-    def get_mamba_state_shape_from_config(
-        cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
-        tp_size = parallel_config.tensor_parallel_size
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        return MambaStateShapeCalculator.kda_state_shape(
-            tp_size,
-            hf_config.linear_attn_config["num_heads"],
-            hf_config.linear_attn_config["head_dim"],
-            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
-            num_spec=num_spec,
-        )
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
@@ -564,7 +479,8 @@ class KimiLinearForCausalLM(
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self,
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
@@ -648,6 +564,101 @@ class KimiLinearForCausalLM(
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        return loaded_params
+
+
+class KimiLinearForCausalLM(
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        self.model_config = vllm_config.model_config
+        self.vllm_config = vllm_config
+        self.config = self.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
+        self.model = KimiLinearModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, scale=logit_scale
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+        return hidden_states
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.kda_state_shape(
+            tp_size,
+            hf_config.linear_attn_config["num_heads"],
+            hf_config.linear_attn_config["head_dim"],
+            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
+            num_spec=num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[
+        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
+    ]:
+        return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
 
 
 def get_spec_layer_idx_from_weight_name(

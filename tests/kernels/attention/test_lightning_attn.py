@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.lightning_attn import linear_decode_forward_triton
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_HEADS = [4, 8]
 HEAD_SIZES = [64]
@@ -122,9 +122,7 @@ def test_linear_decode_forward_triton(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     base = 0.01
     q = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
     k = base * torch.randn(batch_size, num_heads, 1, head_size, dtype=dtype)
@@ -165,9 +163,7 @@ def test_linear_decode_forward_triton_with_padding(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     batch_size = 4
     base = 0.01
@@ -229,9 +225,7 @@ def test_lightning_attention_reference(
     dtype: torch.dtype,
 ):
     torch.set_default_device("cuda")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     base = 0.01
     q = base * torch.randn(batch_size, num_heads, seq_len, head_size, dtype=dtype)

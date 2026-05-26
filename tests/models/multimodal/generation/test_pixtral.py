@@ -13,8 +13,9 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
+from vllm.inputs import MultiModalDataBuiltins
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.multimodal import MultiModalDataBuiltins
+from vllm.platforms import current_platform
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 PIXTRAL_ID = "mistralai/Pixtral-12B-2409"
 MISTRAL_SMALL_3_1_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+MINISTRAL_3B_ID = "mistralai/Ministral-3-3B-Instruct-2512"
 
 MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_1_ID]
 
@@ -115,6 +117,7 @@ assert FIXTURES_PATH.exists()
 FIXTURE_LOGPROBS_CHAT = {
     PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat.json",
     MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
+    MINISTRAL_3B_ID: FIXTURES_PATH / "ministral_3b_chat.json",
 }
 
 OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
@@ -165,6 +168,15 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
 def test_chat(
     vllm_runner, max_model_len: int, model: str, dtype: str, local_asset_server
 ) -> None:
+    if (
+        model == MISTRAL_SMALL_3_1_ID
+        and max_model_len == 65536
+        and current_platform.is_rocm()
+    ):
+        pytest.skip(
+            "OOM on ROCm: 24B model with 65536 context length exceeds GPU memory"
+        )
+
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
         model,
@@ -190,6 +202,44 @@ def test_chat(
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
     # Remove last `None` prompt_logprobs to compare with fixture
+    for i in range(len(logprobs)):
+        assert logprobs[i][-1] is None
+        logprobs[i] = logprobs[i][:-1]
+    check_logprobs_close(
+        outputs_0_lst=EXPECTED_CHAT_LOGPROBS,
+        outputs_1_lst=logprobs,
+        name_0="h100_ref",
+        name_1="output",
+    )
+
+
+@large_gpu_test(min_gb=16)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
+    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
+        FIXTURE_LOGPROBS_CHAT[MINISTRAL_3B_ID]
+    )
+    with vllm_runner(
+        MINISTRAL_3B_ID,
+        dtype=dtype,
+        tokenizer_mode="mistral",
+        load_format="mistral",
+        config_format="mistral",
+        max_model_len=8192,
+        limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+    ) as vllm_model:
+        outputs = []
+        urls_all = [local_asset_server.url_for(u) for u in IMG_URLS]
+        msgs = [
+            _create_msg_format(urls_all[:1]),
+            _create_msg_format(urls_all[:2]),
+            _create_msg_format(urls_all),
+        ]
+        for msg in msgs:
+            output = vllm_model.llm.chat(msg, sampling_params=SAMPLING_PARAMS)
+            outputs.extend(output)
+
+    logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
     for i in range(len(logprobs)):
         assert logprobs[i][-1] is None
         logprobs[i] = logprobs[i][:-1]

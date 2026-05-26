@@ -6,11 +6,13 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from typing import NoReturn
 
 import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config.model import ModelConfig
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -19,11 +21,33 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def _skip(msg: str) -> NoReturn:
+    pytest.skip(msg)
+    raise RuntimeError(msg)
+
+
+def _snapshot_download_or_skip(model_id: str) -> str:
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # pragma: no cover
+        _skip(f"huggingface_hub is required to download {model_id}: {e}")
+
+    try:
+        return snapshot_download(
+            repo_id=model_id,
+            repo_type="model",
+            # These checkpoints are already small; download full repo for simplicity.
+            allow_patterns=["*"],
+        )
+    except Exception as e:
+        _skip(f"Failed to download {model_id} from the HF Hub: {e}")
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8 checkpoint loading and structure validation."""
     # TODO: provide a small publicly available test checkpoint
     model_path = (
@@ -38,6 +62,8 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
             "This test requires a local ModelOpt FP8 checkpoint."
         )
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
@@ -88,6 +114,174 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
         llm.apply_model(check_model)
 
         # Run a simple generation test to ensure the model works
-        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         assert output
         print(f"ModelOpt FP8 output: {output}")
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("modelopt"),
+    reason="ModelOpt FP8 is not supported on this GPU type.",
+)
+def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
+    """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
+    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
+    model_path = _snapshot_download_or_skip(model_id)
+
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
+    with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            o_proj = layer.self_attn.o_proj
+            gate_up_proj = layer.mlp.gate_up_proj
+            down_proj = layer.mlp.down_proj
+
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptFp8PcPtLinearMethod,
+            )
+
+            assert isinstance(qkv_proj.quant_method, ModelOptFp8PcPtLinearMethod)
+            assert isinstance(o_proj.quant_method, ModelOptFp8PcPtLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
+            assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
+
+            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
+            assert o_proj.weight.dtype == torch.float8_e4m3fn
+            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
+            assert down_proj.weight.dtype == torch.float8_e4m3fn
+
+            # Per-channel scales; activations are dynamically scaled per token.
+            assert hasattr(qkv_proj, "weight_scale")
+            assert qkv_proj.weight_scale.dtype == torch.float32
+            assert qkv_proj.weight_scale.dim() == 1
+            assert not hasattr(qkv_proj, "input_scale")
+
+            assert hasattr(o_proj, "weight_scale")
+            assert o_proj.weight_scale.dtype == torch.float32
+            assert o_proj.weight_scale.dim() == 1
+            assert not hasattr(o_proj, "input_scale")
+
+            assert hasattr(gate_up_proj, "weight_scale")
+            assert gate_up_proj.weight_scale.dtype == torch.float32
+            assert gate_up_proj.weight_scale.dim() == 1
+            assert not hasattr(gate_up_proj, "input_scale")
+
+            assert hasattr(down_proj, "weight_scale")
+            assert down_proj.weight_scale.dtype == torch.float32
+            assert down_proj.weight_scale.dim() == 1
+            assert not hasattr(down_proj, "input_scale")
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        assert output
+        print(f"ModelOpt FP8_PER_CHANNEL_PER_TOKEN output: {output}")
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("modelopt"),
+    reason="ModelOpt FP8 is not supported on this GPU type.",
+)
+def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
+    """Test ModelOpt FP8_PB_WO checkpoint setup."""
+    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
+    model_path = _snapshot_download_or_skip(model_id)
+
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
+    with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            o_proj = layer.self_attn.o_proj
+            gate_up_proj = layer.mlp.gate_up_proj
+            down_proj = layer.mlp.down_proj
+
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptFp8PbWoLinearMethod,
+            )
+
+            assert isinstance(qkv_proj.quant_method, ModelOptFp8PbWoLinearMethod)
+            assert isinstance(o_proj.quant_method, ModelOptFp8PbWoLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, ModelOptFp8PbWoLinearMethod)
+            assert isinstance(down_proj.quant_method, ModelOptFp8PbWoLinearMethod)
+
+            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
+            assert o_proj.weight.dtype == torch.float8_e4m3fn
+            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
+            assert down_proj.weight.dtype == torch.float8_e4m3fn
+
+            # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
+            assert hasattr(qkv_proj, "weight_scale")
+            assert qkv_proj.weight_scale.dtype == torch.float32
+            assert qkv_proj.weight_scale.dim() == 2
+
+            assert hasattr(o_proj, "weight_scale")
+            assert o_proj.weight_scale.dtype == torch.float32
+            assert o_proj.weight_scale.dim() == 2
+
+            assert hasattr(gate_up_proj, "weight_scale")
+            assert gate_up_proj.weight_scale.dtype == torch.float32
+            assert gate_up_proj.weight_scale.dim() == 2
+
+            assert hasattr(down_proj, "weight_scale")
+            assert down_proj.weight_scale.dtype == torch.float32
+            assert down_proj.weight_scale.dim() == 2
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        assert output
+        print(f"ModelOpt FP8_PB_WO output: {output}")
+
+
+def test_modelopt_nvfp4_config_dispatches_w4a4_method():
+    """``quant_method="NVFP4"`` (W4A4 default) routes to the existing
+    ``ModelOptNvFp4LinearMethod``."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4LinearMethod,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert config.LinearMethodCls is ModelOptNvFp4LinearMethod
+    assert config.quant_method == "NVFP4"
+
+
+def test_modelopt_nvfp4_config_dispatches_w4a16_method():
+    """``quant_method="W4A16_NVFP4"`` routes to the new
+    ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
+
+    Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
+    one of three FP8 LinearMethods on ``quant_method``); a regression
+    here would mean a W4A16 NVFP4 checkpoint silently loaded under the
+    W4A4 method, which would try to register an ``input_scale`` runtime
+    parameter and (more importantly) call the cutlass W4A4 NVFP4 GEMM
+    instead of FP4 Marlin.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4LinearMethod,
+        ModelOptNvFp4W4A16LinearMethod,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
+    assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
+    assert config.quant_method == "W4A16_NVFP4"

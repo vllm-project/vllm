@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import Config, RankTensors, WeightTensors, make_modular_kernel
 from .parallel_utils import ProcessGroupInfo, parallel_launch_with_config
@@ -34,7 +34,8 @@ def do_profile(
         record_shapes=True,
     ) as tprof:
         fn(**fn_kwargs)
-        torch.cuda.synchronize(torch.cuda.current_device())
+        device = torch.accelerator.current_device_index()
+        torch.accelerator.synchronize(device=device)
 
     # TODO (varun): Add a descriptive trace file name
     tprof.export_chrome_trace(
@@ -72,7 +73,7 @@ def profile_modular_kernel(
         "apply_router_weight_on_input": config.topk == 1,
     }
 
-    do_profile(mk.forward, mk_kwargs, pgi, config)
+    do_profile(mk.apply, mk_kwargs, pgi, config)
 
 
 def rank_worker(
@@ -82,13 +83,7 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
-
-    # sanity check
-    from vllm import envs
-
-    if config.fused_moe_chunk_size is not None:
-        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
+    set_random_seed(pgi.rank)
 
     # get weights to this device
     weights.to_current_device()
@@ -125,7 +120,7 @@ if __name__ == "__main__":
         description=(
             "Run single prepare-finalize & fused-experts combination test"
             "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  # noqa: E501
-            "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
+            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )
     args = parser.parse_args()

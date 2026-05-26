@@ -14,13 +14,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for legacy models."""
+"""Transformers modeling backend mixin for legacy models."""
 
 from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -28,20 +27,6 @@ if TYPE_CHECKING:
 
 
 class LegacyMixin:
-    hf_to_vllm_mapper = WeightsMapper(
-        # These are applied in order, so the order matters!
-        orig_to_new_prefix={
-            # Handle BERT-like models
-            "roberta": "model",
-            "bert": "model",
-        },
-        orig_to_new_suffix={
-            # Replace legacy suffixes used for norms
-            ".gamma": ".weight",
-            ".beta": ".bias",
-        },
-    )
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -80,8 +65,10 @@ class LegacyMixin:
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if self.is_roberta:
-            # RoBERTa-specific positions padding
-            positions += self.padding_idx + 1
+            # RoBERTa positions start at padding_idx + 1.
+            # Non-in-place add to avoid mutating the persistent GPU buffer --
+            # in-place += would accumulate on CUDA graph padding slots.
+            positions = positions + self.padding_idx + 1
         return super().forward(
             input_ids=input_ids,
             positions=positions,

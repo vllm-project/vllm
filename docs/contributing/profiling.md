@@ -3,16 +3,25 @@
 !!! warning
     Profiling is only intended for vLLM developers and maintainers to understand the proportion of time spent in different parts of the codebase. **vLLM end-users should never turn on profiling** as it will significantly slow down the inference.
 
+!!! tip "Choosing a profiler"
+    - Use **Nsight Systems** for low-overhead, performance-critical profiling.
+    - Use **PyTorch Profiler** for medium-overhead profiling with richer debugging information (e.g., stack traces, memory, shapes). Note that enabling these features adds overhead and is not recommended for benchmarking.
+
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`. Additionally, you can control the profiling content by specifying the following environment variables:
+We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.
 
-- `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
-- `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
-- `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
-- `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
+!!! note
+    The `--profiler-config` flag is available in vLLM v0.13.0 and later. If you are using an earlier version, please upgrade to use this feature.
 
-The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
+To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
+
+- `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
+- `torch_profiler_with_memory` to record memory, off by default
+- `torch_profiler_with_stack` to enable recording stack information, on by default
+- `torch_profiler_with_flops` to enable recording FLOPs, off by default
+- `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
+- `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
@@ -33,13 +42,12 @@ Traces can be visualized using <https://ui.perfetto.dev/>.
 
 #### Offline Inference
 
-Refer to [examples/offline_inference/simple_profiling.py](../../examples/offline_inference/simple_profiling.py) for an example.
+Refer to [examples/features/profiling/simple_profiling_offline.py](../../examples/features/profiling/simple_profiling_offline.py) for an example.
 
 #### OpenAI Server
 
 ```bash
-VLLM_TORCH_PROFILER_DIR=./vllm_profile \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
 ```
 
 vllm bench command:
@@ -52,6 +60,29 @@ vllm bench serve \
     --dataset-path sharegpt.json \
     --profile \
     --num-prompts 2
+```
+
+Or use http request:
+
+```shell
+# We need first call /start_profile api to start profile.
+$ curl -X POST http://localhost:8000/start_profile
+
+# Call model generate.
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "San Francisco is a"
+                        }
+                ]
+    }'
+
+# After need call /stop_profile api to stop profile.
+$ curl -X POST http://localhost:8000/stop_profile
 ```
 
 ## Profile with NVIDIA Nsight Systems
@@ -102,13 +133,12 @@ To profile the server, you will want to prepend your `vllm serve` command with `
 
 ```bash
 # server
-VLLM_TORCH_CUDA_PROFILE=1 \
 nsys profile \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
     --capture-range=cudaProfilerApi \
     --capture-range-end repeat \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
 
 # client
 vllm bench serve \
@@ -176,8 +206,8 @@ Both the `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_cont
 used to profile a section of code.
 
 !!! note
-    The legacy import paths `vllm.utils.cprofile` and `vllm.utils.cprofile_context` are deprecated.
-    Please use `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` instead.
+    The `vllm.utils.profiling` helpers are deprecated and will be removed in
+    `v0.21`. Please use Python's `cProfile` module directly instead.
 
 ### Example usage - decorator
 
@@ -224,6 +254,6 @@ snakeviz expensive_function.prof
 
 Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
 
-- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
 - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
   collected objects for each gc.collect

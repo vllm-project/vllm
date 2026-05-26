@@ -8,10 +8,13 @@ import torch
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
@@ -26,11 +29,53 @@ class CpuCommunicator(DeviceCommunicatorBase):
         self.dist_module = torch.distributed
 
         if (
-            (current_platform.get_cpu_architecture() == CpuArchEnum.X86)
+            (
+                current_platform.get_cpu_architecture() == CpuArchEnum.X86
+                or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
+            and self._all_group_ranks_share_shm_group_name()
         ):
             self.dist_module = _CPUSHMDistributed(self)
+        elif unique_name.startswith("tp") or unique_name.startswith("pp"):
+            logger.info(
+                "CPU SHM communicator disabled for group %s: ranks do not share "
+                "the same SHM group name, falling back to torch.distributed.",
+                unique_name,
+            )
+
+        # send/recv tensor_dict is only supported through the SHM communicator backend
+        self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
+
+        if self.use_all2all:
+            if self.all2all_backend not in (
+                "naive",
+                "allgather_reducescatter",
+            ):  # type: ignore[has-type]
+                logger.warning(
+                    "`%s` all2all manager is not supported on CPU. "
+                    "Falling back to `allgather_reducescatter` manager.",
+                    self.all2all_backend,  # type: ignore[has-type]
+                )
+            from .all2all import AgRsAll2AllManager
+
+            self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+            logger.info("Using allgather_reducescatter all2all manager.")
+
+    def _all_group_ranks_share_shm_group_name(self) -> bool:
+        """
+        CPUSHM requires all ranks in this group to agree on one SHM group name.
+        This is a lightweight consistency check for VLLM_DIST_IDENT/name inputs.
+        """
+        local_name = _CPUSHMDistributed.make_group_name(self)
+        names: list[str] = [""] * self.world_size
+        torch.distributed.all_gather_object(
+            names,
+            local_name,
+            group=self.device_group,
+        )
+        return len(set(names)) == 1
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
@@ -102,33 +147,119 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int,
     ) -> None:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.send_tensor_dict(tensor_dict, dst)
 
     def recv_tensor_dict(
         self,
         src: int,
     ) -> dict[str, torch.Tensor | Any]:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.recv_tensor_dict(src)
+
+    def dispatch_router_logits(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+
+        assert self.all2all_manager is not None
+        return self.all2all_manager.dispatch_router_logits(
+            hidden_states,
+            router_logits,
+            is_sequence_parallel,
+            extra_tensors,
+        )
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        This is a no-op in the base class.
+        """
+        assert self.all2all_manager is not None
+        return self.all2all_manager.dispatch(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel,
+            extra_tensors=extra_tensors,
+        )
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
+        assert self.all2all_manager is not None
+        return self.all2all_manager.combine(
+            hidden_states,
+            is_sequence_parallel,
+        )
 
 
 class _CPUSHMDistributed:
     def __init__(self, communicator: CpuCommunicator):
-        instance_identifier = os.environ["VLLM_DIST_IDENT"]
-        unique_name = communicator.unique_name
-        instance_identifier = f"{instance_identifier}-{unique_name}"
         self.communicator = communicator
 
-        group_ranks = [str(rank) for rank in self.communicator.ranks]
-        shm_group_identifier = f"[{'-'.join(group_ranks)}]"
-        self.group_name = f"{instance_identifier}-{shm_group_identifier}-cpushm"
+        self.group_name = self.make_group_name(communicator)
 
         self.handle = self._init_cpu_shm()
 
+    @staticmethod
+    def make_group_name(communicator: CpuCommunicator) -> str:
+        instance_identifier = os.environ["VLLM_DIST_IDENT"]
+        unique_name = communicator.unique_name
+        instance_identifier = f"{instance_identifier}-{unique_name}"
+        group_ranks = [str(rank) for rank in communicator.ranks]
+        shm_group_identifier = f"[{'-'.join(group_ranks)}]"
+        return f"{instance_identifier}-{shm_group_identifier}-cpushm"
+
     def _init_cpu_shm(self) -> int:
+        thread_num_tensor = torch.tensor(
+            [torch.get_num_threads()],
+            dtype=torch.int64,
+        )
+        torch.distributed.all_reduce(
+            thread_num_tensor,
+            op=torch.distributed.ReduceOp.MIN,
+            group=self.communicator.device_group,
+        )
+        thread_num = thread_num_tensor.item()
+
         handle = torch.ops._C.init_shm_manager(
             self.group_name,
             self.communicator.world_size,
             self.communicator.rank,
+            thread_num,
         )
         torch.distributed.barrier(self.communicator.device_group)
         torch.ops._C.join_shm_manager(

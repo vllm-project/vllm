@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -25,8 +26,7 @@ class FlexOlmoConfig(PretrainedConfig):
         bos_token_id=None,
         eos_token_id=100257,
         tie_word_embeddings=False,
-        rope_theta=500000.0,
-        rope_scaling=None,
+        rope_parameters: dict[str, Any] | None = None,
         attention_bias=False,
         attention_dropout=0.0,
         num_experts_per_tok=5,
@@ -39,13 +39,6 @@ class FlexOlmoConfig(PretrainedConfig):
         if "architectures" not in kwargs:
             kwargs["architectures"] = ["FlexOlmoForCausalLM"]
 
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -62,8 +55,13 @@ class FlexOlmoConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
+        rope_theta = kwargs.pop("rope_theta", 500000.0)
+        if "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
+        self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.num_experts_per_tok = num_experts_per_tok
@@ -73,5 +71,12 @@ class FlexOlmoConfig(PretrainedConfig):
         self.norm_topk_prob = norm_topk_prob
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, move it to 'rope_type'.
-        if self.rope_scaling is not None and "type" in self.rope_scaling:
-            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )

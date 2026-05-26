@@ -10,6 +10,9 @@ This guide will help you quickly get started with vLLM to perform:
 - OS: Linux
 - Python: 3.10 -- 3.13
 
+!!! note
+    vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
+
 ## Installation
 
 === "NVIDIA CUDA"
@@ -43,25 +46,24 @@ This guide will help you quickly get started with vLLM to perform:
 
 === "AMD ROCm"
 
-    Use a pre-built docker image from Docker Hub. The public stable image is [rocm/vllm:latest](https://hub.docker.com/r/rocm/vllm). There is also a development image at [rocm/vllm-dev](https://hub.docker.com/r/rocm/vllm-dev).
-    
-    The `-v` flag in the `docker run` command below mounts a local directory into the container. Replace `<path/to/your/models>` with the path on your host machine to the directory containing your models. The models will then be accessible inside the container at `/app/models`.
-    
-    ???+ console "Commands"
-        ```bash
-        docker pull rocm/vllm-dev:nightly # to get the latest image
-        docker run -it --rm \
-        --network=host \
-        --group-add=video \
-        --ipc=host \
-        --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v <path/to/your/models>:/app/models \
-        -e HF_HOME="/app/models" \
-        rocm/vllm-dev:nightly
-        ```
+    If you are using AMD GPUs, you can install vLLM using `uv`.
+
+    It's recommended to use [uv](https://docs.astral.sh/uv/), as it gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). `uv` is also a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+
+    ```bash
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+    ```
+
+    !!! note
+        It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+
+    !!! note
+        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
+
+    !!! tip
+        A nightly Docker image is also available as [vllm/vllm-openai-rocm:nightly](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags) for testing the latest development builds.
 
 === "Google TPU"
 
@@ -74,12 +76,24 @@ This guide will help you quickly get started with vLLM to perform:
     !!! note
         For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
 
+=== "Apple Silicon (Mac)"
+
+    If you are using Apple Silicon Macs, you can use vLLM-Metal for GPU-accelerated inference via Apple's Metal framework.
+
+    Follow the installation instructions in the [vLLM-Metal documentation](https://github.com/vllm-project/vllm-metal#installation).
+
+    !!! note
+        vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires MLX-optimized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face.
+
+    !!! tip
+        For more detailed instructions, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
+
 !!! note
-    For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
+    For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
 
@@ -232,7 +246,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
     print("Completion result:", completion)
     ```
 
-A more detailed client example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+A more detailed client example can be found here: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 ### OpenAI Chat Completions API with vLLM
 
@@ -281,17 +295,20 @@ Alternatively, you can use the `openai` Python package:
 
 Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
 
-If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options:
+If desired, you can also manually set the backend of your choice using the `--attention-backend` CLI argument:
 
-- On NVIDIA CUDA: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
-- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA` or `ROCM_AITER_UNIFIED_ATTN`.
+```bash
+# For online serving
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --attention-backend FLASH_ATTN
 
-For AMD ROCm, you can futher control the specific Attention implementation using the following variables:
+# For offline inference
+python script.py --attention-backend FLASHINFER
+```
 
-- Triton Unified Attention: `VLLM_ROCM_USE_AITER=0 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`
-- AITER Unified Attention: `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`
-- Triton Prefill-Decode Attention: `VLLM_ROCM_USE_AITER=1 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1 VLLM_ROCM_USE_AITER_MHA=0`
-- AITER Multi-head Attention: `VLLM_ROCM_USE_AITER=1 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=1`
+Some of the available backend options include:
+
+- On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
+- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
 
 !!! warning
     There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.

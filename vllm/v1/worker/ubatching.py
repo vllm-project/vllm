@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional
 
 import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
+from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
 
+logger = init_logger(__name__)
+
 _THREAD_ID_TO_CONTEXT: dict = {}
-_CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = [None, None]
+# Here we hardcode the number of microbatches to 2 for default.
+_NUM_UBATCHES: int = 2
+_CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
 class UBatchContext:
@@ -27,8 +31,8 @@ class UBatchContext:
         ready_barrier: threading.Barrier,
         cpu_wait_event: threading.Event,
         cpu_signal_event: threading.Event,
-        gpu_comm_done_event: torch.cuda.Event,
-        gpu_compute_done_event: torch.cuda.Event,
+        gpu_comm_done_event: torch.Event,
+        gpu_compute_done_event: torch.Event,
         schedule: str = "default",
     ):
         self.id = id
@@ -48,6 +52,7 @@ class UBatchContext:
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
         _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
         _CURRENT_CONTEXTS[self.id] = self
+        # _NUM_UBATCHES is set in make_ubatch_contexts
         self.ready_barrier.wait()
 
         self.cpu_wait_event.wait()
@@ -181,7 +186,7 @@ dbo_switch_to_compute_sync = _register_ubatch_function(
 def dbo_register_recv_hook(recv_hook):
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
+        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
         next_ctx.recv_hook = recv_hook
 
 
@@ -202,15 +207,20 @@ def make_ubatch_contexts(
     ready_barrier: threading.Barrier,
     schedule: str = "default",
 ) -> list[UBatchContext]:
-    assert num_micro_batches == 2, "only been tested with 2 micro-batches"
+    global _NUM_UBATCHES, _CURRENT_CONTEXTS
+    assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
+
+    _NUM_UBATCHES = num_micro_batches
+    # Ensure the global context list is large enough
+    if len(_CURRENT_CONTEXTS) < num_micro_batches:
+        _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
+
     """
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_comm_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
-    gpu_compute_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
-
-    assert len(forward_contexts) == 2
+    gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
+    gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 
     ctxs = []
     for i in range(num_micro_batches):

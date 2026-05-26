@@ -6,22 +6,18 @@ from collections.abc import Iterable
 from itertools import islice
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
-
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -32,17 +28,20 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -54,42 +53,52 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
-
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Only used for type hinting.
-class Plamo2Config(PretrainedConfig):  # type: ignore
-    model_type: str = "plamo2"
+if TYPE_CHECKING:
 
-    hidden_size: int
-    num_hidden_layers: int
-    rms_norm_eps: float
-    # Attention
-    num_attention_heads: int
-    hidden_size_per_head: int
-    num_key_value_heads: int
-    # Mamba
-    mamba_d_state: int
-    mamba_d_conv: int
-    mamba_num_heads: int
-    mamba_step: int
-    # MLP
-    intermediate_size: int
-    # Tokenizer
-    vocab_size: int
+    class Plamo2Config(PretrainedConfig):  # type: ignore
+        model_type: str = "plamo2"
+
+        hidden_size: int
+        num_hidden_layers: int
+        rms_norm_eps: float
+        # Attention
+        num_attention_heads: int
+        hidden_size_per_head: int
+        num_key_value_heads: int
+        # Mamba
+        mamba_d_state: int
+        mamba_d_conv: int
+        mamba_num_heads: int
+        mamba_step: int
+        # MLP
+        intermediate_size: int
+        # Tokenizer
+        vocab_size: int
 
 
-def is_mamba(config: Plamo2Config, i: int) -> bool:
+def is_mamba(config: "Plamo2Config", i: int) -> bool:
     assert config.mamba_step > 1
 
     if config.num_hidden_layers <= (config.mamba_step // 2):
@@ -101,14 +110,18 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
 # Adapted from:
 # vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 # transformers.models.mamba.modeling_mamba.MambaMixer
-@CustomOp.register(name="plamo2_mamba_mixer")
-class Plamo2MambaMixer(MambaBase, CustomOp):
+# --8<-- [start:plamo2_mamba_mixer]
+@PluggableLayer.register("plamo2_mamba_mixer")
+class Plamo2MambaMixer(MambaBase, PluggableLayer):
+    # --8<-- [end:plamo2_mamba_mixer]
+
     def __init__(self, vllm_config: VllmConfig, *, prefix: str = "", **kwargs) -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
+        self.is_lora_enabled = bool(vllm_config.lora_config)
         self.hidden_size = self.config.hidden_size
         self.ssm_state_size = self.config.mamba_d_state
         self.conv_kernel_size = self.config.mamba_d_conv
@@ -206,7 +219,11 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         self.prefix = prefix
 
     def _project_ssm_parameters(self, hidden_states):
-        ssm_parameters = self.bcdt_proj(hidden_states)
+        if self.is_lora_enabled:
+            #  Lora kernel requires contiguous tensor.
+            ssm_parameters = self.bcdt_proj(hidden_states.contiguous())
+        else:
+            ssm_parameters = self.bcdt_proj(hidden_states)
         B, C, time_step = torch.split(
             ssm_parameters,
             [self.ssm_state_size, self.ssm_state_size, self.time_step_rank],
@@ -220,14 +237,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         dt = self.dt_proj(time_step)
         return B, C, dt
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        **kwargs,
-    ):
-        pass
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -240,7 +249,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             self.prefix,
         )
 
-    def forward_cuda(
+    def forward_impl(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
@@ -257,11 +266,18 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-            conv_state = self_kv_cache[0].transpose(-1, -2)
+            # conv_state must be (..., dim, width-1) for the conv kernels.
+            # DS layout stores it that way directly; SD layout needs a transpose.
+            conv_state = (
+                self_kv_cache[0]
+                if is_conv_state_dim_first()
+                else self_kv_cache[0].transpose(-1, -2)
+            )
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -294,7 +310,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         hidden_states_d, hidden_states_p = torch.split(
@@ -305,13 +320,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         gate_d, gate_p = torch.split(
             gate[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
         preallocated_ssm_out = torch.empty(
@@ -332,7 +340,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         if has_prefill:
             # 2. Convolution sequence transformation
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            #   pointed to by "state_indices_tensor_p"
             x = hidden_states_p.transpose(0, 1)  # this is the form that causal-conv see
             hidden_states_p = causal_conv1d_fn(
                 x,
@@ -405,6 +413,13 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
             )
 
+            # ROCm: Ensure contiguous tensor for bcdt_proj linear layer.
+            # causal_conv1d_update returns a non-contiguous view (stride 8192
+            # instead of 4096 for shape [batch, 4096]), causing incorrect GEMM
+            # results when batch > 1 on ROCm.
+            if current_platform.is_rocm():
+                hidden_states_d = hidden_states_d.contiguous()
+
             B, C, dt = self._project_ssm_parameters(hidden_states_d)
 
             # 3. State Space Model sequence transformation
@@ -433,8 +448,8 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 B,
                 C,
                 D,
+                dt_bias,
                 z=gate_d.reshape(num_decodes, -1, self.head_dim),
-                dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
@@ -464,13 +479,8 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba2"
-
-    def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
-
-        return Mamba2AttentionBackend
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA2
 
 
 def plamo2_mamba_mixer(
@@ -480,7 +490,7 @@ def plamo2_mamba_mixer(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    self.forward_impl(hidden_states=hidden_states, output=output)
 
 
 def plamo2_mamba_mixer_fake(
@@ -502,7 +512,7 @@ direct_register_custom_op(
 class DenseMLP(nn.Module):
     def __init__(
         self,
-        config: Plamo2Config,
+        config: "Plamo2Config",
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -576,10 +586,6 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
-        self.rope_scaling = (
-            config.rope_scaling if hasattr(config, "rope_scaling") else None
-        )
         max_position = config.max_position_embeddings
         if hasattr(vllm_config.model_config, "max_model_len") and isinstance(
             vllm_config.model_config.max_model_len, int
@@ -588,10 +594,8 @@ class Plamo2AttentionMixer(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.q_norm = RMSNorm(config.hidden_size_per_head, eps=config.rms_norm_eps)
         self.q_norm.weight = torch.nn.Parameter(
@@ -748,7 +752,6 @@ class Plamo2Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -767,7 +770,7 @@ class Plamo2Model(torch.nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -795,120 +798,10 @@ class Plamo2Model(torch.nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        scheduler_config = vllm_config.scheduler_config
-
-        self.config = config
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = scheduler_config
-
-        # ModelConfig.get_head_size assumes head_dim is set or calculated as
-        # hidden_size // num_attention_heads. However, this is not always
-        # the case for PLaMo2, as indicated by the FIXME comment.
-        self.config.head_dim = self.config.hidden_size_per_head
-
-        self.model = Plamo2Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        self.vocab_size = self.config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.vocab_size,
-            self.config.hidden_size,
-            prefix=f"{prefix}.lm_head",
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
-
-        self.logits_processor = LogitsProcessor(
-            config.vocab_size, self.config.vocab_size
-        )
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ):
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
-
-    @classmethod
-    def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
-        )
-
-    @classmethod
-    def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
-        """Calculate shapes for Mamba's convolutional and state caches.
-        Args:
-            vllm_config: vLLM config
-        Returns:
-            Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
-        """
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
-        intermediate_size = hf_config.mamba_num_heads * hf_config.hidden_size_per_head
-
-        return MambaStateShapeCalculator.mamba2_state_shape(
-            intermediate_size=intermediate_size,
-            tp_world_size=parallel_config.tensor_parallel_size,
-            n_groups=0,
-            num_heads=hf_config.mamba_num_heads,
-            head_dim=hf_config.hidden_size_per_head,
-            state_size=hf_config.mamba_d_state,
-            conv_kernel=hf_config.mamba_d_conv,
-        )
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Both tie_word_embeddings=True and lm_head.weight in the safetensor
-            # at the same time causes dict key access error.
-            if name == "lm_head.weight" and self.config.tie_word_embeddings:
-                assert "lm_head.weight" not in params_dict
-                continue
-
             # Update the weight names to be compatible with the vllm version
             # of the model.
             # Do not change the order of the replacements.
@@ -969,7 +862,7 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
                 loaded_weight += 1.0
             elif ".post_mlp_norm" in name:
                 loaded_weight += 1.0 / (5**1.5)
-            elif "model.norm.weight" in name:
+            elif name == "norm.weight":
                 loaded_weight += 1.0
 
             # Skip layers on other devices.
@@ -979,3 +872,121 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class Plamo2ForCausalLM(
+    torch.nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid
+):
+    packed_modules_mapping = {
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_up_proj"],
+        "in_proj": ["in_proj"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        scheduler_config = vllm_config.scheduler_config
+
+        self.config = config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.scheduler_config = scheduler_config
+
+        # ModelConfig.get_head_size assumes head_dim is set or calculated as
+        # hidden_size // num_attention_heads. However, this is not always
+        # the case for PLaMo2, as indicated by the FIXME comment.
+        self.config.head_dim = self.config.hidden_size_per_head
+
+        self.model = Plamo2Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.vocab_size = self.config.vocab_size
+        self.lm_head = ParallelLMHead(
+            self.vocab_size,
+            self.config.hidden_size,
+            prefix=f"{prefix}.lm_head",
+        )
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+
+        self.logits_processor = LogitsProcessor(
+            config.vocab_size, self.config.vocab_size
+        )
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+        Args:
+            vllm_config: vLLM config
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        intermediate_size = hf_config.mamba_num_heads * hf_config.hidden_size_per_head
+
+        return MambaStateShapeCalculator.mamba2_state_shape(
+            intermediate_size=intermediate_size,
+            tp_world_size=parallel_config.tensor_parallel_size,
+            n_groups=0,
+            num_heads=hf_config.mamba_num_heads,
+            head_dim=hf_config.hidden_size_per_head,
+            state_size=hf_config.mamba_d_state,
+            conv_kernel=hf_config.mamba_d_conv,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)

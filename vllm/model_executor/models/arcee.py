@@ -32,13 +32,20 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_prefix,
 )
 
 
@@ -103,15 +110,6 @@ class ArceeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Rotary embedding parameters (reuse LLaMA defaults)
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Determine if attention bias is needed (some variants use bias terms)
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -133,8 +131,6 @@ class ArceeDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
@@ -181,7 +177,7 @@ class ArceeDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class ArceeModel(nn.Module):
+class ArceeModel(nn.Module, EagleModelMixin):
     """The transformer model backbone for Arcee (embedding layer + stacked
     decoder blocks + final norm)."""
 
@@ -229,10 +225,6 @@ class ArceeModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        # For optional capturing of intermediate hidden states
-        # (not used by default)
-        self.aux_hidden_state_layers: tuple[int, ...] = tuple()
-
         # Prepare factory for empty intermediate tensors
         # (for pipeline scheduling)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -264,15 +256,14 @@ class ArceeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states: list[torch.Tensor] = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    hidden_states + residual
-                )  # capture pre-layer hidden state if needed
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             # Send intermediate results to the next pipeline stage
@@ -314,7 +305,7 @@ class ArceeModel(nn.Module):
                 loaded_params.add(scale_name)
                 continue
 
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is None:
                     continue
@@ -359,7 +350,9 @@ class ArceeModel(nn.Module):
         return loaded_params
 
 
-class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class ArceeForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     """Arcee Model for causal language modeling, integrated with vLLM
     runtime."""
 
@@ -375,7 +368,10 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
 
         # Initialize the inner Transformer model (ArceeModel)
-        self.model = ArceeModel(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        self.model = ArceeModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
@@ -386,7 +382,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 config.hidden_size,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
-                prefix=f"{prefix}.lm_head",
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix
@@ -405,7 +401,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

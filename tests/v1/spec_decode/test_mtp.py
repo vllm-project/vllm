@@ -12,7 +12,6 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -25,9 +24,11 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
+DEVICE_TYPE = current_platform.device_type
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -48,18 +49,21 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         model_config=model_config,
         cache_config=CacheConfig(),
         speculative_config=speculative_config,
-        device_config=DeviceConfig(device=current_platform.device_type),
+        device_config=DeviceConfig(device=DEVICE_TYPE),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
     )
 
-    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
+    return EagleProposer(vllm_config=vllm_config, device=DEVICE_TYPE)
 
 
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
 
@@ -67,6 +71,10 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
     mock_get_model.return_value = mock_model
+    # MTP does not have its own embed_tokens or lm_head
+    # so it should share them with the target model
+    mock_model.has_own_embed_tokens = False
+    mock_model.has_own_lm_head = False
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
@@ -111,7 +119,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
 
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
     total_tokens = sum(seq_lens)
@@ -155,7 +163,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         model_mock.compute_logits.side_effect = logits_returns
 
     proposer.model = model_mock
-    proposer.attn_layer_names = ["layer.0"]
+    proposer._draft_attn_layer_names = {"layer.0"}
 
     # Prepare inputs
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
@@ -183,13 +191,17 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer.attn_layer_names,
+        layer_names=list(proposer._draft_attn_layer_names),
         vllm_config=proposer.vllm_config,
         device=device,
     )
 
     proposer.runner = mock.MagicMock()
-    proposer.attn_metadata_builder = attn_metadata_builder
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
 
     # Run propose
     result = proposer.propose(
@@ -197,7 +209,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )

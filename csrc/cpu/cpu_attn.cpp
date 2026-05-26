@@ -1,63 +1,15 @@
-#include "cpu_attn_vec.hpp"
-#include "cpu_attn_vec16.hpp"
+#include "cpu_attn_dispatch_generated.h"
 
-#ifdef CPU_CAPABILITY_AMXBF16
-  #include "cpu_attn_amx.hpp"
-  #define AMX_DISPATCH(...)                                                   \
-    case cpu_attention::ISA::AMX: {                                           \
-      using attn_impl = cpu_attention::AttentionImpl<cpu_attention::ISA::AMX, \
-                                                     scalar_t, head_dim>;     \
-      return __VA_ARGS__();                                                   \
-    }
-#else
-  #define AMX_DISPATCH(...) case cpu_attention::ISA::AMX:
-#endif
-
-#define CPU_ATTN_DISPATCH_CASE(HEAD_DIM, ...) \
-  case HEAD_DIM: {                            \
-    constexpr size_t head_dim = HEAD_DIM;     \
-    return __VA_ARGS__();                     \
-  }
-
-#define CPU_ATTN_DISPATCH_CASE_HEADDIM(HEAD_DIM, ...)           \
-  [&] {                                                         \
-    switch (HEAD_DIM) {                                         \
-      CPU_ATTN_DISPATCH_CASE(32, __VA_ARGS__)                   \
-      CPU_ATTN_DISPATCH_CASE(64, __VA_ARGS__)                   \
-      CPU_ATTN_DISPATCH_CASE(96, __VA_ARGS__)                   \
-      CPU_ATTN_DISPATCH_CASE(128, __VA_ARGS__)                  \
-      CPU_ATTN_DISPATCH_CASE(160, __VA_ARGS__)                  \
-      CPU_ATTN_DISPATCH_CASE(192, __VA_ARGS__)                  \
-      CPU_ATTN_DISPATCH_CASE(224, __VA_ARGS__)                  \
-      CPU_ATTN_DISPATCH_CASE(256, __VA_ARGS__)                  \
-      default: {                                                \
-        TORCH_CHECK(false, "Invalid CPU attention head_dim: " + \
-                               std::to_string(HEAD_DIM));       \
-      }                                                         \
-    }                                                           \
-  }()
-
-#define CPU_ATTN_DISPATCH_IMPL(ISA_TYPE, ...)                                 \
-  [&] {                                                                       \
-    switch (ISA_TYPE) {                                                       \
-      AMX_DISPATCH(__VA_ARGS__)                                               \
-      case cpu_attention::ISA::VEC: {                                         \
-        using attn_impl =                                                     \
-            cpu_attention::AttentionImpl<cpu_attention::ISA::VEC, scalar_t,   \
-                                         head_dim>;                           \
-        return __VA_ARGS__();                                                 \
-      }                                                                       \
-      case cpu_attention::ISA::VEC16: {                                       \
-        using attn_impl =                                                     \
-            cpu_attention::AttentionImpl<cpu_attention::ISA::VEC16, scalar_t, \
-                                         head_dim>;                           \
-        return __VA_ARGS__();                                                 \
-      }                                                                       \
-      default: {                                                              \
-        TORCH_CHECK(false, "Invalid CPU attention ISA type.");                \
-      }                                                                       \
-    }                                                                         \
-  }()
+// Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
+// "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
+static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
+    const std::string& kv_cache_dtype) {
+  if (kv_cache_dtype == "fp8_e5m2")
+    return cpu_attention::Fp8KVCacheDataType::kFp8E5M2;
+  if (kv_cache_dtype == "fp8_e4m3" || kv_cache_dtype == "fp8")
+    return cpu_attention::Fp8KVCacheDataType::kFp8E4M3;
+  return cpu_attention::Fp8KVCacheDataType::kAuto;
+}
 
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
@@ -73,6 +25,14 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::VEC;
   } else if (isa_hint == "vec16") {
     isa = cpu_attention::ISA::VEC16;
+  } else if (isa_hint == "neon") {
+    isa = cpu_attention::ISA::NEON;
+  } else if (isa_hint == "vxe") {
+    isa = cpu_attention::ISA::VXE;
+  } else if (isa_hint == "rvv") {
+    isa = cpu_attention::ISA::RVV;
+  } else if (isa_hint == "vsx") {
+    isa = cpu_attention::ISA::VSX;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -102,19 +62,16 @@ torch::Tensor get_scheduler_metadata(
   input.casual = casual;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
-  TORCH_CHECK(casual, "Only supports casual mask for now.");
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
-    CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
-      CPU_ATTN_DISPATCH_IMPL(isa, [&]() {
-        input.elem_size = sizeof(scalar_t);
-        input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
-        input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
-        input.output_buffer_elem_size =
-            sizeof(attn_impl::partial_output_buffer_t);
-        input.max_num_q_per_iter = attn_impl::MaxQHeadNumPerIteration;
-        input.kv_block_alignment = attn_impl::BlockSizeAlignment;
-      });
+    CPU_ATTN_DISPATCH(head_dim, isa, 0, [&]() {
+      input.elem_size = sizeof(scalar_t);
+      input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
+      input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
+      input.output_buffer_elem_size =
+          sizeof(attn_impl::partial_output_buffer_t);
+      input.max_num_q_per_iter = attn_impl::MaxQHeadNumPerIteration;
+      input.kv_block_alignment = attn_impl::BlockSizeAlignment;
     });
   });
 
@@ -130,7 +87,9 @@ void cpu_attn_reshape_and_cache(
         key_cache,  // [num_blocks, num_kv_heads, block_size, head_size]
     torch::Tensor&
         value_cache,  // [num_blocks, num_kv_heads, block_size, head_size]
-    const torch::Tensor& slot_mapping, const std::string& isa) {
+    const torch::Tensor& slot_mapping, const std::string& isa,
+    const double k_scale = 1.0, const double v_scale = 1.0,
+    const std::string& kv_cache_dtype = "auto") {
   TORCH_CHECK_EQ(key.dim(), 3);
   TORCH_CHECK_EQ(value.dim(), 3);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
@@ -138,18 +97,30 @@ void cpu_attn_reshape_and_cache(
   TORCH_CHECK_EQ(key.stride(2), 1);
   TORCH_CHECK_EQ(value.stride(2), 1);
 
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
+  const bool is_fp8 = (kv_cache_idx != 0);
+
+  if (is_fp8) {
+    TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
+                "key_cache must be uint8 for FP8 path");
+    TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
+                "value_cache must be uint8 for FP8 path");
+    TORCH_CHECK(k_scale > 0, "k_scale must be positive for FP8 path");
+    TORCH_CHECK(v_scale > 0, "v_scale must be positive for FP8 path");
+  }
+
+  const float k_inv = is_fp8 ? 1.0f / static_cast<float>(k_scale) : 0.0f;
+  const float v_inv = is_fp8 ? 1.0f / static_cast<float>(v_scale) : 0.0f;
+
   const int64_t token_num = key.size(0);
-  const int64_t key_token_num_stride = key.stride(0);
-  const int64_t value_token_num_stride = value.stride(0);
-  const int64_t head_num = value.size(1);
-  const int64_t key_head_num_stride = key.stride(1);
-  const int64_t value_head_num_stride = value.stride(1);
+  const int64_t head_num = key.size(1);
+  const int64_t head_dim = key.size(2);
   const int64_t num_blocks = key_cache.size(0);
   const int64_t num_blocks_stride = key_cache.stride(0);
   const int64_t cache_head_num_stride = key_cache.stride(1);
   const int64_t block_size = key_cache.size(2);
   const int64_t block_size_stride = key_cache.stride(2);
-  const int64_t head_dim = key.size(-1);
 
   cpu_attention::ISA isa_tag = [&]() {
     if (isa == "amx") {
@@ -158,25 +129,37 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::VEC;
     } else if (isa == "vec16") {
       return cpu_attention::ISA::VEC16;
+    } else if (isa == "neon") {
+      return cpu_attention::ISA::NEON;
+    } else if (isa == "vxe") {
+      return cpu_attention::ISA::VXE;
+    } else if (isa == "rvv") {
+      return cpu_attention::ISA::RVV;
+    } else if (isa == "vsx") {
+      return cpu_attention::ISA::VSX;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }
   }();
 
+  if (is_fp8) {
+    TORCH_CHECK(isa_tag == cpu_attention::ISA::AMX ||
+                    isa_tag == cpu_attention::ISA::VEC,
+                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+  }
+
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
-        CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
-          CPU_ATTN_DISPATCH_IMPL(isa_tag, [&]() {
-            attn_impl::reshape_and_cache(
-                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                key_cache.data_ptr<scalar_t>(),
-                value_cache.data_ptr<scalar_t>(),
-                slot_mapping.data_ptr<int64_t>(), token_num,
-                key_token_num_stride, value_token_num_stride, head_num,
-                key_head_num_stride, value_head_num_stride, num_blocks,
-                num_blocks_stride, cache_head_num_stride, block_size,
-                block_size_stride);
-          });
+        CPU_ATTN_DISPATCH(head_dim, isa_tag, kv_cache_idx, [&]() {
+          using kv_t = typename attn_impl::kv_cache_t;
+          attn_impl::reshape_and_cache(
+              key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+              reinterpret_cast<kv_t*>(key_cache.data_ptr()),
+              reinterpret_cast<kv_t*>(value_cache.data_ptr()),
+              slot_mapping.data_ptr<int64_t>(), token_num, key.stride(0),
+              value.stride(0), head_num, key.stride(1), value.stride(1),
+              num_blocks, num_blocks_stride, cache_head_num_stride, block_size,
+              block_size_stride, k_inv, v_inv);
         });
       });
 }
@@ -195,12 +178,25 @@ void cpu_attention_with_kv_cache(
     const int64_t sliding_window_left, const int64_t sliding_window_right,
     const torch::Tensor& block_table,  // [num_tokens, max_block_num]
     const double softcap, const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux  // [num_heads]
-) {
+    const std::optional<torch::Tensor>& s_aux,  // [num_heads]
+    const double k_scale = 1.0, const double v_scale = 1.0,
+    const std::string& kv_cache_dtype = "auto") {
   TORCH_CHECK_EQ(query.dim(), 3);
   TORCH_CHECK_EQ(query.stride(2), 1);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
+
+  const int64_t kv_cache_idx =
+      static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
+  const bool is_fp8 = (kv_cache_idx != 0);
+  if (is_fp8) {
+    TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
+                "key_cache must be uint8 for FP8 path");
+    TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
+                "value_cache must be uint8 for FP8 path");
+    TORCH_CHECK(k_scale > 0, "k_scale must be positive for FP8 path");
+    TORCH_CHECK(v_scale > 0, "v_scale must be positive for FP8 path");
+  }
 
   cpu_attention::AttentionInput input;
   input.metadata = reinterpret_cast<cpu_attention::AttentionMetadata*>(
@@ -223,27 +219,32 @@ void cpu_attention_with_kv_cache(
   input.block_table = block_table.data_ptr<int32_t>();
   input.alibi_slopes =
       alibi_slopes.has_value() ? alibi_slopes->data_ptr<float>() : nullptr;
-  // For now sink must be bf16
   input.s_aux = s_aux.has_value() ? s_aux->data_ptr<c10::BFloat16>() : nullptr;
   input.scale = scale;
   input.causal = causal;
   input.sliding_window_left = sliding_window_left;
   input.sliding_window_right = sliding_window_right;
   if (input.causal) {
-    // to make boundary calculation easier
     input.sliding_window_right = 0;
   }
-  float softcap_fp32 = softcap;
-  input.softcap = softcap_fp32;
+  input.softcap = static_cast<float>(softcap);
+
+  if (is_fp8) {
+    input.k_scale_fp8 = static_cast<float>(k_scale);
+    input.v_scale_fp8 = static_cast<float>(v_scale);
+    TORCH_CHECK(input.metadata->isa == cpu_attention::ISA::AMX ||
+                    input.metadata->isa == cpu_attention::ISA::VEC,
+                "FP8 KV cache is only supported on x86 (AMX/VEC) ISA");
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "cpu_attention_with_kv_cache", [&]() {
-        CPU_ATTN_DISPATCH_CASE_HEADDIM(query.size(2), [&] {
-          CPU_ATTN_DISPATCH_IMPL(input.metadata->isa, [&]() {
-            TORCH_CHECK_EQ(input.block_size % attn_impl::BlockSizeAlignment, 0);
-            cpu_attention::AttentionMainLoop<attn_impl> mainloop;
-            mainloop(&input);
-          });
-        });
+        CPU_ATTN_DISPATCH(
+            query.size(2), input.metadata->isa, kv_cache_idx, [&]() {
+              TORCH_CHECK_EQ(input.block_size % attn_impl::BlockSizeAlignment,
+                             0);
+              cpu_attention::AttentionMainLoop<attn_impl> mainloop;
+              mainloop(&input);
+            });
       });
 }

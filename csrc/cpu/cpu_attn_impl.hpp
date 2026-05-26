@@ -1,19 +1,35 @@
 #ifndef CPU_ATTN_HPP
 #define CPU_ATTN_HPP
 
-#include <unistd.h>
 #include <type_traits>
 #include <cstddef>
 
-#include "cpu_types.hpp"
-#include "scratchpad_manager.h"
-#include "cpu_attn_macros.h"
+#if defined(__APPLE__)
+  #include <sys/sysctl.h>
+#endif
+
+#include "cpu/cpu_arch_macros.h"
+#include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16 };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX };
 
-template <ISA isa, typename scalar_t, int64_t head_dim>
-class AttentionImpl {};
+// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
+enum class Fp8KVCacheDataType {
+  kAuto = 0,
+  kFp8E4M3 = 1,
+  kFp8E5M2 = 2,
+};
+
+struct AttentionInput;
+
+template <ISA isa, typename scalar_t, int64_t head_dim,
+          typename kv_cache_scalar_t = scalar_t>
+class AttentionImpl {
+ public:
+  void init_from_input(const AttentionInput*) {}
+  float get_output_v_scale() const noexcept { return 1.0f; }
+};
 
 struct AttentionWorkItemGroup {
   int32_t req_id;
@@ -139,6 +155,21 @@ struct AttentionMetadata {
       case ISA::VEC:
         ss << "VEC, ";
         break;
+      case ISA::VEC16:
+        ss << "VEC16, ";
+        break;
+      case ISA::NEON:
+        ss << "NEON, ";
+        break;
+      case ISA::VXE:
+        ss << "VXE, ";
+        break;
+      case ISA::RVV:
+        ss << "RVV, ";
+        break;
+      case ISA::VSX:
+        ss << "VSX, ";
+        break;
     }
     ss << "workitem_group_num: " << workitem_group_num
        << ", reduction_item_num: " << reduction_item_num
@@ -176,7 +207,7 @@ struct AttentionMetadata {
 //  - Intermediate outputs: q_tile_size * head_dim * output_buffer_elem_size + 2
 //  * q_tile_size * 4, partial output, max + sum (float)
 // Reduction scratchpad contains:
-//  - flags: bool array to indicate wether the split is finished
+//  - flags: bool array to indicate whether the split is finished
 //  - outputs: split_num * q_tile_size * head_dim * output_buffer_elem_size
 //  - max, sum: 2 * split_num * q_tile_size * 4
 class AttentionScratchPad {
@@ -368,12 +399,13 @@ class AttentionScheduler {
 
   static constexpr int32_t MaxQTileIterNum = 128;
 
-  AttentionScheduler() : available_cache_size_(get_available_l2_size()) {}
+  AttentionScheduler()
+      : available_cache_size_(cpu_utils::get_available_l2_size()) {}
 
   torch::Tensor schedule(const ScheduleInput& input) const {
     const bool casual = input.casual;
     const int32_t thread_num = omp_get_max_threads();
-    const int64_t cache_size = get_available_l2_size();
+    const int64_t cache_size = cpu_utils::get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
     int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
@@ -427,7 +459,7 @@ class AttentionScheduler {
     const int64_t kv_len_per_thread =
         (((total_kv_len / thread_num) + kv_len_alignment - 1) /
          kv_len_alignment) *
-        kv_len_alignment * (use_gqa ? input.num_heads_kv : input.num_heads_q);
+        kv_len_alignment;
     std::vector<AttentionWorkItemGroup> workitems;
     std::vector<ReductionWorkItemGroup> reduce_workitems;
     workitems.reserve(1024);
@@ -649,7 +681,7 @@ class AttentionScheduler {
             metadata_ptr->thread_num +
         metadata_ptr->reduction_scratchpad_size_per_kv_head *
             (use_gqa ? input.num_heads_kv : input.num_heads_q);
-    DNNLScratchPadManager::get_dnnl_scratchpad_manager()->realloc(
+    cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(
         scratchpad_size);
 
     // metadata_ptr->print();
@@ -657,7 +689,7 @@ class AttentionScheduler {
     // test out of boundary access
     // {
     //     float* cache_ptr =
-    //     DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<float>();
+    //     cpu_utils::ScratchPadManager::getl_scratchpad_manager()->get_data<float>();
     //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
     //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
     //     }
@@ -739,15 +771,6 @@ class AttentionScheduler {
     return std::max(rounded_tile_size, round_size);
   }
 
-  static int64_t get_available_l2_size() {
-    static int64_t size = []() {
-      long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
-      TORCH_CHECK_NE(l2_cache_size, -1);
-      return l2_cache_size >> 1;  // use 50% of L2 cache
-    }();
-    return size;
-  }
-
  private:
   int64_t available_cache_size_;
 };
@@ -777,6 +800,9 @@ struct AttentionInput {
   int32_t sliding_window_left;
   int32_t sliding_window_right;
   float softcap;
+  // FP8 KV cache scales (used by FP8 attention implementations)
+  float k_scale_fp8 = 1.0f;
+  float v_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -821,10 +847,12 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
+#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
+#endif
 
 template <typename T>
 void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
@@ -1105,7 +1133,8 @@ class AttentionMainLoop {
           if (sliding_window_left != -1) {
             pos = std::max(pos, curr_token_pos - sliding_window_left);
           }
-          return pos;
+          // Clamp to tile end to avoid OOB when window starts past the tile
+          return std::min(pos, kv_tile_end_pos);
         }();
 
         int32_t right_kv_pos = [&]() {
@@ -1146,7 +1175,11 @@ class AttentionMainLoop {
                        bool use_sink) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
+
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
       static_assert(sizeof(prob_buffer_t) <= sizeof(logits_buffer_t));
 
@@ -1195,8 +1228,17 @@ class AttentionMainLoop {
             vec = vec - max_vec;
 
             // compute exp
-#ifdef DEFINE_FAST_EXP
-            vec = fast_exp(vec);
+
+#if defined(DEFINE_FAST_EXP)
+  #ifdef __aarch64__
+            if constexpr (IsReducedPrecision) {
+              vec = fast_exp_f16(vec);
+            } else
+  #endif
+            {
+              vec = fast_exp(vec);
+            }
+
             prob_buffer_vec_t output_vec(vec);
             output_vec.save(curr_prob_buffer_iter);
 #else
@@ -1218,14 +1260,8 @@ class AttentionMainLoop {
         // rescale sum and partial outputs
         if (need_rescale) {
           // compute rescale factor
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           // rescale sum
           new_sum_val += rescale_factor * init_sum_val;
@@ -1258,7 +1294,11 @@ class AttentionMainLoop {
                        int32_t kv_tile_token_num, float softcap_scale) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
+
       float inv_softcap_scale = 1.0 / softcap_scale;
       vec_op::FP32Vec16 softcap_scale_vec(softcap_scale);
       vec_op::FP32Vec16 inv_softcap_scale_vec(inv_softcap_scale);
@@ -1272,8 +1312,15 @@ class AttentionMainLoop {
           vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
           vec = vec * inv_softcap_scale_vec;
 
-#ifdef DEFINE_FAST_EXP
-          vec = fast_exp(vec);
+#if defined(DEFINE_FAST_EXP)
+  #ifdef __aarch64__
+          if constexpr (IsReducedPrecision) {
+            vec = fast_exp_f16(vec);
+          } else
+  #endif
+          {
+            vec = fast_exp(vec);
+          }
           vec_op::FP32Vec16 inv_vec = ones_vec / vec;
           vec = (vec - inv_vec) / (vec + inv_vec);
 #else
@@ -1350,6 +1397,13 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
+      constexpr bool fp8_kv = std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                              std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+      float output_v_scale = 1.0f;
+      if constexpr (fp8_kv) {
+        attn_impl.init_from_input(input);
+        output_v_scale = attn_impl.get_output_v_scale();
+      }
 
       // general information
       const int32_t q_head_num = input->num_heads;
@@ -1380,7 +1434,7 @@ class AttentionMainLoop {
 
       // init buffers
       void* scratchpad_ptr =
-          DNNLScratchPadManager::get_dnnl_scratchpad_manager()
+          cpu_utils::ScratchPadManager::get_scratchpad_manager()
               ->get_data<void>();
       AttentionScratchPad buffer_manager(thread_id, metadata, scratchpad_ptr);
 
@@ -1400,8 +1454,7 @@ class AttentionMainLoop {
         }
       }
 
-      const int64_t available_cache_size =
-          AttentionScheduler::get_available_l2_size();
+      const int64_t available_cache_size = cpu_utils::get_available_l2_size();
       const int32_t default_tile_size =
           AttentionScheduler::calcu_default_tile_size(
               available_cache_size, head_dim, sizeof(kv_cache_t),
@@ -1586,6 +1639,7 @@ class AttentionMainLoop {
 
               if (use_sink) {
                 alignas(64) float s_aux_fp32[16];
+                // All other platforms have BF16Vec16 available
                 vec_op::BF16Vec16 vec_bf16(curr_s_aux);
                 vec_op::FP32Vec16 vec_fp32(vec_bf16);
                 vec_fp32.save(s_aux_fp32);
@@ -1729,7 +1783,7 @@ class AttentionMainLoop {
                                reinterpret_cast<query_t*>(input->output) +
                                    output_buffer_offset,
                                sum_buffer, actual_q_heads_per_kv,
-                               actual_q_token_num, q_head_num);
+                               actual_q_token_num, q_head_num, output_v_scale);
                 } else {
                   const int32_t stride =
                       actual_q_heads_per_kv * split_kv_q_token_num_threshold;
@@ -1799,7 +1853,7 @@ class AttentionMainLoop {
               split_output_buffer,
               reinterpret_cast<query_t*>(input->output) + output_buffer_offset,
               split_sum_buffer, actual_q_heads_per_kv, curr_output_token_num,
-              q_head_num);
+              q_head_num, output_v_scale);
         }
       }
     }
@@ -1853,15 +1907,8 @@ class AttentionMainLoop {
                                    : curr_output_buffer;
           float rescale_factor = final_max > curr_max ? curr_max - final_max
                                                       : final_max - curr_max;
-
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           local_sum[head_idx] = final_max > curr_max
                                     ? final_sum + rescale_factor * curr_sum
@@ -1930,8 +1977,8 @@ class AttentionMainLoop {
                     query_t* __restrict__ curr_output_buffer,
                     float* __restrict__ sum_buffer,
                     const int32_t q_heads_per_kv,
-                    const int32_t actual_q_token_num,
-                    const int32_t q_head_num) {
+                    const int32_t actual_q_token_num, const int32_t q_head_num,
+                    const float v_scale = 1.0f) {
     // final output
     using output_vec_t = typename VecTypeTrait<query_t>::vec_t;
 
@@ -1945,7 +1992,7 @@ class AttentionMainLoop {
           curr_partial_output_buffer;
       query_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
       for (int32_t head_idx = 0; head_idx < q_heads_per_kv; ++head_idx) {
-        vec_op::FP32Vec16 inv_sum_scale_vec(1.0 / *curr_sum_buffer);
+        vec_op::FP32Vec16 inv_sum_scale_vec(v_scale / *curr_sum_buffer);
 
         for (int32_t i = 0; i < group_num_per_head; ++i) {
           vec_op::FP32Vec16 vec(curr_partial_output_buffer_iter);

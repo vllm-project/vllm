@@ -31,7 +31,7 @@ import openai
 import requests
 
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import encode_image_url
 
 MAX_OUTPUT_LEN = 256
 
@@ -49,9 +49,7 @@ SAMPLE_PROMPTS_MM: list[dict] = [
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image;base64,{encode_image_base64(image_1)}"
-                        },
+                        "image_url": {"url": encode_image_url(image_1)},
                     },
                     {"type": "text", "text": "What's in this image?"},
                 ],
@@ -66,9 +64,7 @@ SAMPLE_PROMPTS_MM: list[dict] = [
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image;base64,{encode_image_base64(image_2)}"
-                        },
+                        "image_url": {"url": encode_image_url(image_2)},
                     },
                     {
                         "type": "image_url",
@@ -237,9 +233,8 @@ def main():
 
     for i, prompt_data in enumerate(test_prompts):
         print(
-            f"\nRunning prompt {i + 1}/{len(test_prompts)}: {
-                prompt_data['description']
-            }"
+            f"\nRunning prompt {i + 1}/{len(test_prompts)}: "
+            f"{prompt_data['description']}"
         )
 
         output_str = run_chat_completion(

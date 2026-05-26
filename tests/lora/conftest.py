@@ -3,6 +3,7 @@
 
 import tempfile
 from collections import OrderedDict
+from importlib import reload
 from unittest.mock import MagicMock
 
 import pytest
@@ -44,22 +45,35 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture
+def maybe_enable_lora_dual_stream(monkeypatch: pytest.MonkeyPatch):
+    if current_platform.is_cuda():
+        monkeypatch.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+        import vllm.lora.layers.base_linear
+
+        if not hasattr(vllm.lora.layers.base_linear, "lora_linear_async"):
+            # Reload the module to ensure the environment variable takes effect.
+            reload(vllm.lora.layers.base_linear)
+    yield
+
+
+@pytest.fixture
 def dist_init():
+    from tests.utils import ensure_current_vllm_config
+
     temp_file = tempfile.mkstemp()[1]
 
-    backend = "nccl"
-    if current_platform.is_cpu() or current_platform.is_tpu():
-        backend = "gloo"
+    backend = "gloo" if current_platform.is_tpu() else current_platform.dist_backend
 
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend=backend,
-    )
-    initialize_model_parallel(1, 1)
-    yield
+    with ensure_current_vllm_config():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend=backend,
+        )
+        initialize_model_parallel(1, 1)
+        yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
 
 
@@ -67,9 +81,7 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
-    backend = "nccl"
-    if current_platform.is_cpu():
-        backend = "gloo"
+    backend = current_platform.dist_backend
 
     temp_file = tempfile.mkstemp()[1]
     torch.distributed.init_process_group(
@@ -82,7 +94,7 @@ class DummyLoRAModel(nn.Sequential, SupportsLoRA):
 
 
 @pytest.fixture
-def dummy_model() -> nn.Module:
+def dummy_model(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
         OrderedDict(
             [
@@ -103,19 +115,19 @@ def dummy_model() -> nn.Module:
                 ("output", ColumnParallelLinear(50, 10)),
                 ("outact", nn.Sigmoid()),
                 # Special handling for lm_head & sampler
-                ("lm_head", ParallelLMHead(512, 10)),
-                ("logits_processor", LogitsProcessor(512)),
+                ("lm_head", ParallelLMHead(32064, 10)),
+                ("logits_processor", LogitsProcessor(32064)),
             ]
         )
     )
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
-    model.unpadded_vocab_size = 32000
+    model.unpadded_vocab_size = 32064
     return model
 
 
 @pytest.fixture
-def dummy_model_gate_up() -> nn.Module:
+def dummy_model_gate_up(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
         OrderedDict(
             [
@@ -136,8 +148,8 @@ def dummy_model_gate_up() -> nn.Module:
                 ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
                 ("outact", nn.Sigmoid()),
                 # Special handling for lm_head & sampler
-                ("lm_head", ParallelLMHead(512, 10)),
-                ("logits_processor", LogitsProcessor(512)),
+                ("lm_head", ParallelLMHead(32064, 10)),
+                ("logits_processor", LogitsProcessor(32064)),
             ]
         )
     )
@@ -149,26 +161,9 @@ def dummy_model_gate_up() -> nn.Module:
         ],
     }
     model.embedding_modules = {"lm_head": "lm_head"}
-    model.unpadded_vocab_size = 32000
+    model.unpadded_vocab_size = 32064
 
     return model
-
-
-@pytest.fixture(scope="session")
-def llama_2_7b_base_huggingface_id():
-    # used as a base model for testing with sql lora adapter
-    return "meta-llama/Llama-2-7b-hf"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_huggingface_id():
-    # huggingface repo id is used to test lora runtime downloading.
-    return "yard1/llama-2-7b-sql-lora-test"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
 
 
 @pytest.fixture(scope="session")
@@ -226,6 +221,43 @@ def qwen25vl_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen2vl_language_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-language")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_connector_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="EpochEcho/qwen2.5-3b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="EpochEcho/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3_meowing_lora_files():
+    """Download Qwen3 Meow LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+
+
+@pytest.fixture(scope="session")
+def qwen3_woofing_lora_files():
+    """Download Qwen3 Woof LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
@@ -248,6 +280,47 @@ def qwen3moe_lora_files():
 @pytest.fixture(scope="session")
 def olmoe_lora_files():
     return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def qwen3_lora_files():
+    return snapshot_download(repo_id="charent/self_cognition_Alice")
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "jeeejeee/llama32-3b-text2sql-spider"
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files(llama32_lora_huggingface_id):
+    return snapshot_download(repo_id=llama32_lora_huggingface_id)
+
+
+@pytest.fixture(scope="session")
+def whisper_lora_files():
+    return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_2d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-2d-weights-poken-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_3d_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora")
 
 
 @pytest.fixture

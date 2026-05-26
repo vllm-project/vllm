@@ -8,8 +8,9 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -24,11 +25,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
-from vllm.utils import init_logger
 
-from .utils import AutoWeightsLoader, maybe_prefix
-
-logger = init_logger(__name__)
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 
 @support_torch_compile
@@ -109,7 +107,8 @@ class DeepseekV2Model(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -172,10 +171,6 @@ class DeepseekV2Model(nn.Module):
                     )
                     break
                 else:
-                    # if PP disabled then draft will share embed with target
-                    if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                        continue
-
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -203,7 +198,9 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             vllm_config.parallel_config
         )
         self.model = DeepseekV2Model(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         self.lm_head = ParallelLMHead(
@@ -250,6 +247,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(

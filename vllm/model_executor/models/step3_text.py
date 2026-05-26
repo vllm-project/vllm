@@ -9,17 +9,18 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,9 +37,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.step3_vl import Step3TextConfig
 
 from .interfaces import SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -70,7 +73,6 @@ class FusedMoEBlock(nn.Module):
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -93,8 +95,6 @@ class FusedMoEBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -144,9 +144,8 @@ class Step3TextAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         norm_eps: float,
-        rope_theta: int,
+        rope_parameters: dict[str, Any],
         share_q_dim: int | None = None,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embedding: int = 8192,
         head_dim: int = 256,
         cache_config: CacheConfig | None = None,
@@ -196,10 +195,8 @@ class Step3TextAttention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embedding,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -227,15 +224,13 @@ class Step3TextAttention(nn.Module):
 class Step3TextDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
+        config: Step3TextConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = config.hf_config
         self.hidden_size = config.hidden_size
-        rope_scaling = getattr(config, "rope_scaling", None)
 
         self.self_attn = Step3TextAttention(
             hidden_size=self.hidden_size,
@@ -247,8 +242,7 @@ class Step3TextDecoderLayer(nn.Module):
             max_position_embedding=config.max_position_embedding,
             head_dim=config.head_dim,
             share_q_dim=config.share_q_dim,
-            rope_theta=config.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -338,7 +332,7 @@ class Step3TextModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Step3TextDecoderLayer(
-                config=vllm_config.model_config,
+                config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -359,7 +353,7 @@ class Step3TextModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -388,55 +382,6 @@ class Step3TextModel(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
-
-class Step3TextForCausalLM(nn.Module, SupportsPP):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-
-        self.config = config
-        self.vllm_config = vllm_config
-
-        self.model = Step3TextModel(vllm_config=vllm_config, prefix=prefix)
-
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            self.logits_processor = LogitsProcessor(config.vocab_size)
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ):
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         qkv_params_mapping = [
@@ -472,11 +417,14 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
+            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
         ]
 
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
@@ -557,3 +505,56 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                         weight_loader(param, loaded_weight)
                         loaded_params.add(name)
         return loaded_params
+
+
+class Step3TextForCausalLM(nn.Module, SupportsPP):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+
+        self.config = config
+        self.vllm_config = vllm_config
+
+        self.model = Step3TextModel(vllm_config=vllm_config, prefix=prefix)
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ):
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

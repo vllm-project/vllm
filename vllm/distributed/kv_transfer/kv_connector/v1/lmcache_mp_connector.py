@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
+from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
@@ -15,18 +17,39 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-    LMCacheMPSchedulerAdapter,
-    LMCacheMPWorkerAdapter,
-    LoadStoreOp,
-)
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
 
+try:
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+        ParallelStrategy,
+    )
+
+    try:
+        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
+    except ImportError:
+        from lmcache.v1.multiprocess.custom_types import (
+            BlockAllocationRecord as RequestAllocationRecord,
+        )
+except ImportError:
+    from lmcache.v1.multiprocess.custom_types import (
+        BlockAllocationRecord as RequestAllocationRecord,
+    )
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+        ParallelStrategy,
+    )
+
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -60,40 +83,94 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
+def extract_world_size_and_kv_rank(
+    world_size: int,
+    rank: int,
+    vllm_config: VllmConfig,
+) -> tuple[int, int]:
+    """
+    Convert the rank for the MLA.
+    """
+    use_mla = mla_enabled(vllm_config.model_config)
+    if not use_mla:
+        return world_size, rank
+    else:
+        # Tensor parallel does not change the KV caches for MLA models.
+        # So we need to "exclude" the effect of TP on rank and world size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # vLLM constructs TP groups first, and then construct other
+        # parallel groups on top of TP groups.
+        # for example, TP=4, PP=2,
+        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
+        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
+        # So we can "exclude" the effect of TP by rank // tp_size.
+        return world_size // tp_size, rank // tp_size
+
+
 def create_scheduler_adapter(
-    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+    server_url: str,
+    zmq_context: zmq.Context,
+    vllm_config: VllmConfig,
+    mq_timeout: float,
+    heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
-    # TODO: have a helper function to calculate the correct rank and
-    # world size for the MLA and other models
-    return LMCacheMPSchedulerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
-        vllm_config.cache_config.block_size,
+        vllm_config,
+    )
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
+        world_size,
+        kv_rank,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
+    )
+
+    return LMCacheMPSchedulerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
+        mq_timeout=mq_timeout,
+        heartbeat_interval=heartbeat_interval,
     )
 
 
 def create_worker_adapter(
-    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+    server_url: str,
+    zmq_context: zmq.Context,
+    vllm_config: VllmConfig,
+    mq_timeout: float,
+    heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
-    # TODO: have a helper function to calculate the correct rank and
-    # world size for the MLA and other models
-    return LMCacheMPWorkerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
-        vllm_config.cache_config.block_size,
+        vllm_config,
+    )
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
+        world_size,
+        kv_rank,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
     )
 
-
-def convert_block_hashes_to_bytes(
-    block_hashes: list["BlockHash"],
-) -> list[bytes]:
-    return cast(list[bytes], block_hashes)
+    return LMCacheMPWorkerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
+        mq_timeout=mq_timeout,
+        heartbeat_interval=heartbeat_interval,
+    )
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -139,8 +216,11 @@ class LMCacheMPRequestTracker:
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
+    cache_salt: str = ""
+
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
+        self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -180,7 +260,7 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_blocks += num_new_blocks
 
-    def update_block_ids(
+    def append_block_ids(
         self,
         new_block_ids: list[int],
     ):
@@ -213,6 +293,7 @@ class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
+    cache_salt: str = ""
 
     @staticmethod
     def GetStoreMetadata(
@@ -226,15 +307,37 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
+        #
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
+        #
+        # Both values represent a prefix of blocks whose KV data is already
+        # available (either from vLLM APC or from LMCache), so they must NOT
+        # be summed (that would double-count the overlapping prefix).
+        #
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
+        #   two values, causing under-storing.  Taking the max ensures we
+        #   always use the tighter (larger) of the two hit counts.
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
+        )
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
-            tracker.num_scheduled_tokens // vllm_block_size,
+            computed_blocks,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -242,15 +345,22 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+            op = LoadStoreOp(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="STORE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
+                cache_salt=tracker.cache_salt,
             )
 
             # Update the request tracker
@@ -263,6 +373,7 @@ class LMCacheMPRequestMetadata:
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
+        vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -270,6 +381,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
+            vllm_block_size: the block size used in vLLM
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -290,15 +402,32 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_hashes = convert_block_hashes_to_bytes(
-                tracker.block_hashes[start:end]
-            )
             block_ids = tracker.allocated_block_ids[start:end]
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
+            token_ids = list(tracker.all_token_ids)
+
+            # Compute how many tokens at the start of the retrieve range
+            # overlap with APC-shared blocks. The server must skip writing
+            # to these positions to avoid a cross-stream data race: the
+            # retrieve writes on the LMCache CUDA stream while concurrent
+            # requests may read these APC-shared blocks on the vLLM stream.
+            apc_overlap_blocks = tracker.num_vllm_hit_blocks - start
+            skip_first_n_tokens = apc_overlap_blocks * vllm_block_size
+
+            op = LoadStoreOp(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                start=start_token_idx,
+                end=end_token_idx,
+                skip_first_n_tokens=skip_first_n_tokens,
+            )
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
-                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+                op=op,
+                cache_salt=tracker.cache_salt,
             )
             return ret
 
@@ -332,20 +461,23 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         return self.__str__()
 
 
-class LMCacheMPConnector(KVConnectorBase_V1):
+class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     """
     The connector for LMCache multi-process mode.
 
     Extra configs (kv_transfer_config.extra_config):
     - lmcache.mp.host: the host of the LMCache server.
     - lmcache.mp.port: the port of the LMCache server.
+    - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
+    - lmcache.mp.heartbeat_interval: interval (seconds) between server
+      heartbeat pings.
     """
 
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -356,17 +488,35 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         server_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.port", 5555
         )
+        mq_timeout = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.mq_timeout", 300.0
+            )
+        )
+        heartbeat_interval = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.heartbeat_interval", 10.0
+            )
+        )
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
-                server_url, zmq_context, vllm_config
+                server_url,
+                zmq_context,
+                vllm_config,
+                mq_timeout,
+                heartbeat_interval,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
-                server_url, zmq_context, vllm_config
+                server_url,
+                zmq_context,
+                vllm_config,
+                mq_timeout,
+                heartbeat_interval,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -424,26 +574,27 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
-            event.record()
-
         request_ids = []
         ops = []
+        cache_salts = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            cache_salts.append(meta.cache_salt)
 
-        if len(request_ids) > 0:
-            logger.info(
-                "HERE! SUBMITTING THE BATCHED RETRIEVE REQUESTS %s", request_ids
-            )
-            self.worker_adapter.batched_submit_retrieve_requests(
-                request_ids, ops, event
-            )
+        if len(request_ids) == 0:
+            return
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
+
+        self.worker_adapter.batched_submit_retrieve_requests(
+            request_ids, ops, event, cache_salts=cache_salts
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -462,7 +613,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         """
@@ -487,23 +638,37 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
+        if (
+            self.worker_adapter.use_mla
+            and not self.worker_adapter.is_first_rank_of_pp_group
+        ):
+            return
+
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
-            event.record()
-
         request_ids = []
         ops = []
+        cache_salts = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            cache_salts.append(meta.cache_salt)
 
-        if len(request_ids) > 0:
-            self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
+        if len(request_ids) == 0:
+            return
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
+
+        self.worker_adapter.batched_submit_store_requests(
+            request_ids, ops, event, cache_salts=cache_salts
+        )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -543,8 +708,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
-        # TODO: add error tracking
-        return set()
+        return self.worker_adapter.get_block_ids_with_load_errors()
 
     def shutdown(self):
         """
@@ -556,7 +720,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             self.worker_adapter.shutdown()
         return None
 
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
         Get the KV connector stats collected during the last interval.
         """
@@ -599,9 +763,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        # TODO: support loading KV for preempted requests in the future
+        if request.status == RequestStatus.PREEMPTED:
+            return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id, convert_block_hashes_to_bytes(request.block_hashes)
+            request.request_id,
+            token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -649,13 +818,22 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
-        # NOTE: the `blocks` are NEW BLOCKS allocated for this request.
+        # NOTE: `blocks` comes from kv_cache_manager.get_blocks(request_id),
+        # which returns ALL blocks for the request (not just newly allocated).
+        # This function may be called twice for async-load requests:
+        #   1st call: blocks = initial allocation (APC + fresh)
+        #   2nd call: blocks = all blocks
+        #  (initial + newly allocated for remaining tokens)
+        # We must only append the NEW blocks beyond what's already tracked
+        # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = reformat_block_ids(blocks.get_block_ids())
 
-        # No matter we need to retrieve or not, we need to update
-        # the block ids into the tracker
-        tracker.update_block_ids(block_ids)
+        # Only append blocks beyond what's already tracked
+        existing_count = len(tracker.allocated_block_ids)
+        new_block_ids = block_ids[existing_count:]
+        if new_block_ids:
+            tracker.append_block_ids(new_block_ids)
 
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
@@ -667,6 +845,36 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 if condition
                 else LMCacheMPRequestState.READY
             )
+            # Clean up lookup future in scheduler adapter
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+
+            # Free locks on chunks that vLLM already computed and won't
+            # retrieve from LMCache.
+            if tracker.num_lmcache_hit_blocks > 0:
+                if not condition:
+                    # No retrieve needed — free ALL locked chunks
+                    free_end = tracker.num_lmcache_hit_blocks * self.vllm_block_size
+                else:
+                    # Note(Roy): Boundary misalignment between vLLM blocks and LMCache
+                    # blocks is handled in free_lookup_locks. It makes sure that if
+                    # the last vLLM computed block ends in the middle of a LMCache
+                    # block, the end LMCache block is not freed (i.e., floor division)
+                    # since it will still be needed by vLLM and such block's lock will
+                    # be freed by vLLM's retrieve.
+                    free_end = tracker.num_vllm_hit_blocks * self.vllm_block_size
+
+                if free_end > 0:
+                    self.scheduler_adapter.free_lookup_locks(
+                        token_ids=list(tracker.all_token_ids),
+                        start=0,
+                        end=free_end,
+                        request_id=request.request_id,
+                    )
+                    logger.debug(
+                        "Free locks of tokens %d-%d since it is cached by vLLM.",
+                        0,
+                        free_end,
+                    )
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -688,6 +896,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
+
+        # Report block allocation deltas to LMCache for observability
+        self._report_block_allocation_deltas(scheduler_output)
 
         return metadata
 
@@ -720,7 +931,31 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        return True, None
+
+        params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
+        return_params: dict[str, Any] | None = {} if params is not None else None
+
+        if (
+            params is not None
+            and return_params is not None
+            and "num_lmcache_extra_cached_tokens" in params
+        ):
+            request_tracker = self._get_request_tracker(request.request_id)
+            num_extra_cached_blocks = max(
+                0,
+                request_tracker.num_lmcache_hit_blocks
+                - request_tracker.num_vllm_hit_blocks,
+            )
+            return_params["num_lmcache_extra_cached_tokens"] = (
+                num_extra_cached_blocks * self.vllm_block_size
+            )
+
+        # Clean up request tracker to prevent memory leak
+        self._cleanup_request_tracker(request.request_id)
+        # Notify LMCache to end the session for this request
+        self.scheduler_adapter.end_session(request.request_id)
+
+        return True, return_params
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
@@ -764,7 +999,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> Optional["KVConnectorStats"]:
+    ) -> "KVConnectorStats | None":
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -778,8 +1013,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
-    ) -> Optional["KVConnectorPromMetrics"]:
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> "KVConnectorPromMetrics | None":
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
@@ -800,7 +1035,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
-                request_tracker, blocks_per_chunk
+                request_tracker,
+                blocks_per_chunk,
+                vllm_block_size=self.vllm_block_size,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -838,10 +1075,12 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
             # Update block ids
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            request_tracker.update_block_ids(new_block_ids)
+            if request_id not in cached_reqs.resumed_req_ids:
+                request_tracker.append_block_ids(new_block_ids)
 
-            # Update new scheduled tokens
-            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            # Use the incremental num_scheduled_tokens to
+            # stay consistent with _process_new_requests.
+            num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -850,6 +1089,64 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
+
+    def _report_block_allocation_deltas(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Gather per-request block allocation deltas and report to LMCache.
+
+        For new requests: all allocated_block_ids and token_ids are new.
+        For cached requests: only newly appended block_ids and token_ids.
+        """
+        records: list[RequestAllocationRecord] = []
+
+        # New requests: send all tokens covering all allocated blocks so
+        # the L0 metrics subscriber can correctly map each block to its
+        # actual token content (not just the newly-scheduled slice).
+        for new_request in scheduler_output.scheduled_new_reqs:
+            tracker = self.request_trackers.get(new_request.req_id)
+            if tracker is None:
+                continue
+            num_blocks = len(tracker.allocated_block_ids)
+            total_tokens = num_blocks * self.vllm_block_size
+            records.append(
+                RequestAllocationRecord(
+                    req_id=new_request.req_id,
+                    new_block_ids=list(tracker.allocated_block_ids),
+                    new_token_ids=list(tracker.all_token_ids[:total_tokens]),
+                )
+            )
+
+        # Cached requests: only the newly added blocks and their full
+        # token content.  We send all tokens covered by the new blocks
+        # (not just the tokens scheduled this step) so the L0 subscriber
+        # can correctly identify block content.
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for idx, request_id in enumerate(cached_reqs.req_ids):
+            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
+            if not new_block_ids:
+                continue
+            tracker = self.request_trackers.get(request_id)
+            if tracker is None:
+                continue
+            # The new blocks sit at the end of the request's block list.
+            # Compute the token range they cover.
+            total_blocks = len(tracker.allocated_block_ids)
+            num_new_blocks = len(new_block_ids)
+            start_token = (total_blocks - num_new_blocks) * self.vllm_block_size
+            end_token = total_blocks * self.vllm_block_size
+            new_token_ids = list(tracker.all_token_ids[start_token:end_token])
+            records.append(
+                RequestAllocationRecord(
+                    req_id=request_id,
+                    new_block_ids=new_block_ids,
+                    new_token_ids=new_token_ids,
+                )
+            )
+
+        if records:
+            self.scheduler_adapter.report_block_allocations(records)
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:
         assert request_id in self.request_trackers, (
@@ -861,7 +1158,69 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
         request_id = request.request_id
+        # Remove the old trackers that is created before the preemption
+        if (
+            request.status == RequestStatus.PREEMPTED
+            and request_id in self.request_trackers
+        ):
+            tracker = self.request_trackers[request_id]
+
+            # NOTE: since this function may be called multiple times
+            # for a single request (because get_num_new_matched_tokens
+            # may be called multiple times) for the same request, we
+            # will only do the remove if the tracker is not in the "fresh"
+            # state, i.e., PREFETCHING
+            if tracker.state != LMCacheMPRequestState.PREFETCHING:
+                self.request_trackers.pop(request_id)
+
         if request_id not in self.request_trackers:
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _cleanup_request_tracker(self, request_id: str) -> None:
+        """
+        Clean up request tracker and associated lookup future for a request.
+        This should be called when a request is finished to prevent memory leak.
+        """
+        # Clean up request tracker
+        if self.request_trackers.pop(request_id, None):
+            logger.debug(
+                "[KVConnector] Cleaned up request_tracker for request %s",
+                request_id,
+            )
+
+
+# At module load time, prefer the external LMCacheMPConnector shipped with the
+# ``lmcache`` package. This avoids forcing users to set
+# ``kv_connector_module_path`` when they only configure ``kv_connector``. If
+# the external module is unavailable (e.g. older lmcache version that does
+# not ship this submodule, or any import error), fall back to the builtin
+# implementation defined above.
+def _resolve_lmcache_mp_connector() -> type[KVConnectorBase_V1]:
+    if os.environ.get("LMCACHE_USE_UPSTREAM_MP"):
+        logger.info(
+            "Force use builtin LMCacheMPConnectorUpstream in vLLM.",
+        )
+        return LMCacheMPConnectorUpstream
+
+    try:
+        from lmcache.integration.vllm.lmcache_mp_connector import (
+            LMCacheMPConnector as _ExternalLMCacheMPConnector,
+        )
+
+        logger.info(
+            "Using external LMCacheMPConnector from "
+            "lmcache.integration.vllm.lmcache_mp_connector"
+        )
+        return _ExternalLMCacheMPConnector
+    except ImportError as e:
+        logger.info(
+            "External LMCacheMPConnector is not available (%s), "
+            "falling back to builtin implementation in vLLM.",
+            e,
+        )
+        return LMCacheMPConnectorUpstream
+
+
+LMCacheMPConnector = _resolve_lmcache_mp_connector()

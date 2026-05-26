@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib.metadata import version
+
 import pytest
+from packaging.version import Version
 
 import vllm
 from vllm.assets.image import ImageAsset
@@ -9,6 +12,14 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
+
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
+    reason=(
+        "MiniCPMV custom processor uses tokenizer.im_start_id which is not "
+        "available on TokenizersBackend in transformers v5.0+"
+    ),
+)
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -57,9 +68,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm",
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
@@ -84,10 +94,6 @@ def test_minicpmv_lora(minicpmv_lora_files):
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm",
-)
 @multi_gpu_test(num_gpus=4)
 def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(
@@ -107,10 +113,6 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
 
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
-)
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm",
 )
 @multi_gpu_test(num_gpus=4)
 def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
