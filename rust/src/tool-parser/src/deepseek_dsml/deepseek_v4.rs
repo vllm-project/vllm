@@ -1,5 +1,5 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V4 models.
 ///
@@ -36,26 +36,19 @@ impl DeepSeekV4ToolParser {
 }
 
 impl ToolParser for DeepSeekV4ToolParser {
-    /// Create a boxed DeepSeek V4 tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
-
-    /// Preserve DSML special tokens while decoding.
     fn preserve_special_tokens(&self) -> bool {
         true
     }
-
-    /// Push one decoded text chunk through the DSML parser.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
-        self.0.parse_into(chunk, result)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.0.parse_into(chunk, output)
     }
-
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
 
@@ -89,18 +82,18 @@ mod tests {
     #[test]
     fn deepseek_v4_parse_complete_reuses_dsml_parser_with_tool_calls_token() {
         let mut parser = DeepSeekV4ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_call(
                 "get_weather",
                 &[("location", "SF"), ("date", "2024-01-16")],
             ))
             .unwrap();
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "location": "SF",
                 "date": "2024-01-16"
@@ -111,7 +104,7 @@ mod tests {
     #[test]
     fn deepseek_v4_streaming_handles_tool_calls_token_split_across_chunks() {
         let mut parser = DeepSeekV4ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "Thinking... ",
@@ -126,11 +119,11 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.normal_text, "Thinking... ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text, "Thinking... ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "Beijing" })
         );
     }

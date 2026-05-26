@@ -1,5 +1,5 @@
 use super::{DeepSeekJsonFormat, DeepSeekJsonToolParser};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3.1 raw JSON tool calls.
 ///
@@ -21,21 +21,16 @@ impl DeepSeekV31ToolParser {
 }
 
 impl ToolParser for DeepSeekV31ToolParser {
-    /// Create a boxed DeepSeek V3.1 tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
-
-    /// Push one decoded text chunk through the DeepSeek V3.1 parser.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
-        self.0.parse_into(chunk, result)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.0.parse_into(chunk, output)
     }
-
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
 
@@ -54,7 +49,7 @@ mod tests {
         TOOL_CALL_END, TOOL_CALL_SEPARATOR, TOOL_CALL_START, TOOL_CALLS_END, TOOL_CALLS_START,
     };
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParseResult, ToolParser};
+    use crate::{ToolParser, ToolParserOutput};
 
     fn v31_tool_call(function_name: &str, arguments: &str) -> String {
         format!("{TOOL_CALL_START}{function_name}{TOOL_CALL_SEPARATOR}{arguments}{TOOL_CALL_END}")
@@ -67,39 +62,39 @@ mod tests {
     #[test]
     fn deepseek_v31_parse_complete_without_tool_call_keeps_text() {
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn deepseek_v31_parse_complete_extracts_raw_json_arguments() {
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;
-        let result = parser
+        let output = parser
             .parse_complete(&format!(
                 "Let me check.{} trailing text",
                 tool_section(&[v31_tool_call("get_weather", arguments)])
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "Let me check.");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.normal_text, "Let me check.");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn deepseek_v31_does_not_validate_or_normalize_arguments() {
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
         let arguments = r#"{"location":"Tokyo",}"#;
-        let result = parser
+        let output = parser
             .parse_complete(&tool_section(&[v31_tool_call("get_weather", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -117,7 +112,7 @@ mod tests {
             TOOL_CALLS_END,
         ];
 
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
@@ -127,13 +122,13 @@ mod tests {
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
             );
-            result.append(next);
+            output.append(next);
         }
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
         assert_eq!(
-            result.coalesce_calls().calls[0].arguments,
+            output.coalesce_calls().calls[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -147,11 +142,11 @@ mod tests {
         let chunks = split_by_chars(&input, 5);
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert_eq!(output.normal_text, "hello ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]
@@ -160,10 +155,10 @@ mod tests {
         let arguments = format!(r#"{{"text":"literal {TOOL_CALL_END} inside"}}"#);
         let input = tool_section(&[v31_tool_call("echo", &arguments)]);
 
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -175,10 +170,10 @@ mod tests {
         let chunks = split_by_chars(&input, 7);
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -198,7 +193,7 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -209,11 +204,11 @@ mod tests {
         );
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &[&input]);
+        let output = collect_stream(&mut parser, &[&input]);
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]

@@ -51,15 +51,15 @@ pub struct ToolCallDelta {
 
 /// Result of advancing tool parsing with one assistant-text input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolParseResult {
+pub struct ToolParserOutput {
     /// Plain assistant text that is not part of any tool call.
     pub normal_text: String,
     /// Tool-call updates extracted from this input.
     pub calls: Vec<ToolCallDelta>,
 }
 
-impl ToolParseResult {
-    /// Append another parser result onto this one.
+impl ToolParserOutput {
+    /// Append another parser output onto this one.
     ///
     /// Note that this does not attempt to merge multiple deltas for the same
     /// tool call into one complete item. Call `coalesce_calls()` after if
@@ -117,18 +117,18 @@ pub trait ToolParser: Send {
     }
 
     /// Feed one decoded text delta into the parser, appending committed output
-    /// into `result`.
+    /// into `output`.
     ///
-    /// If this returns an error, any output already appended to `result`
+    /// If this returns an error, any output already appended to `output`
     /// remains committed parser output. The parser must keep its uncommitted
     /// buffer intact so callers may recover it with `reset()`.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()>;
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()>;
 
     /// Flush any buffered partial state at end of stream.
     ///
     /// This operation is atomic: on error no partial output is returned and the
     /// parser's buffered state is left intact.
-    fn finish(&mut self) -> Result<ToolParseResult>;
+    fn finish(&mut self) -> Result<ToolParserOutput>;
 
     /// Clear parser state and return currently uncommitted buffered text.
     ///
@@ -139,10 +139,10 @@ pub trait ToolParser: Send {
     /// Feed one decoded text delta and return only if the whole chunk parses.
     ///
     /// If parsing fails, partial committed output is discarded by this helper.
-    fn parse_chunk(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
-        self.parse_into(chunk, &mut result)?;
-        Ok(result)
+    fn parse_chunk(&mut self, chunk: &str) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
+        self.parse_into(chunk, &mut output)?;
+        Ok(output)
     }
 
     /// Parse complete tool calls from final output.
@@ -151,10 +151,10 @@ pub trait ToolParser: Send {
     /// feeding the full output through `parse_chunk()` and then calling `finish()`.
     /// This keeps one source of truth for robust parsers whose incremental
     /// state machine is equivalent across arbitrary chunking.
-    fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
-        let mut result = self.parse_chunk(output)?;
-        result.append(self.finish()?);
-        Ok(result.coalesce_calls())
+    fn parse_complete(&mut self, text: &str) -> Result<ToolParserOutput> {
+        let mut output = self.parse_chunk(text)?;
+        output.append(self.finish()?);
+        Ok(output.coalesce_calls())
     }
 }
 

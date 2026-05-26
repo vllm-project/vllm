@@ -1,4 +1,4 @@
-use super::{Result, Tool, ToolCallDelta, ToolParseResult, ToolParser};
+use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
 
 struct DefaultParser;
 
@@ -10,12 +10,12 @@ impl ToolParser for DefaultParser {
         Ok(Box::new(Self))
     }
 
-    fn parse_into(&mut self, _chunk: &str, _result: &mut ToolParseResult) -> Result<()> {
+    fn parse_into(&mut self, _chunk: &str, _output: &mut ToolParserOutput) -> Result<()> {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        Ok(ToolParseResult::default())
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        Ok(ToolParserOutput::default())
     }
 
     fn reset(&mut self) -> String {
@@ -42,9 +42,9 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
             Ok(Box::new(Self))
         }
 
-        fn parse_into(&mut self, _chunk: &str, result: &mut ToolParseResult) -> Result<()> {
-            result.normal_text.push_str("prefix ");
-            result.calls.extend([
+        fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+            output.normal_text.push_str("prefix ");
+            output.calls.extend([
                 ToolCallDelta {
                     tool_index: 0,
                     name: Some("weather".to_string()),
@@ -64,8 +64,8 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
             Ok(())
         }
 
-        fn finish(&mut self) -> Result<ToolParseResult> {
-            Ok(ToolParseResult {
+        fn finish(&mut self) -> Result<ToolParserOutput> {
+            Ok(ToolParserOutput {
                 normal_text: "suffix".to_string(),
                 calls: vec![
                     ToolCallDelta {
@@ -88,10 +88,10 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
     }
 
     let mut parser = StreamingParser;
-    let result = parser.parse_complete("ignored").unwrap();
-    assert_eq!(result.normal_text, "prefix suffix");
+    let output = parser.parse_complete("ignored").unwrap();
+    assert_eq!(output.normal_text, "prefix suffix");
     assert_eq!(
-        result.calls,
+        output.calls,
         vec![
             ToolCallDelta {
                 tool_index: 0,

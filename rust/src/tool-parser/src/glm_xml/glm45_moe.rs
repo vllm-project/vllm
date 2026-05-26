@@ -1,5 +1,5 @@
 use super::{GlmXmlToolParser, Separator};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for GLM-4.5/4.6 MoE XML-style tool calls.
 ///
@@ -23,21 +23,16 @@ impl Glm45MoeToolParser {
 }
 
 impl ToolParser for Glm45MoeToolParser {
-    /// Create a boxed GLM-4.5/4.6 MoE tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
-
-    /// Push one decoded text chunk through the GLM MoE parser.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
-        self.0.parse_into(chunk, result)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.0.parse_into(chunk, output)
     }
-
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
     }
 

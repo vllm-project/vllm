@@ -9,7 +9,7 @@ use super::{
     argument_delta_event, tool_call_header_event,
 };
 use crate::utils::{JsonObjectScanState, parse_buffered_event};
-use crate::{Result, Tool, ToolCallDelta, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LlamaJsonMode {
@@ -78,7 +78,7 @@ impl Llama3JsonToolParser {
     }
 
     /// Apply one parsed Llama JSON event to parser state and output.
-    fn apply_event(&mut self, event: LlamaJsonEvent, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: LlamaJsonEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             LlamaJsonEvent::ToolCallHeader { function_name } => {
                 let tool_index = self.emitted_tool_count;
@@ -87,7 +87,7 @@ impl Llama3JsonToolParser {
                 self.mode = LlamaJsonMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -99,7 +99,7 @@ impl Llama3JsonToolParser {
                         "Llama JSON arguments without an active tool call"
                     ));
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -116,8 +116,6 @@ impl Llama3JsonToolParser {
         }
         Ok(())
     }
-
-    /// Reset all streaming state.
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = LlamaJsonMode::Start;
@@ -128,16 +126,13 @@ impl Llama3JsonToolParser {
 }
 
 impl ToolParser for Llama3JsonToolParser {
-    /// Create a boxed Llama JSON tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
-
-    /// Push one decoded text chunk through the Llama JSON parser.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
         if !self.commit_start() {
@@ -145,7 +140,7 @@ impl ToolParser for Llama3JsonToolParser {
         }
 
         if matches!(self.mode, LlamaJsonMode::Passthrough) {
-            result.normal_text.push_str(&self.buffer);
+            output.normal_text.push_str(&self.buffer);
             self.buffer.clear();
             return Ok(());
         }
@@ -153,19 +148,17 @@ impl ToolParser for Llama3JsonToolParser {
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_llama_json_event(input, &mut self.mode)
         })? {
-            self.apply_event(event, result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
         Ok(())
     }
-
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match &self.mode {
             LlamaJsonMode::Start | LlamaJsonMode::Passthrough => {
-                result.normal_text.push_str(&self.buffer);
+                output.normal_text.push_str(&self.buffer);
             }
             LlamaJsonMode::AfterCall if self.buffer.trim().is_empty() => {}
             LlamaJsonMode::Header | LlamaJsonMode::Arguments { .. } => {
@@ -176,7 +169,7 @@ impl ToolParser for Llama3JsonToolParser {
             }
         }
         let _ = self.reset();
-        Ok(result)
+        Ok(output)
     }
 
     fn reset(&mut self) -> String {
@@ -258,7 +251,7 @@ mod tests {
 
     use super::Llama3JsonToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParseResult, ToolParser};
+    use crate::{ToolParser, ToolParserOutput};
 
     fn build_tool_call(function_name: &str, parameters: &str) -> String {
         format!(r#"{{"name":"{function_name}","parameters":{parameters}}}"#)
@@ -267,28 +260,28 @@ mod tests {
     #[test]
     fn llama_json_parse_complete_without_tool_call_keeps_text() {
         let mut parser = Llama3JsonToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn llama_json_passthrough_never_reenters_tool_parsing() {
         let mut parser = Llama3JsonToolParser::new(&test_tools());
-        let mut result = parser.parse_chunk("plain text first ").unwrap();
-        result.append(
+        let mut output = parser.parse_chunk("plain text first ").unwrap();
+        output.append(
             parser
                 .parse_chunk(&build_tool_call("get_weather", r#"{"location":"Tokyo"}"#))
                 .unwrap(),
         );
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(
-            result.normal_text,
+            output.normal_text,
             r#"plain text first {"name":"get_weather","parameters":{"location":"Tokyo"}}"#
         );
-        assert!(result.calls.is_empty());
+        assert!(output.calls.is_empty());
     }
 
     #[test]
@@ -298,10 +291,10 @@ mod tests {
             "<|python_tag|>{}",
             build_tool_call("get_weather", r#"{"location":"Tokyo"}"#)
         );
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.normal_text, input);
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, input);
+        assert!(output.calls.is_empty());
     }
 
     #[test]
@@ -311,22 +304,22 @@ mod tests {
             "\n  {}",
             build_tool_call("get_weather", r#"{"location":"Tokyo"}"#)
         );
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.normal_text, input);
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, input);
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn llama_json_extracts_raw_parameters_object() {
         let mut parser = Llama3JsonToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": 3 }"#;
-        let result = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
+        let output = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -350,10 +343,10 @@ mod tests {
             build_tool_call("get_weather", r#"{"location":"Shanghai"}"#),
             build_tool_call("add", r#"{"x":1,"y":2}"#),
         );
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -373,7 +366,7 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -386,7 +379,7 @@ mod tests {
             "}}",
         ];
 
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
@@ -396,13 +389,13 @@ mod tests {
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
             );
-            result.append(next);
+            output.append(next);
         }
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
         assert_eq!(
-            result.coalesce_calls().calls[0].arguments,
+            output.coalesce_calls().calls[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -417,16 +410,16 @@ mod tests {
         let chunks = split_by_chars(&input, 6);
         let mut parser = Llama3JsonToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.calls.len(), 2);
+        assert_eq!(output.normal_text, "");
+        assert_eq!(output.calls.len(), 2);
         assert_eq!(
-            result.calls[0].arguments,
+            output.calls[0].arguments,
             r#"{"location":"Dallas","state":"TX"}"#
         );
-        assert_eq!(result.calls[1].name.as_deref(), Some("add"));
-        assert_eq!(result.calls[1].arguments, r#"{"x":4,"y":5}"#);
+        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(output.calls[1].arguments, r#"{"x":4,"y":5}"#);
     }
 
     #[test]
@@ -436,23 +429,23 @@ mod tests {
   "payload": {"items": [1, {"value": "literal { brace } and \"quote\""}]},
   "flag": true
 }"#;
-        let result = parser.parse_complete(&build_tool_call("convert", arguments)).unwrap();
+        let output = parser.parse_complete(&build_tool_call("convert", arguments)).unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn llama_json_keeps_trailing_whitespace_after_tool_call() {
         let mut parser = Llama3JsonToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&format!(
                 "{}\n\t ",
                 build_tool_call("get_weather", r#"{"location":"Tokyo"}"#)
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.normal_text, "");
+        assert_eq!(output.calls.len(), 1);
     }
 
     #[test]

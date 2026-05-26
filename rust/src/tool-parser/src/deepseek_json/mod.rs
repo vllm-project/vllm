@@ -10,7 +10,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len, take_json_object};
-use super::{Result, ToolCallDelta, ToolParseResult};
+use super::{Result, ToolCallDelta, ToolParserOutput};
 
 pub(super) const TOOL_CALLS_START: &str = "<｜tool▁calls▁begin｜>";
 pub(super) const TOOL_CALLS_END: &str = "<｜tool▁calls▁end｜>";
@@ -92,11 +92,11 @@ impl DeepSeekJsonToolParser {
     fn apply_event(
         &mut self,
         event: DeepSeekJsonEvent,
-        result: &mut ToolParseResult,
+        output: &mut ToolParserOutput,
     ) -> Result<()> {
         match event {
             DeepSeekJsonEvent::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             DeepSeekJsonEvent::ToolCallsStart => self.mode = DeepSeekJsonMode::ToolBlock,
             DeepSeekJsonEvent::ToolCallStart => self.mode = DeepSeekJsonMode::Header,
@@ -107,7 +107,7 @@ impl DeepSeekJsonToolParser {
                 self.mode = DeepSeekJsonMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -120,7 +120,7 @@ impl DeepSeekJsonToolParser {
                         self.format.parser_name()
                     ));
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -138,26 +138,22 @@ impl DeepSeekJsonToolParser {
         }
         Ok(())
     }
-
-    /// Push one decoded text chunk through the DeepSeek JSON parser.
-    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_deepseek_json_event(input, &mut self.mode, self.format)
         })? {
-            self.apply_event(event, result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
         Ok(())
     }
-
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match &self.mode {
-            DeepSeekJsonMode::Text => result.normal_text.push_str(&self.buffer),
+            DeepSeekJsonMode::Text => output.normal_text.push_str(&self.buffer),
             DeepSeekJsonMode::ToolBlock | DeepSeekJsonMode::Done => {}
             DeepSeekJsonMode::Header | DeepSeekJsonMode::Arguments { .. } => {
                 return Err(parsing_failed!(
@@ -167,10 +163,8 @@ impl DeepSeekJsonToolParser {
             }
         }
         let _ = self.reset();
-        Ok(result)
+        Ok(output)
     }
-
-    /// Reset all streaming state.
     fn reset(&mut self) -> String {
         let buffered = std::mem::take(&mut self.buffer);
         self.mode = DeepSeekJsonMode::Text;

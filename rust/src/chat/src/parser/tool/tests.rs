@@ -1,6 +1,6 @@
 use vllm_tool_parser::Result;
 
-use super::{ToolParseResult, ToolParser, ToolParserFactory, names};
+use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
 use crate::Error;
 use crate::request::ChatTool;
 
@@ -18,12 +18,12 @@ impl ToolParser for FakeToolParser {
         true
     }
 
-    fn parse_into(&mut self, _chunk: &str, _result: &mut ToolParseResult) -> Result<()> {
+    fn parse_into(&mut self, _chunk: &str, _output: &mut ToolParserOutput) -> Result<()> {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        Ok(ToolParseResult::default())
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        Ok(ToolParserOutput::default())
     }
 
     fn reset(&mut self) -> String {
