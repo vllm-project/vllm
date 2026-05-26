@@ -534,7 +534,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "expert load. Only populated when EPLBConfig.log_balancedness=True."
             ),
             multiprocess_mode="mostrecent",
-            labelnames=labelnames + ["eplb_model"],
+            labelnames=labelnames + ["model"],
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1122,13 +1122,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.eplb_metrics is not None:
                 model_name, engine = self.per_engine_labelvalues[engine_idx]
                 for (
-                    eplb_model,
+                    model,
                     balancedness,
                 ) in scheduler_stats.eplb_metrics.balancedness_per_model.items():
                     self.gauge_eplb_balancedness.labels(
                         model_name=model_name,
                         engine=engine,
-                        eplb_model=eplb_model,
+                        model=model,
                     ).set(balancedness)
 
             if (
