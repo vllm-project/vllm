@@ -20,7 +20,7 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -423,7 +423,9 @@ class TieringOffloadingManager(OffloadingManager):
         request_level_tiers = self._request_level_tiers.get(req_context.req_id, set())
         if request_level_tiers:
             keys_to_store_set = set(primary_result.keys_to_store)
-            keys_already_in_primary = [k for k in keys if k not in keys_to_store_set]
+            keys_already_in_primary = tuple(
+                k for k in keys if k not in keys_to_store_set
+            )
             if keys_already_in_primary:
                 self._cascade_existing_blocks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers
@@ -433,7 +435,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _cascade_existing_blocks_to_request_level_tiers(
         self,
-        keys: list[OffloadKey],
+        keys: Sequence[OffloadKey],
         req_context: ReqContext,
         request_level_tiers: set[SecondaryTierManager],
     ) -> None:
@@ -442,9 +444,9 @@ class TieringOffloadingManager(OffloadingManager):
         blocks that are already present in the primary tier.
         """
         # Filter out keys that are not ready in primary (e.g. in-flight)
-        ready_keys = [
+        ready_keys = tuple(
             k for k in keys if self.primary_tier.lookup(k, req_context) is True
-        ]
+        )
         if not ready_keys:
             return
 
