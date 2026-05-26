@@ -679,9 +679,9 @@ class GLM4_6VVideoBackend(VideoBackend):
         timestamps = [i * duration_per_frame for i in range(total_frames_num)]
 
         if total_frames_num < extract_t:
-            frame_indices = np.linspace(
-                0, total_frames_num - 1, extract_t, dtype=int
-            ).tolist()
+            frame_indices = [
+                math.floor(i * total_frames_num / extract_t) for i in range(extract_t)
+            ]
         else:
             frame_indices = []
             current_second = 0.0
