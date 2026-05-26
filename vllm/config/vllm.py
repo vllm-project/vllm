@@ -881,6 +881,15 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            if self.speculative_config is not None:
+                from vllm.v1.sample.logits_processor import (
+                    validate_custom_logitsprocs_with_spec_decode,
+                )
+
+                validate_custom_logitsprocs_with_spec_decode(
+                    self.model_config.logits_processors
+                )
+
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
