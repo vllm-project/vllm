@@ -58,22 +58,15 @@ def init_speech_to_text_state(
     )
 
     # Deprecated --enable-force-include-usage → UsagePolicy conversion.
-    # STT: flag only forced include_usage=True, continuous still from request.
-    def _maybe_force_usage(
-        policy: UsagePolicy,
-        enable_force: bool,
-        *,
-        set_continuous: bool,
-    ) -> UsagePolicy:
-        if enable_force and policy.include_usage is None:
-            return UsagePolicy(
-                include_usage="always",
-                continuous_usage="always" if set_continuous else None,
-            )
-        return policy
-
-    usage_policy = _maybe_force_usage(
-        usage_policy, args.enable_force_include_usage, set_continuous=False
+    # Once the flag is removed this helper and its use below can be deleted.
+    # Category 2, converted_usage_policy, flag forced include_usage=True only:
+    #   STT Transcribe, Translate
+    # Category 3, unchanged_usage_policy, flag had no effect:
+    #   Realtime
+    converted_usage_policy = (
+        UsagePolicy(include_usage="always")
+        if args.enable_force_include_usage
+        else usage_policy
     )
 
     if "transcription" in supported_tasks:
@@ -83,7 +76,7 @@ def init_speech_to_text_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            usage_policy=usage_policy,
+            usage_policy=converted_usage_policy,
         )
 
         from .translation.serving import OpenAIServingTranslation
@@ -92,7 +85,7 @@ def init_speech_to_text_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            usage_policy=usage_policy,
+            usage_policy=converted_usage_policy,
         )
 
     if "realtime" in supported_tasks:
