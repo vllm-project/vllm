@@ -71,9 +71,10 @@ impl Gemma4ToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
+        let buffered = std::mem::take(&mut self.buffer);
         self.emitted_tool_count = 0;
+        buffered
     }
 }
 
@@ -89,18 +90,17 @@ impl ToolParser for Gemma4ToolParser {
         true
     }
 
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) =
             parse_buffered_event(&self.buffer, parse_next_gemma4_event)?
         {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, result)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<ToolParseResult> {
@@ -108,14 +108,17 @@ impl ToolParser for Gemma4ToolParser {
 
         if !self.buffer.is_empty() {
             if self.buffer.starts_with(TOOL_CALL_START) {
-                self.reset();
                 return Err(parsing_failed!("incomplete Gemma4 tool call"));
             }
             result.normal_text.push_str(&self.buffer);
         }
 
-        self.reset();
+        let _ = self.reset();
         Ok(result)
+    }
+
+    fn reset(&mut self) -> String {
+        Gemma4ToolParser::reset(self)
     }
 }
 
@@ -371,7 +374,7 @@ mod tests {
         let mut parser = Gemma4ToolParser::new(&test_tools());
         let mut result = ToolParseResult::default();
         for chunk in chunks {
-            result.append(parser.push(chunk).unwrap());
+            result.append(parser.parse_chunk(chunk).unwrap());
         }
         result.append(parser.finish().unwrap());
         result.coalesce_calls()
@@ -488,11 +491,11 @@ mod tests {
             "call:get_weather{",
             "location:<|\"|>Paris<|\"|>}",
         ] {
-            result.append(parser.push(chunk).unwrap());
+            result.append(parser.parse_chunk(chunk).unwrap());
             assert!(result.calls.is_empty());
         }
 
-        result.append(parser.push("<tool_call|>").unwrap());
+        result.append(parser.parse_chunk("<tool_call|>").unwrap());
         let result = result.coalesce_calls();
 
         assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
@@ -632,7 +635,7 @@ mod tests {
     #[test]
     fn gemma4_finish_flushes_partial_start_marker_as_text() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let mut result = parser.push("<").unwrap();
+        let mut result = parser.parse_chunk("<").unwrap();
         result.append(parser.finish().unwrap());
 
         assert_eq!(result.normal_text, "<");
@@ -643,7 +646,7 @@ mod tests {
     fn gemma4_finish_rejects_complete_args_without_end_marker() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
         for chunk in ["<|tool_call>", "call:get_status{}"] {
-            parser.push(chunk).unwrap();
+            parser.parse_chunk(chunk).unwrap();
         }
 
         let error = parser.finish().unwrap_err();

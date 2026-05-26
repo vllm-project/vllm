@@ -10,8 +10,16 @@ impl ToolParser for DefaultParser {
         Ok(Box::new(Self))
     }
 
-    fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, _chunk: &str, _result: &mut ToolParseResult) -> Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<ToolParseResult> {
         Ok(ToolParseResult::default())
+    }
+
+    fn reset(&mut self) -> String {
+        String::new()
     }
 }
 
@@ -23,7 +31,7 @@ fn tool_parser_does_not_preserve_special_tokens_by_default() {
 }
 
 #[test]
-fn default_parse_complete_delegates_through_push_and_finish() {
+fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
     struct StreamingParser;
 
     impl ToolParser for StreamingParser {
@@ -34,27 +42,26 @@ fn default_parse_complete_delegates_through_push_and_finish() {
             Ok(Box::new(Self))
         }
 
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
-            Ok(ToolParseResult {
-                normal_text: "prefix ".to_string(),
-                calls: vec![
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some("weather".to_string()),
-                        arguments: "{\"location\":".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: None,
-                        arguments: "\"Paris\"".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some("time".to_string()),
-                        arguments: "{\"timezone\":".to_string(),
-                    },
-                ],
-            })
+        fn parse_into(&mut self, _chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+            result.normal_text.push_str("prefix ");
+            result.calls.extend([
+                ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("weather".to_string()),
+                    arguments: "{\"location\":".to_string(),
+                },
+                ToolCallDelta {
+                    tool_index: 0,
+                    name: None,
+                    arguments: "\"Paris\"".to_string(),
+                },
+                ToolCallDelta {
+                    tool_index: 1,
+                    name: Some("time".to_string()),
+                    arguments: "{\"timezone\":".to_string(),
+                },
+            ]);
+            Ok(())
         }
 
         fn finish(&mut self) -> Result<ToolParseResult> {
@@ -73,6 +80,10 @@ fn default_parse_complete_delegates_through_push_and_finish() {
                     },
                 ],
             })
+        }
+
+        fn reset(&mut self) -> String {
+            String::new()
         }
     }
 

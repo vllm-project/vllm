@@ -44,13 +44,17 @@ impl ToolParser for MistralToolParser {
     }
 
     /// Push one decoded text chunk through the Mistral parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.inner.push(chunk)
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+        self.inner.parse_into(chunk, result)
     }
 
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         self.inner.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.inner.reset()
     }
 }
 
@@ -165,7 +169,7 @@ mod tests {
         let mut result = ToolParseResult::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
@@ -216,7 +220,7 @@ mod tests {
     fn mistral_finish_fails_incomplete_tool_call() {
         let mut parser = MistralToolParser::new(&test_tools());
         parser
-            .push(r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"location""#)
+            .parse_chunk(r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"location""#)
             .unwrap();
 
         let error = parser.finish().unwrap_err();
@@ -229,7 +233,7 @@ mod tests {
     fn mistral_malformed_field_order_fails_fast() {
         let mut parser = MistralToolParser::new(&test_tools());
         let error = parser
-            .push(r#"[TOOL_CALLS] [{"arguments":{},"name":"get_weather"}]"#)
+            .parse_chunk(r#"[TOOL_CALLS] [{"arguments":{},"name":"get_weather"}]"#)
             .unwrap_err();
 
         expect![[r#"

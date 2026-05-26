@@ -47,13 +47,17 @@ impl ToolParser for DeepSeekV32ToolParser {
     }
 
     /// Push one decoded text chunk through the DSML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.0.push(chunk)
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+        self.0.parse_into(chunk, result)
     }
 
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         self.0.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.0.reset()
     }
 }
 
@@ -345,12 +349,12 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_truncated_parameter_does_not_leak_eos() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        parser.push("<｜DSML｜function_calls>\n").unwrap();
-        parser.push("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
+        parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
+        parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
         parser
-            .push("<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo")
+            .parse_chunk("<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo")
             .unwrap();
-        parser.push("<｜end▁of▁sentence｜>").unwrap();
+        parser.parse_chunk("<｜end▁of▁sentence｜>").unwrap();
 
         let error = parser.finish().unwrap_err();
         assert!(error.to_report_string().contains("incomplete DeepSeek DSML tool call"));
@@ -396,10 +400,12 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_does_not_emit_incomplete_invoke() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        parser.push("<｜DSML｜function_calls>\n").unwrap();
-        parser.push("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
+        parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
+        parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
         parser
-            .push("<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n")
+            .parse_chunk(
+                "<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n",
+            )
             .unwrap();
 
         let error = parser.finish().unwrap_err();

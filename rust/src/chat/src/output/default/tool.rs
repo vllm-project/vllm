@@ -57,10 +57,11 @@ impl ToolState {
             return Ok(events);
         }
 
-        let parse_result = self.parser.push(&delta);
+        let mut result = ToolParseResult::default();
+        let parse_result = self.parser.parse_into(&delta, &mut result);
 
         match parse_result {
-            Ok(result) => self.process_parse_result(kind, result, &mut events)?,
+            Ok(()) => self.process_parse_result(kind, result, &mut events)?,
             Err(error) => {
                 if !self.parser_failed {
                     warn!(
@@ -69,8 +70,9 @@ impl ToolState {
                     );
                     self.parser_failed = true;
                 }
+                self.process_parse_result(kind, result, &mut events)?;
                 self.open_call_index = None;
-                events.push(AssistantEvent::TextDelta { kind, delta });
+                push_text_delta(&mut events, kind, self.parser.reset());
             }
         }
 
@@ -271,6 +273,7 @@ mod tests {
 
     struct FailingParser {
         fail_next: bool,
+        buffered: String,
     }
 
     struct ScriptedParser {
@@ -278,15 +281,23 @@ mod tests {
         finish_result: ToolParseResult,
     }
 
+    struct PartialThenFailParser {
+        buffered: String,
+    }
+
     impl ToolParser for FailingParser {
         fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
-            Ok(Box::new(Self { fail_next: false }))
+            Ok(Box::new(Self {
+                fail_next: false,
+                buffered: String::new(),
+            }))
         }
 
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+        fn parse_into(&mut self, chunk: &str, _result: &mut ToolParseResult) -> Result<()> {
+            self.buffered.push_str(chunk);
             if self.fail_next {
                 self.fail_next = false;
                 return Err(ToolParserError::ParsingFailed {
@@ -294,7 +305,16 @@ mod tests {
                 });
             }
 
+            self.buffered.clear();
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<ToolParseResult> {
             Ok(ToolParseResult::default())
+        }
+
+        fn reset(&mut self) -> String {
+            std::mem::take(&mut self.buffered)
         }
     }
 
@@ -309,13 +329,103 @@ mod tests {
             }))
         }
 
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
-            Ok(self.push_results.pop().unwrap_or_default())
+        fn parse_into(&mut self, _chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+            let mut next = self.push_results.pop().unwrap_or_default();
+            result.normal_text.push_str(&next.normal_text);
+            result.calls.append(&mut next.calls);
+            Ok(())
         }
 
         fn finish(&mut self) -> Result<ToolParseResult> {
             Ok(std::mem::take(&mut self.finish_result))
         }
+
+        fn reset(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    impl ToolParser for PartialThenFailParser {
+        fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self {
+                buffered: String::new(),
+            }))
+        }
+
+        fn parse_into(&mut self, _chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+            result.calls.extend([
+                crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: String::new(),
+                },
+                crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: None,
+                    arguments: r#"{"location":"SF"}"#.to_string(),
+                },
+            ]);
+            self.buffered.push_str(" trailing text");
+            Err(ToolParserError::ParsingFailed {
+                message: "boom".to_string(),
+            })
+        }
+
+        fn finish(&mut self) -> Result<ToolParseResult> {
+            Ok(ToolParseResult::default())
+        }
+
+        fn reset(&mut self) -> String {
+            std::mem::take(&mut self.buffered)
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_parser_error_preserves_partial_result_and_flushes_buffer() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "ignored".to_string(),
+            }),
+            Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = tool_event_stream(
+            events,
+            Some(Box::new(PartialThenFailParser {
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolCallStart { name, .. } if name == "get_weather"
+        ));
+        assert!(matches!(
+            &events[1],
+            AssistantEvent::ToolCallArgumentsDelta { delta } if delta == r#"{"location":"SF"}"#
+        ));
+        assert_eq!(
+            events[2],
+            AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: " trailing text".to_string(),
+            }
+        );
+        assert!(matches!(events[3], AssistantEvent::Done { .. }));
     }
 
     #[tokio::test]
@@ -341,10 +451,15 @@ mod tests {
             }),
         ]);
 
-        let collected =
-            tool_event_stream(events, Some(Box::new(FailingParser { fail_next: true })))
-                .collect::<Vec<_>>()
-                .await;
+        let collected = tool_event_stream(
+            events,
+            Some(Box::new(FailingParser {
+                fail_next: true,
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         let events = collected
             .into_iter()
@@ -415,12 +530,18 @@ mod tests {
                 kv_transfer_params: None,
             }),
         ]);
-        let events = tool_event_stream(events, Some(Box::new(FailingParser { fail_next: false })))
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<crate::Result<Vec<_>>>()
-            .unwrap();
+        let events = tool_event_stream(
+            events,
+            Some(Box::new(FailingParser {
+                fail_next: false,
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(
             events,

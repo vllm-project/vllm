@@ -85,7 +85,7 @@ pub fn test_tools() -> Vec<Tool> {
 pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -> ToolParseResult {
     let mut result = ToolParseResult::default();
     for chunk in chunks {
-        result.append(parser.push(chunk).unwrap());
+        result.append(parser.parse_chunk(chunk).unwrap());
     }
     result.append(parser.finish().unwrap());
     result.coalesce_calls()

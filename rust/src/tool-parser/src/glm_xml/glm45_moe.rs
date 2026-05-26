@@ -32,12 +32,16 @@ impl ToolParser for Glm45MoeToolParser {
     }
 
     /// Push one decoded text chunk through the GLM MoE parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.0.push(chunk)
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+        self.0.parse_into(chunk, result)
     }
 
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         self.0.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.0.reset()
     }
 }

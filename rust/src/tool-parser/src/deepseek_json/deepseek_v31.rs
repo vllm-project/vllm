@@ -30,13 +30,17 @@ impl ToolParser for DeepSeekV31ToolParser {
     }
 
     /// Push one decoded text chunk through the DeepSeek V3.1 parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.0.push(chunk)
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+        self.0.parse_into(chunk, result)
     }
 
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         self.0.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.0.reset()
     }
 }
 
@@ -116,7 +120,7 @@ mod tests {
         let mut result = ToolParseResult::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
@@ -216,7 +220,7 @@ mod tests {
     fn deepseek_v31_finish_fails_incomplete_tool_call() {
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
         parser
-            .push(&format!(
+            .parse_chunk(&format!(
                 "{TOOL_CALLS_START}{TOOL_CALL_START}get_weather{TOOL_CALL_SEPARATOR}{{\"location\""
             ))
             .unwrap();
@@ -232,7 +236,7 @@ mod tests {
         let mut parser = DeepSeekV31ToolParser::new(&test_tools());
         let input = format!("{TOOL_CALLS_START}{TOOL_CALL_START}{TOOL_CALL_SEPARATOR}{{}}");
 
-        let error = parser.push(&input).unwrap_err();
+        let error = parser.parse_chunk(&input).unwrap_err();
 
         expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
     }

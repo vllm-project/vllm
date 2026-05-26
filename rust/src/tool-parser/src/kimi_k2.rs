@@ -121,10 +121,11 @@ impl KimiK2ToolParser {
     }
 
     /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
+        let buffered = std::mem::take(&mut self.buffer);
         self.mode = KimiK2Mode::Text;
         self.active_tool_index = None;
+        buffered
     }
 }
 
@@ -143,18 +144,17 @@ impl ToolParser for KimiK2ToolParser {
     }
 
     /// Push one decoded text chunk through the Kimi K2 parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_kimi_k2_event(input, &mut self.mode)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, result)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Flush buffered text and reset parser state.
@@ -167,8 +167,12 @@ impl ToolParser for KimiK2ToolParser {
                 return Err(parsing_failed!("incomplete Kimi K2 tool call"));
             }
         }
-        self.reset();
+        let _ = self.reset();
         Ok(result)
+    }
+
+    fn reset(&mut self) -> String {
+        KimiK2ToolParser::reset(self)
     }
 }
 
@@ -396,7 +400,7 @@ mod tests {
         let mut result = ToolParseResult::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
@@ -536,7 +540,7 @@ mod tests {
     fn kimi_k2_finish_fails_incomplete_tool_call() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         parser
-            .push(&format!(
+            .parse_chunk(&format!(
                 "{TOOL_CALLS_START}{TOOL_CALL_START}functions.get_weather:0{TOOL_CALL_ARGUMENT_START}{{\"location\""
             ))
             .unwrap();
@@ -553,7 +557,7 @@ mod tests {
         let input =
             format!("{TOOL_CALLS_START}{TOOL_CALL_START}get_weather{TOOL_CALL_ARGUMENT_START}{{}}");
 
-        let error = parser.push(&input).unwrap_err();
+        let error = parser.parse_chunk(&input).unwrap_err();
 
         expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
     }

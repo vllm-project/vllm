@@ -18,8 +18,16 @@ impl ToolParser for FakeToolParser {
         true
     }
 
-    fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, _chunk: &str, _result: &mut ToolParseResult) -> Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<ToolParseResult> {
         Ok(ToolParseResult::default())
+    }
+
+    fn reset(&mut self) -> String {
+        String::new()
     }
 }
 

@@ -101,25 +101,25 @@ impl GlmXmlToolParser {
     }
 
     /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
+        let buffered = std::mem::take(&mut self.buffer);
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
+        buffered
     }
 
     /// Push one decoded text chunk through the GLM MoE parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_glm_event(input, self.mode, self.separator)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, result)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Flush buffered text and reset parser state.
@@ -132,7 +132,7 @@ impl GlmXmlToolParser {
                 GlmMode::AfterToolCall => {}
             }
         }
-        self.reset();
+        let _ = self.reset();
         Ok(result)
     }
 }
@@ -392,7 +392,7 @@ mod tests {
     fn glm45_streaming_does_not_emit_incomplete_tool_call() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let result = parser.push("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
+        let result = parser.parse_chunk("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
 
         assert_eq!(result.normal_text, "");
         assert!(result.calls.is_empty());
@@ -402,7 +402,7 @@ mod tests {
     fn glm45_finish_fails_incomplete_tool_call() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        parser.push("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
+        parser.parse_chunk("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
         let error = parser.finish().unwrap_err();
 
         assert!(error.as_report().to_string().contains("incomplete GLM MoE tool call"));
@@ -412,7 +412,7 @@ mod tests {
     fn glm45_malformed_tool_call_fails_fast() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let error = parser.push("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>").unwrap_err();
+        let error = parser.parse_chunk("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>").unwrap_err();
 
         assert!(error.as_report().to_string().contains("tool parser parsing failed"));
     }

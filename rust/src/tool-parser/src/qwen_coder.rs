@@ -95,10 +95,11 @@ impl Qwen3CoderToolParser {
     }
 
     /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
+        let buffered = std::mem::take(&mut self.buffer);
         self.mode = QwenCoderMode::Text;
         self.emitted_tool_count = 0;
+        buffered
     }
 }
 
@@ -112,18 +113,17 @@ impl ToolParser for Qwen3CoderToolParser {
     }
 
     /// Push one decoded text chunk through the Qwen Coder parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_qwen_coder_event(input, self.mode)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, result)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Flush buffered text and reset parser state.
@@ -135,8 +135,12 @@ impl ToolParser for Qwen3CoderToolParser {
             }
             result.normal_text.push_str(&self.buffer);
         }
-        self.reset();
+        let _ = self.reset();
         Ok(result)
+    }
+
+    fn reset(&mut self) -> String {
+        Qwen3CoderToolParser::reset(self)
     }
 }
 
@@ -578,7 +582,7 @@ mod tests {
     fn qwen_coder_streaming_does_not_emit_incomplete_tool_call() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let result = parser
-            .push("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
+            .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
             .unwrap();
 
         assert!(result.normal_text.is_empty());
@@ -589,7 +593,7 @@ mod tests {
     fn qwen_coder_finish_fails_incomplete_tool_call() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         parser
-            .push("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
+            .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
             .unwrap();
 
         assert!(parser.finish().is_err());
@@ -598,7 +602,7 @@ mod tests {
     #[test]
     fn qwen_coder_malformed_tool_call_fails_fast() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
-        let error = parser.push("<tool_call>\n<bad>\n</tool_call>").unwrap_err();
+        let error = parser.parse_chunk("<tool_call>\n<bad>\n</tool_call>").unwrap_err();
 
         expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
     }
@@ -607,7 +611,7 @@ mod tests {
     fn qwen_coder_missing_parameter_end_fails_fast_after_function_end() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let error = parser
-            .push(
+            .parse_chunk(
                 "<tool_call>\n<function=get_weather>\n<parameter=location>SF</function>\n</tool_call>",
             )
             .unwrap_err();

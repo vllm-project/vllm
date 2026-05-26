@@ -49,13 +49,17 @@ impl ToolParser for Qwen3XmlToolParser {
     }
 
     /// Push one decoded text chunk through the Qwen XML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.inner.push(chunk)
+    fn parse_into(&mut self, chunk: &str, result: &mut ToolParseResult) -> Result<()> {
+        self.inner.parse_into(chunk, result)
     }
 
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         self.inner.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.inner.reset()
     }
 }
 
@@ -125,7 +129,7 @@ mod tests {
         let mut result = ToolParseResult::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
@@ -248,7 +252,7 @@ mod tests {
     fn qwen_xml_finish_fails_incomplete_tool_call() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         parser
-            .push(
+            .parse_chunk(
                 r#"<tool_call>
 {"name":"get_weather","arguments":{"location""#,
             )
@@ -264,7 +268,7 @@ mod tests {
     fn qwen_xml_malformed_field_order_fails_fast() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let error = parser
-            .push(
+            .parse_chunk(
                 r#"<tool_call>
 {"arguments":{},"name":"get_weather"}
 </tool_call>"#,
