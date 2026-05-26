@@ -89,26 +89,13 @@ def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
         # TODO: read input_quant_config from quant_config
         input_schema = HummingInputSchema.from_config(input_quant_config)
 
-    is_gated = layer.moe_config.activation.is_gated
-    sublayer_configs = {
-        "w13": {
-            "shape_n": layer.moe_config.intermediate_size_per_partition * 2,
-            "shape_k": layer.moe_config.hidden_dim,
-        },
-        "w2": {
-            "shape_n": layer.moe_config.hidden_dim,
-            "shape_k": layer.moe_config.intermediate_size_per_partition
-            * (1 if is_gated else 2),
-        },
-    }
-
     _process_all_sublayers(
         layer=layer,
-        sublayer_configs=sublayer_configs,
         weight_schema=weight_schema,
         input_schema=input_schema,
         has_bias=layer.moe_config.has_bias,
         num_experts=layer.local_num_experts,
         param_dtype=layer.params_dtype,
-        force_weight_schema=None,  # No force requant in this code path
+        # sublayer_configs=None by default - will be built from layer.moe_config
+        # force_weight_schema=None - no force requant in this code path
     )

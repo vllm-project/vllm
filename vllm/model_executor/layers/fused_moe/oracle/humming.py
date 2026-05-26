@@ -370,12 +370,12 @@ def _process_single_sublayer(
 
 def _process_all_sublayers(
     layer: "RoutedExperts",
-    sublayer_configs: dict[str, Any],
     weight_schema: Any,
     input_schema: Any,
     has_bias: bool,
     num_experts: int,
     param_dtype: torch.dtype,
+    sublayer_configs: dict[str, Any] | None = None,
     force_weight_schema: Any | None = None,
 ) -> None:
     """
@@ -386,19 +386,35 @@ def _process_all_sublayers(
 
     Args:
         layer: The RoutedExperts layer containing weights to process
-        sublayer_configs: Configuration dict for each sublayer (w13, w2)
-                         Each config must have "shape_n" and "shape_k" keys
         weight_schema: Initial weight quantization schema
         input_schema: Initial input quantization schema
         has_bias: Whether the layer has bias terms
         num_experts: Number of experts in the layer
         param_dtype: Parameter data type
+        sublayer_configs: Optional configuration dict for each sublayer (w13, w2).
+                         Each config must have "shape_n" and "shape_k" keys.
+                         If None, configs are built from layer.moe_config properties.
         force_weight_schema: Optional schema to force requantization to
 
     Side effects:
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
     """
+    # Build sublayer configs from layer properties if not provided
+    if sublayer_configs is None:
+        is_gated = layer.moe_config.activation.is_gated
+        sublayer_configs = {
+            "w13": {
+                "shape_n": layer.moe_config.intermediate_size_per_partition * 2,
+                "shape_k": layer.moe_config.hidden_dim,
+            },
+            "w2": {
+                "shape_n": layer.moe_config.hidden_dim,
+                "shape_k": layer.moe_config.intermediate_size_per_partition
+                * (1 if is_gated else 2),
+            },
+        }
+
     layer.weight_schemas = {}
     layer.input_schemas = {}
 
@@ -418,11 +434,6 @@ def _process_all_sublayers(
 
         layer.weight_schemas[sublayer_name] = final_weight_schema
         layer.input_schemas[sublayer_name] = final_input_schema
-
-    if not hasattr(layer, "locks"):
-        device = layer.w13_weight.device
-        locks = torch.zeros(1024, dtype=torch.int32, device=device)
-        layer.register_buffer("locks", locks)
 
 
 def convert_to_humming_moe_kernel_format(
@@ -456,12 +467,12 @@ def convert_to_humming_moe_kernel_format(
     """
     _process_all_sublayers(
         layer=layer,
-        sublayer_configs=sublayer_configs,
         weight_schema=weight_schema,
         input_schema=input_schema,
         has_bias=has_bias,
         num_experts=layer.num_experts,
         param_dtype=layer.param_dtype,
+        sublayer_configs=sublayer_configs,
         force_weight_schema=force_weight_schema,
     )
 
