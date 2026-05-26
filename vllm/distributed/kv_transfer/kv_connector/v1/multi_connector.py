@@ -19,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    SupportsPP,
+    supports_pp,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -125,7 +127,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
 
 
-class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+class MultiConnector(KVConnectorBase_V1, SupportsHMA, SupportsPP):
     """
     A wrapper for using multiple KVConnectors at the same time.
 
@@ -470,6 +472,25 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         """
         for c in self._connectors:
             c.set_xfer_handshake_metadata(metadata)
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set PP-aware KV connector handshake metadata for all sub-connectors.
+        Non-``SupportsPP`` children receive the ``{tp_rank: metadata}`` shape
+        via a ``(0, tp_rank)`` unwrap.
+        """
+        for c in self._connectors:
+            if supports_pp(c):
+                cast(SupportsPP, c).set_xfer_handshake_metadata_pp_aware(metadata)
+            else:
+                non_pp_metadata = {
+                    tp_rank: meta
+                    for (pp_rank, tp_rank), meta in metadata.items()
+                    if pp_rank == 0
+                }
+                c.set_xfer_handshake_metadata(non_pp_metadata)
 
     def _aggregate_request_finished(
         self,

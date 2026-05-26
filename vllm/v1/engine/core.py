@@ -26,6 +26,10 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    SupportsPP,
+    supports_pp,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -176,13 +180,27 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {tp_rank: metadata}
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[int, Any] = {}
+                content: dict[tuple[int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata(content)
+
+                if supports_pp(kv_connector):
+                    cast(SupportsPP, kv_connector).set_xfer_handshake_metadata_pp_aware(
+                        content
+                    )
+                else:
+                    # Unwrap (0, tp_rank) entries to {tp_rank: metadata} for
+                    # non-PP connectors. Entries with pp_rank != 0 cannot be
+                    # consumed by a non-PP connector and are dropped.
+                    non_pp_content: dict[int, Any] = {
+                        tp_rank: meta
+                        for (pp_rank, tp_rank), meta in content.items()
+                        if pp_rank == 0
+                    }
+                    kv_connector.set_xfer_handshake_metadata(non_pp_content)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
