@@ -800,8 +800,7 @@ def test_has_mamba_init(
 
     block_size = 16
     vllm_config = create_vllm_config(block_size=block_size)
-    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
-    # is set; override so we can test the scheduler's own derivation.
+    # Explicitly enable HMA so we can test the scheduler's own derivation.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(
         block_size=block_size,
