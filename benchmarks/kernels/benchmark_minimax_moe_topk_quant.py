@@ -5,7 +5,8 @@
 Example:
     python3 benchmarks/kernels/benchmark_minimax_moe_topk_quant.py \
         --m-values 1 2 4 8 16 32 64 128 256 512 1024 \
-        --modes eager cudagraph
+        --modes eager cudagraph \
+        --providers triton cuda
 """
 
 import argparse
@@ -21,6 +22,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.minimax_m2_kernels import (
     minimax_moe_topk_sigmoid_quant,
+    minimax_moe_topk_sigmoid_quant_cuda,
+    minimax_moe_topk_sigmoid_quant_triton,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -34,6 +37,7 @@ from vllm.utils.torch_utils import set_random_seed
 @dataclass
 class BenchResult:
     mode: str
+    provider: str
     m: int
     hidden_size: int
     num_experts: int
@@ -42,7 +46,7 @@ class BenchResult:
     topk_us: float
     quant_us: float
     baseline_us: float
-    fused_us: float
+    provider_us: float
     speedup: float
     delta_us: float
 
@@ -113,6 +117,10 @@ def _check_correctness(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
+    fused_fn: Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, int, int],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
 ) -> None:
     ref_topk_weights, ref_topk_ids, ref_a1q, ref_a1q_scale = _baseline_topk_quant(
         hidden_states,
@@ -121,7 +129,7 @@ def _check_correctness(
         top_k,
         block_k,
     )
-    topk_weights, topk_ids, a1q, a1q_scale = minimax_moe_topk_sigmoid_quant(
+    topk_weights, topk_ids, a1q, a1q_scale = fused_fn(
         hidden_states,
         router_logits,
         e_score_correction_bias,
@@ -142,6 +150,7 @@ def _run_one(
     num_experts: int,
     top_k: int,
     block_k: int,
+    provider: str,
     check_correctness: bool,
 ) -> BenchResult:
     if hidden_size % block_k != 0:
@@ -159,6 +168,7 @@ def _run_one(
     e_score_correction_bias = torch.randn(
         (num_experts,), dtype=torch.float32, device=device
     )
+    provider_fn = _get_provider_fn(provider)
 
     if check_correctness:
         _check_correctness(
@@ -167,6 +177,7 @@ def _run_one(
             e_score_correction_bias,
             top_k,
             block_k,
+            provider_fn,
         )
 
     quantiles = [0.5, 0.2, 0.8]
@@ -195,8 +206,8 @@ def _run_one(
         mode,
         quantiles,
     )
-    fused_us = _bench_us(
-        lambda: minimax_moe_topk_sigmoid_quant(
+    provider_us = _bench_us(
+        lambda: provider_fn(
             hidden_states,
             router_logits,
             e_score_correction_bias,
@@ -207,9 +218,10 @@ def _run_one(
         quantiles,
     )
 
-    speedup = baseline_us / fused_us if fused_us else math.inf
+    speedup = baseline_us / provider_us if provider_us else math.inf
     return BenchResult(
         mode=mode,
+        provider=provider,
         m=m,
         hidden_size=hidden_size,
         num_experts=num_experts,
@@ -218,15 +230,26 @@ def _run_one(
         topk_us=topk_us,
         quant_us=quant_us,
         baseline_us=baseline_us,
-        fused_us=fused_us,
+        provider_us=provider_us,
         speedup=speedup,
-        delta_us=baseline_us - fused_us,
+        delta_us=baseline_us - provider_us,
     )
+
+
+def _get_provider_fn(provider: str):
+    if provider == "auto":
+        return minimax_moe_topk_sigmoid_quant
+    if provider == "cuda":
+        return minimax_moe_topk_sigmoid_quant_cuda
+    if provider == "triton":
+        return minimax_moe_topk_sigmoid_quant_triton
+    raise ValueError(f"Unknown provider: {provider}")
 
 
 def _print_header() -> None:
     print(
         "mode".ljust(10),
+        "provider".ljust(9),
         "M".rjust(6),
         "H".rjust(6),
         "E".rjust(5),
@@ -235,16 +258,17 @@ def _print_header() -> None:
         "topk_us".rjust(10),
         "quant_us".rjust(10),
         "base_us".rjust(10),
-        "fused_us".rjust(10),
+        "kernel_us".rjust(10),
         "speedup".rjust(9),
         "delta_us".rjust(10),
     )
-    print("-" * 105)
+    print("-" * 115)
 
 
 def _print_result(result: BenchResult) -> None:
     print(
         result.mode.ljust(10),
+        result.provider.ljust(9),
         f"{result.m:6d}",
         f"{result.hidden_size:6d}",
         f"{result.num_experts:5d}",
@@ -253,7 +277,7 @@ def _print_result(result: BenchResult) -> None:
         f"{result.topk_us:10.3f}",
         f"{result.quant_us:10.3f}",
         f"{result.baseline_us:10.3f}",
-        f"{result.fused_us:10.3f}",
+        f"{result.provider_us:10.3f}",
         f"{result.speedup:9.3f}",
         f"{result.delta_us:10.3f}",
     )
@@ -312,6 +336,16 @@ def parse_args():
         help="Benchmark eager launches, CUDA graph replay, or both.",
     )
     parser.add_argument(
+        "--providers",
+        choices=["auto", "cuda", "triton"],
+        nargs="+",
+        default=["triton", "cuda"],
+        help=(
+            "Fused implementations to benchmark. 'auto' is the production "
+            "wrapper, which uses CUDA when the extension op is available."
+        ),
+    )
+    parser.add_argument(
         "--check-correctness",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -336,12 +370,13 @@ if __name__ == "__main__":
 
     configs = itertools.product(
         args.modes,
+        args.providers,
         args.m_values,
         args.hidden_sizes,
         args.num_experts,
         args.top_k,
     )
-    for mode, m, hidden_size, num_experts, top_k in configs:
+    for mode, provider, m, hidden_size, num_experts, top_k in configs:
         result = _run_one(
             mode=mode,
             m=m,
@@ -349,6 +384,7 @@ if __name__ == "__main__":
             num_experts=num_experts,
             top_k=top_k,
             block_k=args.block_k,
+            provider=provider,
             check_correctness=args.check_correctness,
         )
         results.append(result)

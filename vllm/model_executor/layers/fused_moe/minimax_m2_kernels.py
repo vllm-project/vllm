@@ -100,25 +100,14 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
             tl.store(topk_weights_ptr + token_id * TOP_K + k_idx, weight / denom)
 
 
-def _minimax_moe_topk_sigmoid_quant_impl(
+def _allocate_outputs(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
-    e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert hidden_states.dim() == 2
-    assert router_logits.dim() == 2
-    assert hidden_states.shape[0] == router_logits.shape[0]
-    assert hidden_states.stride(-1) == 1
-    assert router_logits.stride(-1) == 1
-    assert block_k > 0
-    assert router_logits.shape[-1] == e_score_correction_bias.shape[0]
-
     num_tokens, hidden_size = hidden_states.shape
-    num_experts = router_logits.shape[-1]
     num_groups = triton.cdiv(hidden_size, block_k)
-
     topk_weights = torch.empty(
         (num_tokens, top_k), dtype=torch.float32, device=hidden_states.device
     )
@@ -132,6 +121,39 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     )
     a1q_scale = torch.empty(
         (num_tokens, num_groups), dtype=torch.float32, device=hidden_states.device
+    )
+    return topk_weights, topk_ids, a1q, a1q_scale
+
+
+def _validate_inputs(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    block_k: int,
+) -> None:
+    assert hidden_states.dim() == 2
+    assert router_logits.dim() == 2
+    assert hidden_states.shape[0] == router_logits.shape[0]
+    assert hidden_states.stride(-1) == 1
+    assert router_logits.stride(-1) == 1
+    assert block_k > 0
+    assert router_logits.shape[-1] == e_score_correction_bias.shape[0]
+
+
+def _minimax_moe_topk_sigmoid_quant_triton_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
+
+    num_tokens, hidden_size = hidden_states.shape
+    num_experts = router_logits.shape[-1]
+    num_groups = triton.cdiv(hidden_size, block_k)
+    topk_weights, topk_ids, a1q, a1q_scale = _allocate_outputs(
+        hidden_states, router_logits, top_k, block_k
     )
 
     if num_tokens == 0:
@@ -162,6 +184,95 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     )
 
     return topk_weights, topk_ids, a1q, a1q_scale
+
+
+def _get_cuda_kernel():
+    try:
+        return torch.ops._moe_C.minimax_m2_topk_sigmoid_quant
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _can_use_cuda_kernel(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> bool:
+    return (
+        hidden_states.is_cuda
+        and _get_cuda_kernel() is not None
+        and hidden_states.dtype == torch.bfloat16
+        and router_logits.dtype == torch.float32
+        and e_score_correction_bias.dtype == torch.float32
+        and router_logits.shape[-1] == 256
+        and top_k == 8
+        and block_k == 128
+        and current_platform.fp8_dtype() == torch.float8_e4m3fn
+    )
+
+
+def _minimax_moe_topk_sigmoid_quant_cuda_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
+    topk_weights, topk_ids, a1q, a1q_scale = _allocate_outputs(
+        hidden_states, router_logits, top_k, block_k
+    )
+    if hidden_states.shape[0] == 0:
+        return topk_weights, topk_ids, a1q, a1q_scale
+
+    cuda_kernel = _get_cuda_kernel()
+    if cuda_kernel is None:
+        raise RuntimeError("CUDA MiniMax-M2 topk+quant kernel is unavailable.")
+    cuda_kernel(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        topk_weights,
+        topk_ids,
+        a1q,
+        a1q_scale,
+        top_k,
+        block_k,
+    )
+    return topk_weights, topk_ids, a1q, a1q_scale
+
+
+def _minimax_moe_topk_sigmoid_quant_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
+    if _can_use_cuda_kernel(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    ):
+        return _minimax_moe_topk_sigmoid_quant_cuda_impl(
+            hidden_states,
+            router_logits,
+            e_score_correction_bias,
+            top_k,
+            block_k,
+        )
+    return _minimax_moe_topk_sigmoid_quant_triton_impl(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    )
 
 
 def _minimax_moe_topk_sigmoid_quant_fake(
@@ -205,6 +316,38 @@ def minimax_moe_topk_sigmoid_quant(
     block_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.minimax_moe_topk_sigmoid_quant(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    )
+
+
+def minimax_moe_topk_sigmoid_quant_cuda(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _minimax_moe_topk_sigmoid_quant_cuda_impl(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    )
+
+
+def minimax_moe_topk_sigmoid_quant_triton(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _minimax_moe_topk_sigmoid_quant_triton_impl(
         hidden_states,
         router_logits,
         e_score_correction_bias,
