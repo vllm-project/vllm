@@ -535,10 +535,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # aligned region, SWA groups only consult a subset of blocks per
         # ``lcm_block_size``-segment so the unused blocks also stay out of the
         # prefix-cache hash map.
-        raw_num_computed_tokens = num_computed_tokens
-        prompt_complete = raw_num_computed_tokens >= request.num_prompt_tokens
+        prompt_complete = num_computed_tokens >= request.num_prompt_tokens
         aligned_num_computed_tokens = (
-            raw_num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
         )
 
         # Cache the latest prompt boundary in addition to the interval boundaries.
@@ -560,23 +559,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if self.local_kv_retention_interval is not None and isinstance(
                 manager, SlidingWindowManager
             ):
+                # MTP/EAGLE lookup matches one local block after the replay
+                # boundary and then drops it, so sparse local retention may
+                # need cacheable tokens past the aligned returned-hit boundary.
                 extra_tokens_after_replay_boundary = (
                     manager.block_size
                     if manager.kv_cache_group_id in self.eagle_lookup_group_ids
                     else 0
                 )
-                # MTP/EAGLE lookup matches one local block after the replay
-                # boundary and then drops it, so sparse local retention may
-                # need cacheable tokens past the aligned returned-hit boundary.
-                # Non-EAGLE groups only cache aligned replay boundaries.
-                num_cacheable_tokens = (
-                    raw_num_computed_tokens
-                    if extra_tokens_after_replay_boundary
-                    else aligned_num_computed_tokens
-                )
                 manager.cache_blocks_at_boundaries(
                     request=request,
-                    num_tokens=num_cacheable_tokens,
+                    num_tokens=num_computed_tokens,
                     alignment_tokens=self.lcm_block_size,
                     interval_tokens=self.local_kv_retention_interval,
                     latest_boundary_token=latest_retention_boundary,
@@ -711,11 +704,6 @@ def get_kv_cache_coordinator(
     local_kv_retention_interval: int | Literal["auto"] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
-    if (
-        local_kv_retention_interval is not None
-        and len(kv_cache_config.kv_cache_groups) == 1
-    ):
-        raise ValueError("local_kv_retention_interval requires a hybrid KV cache model")
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,
