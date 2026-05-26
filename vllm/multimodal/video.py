@@ -710,10 +710,7 @@ class GLM4_6VVideoBackend(VideoBackend):
                 seen.add(idx)
                 uniq.append(idx)
 
-        if len(uniq) & 1:
-            uniq.append(uniq[-1])
-
-        return np.array(uniq).tolist()
+        return uniq
 
     @classmethod
     def load_bytes(
@@ -727,7 +724,7 @@ class GLM4_6VVideoBackend(VideoBackend):
         backend: Literal["opencv", "pyav"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        return super().load_bytes(
+        frames, metadata = super().load_bytes(
             data,
             num_frames=num_frames,
             fps=fps,
@@ -736,6 +733,11 @@ class GLM4_6VVideoBackend(VideoBackend):
             backend=backend,
             **kwargs,
         )
+        # Ensure even frame count — matches HF's sample_frames even-padding
+        # and _preprocess temporal_patch_size divisibility check.
+        if frames.shape[0] & 1:
+            frames = np.concatenate([frames, frames[-1:]], axis=0)
+        return frames, metadata
 
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")
