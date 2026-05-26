@@ -64,9 +64,9 @@ class TestForceStreamingDefault:
         assert s.should_include_usage(is_streaming=True) == (True, True)
 
     def test_disagg(self):
-        """Usage in last chunk, and every chunk."""
+        """Disagg ignores enable_force_include_usage, stays at default."""
         s = make_disagg(enable_force_include_usage=True)
-        assert s.should_include_usage(is_streaming=True) == (True, True)
+        assert s.should_include_usage(is_streaming=True) == (False, False)
 
     def test_anthropic(self):
         """Always (True, True) regardless."""
@@ -105,11 +105,11 @@ class TestForceOverridesRequestIncludeUsageFalse:
         )
 
     def test_disagg(self):
-        """Force overrides to usage in last chunk and every chunk."""
+        """Disagg ignores enable_force_include_usage, respects request param."""
         s = make_disagg(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True, include_usage=False) == (
-            True,
-            True,
+            False,
+            False,
         )
 
     def test_anthropic(self):
@@ -152,11 +152,11 @@ class TestForceWithRequestIncludeUsageTrue:
         )
 
     def test_disagg(self):
-        """Usage in last chunk and every chunk."""
+        """Disagg ignores enable_force_include_usage, respects request param."""
         s = make_disagg(enable_force_include_usage=True)
         assert s.should_include_usage(is_streaming=True, include_usage=True) == (
             True,
-            True,
+            False,
         )
 
     def test_anthropic(self):

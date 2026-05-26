@@ -518,9 +518,6 @@ class ServingTokens(OpenAIServing):
             in_chunks = policy.continuous_usage == "always"
             return (True, in_chunks)
 
-        if self.enable_force_include_usage:
-            return (True, True)
-
         if include_usage is not None:
             in_chunks = bool(include_usage and continuous_usage)
             return (include_usage, in_chunks)
