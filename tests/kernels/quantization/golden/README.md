@@ -47,7 +47,7 @@ measured performance against these values using a two-sided tolerance band.
 | `group_size` | shape | Quantization group size (typically 128). |
 | `comment` | shape | Human-readable label (model name + layer). |
 | `skip` | shape/provider/baseline | When present, the item is skipped. Value is the reason string. `tflops` is not required when `skip` is set. |
-| `provider` | provider | Kernel variant: `hybrid-w4a16` or `hybrid-w4a16-zp`. |
+| `provider` | provider | Kernel variant. The base name is `hybrid-w4a16`; suffix `-zp` selects the asymmetric (per-group zero-point) dequant path, and suffix `-bf16` runs the kernel with bfloat16 activations/scales/zp instead of float16. Valid combinations: `hybrid-w4a16`, `hybrid-w4a16-zp`, `hybrid-w4a16-bf16`, `hybrid-w4a16-zp-bf16`. |
 | `kernel` | baseline | Expected kernel label (e.g. `wvsplitk_int4` or `hybrid_triton_w4a16`). Kernel mismatch is a test failure. |
 | `tflops` | baseline | Golden TFLOP/s value for this batch size. |
 | `batch_size` | baseline | M dimension (number of tokens). |
