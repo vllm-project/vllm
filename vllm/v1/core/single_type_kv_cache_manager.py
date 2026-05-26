@@ -825,7 +825,20 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self._cache_block_range(request, start_block, end_block)
 
     def free(self, request_id: str) -> None:
-        super().free(request_id)
+        # similar to remove_skipped_blocks(), prepend the uncached blocks
+        # and append the cached blocks to the free queue
+        req_blocks = self.req_to_blocks.pop(request_id, [])
+        if req_blocks:
+            cached_blocks: list[KVCacheBlock] = []
+            uncached_blocks: list[KVCacheBlock] = []
+            for block in reversed(req_blocks):
+                if block.block_hash is None:
+                    uncached_blocks.append(block)
+                else:
+                    cached_blocks.append(block)
+            self.block_pool.free_blocks(cached_blocks)
+            self.block_pool.free_blocks(uncached_blocks, prepend=True)
+        self.num_cached_block.pop(request_id, None)
         self._last_interval_retention_boundary.pop(request_id, None)
         self._latest_retention_cached.discard(request_id)
 
