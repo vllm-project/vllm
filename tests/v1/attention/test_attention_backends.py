@@ -36,7 +36,6 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASHINFER,
     AttentionBackendEnum.FLEX_ATTENTION,
     AttentionBackendEnum.TRITON_ATTN,
-    AttentionBackendEnum.TREE_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 

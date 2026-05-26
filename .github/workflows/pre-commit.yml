@@ -16,11 +16,7 @@ permissions:
 
 jobs:
   pre-run-check:
-    if: >-
-      github.event_name == 'pull_request' &&
-      (github.event.action != 'labeled' ||
-       github.event.label.name == 'ready' ||
-       github.event.label.name == 'verified')
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
     - name: Check PR label and author merge count
@@ -49,12 +45,7 @@ jobs:
 
   pre-commit:
     needs: pre-run-check
-    if: >-
-      always() &&
-      (github.event.action != 'labeled' ||
-       github.event.label.name == 'ready' ||
-       github.event.label.name == 'verified') &&
-      (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

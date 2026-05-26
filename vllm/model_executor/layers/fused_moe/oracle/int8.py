@@ -17,9 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt8DynamicTokenSym,
@@ -46,7 +43,7 @@ def backend_to_kernel_cls(
     backend: Int8MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     if backend == Int8MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
@@ -78,9 +75,6 @@ def select_int8_moe_backend(
     Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    if config.is_lora_enabled:
-        return Int8MoeBackend.TRITON, backend_to_kernel_cls(Int8MoeBackend.TRITON)[0]
 
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
@@ -153,6 +147,8 @@ def make_int8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
@@ -165,6 +161,8 @@ def make_int8_moe_quant_config(
             w2_scale=w2_scale,
             w1_zp=None,
             w2_zp=None,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
         )
 
     return int8_w8a8_moe_quant_config(
@@ -172,6 +170,8 @@ def make_int8_moe_quant_config(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
     )
 
@@ -181,7 +181,6 @@ def make_int8_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -214,7 +213,6 @@ def make_int8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=not moe_config.disable_inplace,
     )
 
