@@ -7,6 +7,7 @@ These tests verify the bug fixes for:
 1. CPU platform override conflict (auto_awq should not override on CPU)
 2. MoE fallback compatibility (full_config["quant_method"] should be "awq")
 3. Config attribute consistency
+4. End-to-end quantization method loading (auto_awq loads and runs correctly)
 
 Note: Tests that require importing the full auto_awq module (which has GPU-dependent
 imports) should use subprocess or be run in a GPU environment.
@@ -16,6 +17,11 @@ from __future__ import annotations
 
 import sys
 import textwrap
+
+import pytest
+import torch
+
+from tests.quantization.utils import is_quant_method_supported
 
 
 def _get_auto_awq_config_source() -> str:
@@ -157,3 +163,69 @@ class TestAutoAWQConfigOverrideLogic:
         assert '"quant_method"] = "awq"' in source or \
                "'quant_method'] = 'awq'" in source, \
             "from_config should set quant_method='awq' in full_config"
+
+
+# =============================================================================
+# End-to-end integration tests (require GPU environment)
+# =============================================================================
+
+PROMPT = "On the surface of Mars, we found"
+
+# Small AWQ model for testing - using Qwen2 1.5B which has official AWQ checkpoint
+AWQ_MODELS = [
+    "Qwen/Qwen2-1.5B-Instruct-AWQ",
+]
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("auto_awq"),
+    reason="auto_awq is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("model_id", AWQ_MODELS)
+def test_auto_awq_quantization_method(vllm_runner, model_id: str):
+    """Test that quantization='auto_awq' loads and runs correctly.
+
+    This verifies that:
+    1. AutoAWQConfig.override_quantization_method() correctly detects AWQ models
+    2. The model loads with auto_awq quantization and uses the appropriate kernel
+    3. Generation produces valid output
+    """
+    with vllm_runner(
+        model_id,
+        dtype=torch.float16,
+        quantization="auto_awq",
+        max_model_len=2048,
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.quantization.auto_awq import (
+                AutoAWQLinearMethod,
+                AutoAWQMarlinLinearMethod,
+            )
+
+            for name, submodule in model.named_modules():
+                if name == "model.layers.0.self_attn.qkv_proj":
+                    # Should use either AutoAWQLinearMethod (Triton) or
+                    # AutoAWQMarlinLinearMethod (Marlin) depending on hardware
+                    assert isinstance(
+                        submodule.quant_method,
+                        (AutoAWQLinearMethod, AutoAWQMarlinLinearMethod),
+                    ), (
+                        f"Expected AutoAWQLinearMethod or AutoAWQMarlinLinearMethod "
+                        f"for {name}, got {type(submodule.quant_method)}"
+                    )
+                    break
+
+        llm.apply_model(check_model)
+
+        outputs = llm.generate_greedy([PROMPT], max_tokens=8)
+        assert outputs
+        assert len(outputs[0][1]) > 0
+
+
+def test_auto_awq_config_get_name():
+    """Test that AutoAWQConfig.get_name() returns 'auto_awq'."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    assert AutoAWQConfig.get_name() == "auto_awq"
