@@ -6,6 +6,9 @@ import torch
 # import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.import_utils import has_tilelang
+
+HAS_TILELANG = has_tilelang()
 
 
 # --8<-- [start:mhc_pre]
@@ -86,20 +89,36 @@ class MHCPreOp(CustomOp):
         #         sinkhorn_repeat,
         #     )
         # else:
-        return torch.ops.vllm.mhc_pre_tilelang(
-            residual,
-            fn,
-            hc_scale,
-            hc_base,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            n_splits,
-            norm_weight,
-            norm_eps,
-        )
+        if HAS_TILELANG:
+            return torch.ops.vllm.mhc_pre_tilelang(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                norm_weight,
+                norm_eps,
+            )
+        else:
+            return self.forward_native(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                norm_weight,
+                norm_eps,
+            )
 
     def forward_native(
         self,
@@ -175,9 +194,12 @@ class MHCPostOp(CustomOp):
         #         comb_res_mix,
         #     )
         # else:
-        return torch.ops.vllm.mhc_post_tilelang(
-            x, residual, post_layer_mix, comb_res_mix
-        )
+        if HAS_TILELANG:
+            return torch.ops.vllm.mhc_post_tilelang(
+                x, residual, post_layer_mix, comb_res_mix
+            )
+        else:
+            return self.forward_native(x, residual, post_layer_mix, comb_res_mix)
 
     def forward_native(
         self,
@@ -256,47 +278,32 @@ class HCHeadOp(CustomOp):
         out = torch.empty(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
         )
-        torch.ops.vllm.hc_head_fused_kernel_tilelang(
-            hs_flat,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            out,
-            hidden_size,
-            rms_norm_eps,
-            hc_eps,
-            hc_mult,
-        )
-        return out.view(*outer_shape, hidden_size)
 
-    def _forward_triton(
-        self,
-        hidden_states: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
-        rms_norm_eps: float,
-        hc_eps: float,
-    ) -> torch.Tensor:
-        hc_mult, hidden_size = hidden_states.shape[-2:]
-        outer_shape = hidden_states.shape[:-2]
-        hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        num_tokens = hs_flat.shape[0]
+        if HAS_TILELANG:
+            torch.ops.vllm.hc_head_fused_kernel_tilelang(
+                hs_flat,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                out,
+                hidden_size,
+                rms_norm_eps,
+                hc_eps,
+                hc_mult,
+            )
+        else:
+            torch.ops.vllm.hc_head_triton(
+                hs_flat,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                out,
+                hidden_size,
+                rms_norm_eps,
+                hc_eps,
+                hc_mult,
+            )
 
-        out = torch.empty(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
-        )
-        torch.ops.vllm.hc_head_triton(
-            hs_flat,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            out,
-            hidden_size,
-            rms_norm_eps,
-            hc_eps,
-            hc_mult,
-        )
         return out.view(*outer_shape, hidden_size)
 
     def forward_native(self, *args, **kwargs):
