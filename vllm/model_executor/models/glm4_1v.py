@@ -1372,14 +1372,14 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
 
-                excluded_keys = ["do_sample_frames"]
+                unuse_metadata = ["do_sample_frames"]
                 video_mm_data["video_metadata"] = [
                     [
                         VideoMetadata(
                             **{
                                 k: metadata[k]
                                 for k in metadata
-                                if k not in excluded_keys
+                                if k not in unuse_metadata
                             }
                         )
                     ]
@@ -1448,13 +1448,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        config = dict(
-            _create_qwen2vl_field_factory(
-                self.info.get_hf_config().vision_config.spatial_merge_size
-            )(hf_inputs)
-        )
-
-        return config
+        return _create_qwen2vl_field_factory(
+            self.info.get_hf_config().vision_config.spatial_merge_size
+        )(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -1464,6 +1460,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+
         merge_length = image_processor.merge_size**2
 
         def get_image_replacement_glm4v(item_idx: int):
