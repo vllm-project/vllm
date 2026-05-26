@@ -60,6 +60,11 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")
+
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +443,27 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     raise ValueError(
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
+    )
+
+
+def process_audio(audio: Any) -> tuple:
+    """
+    Process a single audio input and return a (array, sample_rate) tuple.
+
+    Supports:
+    1. String: treated as a file path, loaded with soundfile.
+    2. Dict with 'array' and 'sampling_rate' keys: HuggingFace audio format.
+    3. Tuple (array, sr): passed through directly.
+    """
+    if isinstance(audio, str):
+        return sf.read(audio)
+    if isinstance(audio, dict) and "array" in audio and "sampling_rate" in audio:
+        return audio["array"], audio["sampling_rate"]
+    if isinstance(audio, tuple) and len(audio) == 2:
+        return audio
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a file path string, "
+        "a dict with 'array' and 'sampling_rate', or a (array, sr) tuple."
     )
 
 
@@ -1399,6 +1425,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random-rerank",
             "hf",
             "custom",
+            "custom_audio",
+            "custom_image",
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
@@ -1803,7 +1831,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     if args.dataset_name == "custom":
         dataset = CustomDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
         )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
@@ -1814,9 +1844,31 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
         )
 
-    elif args.dataset_name == "custom_mm":
-        dataset = CustomMMDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+    elif args.dataset_name in ("custom_image", "custom_mm"):
+        if args.dataset_name == "custom_mm":
+            logger.warning(
+                "Dataset name 'custom_mm' is deprecated and will be removed in v0.24. "
+                "Use '--dataset-name custom_image' instead."
+            )
+        dataset = CustomImageDataset(
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
+        )
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            enable_multimodal_chat=args.enable_multimodal_chat,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+
+    elif args.dataset_name == "custom_audio":
+        dataset = CustomAudioDataset(
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
         )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
@@ -1888,6 +1940,19 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         ):
             dataset_class = MTBenchDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
+        elif (
+            args.dataset_path in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = HumanEvalDataset
+            args.hf_split = args.hf_split if args.hf_split else "test"
+        elif (
+            args.dataset_path in GSM8KDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in GSM8KDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = GSM8KDataset
+            args.hf_subset = args.hf_subset if args.hf_subset else "main"
+            args.hf_split = args.hf_split if args.hf_split else "test"
         elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
@@ -2245,9 +2310,9 @@ class CustomDataset(BenchmarkDataset):
         return sampled_requests
 
 
-class CustomMMDataset(CustomDataset):
+class CustomImageDataset(CustomDataset):
     """
-    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
+    Implements the Custom image dataset. Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {
@@ -2258,14 +2323,151 @@ class CustomMMDataset(CustomDataset):
         "prompt": "Which country has the most pokemons based on the given graphs?",
         "image_files": ["path/to/image.png"],
     }
+    {
+        "content": [
+            {"type": "text", "text": "Compare these images: "},
+            {"type": "image", "image": "path/to/image1.png"},
+            {"type": "text", "text": " and "},
+            {"type": "image_url", "image_url": {"url": "path/to/image2.png"}},
+        ],
+    }
     ```
-
-    NOTE: Only the first image file in "image_files" is used for each sample request.
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
 
     IS_MULTIMODAL = True
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        self.data: list[dict] = []
+
+        if not self.dataset_path.endswith(".jsonl"):
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomImageDataset."
+            )
+
+        with open(self.dataset_path, encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON in custom image dataset line {line_number}: {e}"
+                    ) from e
+
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Each custom image dataset line must contain a JSON object. "
+                        f"Found {type(item)} on line {line_number}."
+                    )
+
+                has_legacy_fields = "prompt" in item and "image_files" in item
+                has_interleaved_content = "content" in item
+                if not has_legacy_fields and not has_interleaved_content:
+                    raise ValueError(
+                        "Each custom image dataset line must contain either "
+                        "'prompt' and 'image_files' fields, or a 'content' field. "
+                        f"Invalid line: {line_number}."
+                    )
+
+                self.data.append(item)
+
+        random.seed(self.random_seed)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
+
+    @staticmethod
+    def _validate_content_parts(content: Any) -> list[dict[str, Any]]:
+        if not isinstance(content, list):
+            raise ValueError(
+                "'content' must be a list of text and image content dictionaries."
+            )
+
+        if not content:
+            raise ValueError("'content' must contain at least one item.")
+
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError(
+                    f"Each item in 'content' must be a dictionary. Found {type(part)}."
+                )
+            parts.append(part)
+
+        return parts
+
+    @classmethod
+    def _process_content_part(cls, part: dict[str, Any]) -> dict[str, Any]:
+        content_type = part.get("type")
+        if content_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ValueError("Text content parts must contain a string 'text'.")
+            return {"type": "text", "text": text}
+
+        if content_type == "image":
+            if "image" not in part:
+                raise ValueError("Image content parts must contain an 'image' field.")
+            return dict(process_image(part["image"]))
+
+        if content_type == "image_url":
+            image_url = part.get("image_url")
+            if isinstance(image_url, str):
+                return dict(process_image(image_url))
+
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if not isinstance(url, str):
+                    raise ValueError(
+                        "Image URL content parts must contain a string 'image_url.url'."
+                    )
+
+                processed_part = dict(process_image(url))
+                processed_image_url = dict(processed_part["image_url"])
+                processed_image_url.update(
+                    {key: value for key, value in image_url.items() if key != "url"}
+                )
+                processed_part["image_url"] = processed_image_url
+                return processed_part
+
+            raise ValueError(
+                "Image URL content parts must contain an 'image_url' string "
+                "or dictionary."
+            )
+
+        raise ValueError(
+            "Content parts must have type 'text', 'image', or 'image_url'. "
+            f"Found: {content_type!r}."
+        )
+
+    @classmethod
+    def _process_interleaved_content(cls, content: Any) -> list[dict[str, Any]]:
+        return [
+            cls._process_content_part(part)
+            for part in cls._validate_content_parts(content)
+        ]
+
+    @staticmethod
+    def _get_text_from_content(content: list[dict[str, Any]]) -> str:
+        return "".join(part["text"] for part in content if part.get("type") == "text")
+
+    @staticmethod
+    def _process_image_files(images: Any) -> dict[str, Any] | list[dict[str, Any]]:
+        if not isinstance(images, list) or not images:
+            raise ValueError("'image_files' must be a non-empty list.")
+
+        mm_content = [dict(process_image(image)) for image in images]
+        if len(mm_content) == 1:
+            return mm_content[0]
+
+        return mm_content
 
     def sample(
         self,
@@ -2291,17 +2493,33 @@ class CustomMMDataset(CustomDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
+
+            if "content" in item:
+                content = self._process_interleaved_content(item["content"])
+                text_prompt = self._get_text_from_content(content)
+                prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt = (
+                    [{"role": "user", "content": content}]
+                    if enable_multimodal_chat
+                    else content
+                )
+                sampled_requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                        multi_modal_data=None,
+                        request_id=request_id_prefix + str(i),
+                    )
+                )
+                continue
+
             prompt = item["prompt"]
+            if not isinstance(prompt, str):
+                raise ValueError("'prompt' must be a string.")
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
-                )
-            mm_content = process_image(images[0])
+            mm_content = self._process_image_files(item["image_files"])
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -2321,6 +2539,104 @@ class CustomMMDataset(CustomDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
 
+        return sampled_requests
+
+
+class CustomAudioDataset(CustomDataset):
+    """
+    Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
+    {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
+
+    Supports both:
+    - Dedicated ASR models (e.g. Whisper) via openai-audio & /v1/audio/transcriptions
+    - Chat-based audio models (e.g. Qwen2-Audio) via openai-chat & /v1/chat/completions
+    """
+
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        skip_chat_template: bool = False,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        self.num_available_samples = len(self.data)
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
+        sampled_requests = []
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item.get("prompt", "")
+            if tokenizer is None:
+                prompt_len = 1
+                new_output_len = output_len if output_len not in (None, -1) else 256
+                mm_content = None
+            else:
+                use_chat_template = (
+                    not skip_chat_template
+                    and hasattr(tokenizer, "chat_template")
+                    and tokenizer.chat_template is not None
+                )
+                if enable_multimodal_chat:
+                    # Chat-based audio models (e.g., Qwen2-Audio):
+                    # encode audio as base64; serve.py assembles the chat message
+                    # as: {"role": "user", "content": [
+                    #     {"type": "text", "text": prompt},
+                    #     {"type": "input_audio", "input_audio": {...}}
+                    # ]}
+                    y, sr = process_audio(item["audio"])
+                    buf = io.BytesIO()
+                    sf.write(buf, y, sr, format="WAV")
+                    audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    mm_content = {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    }
+                    # prompt stays as plain string; serve.py handles wrapping
+                else:
+                    # Whisper-style models: load audio array locally
+                    y, sr = process_audio(item["audio"])
+                    mm_content = {"audio": (y, sr)}
+                    if use_chat_template:
+                        # ASR models with a chat template but not multimodal chat
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": prompt}],
+                            add_generation_prompt=True,
+                            tokenize=False,
+                        )
+                    # else: plain prompt for Whisper-style models
+                prompt_len = (
+                    len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
+                )
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    new_output_len = int(item["output_tokens"])
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
         return sampled_requests
 
 
@@ -2948,6 +3264,126 @@ class MTBenchDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# HumanEval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class HumanEvalDataset(HuggingFaceDataset):
+    """
+    HumanEvalDataset Dataset.
+    https://huggingface.co/datasets/openai/openai_humaneval
+
+    We create a single turn dataset for HumanEval.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/openai_humaneval",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# GSM8K Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class GSM8KDataset(HuggingFaceDataset):
+    """
+    GSM8K Dataset.
+    https://huggingface.co/datasets/openai/gsm8k
+
+    We create a single turn dataset for GSM8K.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/gsm8k",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["question"]
 
             # apply template
             if not skip_chat_template:

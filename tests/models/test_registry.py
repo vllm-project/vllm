@@ -36,6 +36,17 @@ def test_registry_imports(model_arch):
         check_max_version=False,
         check_version_reason="vllm",
     )
+
+    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+        import importlib.util
+
+        if importlib.util.find_spec("terratorch") is None:
+            pytest.skip(
+                "terratorch is not installed; "
+                "temporarily skipped while PyPI has `lightning` quarantined "
+                "(see #41376)"
+            )
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
