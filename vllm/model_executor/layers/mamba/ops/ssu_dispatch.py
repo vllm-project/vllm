@@ -322,7 +322,13 @@ class FlashInferSSUBackend(MambaSSUBackend):
             and all(arg is not None for arg in checkpointing_args)
             and self._checkpointing_state_indices(state_batch_indices) is not None
             and state.dtype
-            in (torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn)
+            in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+                torch.float8_e4m3fn,
+                torch.int8,
+            )
         )
         if can_checkpoint:
             assert old_x is not None
