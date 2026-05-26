@@ -526,20 +526,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        #
-        # EPLB load balancing
-        #
-        # Labeled by ``eplb_model`` (in addition to model_name/engine) so the
-        # main model and any drafter expose distinct series. Not wrapped via
-        # create_metric_per_engine because the ``eplb_model`` value is only
-        # known at record() time.
         self.gauge_eplb_balancedness = self._gauge_cls(
             name="vllm:eplb_balancedness",
             documentation=(
                 "EPLB balancedness ratio: avg tokens-per-rank / max "
-                "tokens-per-rank, summed across MoE layers. 1.0 = perfectly "
-                "balanced expert load across EP ranks. Only populated when "
-                "EPLBConfig.log_balancedness=True."
+                "tokens-per-rank across EP ranks. 1.0 indicates a perfectly balanced "
+                "expert load. Only populated when EPLBConfig.log_balancedness=True."
             ),
             multiprocess_mode="mostrecent",
             labelnames=labelnames + ["eplb_model"],
