@@ -7,7 +7,6 @@ import torch
 from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
-from vllm import envs
 from vllm.model_executor.layers.fused_moe.oracle.humming import (
     _process_all_sublayers,
 )
@@ -81,21 +80,14 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
 
 
 def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
-    weight_schema = BaseWeightSchema.from_config(quant_config)
-    input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
-    if humming_is_layer_skipped(input_quant_config, layer.layer_name):
-        input_schema = HummingInputSchema()
-    else:
-        # TODO: read input_quant_config from quant_config
-        input_schema = HummingInputSchema.from_config(input_quant_config)
-
     _process_all_sublayers(
         layer=layer,
-        weight_schema=weight_schema,
-        input_schema=input_schema,
         has_bias=layer.moe_config.has_bias,
         num_experts=layer.local_num_experts,
         param_dtype=layer.params_dtype,
-        # sublayer_configs=None by default - will be built from layer.moe_config
-        # force_weight_schema=None - no force requant in this code path
+        quant_config=quant_config,
+        weight_schema=None,
+        input_schema=None,
+        sublayer_configs=None,
+        force_weight_schema=None,
     )

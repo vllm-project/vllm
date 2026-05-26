@@ -370,11 +370,12 @@ def _process_single_sublayer(
 
 def _process_all_sublayers(
     layer: "RoutedExperts",
-    weight_schema: Any,
-    input_schema: Any,
     has_bias: bool,
     num_experts: int,
     param_dtype: torch.dtype,
+    weight_schema: Any | None = None,
+    input_schema: Any | None = None,
+    quant_config: dict[str, Any] | None = None,
     sublayer_configs: dict[str, Any] | None = None,
     force_weight_schema: Any | None = None,
 ) -> None:
@@ -386,11 +387,16 @@ def _process_all_sublayers(
 
     Args:
         layer: The RoutedExperts layer containing weights to process
-        weight_schema: Initial weight quantization schema
-        input_schema: Initial input quantization schema
         has_bias: Whether the layer has bias terms
         num_experts: Number of experts in the layer
         param_dtype: Parameter data type
+        weight_schema: Optional initial weight quantization schema.
+                      If None, built from quant_config.
+        input_schema: Optional initial input quantization schema.
+                     If None, built from quant_config or env vars.
+        quant_config: Optional quantization config dict. Required if weight_schema
+                     or input_schema are None. Used to build schemas via
+                     BaseWeightSchema.from_config().
         sublayer_configs: Optional configuration dict for each sublayer (w13, w2).
                          Each config must have "shape_n" and "shape_k" keys.
                          If None, configs are built from layer.moe_config properties.
@@ -400,6 +406,32 @@ def _process_all_sublayers(
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
     """
+    # Build schemas from quant_config if not provided
+    if weight_schema is None or input_schema is None:
+        if quant_config is None:
+            raise ValueError(
+                "Must provide either weight_schema/input_schema or quant_config"
+            )
+
+        from humming.layer import HummingInputSchema
+        from humming.schema import BaseWeightSchema
+
+        from vllm import envs
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            humming_is_layer_skipped,
+        )
+
+        if weight_schema is None:
+            weight_schema = BaseWeightSchema.from_config(quant_config)
+
+        if input_schema is None:
+            input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+            if humming_is_layer_skipped(input_quant_config, layer.layer_name):
+                input_schema = HummingInputSchema()
+            else:
+                # TODO: read input_quant_config from quant_config
+                input_schema = HummingInputSchema.from_config(input_quant_config)
+
     # Build sublayer configs from layer properties if not provided
     if sublayer_configs is None:
         is_gated = layer.moe_config.activation.is_gated
@@ -467,11 +499,11 @@ def convert_to_humming_moe_kernel_format(
     """
     _process_all_sublayers(
         layer=layer,
-        weight_schema=weight_schema,
-        input_schema=input_schema,
         has_bias=has_bias,
         num_experts=layer.num_experts,
         param_dtype=layer.param_dtype,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
         sublayer_configs=sublayer_configs,
         force_weight_schema=force_weight_schema,
     )
