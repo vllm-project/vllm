@@ -120,9 +120,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs):
-    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-        q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+def _call_fused(
+    q_in, q_head_padded, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+):
+    return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        q_in,
+        kv,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        q_head_padded,
+        eps,
+        bs,
     )
 
 
@@ -130,8 +140,23 @@ def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 64, 2048])
-@pytest.mark.parametrize("n_heads", [8, 64])
-def test_q_path_matches_reference(num_tokens: int, n_heads: int):
+@pytest.mark.parametrize(
+    "n_heads,padded_heads",
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
+)
+def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: int):
     torch.manual_seed(0)
     device = "cuda"
     dtype = torch.bfloat16
@@ -156,10 +181,16 @@ def test_q_path_matches_reference(num_tokens: int, n_heads: int):
         num_blocks, bs, HEAD_BYTES, dtype=torch.uint8, device=device
     ).view(num_blocks, -1)
     slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
-    q_fused = q.clone()
-    _call_fused(q_fused, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs)
+    q_out = _call_fused(
+        q, padded_heads, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+    )
 
-    torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)
+    if n_heads < padded_heads:
+        pad_region = q_out[:, n_heads:padded_heads]
+        assert pad_region.abs().max().item() == 0.0, (
+            "padded head slots must be exact zero"
+        )
 
 
 # ── Test 2: KV path round-trip byte/value parity ─────────────────────────────
@@ -201,11 +232,12 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         kv_ref, k_cache_ref, slot_mapping, block_size=block_size
     )
 
-    # ── Fused path (dummy q, single head) ──────────────────────────────────
+    # ── Fused path (dummy q, padded to FlashMLA's min head count 64) ───────
     k_cache_fused = torch.zeros_like(k_cache_ref)
     q_dummy = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
-    _call_fused(
+    _ = _call_fused(
         q_dummy,
+        64,
         kv,
         k_cache_fused,
         slot_mapping,
@@ -298,8 +330,9 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
     # Fused: pass full-sized q/kv/positions, shorter slot_mapping.
     q_dummy = torch.zeros(total, 1, HEAD_DIM, dtype=dtype, device=device)
     k_cache_fused = torch.zeros_like(k_cache_ref)
-    _call_fused(
+    _ = _call_fused(
         q_dummy,
+        64,
         kv,
         k_cache_fused,
         slot_mapping,
@@ -316,9 +349,26 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 2048])
-@pytest.mark.parametrize("n_heads", [8, 64])
+@pytest.mark.parametrize(
+    "n_heads,padded_heads",
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
+)
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
+def test_combined_q_and_kv(
+    num_tokens: int, n_heads: int, padded_heads: int, block_size: int
+):
     torch.manual_seed(2)
     device = "cuda"
     dtype = torch.bfloat16
@@ -345,10 +395,10 @@ def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
     )
 
     # Fused single call.
-    q_fused = q.clone()
     k_cache_fused = torch.zeros_like(k_cache_ref)
-    _call_fused(
-        q_fused,
+    q_out = _call_fused(
+        q,
+        padded_heads,
         kv,
         k_cache_fused,
         slot_mapping,
@@ -358,5 +408,10 @@ def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
         block_size,
     )
 
-    torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)
+    if n_heads < padded_heads:
+        pad_region = q_out[:, n_heads:padded_heads]
+        assert pad_region.abs().max().item() == 0.0, (
+            "padded head slots must be exact zero"
+        )
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
