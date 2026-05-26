@@ -45,7 +45,12 @@ class BudgetGraphMetadata:
     # The input tensor updated before replay (e.g. pixel_values)
     input_buffer: torch.Tensor
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
-    # Before replay the manager zeros then slice-copies new data into these.
+    # Before replay the manager updates these in-place. Most buffers are zeroed
+    # before slice-copying the actual values. cu*_seqlens buffers are special:
+    # their padded tail repeats the final cumulative offset so the extra entries
+    # represent empty sequences rather than invalid zero-length ranges. FlashInfer
+    # stores two cumulative-offset sections back-to-back; each section must be
+    # padded independently.
     metadata_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
@@ -259,6 +264,40 @@ class EncoderCudaGraphManager:
         """Get per-item output token counts as plain ints."""
         return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
 
+    @staticmethod
+    def _is_cu_seqlens_buffer(key: str) -> bool:
+        return key.startswith("cu_") and "seqlens" in key
+
+    @staticmethod
+    def _is_flashinfer_cu_seqlens(
+        src: torch.Tensor,
+        dst: torch.Tensor,
+    ) -> bool:
+        if src.ndim != 1 or dst.ndim != 1:
+            return False
+        return src.shape[0] >= 4 and src.shape[0] % 2 == 0 and dst.shape[0] % 2 == 0
+
+    @staticmethod
+    def _copy_padded_flashinfer_cu_seqlens(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+    ) -> None:
+        src_mid = src.shape[0] // 2
+        dst_mid = dst.shape[0] // 2
+        assert src_mid <= dst_mid, (
+            f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+            f"src_section={src_mid}, dst_section={dst_mid}"
+        )
+
+        dst.zero_()
+        dst[:src_mid].copy_(src[:src_mid])
+        if src_mid < dst_mid:
+            dst[src_mid:dst_mid] = src[src_mid - 1]
+
+        dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+        if dst_mid + src_mid < dst.shape[0]:
+            dst[dst_mid + src_mid :] = src[-1]
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -282,6 +321,10 @@ class EncoderCudaGraphManager:
             return None
 
         graph_meta = self.budget_graphs[token_budget]
+        has_flashinfer_metadata = any(
+            replay_buffers.get(key) is not None
+            for key in ("sequence_lengths_full", "sequence_lengths_window")
+        )
 
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
@@ -303,8 +346,21 @@ class EncoderCudaGraphManager:
                 buf.copy_(src)
             else:
                 n = src.shape[0]
-                buf.zero_()
-                buf[:n].copy_(src)
+                is_cu_seqlens = self._is_cu_seqlens_buffer(key)
+                is_flashinfer_cu_seqlens = (
+                    has_flashinfer_metadata
+                    and is_cu_seqlens
+                    and self._is_flashinfer_cu_seqlens(src, buf)
+                )
+                if is_flashinfer_cu_seqlens:
+                    self._copy_padded_flashinfer_cu_seqlens(buf, src)
+                else:
+                    buf.zero_()
+                    buf[:n].copy_(src)
+                if n < buf.shape[0] and is_cu_seqlens and not is_flashinfer_cu_seqlens:
+                    # Cumulative sequence-length buffers encode empty padded
+                    # sequences by repeating the final offset, not by zeros.
+                    buf[n:] = src[-1]
 
         graph_meta.graph.replay()
 
