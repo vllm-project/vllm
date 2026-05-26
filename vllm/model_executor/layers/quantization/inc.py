@@ -297,6 +297,7 @@ class INCConfig(QuantizationConfig):
                 weight_bits=weight_bits,
                 group_size=group_size,
                 zero_point=not sym,
+                lm_head_quantized=False,
             )
 
         if isinstance(layer, RoutedExperts):

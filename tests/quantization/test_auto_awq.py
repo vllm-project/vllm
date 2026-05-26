@@ -15,9 +15,6 @@ imports) should use subprocess or be run in a GPU environment.
 
 from __future__ import annotations
 
-import sys
-import textwrap
-
 import pytest
 import torch
 
@@ -26,8 +23,10 @@ from tests.quantization.utils import is_quant_method_supported
 
 def _get_auto_awq_config_source() -> str:
     """Read the AutoAWQConfig class source code for isolated testing."""
-    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
     import inspect
+
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
     return inspect.getsource(auto_awq_module.AutoAWQConfig)
 
 
@@ -142,27 +141,35 @@ class TestAutoAWQConfigOverrideLogic:
         """override_quantization_method should check current_platform.is_cpu()."""
         # Read the source file directly
         import pathlib
-        source_path = pathlib.Path(__file__).parent.parent.parent / \
-            "vllm/model_executor/layers/quantization/auto_awq.py"
+
+        source_path = (
+            pathlib.Path(__file__).parent.parent.parent
+            / "vllm/model_executor/layers/quantization/auto_awq.py"
+        )
         source = source_path.read_text()
 
         # Verify the CPU check exists in override method
-        assert "current_platform.is_cpu()" in source, \
+        assert "current_platform.is_cpu()" in source, (
             "override_quantization_method should check is_cpu()"
-        assert "return None" in source, \
+        )
+        assert "return None" in source, (
             "override_quantization_method should return None on CPU"
+        )
 
     def test_quant_method_normalization_in_from_config(self):
         """from_config should normalize quant_method to 'awq' for MoE fallback."""
         import pathlib
-        source_path = pathlib.Path(__file__).parent.parent.parent / \
-            "vllm/model_executor/layers/quantization/auto_awq.py"
+
+        source_path = (
+            pathlib.Path(__file__).parent.parent.parent
+            / "vllm/model_executor/layers/quantization/auto_awq.py"
+        )
         source = source_path.read_text()
 
         # Verify the normalization exists
-        assert '"quant_method"] = "awq"' in source or \
-               "'quant_method'] = 'awq'" in source, \
-            "from_config should set quant_method='awq' in full_config"
+        assert (
+            '"quant_method"] = "awq"' in source or "'quant_method'] = 'awq'" in source
+        ), "from_config should set quant_method='awq' in full_config"
 
 
 # =============================================================================

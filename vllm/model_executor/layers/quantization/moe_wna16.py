@@ -28,9 +28,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supports_layer,
-)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -168,10 +165,10 @@ class MoeWNA16Config(QuantizationConfig):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             # Avoid circular import
+            from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
             from vllm.model_executor.layers.quantization.auto_gptq import (
                 AutoGPTQConfig,
             )
-            from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
             if self.linear_quant_method == "gptq":
                 return AutoGPTQConfig.from_config(self.full_config).get_quant_method(

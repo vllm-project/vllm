@@ -49,7 +49,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
-    marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -59,9 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
-    PackedColumnParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -169,7 +166,6 @@ def _convert_awq_to_standard_format(
         weight_loader=_noop_loader,
     )
     setattr(layer, w_zp_name, new_zp_param)
-
 
 
 class AutoAWQConfig(QuantizationConfig):
@@ -338,7 +334,9 @@ class AutoAWQConfig(QuantizationConfig):
                     f"Layer '{prefix}' is not supported by AutoAWQMoEMarlin. "
                     "Falling back to Moe WNA16 kernels."
                 )
-                from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+                from vllm.model_executor.layers.quantization.moe_wna16 import (
+                    MoeWNA16Config,
+                )
 
                 return MoeWNA16Config.from_config(self.full_config).get_quant_method(
                     layer, prefix
@@ -786,6 +784,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             shared_experts_input=shared_experts_input,
         )
 
+
 class AutoAWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ using Triton kernels.
 
@@ -998,9 +997,7 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
             transpose_onednn_woq_format,
         )
 
-        layer.xpu_output_size = (
-            layer.qweight.size(1) * self.quant_config.pack_factor
-        )
+        layer.xpu_output_size = layer.qweight.size(1) * self.quant_config.pack_factor
         qweight_new, qzeros_new = AWQUtils.repack(layer.qweight, layer.qzeros)
         if qweight_new.shape != layer.qweight.data.shape:
             layer.qweight.data = layer.qweight.data.view_as(qweight_new)
@@ -1034,4 +1031,3 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
         )
         out_shape = x.shape[:-1] + (layer.xpu_output_size,)
         return out.reshape(out_shape)
-

@@ -28,8 +28,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
 logger = init_logger(__name__)
 
@@ -571,11 +571,11 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        from vllm.model_executor.layers.quantization.auto_gptq import (
-            AutoGPTQConfig,
-        )
         from vllm.model_executor.layers.quantization.auto_awq import (
             AutoAWQConfig,
+        )
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
         )
 
         if isinstance(quant_config, AutoAWQConfig):
