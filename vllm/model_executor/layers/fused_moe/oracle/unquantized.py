@@ -84,6 +84,15 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
 def backend_to_kernel_cls(
     backend: UnquantizedMoeBackend,
 ) -> type[mk.FusedMoEExperts]:
+    # Surface a one-shot warning if VLLM_TRITON_MOE_USE_TD is set but the
+    # selected backend won't honor it.  Helps users who expect the env
+    # var to take effect without --moe-backend=triton.
+    from vllm.model_executor.layers.fused_moe.utils import (
+        warn_if_moe_use_td_ineffective,
+    )
+
+    warn_if_moe_use_td_ineffective(backend.value)
+
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
             TrtLlmBf16Experts,

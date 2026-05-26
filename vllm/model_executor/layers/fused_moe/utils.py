@@ -459,8 +459,50 @@ def resolve_moe_use_td() -> bool:
     boolean override when set to ``"1"``/``"0"``, and ``False`` everywhere
     else.  Mirrors the dispatcher in ``triton_attn.py`` for the
     unified-attention TD path.
+
+    Only consulted from the Triton MoE kernel launch sites
+    (``invoke_fused_moe_triton_kernel`` / ``invoke_moe_batched_triton_kernel``);
+    other backends (FlashInfer, CUTLASS, AITer, the Intel-XPU SYCL
+    ``XPUExperts`` default) never reach this resolver, so the env var is
+    a no-op for them.  See ``warn_if_moe_use_td_ineffective`` for the
+    one-shot warning emitted when the env is set but the active MoE
+    backend is not Triton.
     """
     override = envs.VLLM_TRITON_MOE_USE_TD
     if override is None:
         return current_platform.is_xpu()
     return override
+
+
+_warned_moe_use_td_ineffective = False
+
+
+def warn_if_moe_use_td_ineffective(active_backend: str) -> None:
+    """Log a one-shot warning if ``VLLM_TRITON_MOE_USE_TD`` is set but the
+    selected MoE backend won't honor it.
+
+    Called from the MoE backend dispatcher once the final backend has
+    been chosen.  ``active_backend`` is the resolved backend name (e.g.
+    "TRITON", "BATCHED_TRITON", "XPU", "FLASHINFER_CUTLASS"); the
+    warning fires only when the user explicitly set the env to ``"1"``
+    or ``"0"`` and the backend name does not contain ``"TRITON"``.
+    """
+    global _warned_moe_use_td_ineffective
+    if _warned_moe_use_td_ineffective:
+        return
+    if envs.VLLM_TRITON_MOE_USE_TD is None:
+        return
+    if "TRITON" in active_backend.upper():
+        return
+    import logging
+
+    logger = logging.getLogger("vllm")
+    logger.warning(
+        "VLLM_TRITON_MOE_USE_TD is set to %s but the active MoE backend "
+        "is %r, which does not honor it.  Pass `--moe-backend triton` "
+        "(or `triton_unfused` / `batched_triton`) to enable the "
+        "tensor-descriptor path.",
+        envs.VLLM_TRITON_MOE_USE_TD,
+        active_backend,
+    )
+    _warned_moe_use_td_ineffective = True

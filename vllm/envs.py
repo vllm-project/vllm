@@ -608,6 +608,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # unset (default) lets the dispatcher auto-select per platform
     # (currently auto-enabled on XPU only); ``1`` forces TD on; ``0``
     # forces TD off.  Useful for A/B benchmarking the TD path.
+    #
+    # NOTE: this knob only takes effect when the active MoE expert
+    # implementation is the Triton kernel (``--moe-backend=triton`` /
+    # ``triton_unfused``, or ``BATCHED_TRITON``).  Other backends
+    # (FlashInfer, CUTLASS, AITer, the Intel-XPU SYCL ``XPUExperts``
+    # default, etc.) do not consult this env var and ignore it
+    # silently.  vLLM logs a one-shot warning if you set it without a
+    # Triton-family MoE backend selected.
     "VLLM_TRITON_MOE_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_MOE_USE_TD", "").strip()
     ),
