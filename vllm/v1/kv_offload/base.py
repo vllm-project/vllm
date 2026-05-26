@@ -50,7 +50,11 @@ class ReqContext:
 
 
 class OffloadPolicy(Enum):
+    # Offload only newly-computed blocks as they arrive; prefix-hit
+    # blocks (already offloaded by a prior request) are skipped.
     BLOCK_LEVEL = "block_level"
+    # Offload all blocks for the request, including prefix hits.
+    # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
 
 
