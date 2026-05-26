@@ -130,19 +130,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         tier.tier_type,
                     )
                 except Exception as e:
-                    # Redact credentials before logging; secret_key lives inside
-                    # the nested store_config dict, so check one level deep.
-                    _REDACT = {"secret_key", "access_key", "password"}
-                    safe_config = {
-                        k: {sk: "***" if sk in _REDACT else sv
-                            for sk, sv in v.items()}
-                           if isinstance(v, dict) else v
-                        for k, v in tier_config.items()
-                    }
                     logger.error(
-                        "Failed to create secondary tier from config %s: %s",
-                        safe_config,
-                        e,
+                        "Failed to create secondary tier from config index %i: %s",
+                        i, e,
                     )
                     raise
 
