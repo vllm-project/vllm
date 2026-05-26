@@ -538,7 +538,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             documentation=(
                 "EPLB balancedness ratio: avg tokens-per-rank / max "
                 "tokens-per-rank, summed across MoE layers. 1.0 = perfectly "
-                "balanced expert load across EP ranks."
+                "balanced expert load across EP ranks. Only populated when "
+                "EPLBConfig.log_balancedness=True."
             ),
             multiprocess_mode="mostrecent",
             labelnames=labelnames + ["eplb_model"],
