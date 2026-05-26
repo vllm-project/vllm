@@ -23,7 +23,7 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@torch.compile(backend=current_platform.simple_compile_backend, dynamic=True)
 def _minimax_qk_norm_fallback(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
