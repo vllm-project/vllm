@@ -68,6 +68,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -265,6 +266,7 @@ class ResponsesRequest(OpenAIBaseModel):
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
+    thinking_token_budget: ThinkingTokenBudget = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -410,6 +412,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            thinking_token_budget=self.thinking_token_budget,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,

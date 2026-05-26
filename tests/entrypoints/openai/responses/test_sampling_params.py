@@ -154,3 +154,32 @@ class TestResponsesRequestSamplingParams:
         assert "Cannot specify both structured_outputs and text.format" in str(
             exc_info.value
         )
+
+    def test_thinking_token_budget_passed_through(self):
+        """Test that thinking_token_budget is correctly forwarded to SamplingParams.
+
+        Regression test: thinking_token_budget was previously silently ignored
+        because ResponsesRequest had no such field and to_sampling_params() never
+        passed it.  Passing it via vllm_xargs/extra_args does NOT work because
+        SamplingParams.from_optional() does not forward extra_args to named params.
+        """
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            thinking_token_budget=24576,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=32768)
+
+        assert sampling_params.thinking_token_budget == 24576
+
+    def test_thinking_token_budget_default_is_none(self):
+        """Test that thinking_token_budget defaults to None."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.thinking_token_budget is None
