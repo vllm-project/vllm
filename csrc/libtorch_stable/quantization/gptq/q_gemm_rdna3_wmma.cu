@@ -1958,8 +1958,9 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
   }
 
   // V8 (128M × 64N, K=32/iter, 8-wave dequant) when K%32==0 and gs≥32.
-  // Falls back to V7 otherwise.
-  if (size_m >= 128) {
+  // Falls back to V7 otherwise. V7/V8 read A sequentially, so act-order
+  // (b_q_perm != null) must skip them and use v5, which honors the perm.
+  if (size_m >= 128 && b_q_perm == nullptr) {
     const int k_split =
         compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
     const int groupsize = size_k / groups;
