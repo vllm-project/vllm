@@ -136,6 +136,9 @@ class OffloadingConnectorWorker:
                         page_size_bytes[layer_name] = (
                             layer_kv_cache_spec.page_size_bytes
                         )
+                        unpadded_page_size_bytes[layer_name] = (
+                            layer_kv_cache_spec.real_page_size_bytes
+                        )
                     else:
                         # Flash Attention case: (2, num_blocks, ...)
                         assert test_shape[0] == 2
@@ -157,8 +160,9 @@ class OffloadingConnectorWorker:
                         tensors_per_block[layer_name] = tuple(raw.unbind(0))
 
                         page_size_bytes[layer_name] = half_page_size
-
-                    unpadded_page_size_bytes[layer_name] = page_size_bytes[layer_name]
+                        unpadded_page_size_bytes[layer_name] = (
+                            layer_kv_cache_spec.real_page_size_bytes // 2
+                        )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -191,7 +195,16 @@ class OffloadingConnectorWorker:
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
         for kv_cache_tensor in self.spec.kv_cache_config.kv_cache_tensors:
-            tensor_layer_names = kv_cache_tensor.shared_by
+            # Filter to layers that were actually processed above.
+            # _get_kv_cache_config_deepseek_v4 emits KVCacheTensor entries for
+            # every (tuple_idx, page_size) slot; slots where no group has a
+            # layer at that index produce an empty shared_by (reserved memory
+            # with no corresponding model layer).
+            tensor_layer_names = [
+                n for n in kv_cache_tensor.shared_by if n in tensors_per_block
+            ]
+            if not tensor_layer_names:
+                continue
 
             # verify all layers in the group reference the exact same tensors
             assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
