@@ -749,6 +749,18 @@ class Glm4vVisionTransformer(nn.Module):
         return max_seqlen
 
     def pos_embeds_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+        """Pre-compute absolute position embeddings for all input samples.
+        The original `self.embeddings` fused token embeddings and position embeddings
+        in one call, which prevented preparing position embeddings as static metadata
+        required by CUDA graph capture / replay. This method decouples the two by
+        feeding an all-zero token tensor to `self.embeddings`. The module therefore only
+        performs bilinear interpolation based on the coordinates and returns pure
+        position embeddings. These are cached in `prepare_encoder_metadata` and later
+        added to the patch tokens in `forward` via `x = x + pos_embeds`, keeping the
+        forward graph compatible with CUDA graph replay. Coordinate generation matches
+        `rot_pos_emb` exactly to guarantee spatial alignment.
+        """
+
         device = self.embeddings.position_embedding.weight.device
         dtype = self.dtype
         all_embeds = []
@@ -1709,14 +1721,15 @@ class Glm4vForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        modalities = ["image"]
-        # NOTE: When EVS (Efficient Video Sampling) pruning is enabled, the number
-        # of tokens becomes data-dependent (i.e., the retained tokens are
-        # dynamically selected based on inter-frame differences) and therefore
-        # cannot be captured by CUDA Graphs. As a result, video CUDA Graphs are
-        # only enabled when EVS is disabled.
-        if not self.is_multimodal_pruning_enabled:
-            modalities.append("video")
+        # When EVS pruning is enabled, embed_multimodal post-processes both
+        # image and video embeddings (mrope positions are appended for image,
+        # prune+append for video). The encoder CUDA graph path bypasses that
+        # post-process, producing inconsistent embedding formats vs eager. So
+        # disable CUDA graph for all modalities when pruning is on.
+        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
+
+        # Compute max_frames_per_video for budget sizing.
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1733,6 +1746,7 @@ class Glm4vForConditionalGeneration(
                 "sequence_lengths",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=max_frames,
         )
 
     def get_input_modality(
@@ -1741,7 +1755,9 @@ class Glm4vForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        return "video"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
@@ -1750,13 +1766,9 @@ class Glm4vForConditionalGeneration(
             seq_len=self.model_config.max_model_len,
             mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
         )
-
-        image_longest = info.get_image_processor().size["longest_edge"]
-        video_longest = info.get_video_processor().size["longest_edge"]
-        max_frames_from_info = video_longest // image_longest
-
-        max_frames_per_video = max(max_frames_per_video, max_frames_from_info, 16)
-        return max_frames_per_video
+        # Small 'max_frames_per_video' will cause 'tensor mismatch' in PR#43403
+        # 16 is the default 'num_frames' of '_get_vision_info'
+        return max(max_frames_per_video, 16)
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -1793,26 +1805,21 @@ class Glm4vForConditionalGeneration(
             grid_thw = grid_thw.tolist()
         return grid_thw
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         m = self.visual.spatial_merge_size
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * (h // m) * (w // m) for t, h, w in grid_thw]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * h * w for t, h, w in grid_thw]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
 
     def select_encoder_cudagraph_items(
         self,

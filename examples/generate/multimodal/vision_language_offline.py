@@ -588,6 +588,7 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
             "fps": 1,
         },
         limit_mm_per_prompt=mm_limit,
+        enforce_eager=True,
     )
 
     image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
