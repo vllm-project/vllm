@@ -189,7 +189,11 @@ def _is_rdna() -> bool:
         return False
 
 
-def get_block_size(dtype: torch.dtype) -> int:
+def get_block_size(dtype: torch.dtype, head_dim: int | None = None) -> int:
+    # Gemma3 SigLIP ViT (head_dim=72) on gfx1151: cold-L2 sweep across
+    # BM in {16,32,64,128} x NW in {1,2,4,8} found BM=32 + NW=2 fastest.
+    if _is_rdna() and head_dim == 72 and dtype in (torch.bfloat16, torch.float16):
+        return 32
     if dtype == torch.float32:
         return 32
     elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
@@ -210,9 +214,21 @@ def get_num_warps(head_dim: int) -> int:
         # RDNA tuning: Block=32, Warps=8 is optimal for ViT attention.
         # Tested on Radeon 8060S (gfx1151) with Qwen2.5-VL-7B.
         # Tested configs: Block in {16,32,64}, Warps in {2,4,8,16}.
+        if head_dim == 72:
+            # Gemma3 SigLIP. Cold-L2 sweep: BM=32 + NW=2 + WE=6 best (~6.8 ms
+            # vs 9.1 ms at NW=8 on a B=1,S=4096,H=16,D=72 bf16 call).
+            return 2
         return 8
     else:
         return 4 if head_dim <= 64 else 8
+
+
+def get_waves_per_eu(head_dim: int) -> int | None:
+    """Per-shape waves_per_eu override for the ViT prefill kernel on RDNA."""
+    if _is_rdna() and head_dim == 72:
+        # Gemma3 SigLIP. Cold-L2 sweep best (with BM=32, NW=2).
+        return 6
+    return None
 
 
 def context_attention_fwd(
@@ -234,9 +250,9 @@ def context_attention_fwd(
     b_seq_len: [b]
     out: [b * s, head, head_dim]
     """
-    BLOCK = get_block_size(q.dtype)
-
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+
+    BLOCK = get_block_size(q.dtype, head_dim=Lk)
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
@@ -250,6 +266,11 @@ def context_attention_fwd(
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
+
+    waves_per_eu = get_waves_per_eu(Lk)
+    extra_kwargs = {}
+    if waves_per_eu is not None:
+        extra_kwargs["waves_per_eu"] = waves_per_eu
 
     _fwd_kernel[grid](
         q,
@@ -277,4 +298,5 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        **extra_kwargs,
     )
