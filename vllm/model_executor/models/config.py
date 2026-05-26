@@ -28,31 +28,29 @@ class VerifyAndUpdateConfig:
 class AnyModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Normalize block_configs to _AttrDict and patch _model_info from base arch."""
+        """Validate per_layer_config length and patch _model_info from base arch."""
         from dataclasses import replace
 
-        from vllm.model_executor.models.anymodel import _AttrDict
-
         hf_config = model_config.hf_config
-        # For VL models block_configs lives on text_config, not hf_config.
+        # For VL models per_layer_config lives on text_config, not hf_config.
         text_config = hf_config.get_text_config()
 
-        block_configs = getattr(text_config, "block_configs", None)
-        if block_configs:
-            if len(block_configs) != text_config.num_hidden_layers:
-                raise ValueError(
-                    f"block_configs length ({len(block_configs)}) must match "
-                    f"num_hidden_layers ({text_config.num_hidden_layers})"
-                )
-
-            def _to_attrdict(obj):
-                if isinstance(obj, dict):
-                    return _AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
-                if isinstance(obj, list):
-                    return [_to_attrdict(item) for item in obj]
-                return obj
-
-            text_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
+        per_layer_config = getattr(text_config, "per_layer_config", None)
+        if per_layer_config:
+            n_layers = text_config.num_hidden_layers
+            for key in per_layer_config:
+                try:
+                    idx = int(key)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"per_layer_config keys must be integer layer indices; "
+                        f"got {key!r}"
+                    ) from exc
+                if not 0 <= idx < n_layers:
+                    raise ValueError(
+                        f"per_layer_config has entry for layer {idx}, but "
+                        f"num_hidden_layers is {n_layers}"
+                    )
 
         base_arch = getattr(hf_config, "base_architecture", None)
         if base_arch:

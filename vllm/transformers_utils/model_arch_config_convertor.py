@@ -439,21 +439,40 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    """Convertor for NAS-optimized models with heterogeneous block_configs."""
+    """Convertor for NAS-optimized models with HF heterogeneity schema."""
+
+    @staticmethod
+    def _entry_items(entry) -> dict:
+        if isinstance(entry, dict):
+            return entry
+        return dict(vars(entry))
+
+    @classmethod
+    def _entry_skip(cls, entry) -> set[str]:
+        skip = cls._entry_items(entry).get("skip") or ()
+        return set(skip)
+
+    @classmethod
+    def _iter_entries(cls, per_layer_config):
+        """Yield per-layer entries (values), tolerating int/str dict keys."""
+        return list(per_layer_config.values())
 
     def get_total_num_kv_heads(self) -> int:
-        # Return the max KV head count across non-no-op layers so the KV
-        # cache is allocated large enough for every layer.
-        block_configs = getattr(self.hf_text_config, "block_configs", None)
-        if block_configs:
+        # Return the max KV head count across non-skipped attention layers
+        # so the KV cache is allocated large enough for every layer.
+        per_layer_config = getattr(self.hf_text_config, "per_layer_config", None)
+        if per_layer_config:
+            num_hidden_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+            global_kv = super().get_total_num_kv_heads()
             max_kv = 0
-            for bc in block_configs:
-                attn_section = getattr(bc, "attention", None)
-                if attn_section is None:
+            # Missing-from-dict layers fall back to the global value.
+            non_overridden = num_hidden_layers - len(per_layer_config)
+            if non_overridden > 0:
+                max_kv = global_kv or 0
+            for entry in self._iter_entries(per_layer_config):
+                if "attention" in self._entry_skip(entry):
                     continue
-                if getattr(attn_section, "no_op", False):
-                    continue
-                kv = getattr(attn_section, "num_key_value_heads", None)
+                kv = self._entry_items(entry).get("num_key_value_heads", global_kv)
                 if kv is not None:
                     max_kv = max(max_kv, kv)
             if max_kv > 0:
@@ -461,17 +480,27 @@ class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return super().get_total_num_kv_heads()
 
     def get_num_experts(self) -> int:
-        block_configs = getattr(self.hf_text_config, "block_configs", None)
-        if block_configs:
+        per_layer_config = getattr(self.hf_text_config, "per_layer_config", None)
+        if per_layer_config:
+            num_hidden_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+            global_experts = super().get_num_experts()
             max_experts = 0
-            for bc in block_configs:
-                ffn = getattr(bc, "ffn", None)
-                if ffn is None:
+            non_overridden = num_hidden_layers - len(per_layer_config)
+            if non_overridden > 0 and global_experts:
+                max_experts = global_experts
+            for entry in self._iter_entries(per_layer_config):
+                if "mlp" in self._entry_skip(entry):
                     continue
-                moe = getattr(ffn, "moe", None)
-                if moe is None:
-                    continue
-                max_experts = max(max_experts, getattr(moe, "num_local_experts", 0))
+                items = self._entry_items(entry)
+                n = items.get("num_local_experts")
+                if n is None:
+                    n = items.get("num_experts")
+                if n is None:
+                    n = items.get("n_routed_experts")
+                if n is None:
+                    n = global_experts
+                if n:
+                    max_experts = max(max_experts, n)
             if max_experts > 0:
                 return max_experts
         return super().get_num_experts()

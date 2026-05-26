@@ -38,19 +38,26 @@ def _block(
     ffn_no_op: bool = False,
     intermediate_size: int | None = None,
     hidden_act: str | None = None,
-    moe: dict | None = None,
-):
-    attn: dict = {"no_op": attn_no_op}
+    extra: dict | None = None,
+) -> dict:
+    """Build a per_layer_config entry in the flat HF heterogeneity schema."""
+    entry: dict = {}
+    skip: list[str] = []
+    if attn_no_op:
+        skip.append("attention")
+    if ffn_no_op:
+        skip.append("mlp")
+    if skip:
+        entry["skip"] = skip
     if kv_heads is not None:
-        attn["num_key_value_heads"] = kv_heads
-    ffn: dict = {"no_op": ffn_no_op}
+        entry["num_key_value_heads"] = kv_heads
     if intermediate_size is not None:
-        ffn["intermediate_size"] = intermediate_size
+        entry["intermediate_size"] = intermediate_size
     if hidden_act is not None:
-        ffn["hidden_act"] = hidden_act
-    if moe is not None:
-        ffn["moe"] = moe
-    return _ns(attention=_ns(**attn), ffn=_ns(**ffn))
+        entry["hidden_act"] = hidden_act
+    if extra:
+        entry.update(extra)
+    return entry
 
 
 def _base_config(**overrides):
@@ -105,13 +112,6 @@ class TestArchRegistry:
             ("Qwen2ForCausalLM", "decoder_layer_module", ".qwen2"),
             ("Qwen3ForCausalLM", "decoder_layer_class", "Qwen3DecoderLayer"),
             ("MixtralForCausalLM", "ffn_module", "block_sparse_moe"),
-            ("MixtralForCausalLM", "moe_num_experts_field", "num_local_experts"),
-            ("Qwen2MoeForCausalLM", "moe_num_experts_field", "num_experts"),
-            (
-                "Qwen2MoeForCausalLM",
-                "moe_intermediate_size_field",
-                "moe_intermediate_size",
-            ),
             ("GptOssForCausalLM", "attn_module", "attn"),
             ("GptOssForCausalLM", "decoder_layer_class", "TransformerBlock"),
             (
@@ -145,7 +145,6 @@ class TestArchRegistry:
         assert info.attn_norm_module == "input_layernorm"
         assert info.ffn_norm_module == "post_attention_layernorm"
         assert info.layers_path == "model.layers"
-        assert info.moe_num_experts_field is None
         assert info.decoder_layer_class_map is None
         assert info.init_prefix is None
         assert info.layer_hf_config is None
@@ -223,65 +222,38 @@ class TestCreateLayerConfig:
         result = _create_layer_config(cfg, _block(hidden_act="gelu"), _LLAMA_INFO)
         assert result.hidden_act == "gelu"
 
-    def test_attn_noop_skips_kv_override(self):
-        cfg = _base_config(num_key_value_heads=8)
-        result = _create_layer_config(
-            cfg, _block(attn_no_op=True, kv_heads=2), _LLAMA_INFO
-        )
-        assert result.num_key_value_heads == 8
+    def test_skip_does_not_set_skip_attr_on_config(self):
+        # The "skip" key is consumed by _apply_no_ops; _create_layer_config
+        # must not leak it onto the returned config.
+        cfg = _base_config()
+        result = _create_layer_config(cfg, _block(attn_no_op=True), _LLAMA_INFO)
+        assert not hasattr(result, "skip")
 
-    def test_ffn_noop_skips_size_override(self):
-        cfg = _base_config(intermediate_size=14336)
+    def test_arbitrary_top_level_override(self):
+        # Under the flat HF schema, any top-level parent-config key may be
+        # overridden per-layer.  _create_layer_config applies them verbatim.
+        cfg = _base_config(hidden_size=4096)
         result = _create_layer_config(
-            cfg, _block(ffn_no_op=True, intermediate_size=1), _LLAMA_INFO
+            cfg, _block(extra={"hidden_size": 1024}), _LLAMA_INFO
         )
-        assert result.intermediate_size == 14336
+        assert result.hidden_size == 1024
+        assert cfg.hidden_size == 4096
 
-    def test_moe_qwen2moe(self):
+    def test_moe_expert_count_override(self):
+        # MoE experts are now a flat top-level key (matching the parent
+        # config's canonical name, e.g. "num_experts" or "num_local_experts").
         cfg = _base_config(num_experts=8, moe_intermediate_size=1024)
         info = ArchInfo(
             decoder_layer_module=".qwen2_moe",
             decoder_layer_class="Qwen2MoeDecoderLayer",
-            moe_num_experts_field="num_experts",
-            moe_intermediate_size_field="moe_intermediate_size",
         )
-        moe = {"num_local_experts": 4, "expert_intermediate_size": 512}
-        result = _create_layer_config(cfg, _block(moe=moe), info)
+        result = _create_layer_config(
+            cfg,
+            _block(extra={"num_experts": 4, "moe_intermediate_size": 512}),
+            info,
+        )
         assert result.num_experts == 4
         assert result.moe_intermediate_size == 512
-
-    def test_moe_mixtral_falls_back_to_intermediate_size(self):
-        cfg = _base_config(intermediate_size=14336, num_local_experts=8)
-        info = ArchInfo(
-            decoder_layer_module=".mixtral",
-            decoder_layer_class="MixtralDecoderLayer",
-            moe_num_experts_field="num_local_experts",
-            moe_intermediate_size_field=None,
-        )
-        moe = {"num_local_experts": 4, "expert_intermediate_size": 512}
-        result = _create_layer_config(cfg, _block(moe=moe), info)
-        assert result.num_local_experts == 4
-        assert result.intermediate_size == 512
-
-    def test_nemotronh_moe(self):
-        cfg = _base_config(n_routed_experts=8, moe_intermediate_size=2048)
-        info = _ARCH_REGISTRY["NemotronHForCausalLM"]
-        moe = {"num_local_experts": 4, "expert_intermediate_size": 1024}
-        result = _create_layer_config(cfg, _block(moe=moe), info)
-        assert result.n_routed_experts == 4
-        assert result.moe_intermediate_size == 1024
-
-    def test_extra_config_fields(self):
-        cfg = _base_config(hidden_size=4096)
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            extra_config_fields={"ffn.hidden_size": "hidden_size"},
-        )
-        bc = _ns(attention=_ns(no_op=False), ffn=_ns(no_op=False, hidden_size=1024))
-        result = _create_layer_config(cfg, bc, info)
-        assert result.hidden_size == 1024
-        assert cfg.hidden_size == 4096
 
 
 class TestApplyNoOps:
@@ -389,30 +361,21 @@ class TestNoOpModules:
 
 class TestHasOverrides:
     @pytest.mark.parametrize(
-        "bc, expected",
+        "entry, expected",
         [
             (_block(), False),
             (_block(kv_heads=2), True),
             (_block(intermediate_size=4096), True),
             (_block(hidden_act="gelu"), True),
-            (_block(moe={"num_local_experts": 4}), True),
+            (_block(extra={"num_local_experts": 4}), True),
             (_block(attn_no_op=True), False),
             (_block(ffn_no_op=True), False),
             (_block(attn_no_op=True, ffn_no_op=True), False),
             (_block(kv_heads=2, attn_no_op=True), True),
         ],
     )
-    def test_has_overrides(self, bc, expected):
-        assert _has_overrides(bc) is expected
-
-    def test_extra_config_fields_triggers_rebuild(self):
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            extra_config_fields={"ffn.hidden_size": "hidden_size"},
-        )
-        bc = _ns(attention=_ns(no_op=False), ffn=_ns(no_op=False, hidden_size=1024))
-        assert _has_overrides(bc, info)
+    def test_has_overrides(self, entry, expected):
+        assert _has_overrides(entry) is expected
 
 
 class TestUnregisterLayer:

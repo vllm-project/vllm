@@ -5,9 +5,15 @@
 At init time, ``__new__`` creates a wrapper subclass inheriting from both
 AnyModel and the target base model (e.g. ``LlamaForCausalLM``).  The base
 model builds the full structure with the global config; then
-``_patch_anymodel_layers`` replaces layers whose ``block_configs`` differ
-and injects no-ops.  VL models work automatically (vision tower, forward,
+``_patch_anymodel_layers`` replaces layers whose ``per_layer_config``
+entries carry overrides and injects no-ops for entries that list skipped
+sub-module groups.  VL models work automatically (vision tower, forward,
 load_weights all inherited).
+
+The per-layer config follows the HuggingFace heterogeneity schema: a list
+of flat dicts, each mapping top-level parent-config keys to per-layer
+overrides.  Skipped sub-module groups are listed under the ``"skip"`` key
+(e.g. ``{"skip": ["attention"]}`` or ``{"skip": ["attention", "mlp"]}``).
 
 No-op layers are replaced with identity pass-throughs (``NoOpAttention``,
 ``NoOpMLP``) paired with ``NoOpNorm``.  The identity approach defers the
@@ -23,7 +29,7 @@ import importlib
 import importlib.util
 import inspect
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from typing import ClassVar
 
@@ -79,41 +85,36 @@ def _validate_config_arch_info(arch_info: ArchInfo) -> None:
     _validate_layers_path(arch_info.layers_path)
 
 
-class _AttrDict(dict):
-    """Dict with attribute access; stays JSON-serializable for config hashing."""
-
-    def __getattr__(self, key: str):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(key) from None
-
-    def __setattr__(self, key: str, value):
-        self[key] = value
-
-    def __delattr__(self, key: str):
-        try:
-            del self[key]
-        except KeyError:
-            raise AttributeError(key) from None
+# Module-group names used in the HF heterogeneity "skip" list.
+_SKIP_GROUP_ATTENTION = "attention"
+_SKIP_GROUP_MLP = "mlp"
 
 
-def _get_block_section(block_config, section: str):
-    if isinstance(block_config, dict):
-        return block_config.get(section, {})
-    return getattr(block_config, section, {})
+def _layer_entry_items(entry) -> dict:
+    """Return a dict view of a per_layer_config entry.
+
+    HF may yield either a plain dict (from JSON load) or a ``LayerConfig``
+    namespace (from ``HeterogeneousConfig``).
+    """
+    if isinstance(entry, dict):
+        return entry
+    return dict(vars(entry))
 
 
-def _get_attr(obj, key: str, default=None):
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+def _layer_skip_set(entry) -> set[str]:
+    """Set of module-group names this layer skips (e.g. ``{"attention"}``)."""
+    skip = _layer_entry_items(entry).get("skip") or ()
+    return set(skip)
 
 
-def _get_block_attr(block_config, section: str, key: str, default=None):
-    return _get_attr(_get_block_section(block_config, section), key, default)
+def _iter_layer_overrides(per_layer_config):
+    """Yield ``(layer_idx, layer_overrides)`` from a sparse per_layer_config.
+
+    JSON-loaded configs have string keys; Python-constructed ones may use
+    ints.  Coerces to int and yields in ascending layer-index order.
+    """
+    for key, entry in sorted(per_layer_config.items(), key=lambda kv: int(kv[0])):
+        yield int(key), entry
 
 
 class NoOpAttention(nn.Module):
@@ -162,25 +163,13 @@ class ArchInfo:
     decoder_layer_class_map: dict[str, str] | None = None
     hybrid_pattern_field: str | None = None
 
-    # Sub-module attribute names on the decoder layer
+    # Sub-module attribute names on the decoder layer.  Used to decide which
+    # sub-modules to replace with no-ops when a layer's ``"skip"`` list
+    # contains the corresponding group name.
     attn_module: str = "self_attn"
     attn_norm_module: str = "input_layernorm"
     ffn_module: str = "mlp"
     ffn_norm_module: str = "post_attention_layernorm"
-
-    # Config field names (block_config key -> HF config attr)
-    kv_heads_field: str = "num_key_value_heads"
-    intermediate_size_field: str = "intermediate_size"
-    hidden_act_field: str = "hidden_act"
-
-    # MoE (None = not MoE)
-    moe_num_experts_field: str | None = None
-    moe_intermediate_size_field: str | None = (
-        None  # falls back to intermediate_size_field
-    )
-
-    extra_config_fields: dict[str, str] = field(default_factory=dict)
-    """Maps ``"section.key"`` block_config paths to config attr names."""
 
     # Dynamic-parent / multimodal support
     base_model_module: str | None = None  # None = use decoder_layer_module
@@ -212,15 +201,12 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
     "Qwen2MoeForCausalLM": ArchInfo(
         decoder_layer_module=".qwen2_moe",
         decoder_layer_class="Qwen2MoeDecoderLayer",
-        moe_num_experts_field="num_experts",
-        moe_intermediate_size_field="moe_intermediate_size",
     ),
     # MoE: Mixtral family
     "MixtralForCausalLM": ArchInfo(
         decoder_layer_module=".mixtral",
         decoder_layer_class="MixtralDecoderLayer",
         ffn_module="block_sparse_moe",
-        moe_num_experts_field="num_local_experts",
     ),
     # Hybrid: NemotronH
     "NemotronHForCausalLM": ArchInfo(
@@ -237,15 +223,12 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
         attn_norm_module="norm",
         ffn_module="mixer",
         ffn_norm_module="norm",
-        moe_num_experts_field="n_routed_experts",
-        moe_intermediate_size_field="moe_intermediate_size",
     ),
     # MoE: GptOss
     "GptOssForCausalLM": ArchInfo(
         decoder_layer_module=".gpt_oss",
         decoder_layer_class="TransformerBlock",
         attn_module="attn",
-        moe_num_experts_field="num_local_experts",
     ),
     # Multimodal: Qwen3VL
     "Qwen3VLForConditionalGeneration": ArchInfo(
@@ -284,64 +267,26 @@ def _resolve_layer_class(
         ) from exc
 
 
-def _create_layer_config(global_config, block_config, info: ArchInfo):
-    """Deep-copy global_config with per-layer overrides applied."""
+def _create_layer_config(global_config, layer_overrides, info: ArchInfo):
+    """Deep-copy global_config with per-layer overrides applied.
+
+    ``layer_overrides`` is a flat mapping of top-level parent-config keys to
+    per-layer values (HF heterogeneity schema).  The ``"skip"`` key is
+    handled separately by ``_apply_no_ops`` and ignored here.
+    """
     config = copy.deepcopy(global_config)
-
-    attn = _get_block_section(block_config, "attention")
-    ffn = _get_block_section(block_config, "ffn")
-
-    if not _get_attr(attn, "no_op", False):
-        kv = _get_attr(attn, "num_key_value_heads")
-        if kv is not None:
-            setattr(config, info.kv_heads_field, kv)
-
-    if not _get_attr(ffn, "no_op", False):
-        intermediate = _get_attr(ffn, "intermediate_size")
-        if intermediate is not None:
-            setattr(config, info.intermediate_size_field, intermediate)
-
-        hidden_act = _get_attr(ffn, "hidden_act")
-        if hidden_act is not None:
-            setattr(config, info.hidden_act_field, hidden_act)
-
-        moe = _get_attr(ffn, "moe")
-        if moe is not None:
-            if info.moe_num_experts_field is not None:
-                n = _get_attr(moe, "num_local_experts")
-                if n is not None:
-                    setattr(config, info.moe_num_experts_field, n)
-            moe_size_field = (
-                info.moe_intermediate_size_field or info.intermediate_size_field
-            )
-            legacy_size = _get_attr(moe, "expert_intermediate_dim")
-            s = _get_attr(moe, "expert_intermediate_size", legacy_size)
-            if legacy_size is not None:
-                logger.warning_once(
-                    "block_configs MoE field 'expert_intermediate_dim' is "
-                    "deprecated; use 'expert_intermediate_size' instead."
-                )
-            if s is not None:
-                setattr(config, moe_size_field, s)
-
-    for block_path, config_attr in info.extra_config_fields.items():
-        parts = block_path.split(".", 1)
-        if len(parts) != 2:
-            raise ValueError(
-                f"extra_config_fields key {block_path!r} must be "
-                f"'section.key' format (e.g. 'ffn.hidden_size')"
-            )
-        val = _get_block_attr(block_config, parts[0], parts[1])
-        if val is not None:
-            setattr(config, config_attr, val)
-
+    for key, val in _layer_entry_items(layer_overrides).items():
+        if key == "skip":
+            continue
+        setattr(config, key, val)
     return config
 
 
-def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
-    """Replace sub-modules with no-ops per block_config."""
-    attn_noop = _get_block_attr(block_config, "attention", "no_op", False)
-    ffn_noop = _get_block_attr(block_config, "ffn", "no_op", False)
+def _apply_no_ops(layer: nn.Module, layer_overrides, info: ArchInfo) -> None:
+    """Replace sub-modules with no-ops per the layer's ``"skip"`` list."""
+    skip = _layer_skip_set(layer_overrides)
+    attn_noop = _SKIP_GROUP_ATTENTION in skip
+    ffn_noop = _SKIP_GROUP_MLP in skip
 
     shared_module = info.attn_module == info.ffn_module
     shared_norm = info.attn_norm_module == info.ffn_norm_module
@@ -361,16 +306,17 @@ def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
                 setattr(layer, info.ffn_norm_module, NoOpNorm())
 
 
-def _collect_noop_prefixes(block_configs: list, info: ArchInfo) -> frozenset[str]:
+def _collect_noop_prefixes(per_layer_config: dict, info: ArchInfo) -> frozenset[str]:
     """Build weight-name prefixes (ending with '.') for no-op sub-modules."""
     prefixes: set[str] = set()
     shared_module = info.attn_module == info.ffn_module
     shared_norm = info.attn_norm_module == info.ffn_norm_module
 
-    for idx, bc in enumerate(block_configs):
+    for idx, entry in _iter_layer_overrides(per_layer_config):
         lp = f"{info.layers_path}.{idx}"
-        attn_noop = _get_block_attr(bc, "attention", "no_op", False)
-        ffn_noop = _get_block_attr(bc, "ffn", "no_op", False)
+        skip = _layer_skip_set(entry)
+        attn_noop = _SKIP_GROUP_ATTENTION in skip
+        ffn_noop = _SKIP_GROUP_MLP in skip
 
         if shared_module:
             if attn_noop and ffn_noop:
@@ -419,92 +365,14 @@ def _instantiate_layer(
     return layer_cls(**{k: v for k, v in _pool.items() if k in params})
 
 
-def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
-    """True if block_config has config overrides requiring a layer rebuild.
-    No-ops alone don't trigger a rebuild."""
-    attn = _get_block_section(block_config, "attention")
-    ffn = _get_block_section(block_config, "ffn")
-    if (
-        _get_attr(attn, "num_key_value_heads") is not None
-        or _get_attr(ffn, "intermediate_size") is not None
-        or _get_attr(ffn, "hidden_act") is not None
-        or _get_attr(ffn, "moe") is not None
-    ):
-        return True
-    if info and info.extra_config_fields:
-        for block_path in info.extra_config_fields:
-            parts = block_path.split(".", 1)
-            if len(parts) != 2:
-                raise ValueError(
-                    f"extra_config_fields key {block_path!r} must be "
-                    f"'section.key' format (e.g. 'ffn.hidden_size')"
-                )
-            if _get_block_attr(block_config, parts[0], parts[1]) is not None:
-                return True
-    return False
+def _has_overrides(layer_overrides) -> bool:
+    """True iff this layer carries any config override beyond ``"skip"``.
 
-
-def _overrides_differ(block_config, global_config, info: ArchInfo) -> bool:
-    """True if block_config values actually differ from global_config defaults.
-
-    Companion to ``_has_overrides``: while that function checks whether
-    override *keys* are present (not None), this function checks whether
-    the values are different from what the model was originally built with.
-    Skipping rebuilds for identical values avoids unnecessary GPU allocation
-    churn during ``_patch_anymodel_layers``.
+    HF canonicalizes the heterogeneity schema at construction time so
+    per-layer entries only retain attributes that genuinely differ from the
+    global config; any non-skip key therefore implies a layer rebuild.
     """
-    attn = _get_block_section(block_config, "attention")
-    ffn = _get_block_section(block_config, "ffn")
-
-    kv = _get_attr(attn, "num_key_value_heads")
-    if kv is not None and kv != getattr(global_config, info.kv_heads_field, None):
-        return True
-
-    intermediate = _get_attr(ffn, "intermediate_size")
-    if intermediate is not None and intermediate != getattr(
-        global_config, info.intermediate_size_field, None
-    ):
-        return True
-
-    hidden_act = _get_attr(ffn, "hidden_act")
-    if hidden_act is not None and hidden_act != getattr(
-        global_config, info.hidden_act_field, None
-    ):
-        return True
-
-    moe = _get_attr(ffn, "moe")
-    if moe is not None:
-        if info.moe_num_experts_field is None:
-            return True
-        n = _get_attr(moe, "num_local_experts")
-        if n is not None and n != getattr(
-            global_config, info.moe_num_experts_field, None
-        ):
-            return True
-        moe_size_field = (
-            info.moe_intermediate_size_field or info.intermediate_size_field
-        )
-        s = _get_attr(
-            moe,
-            "expert_intermediate_size",
-            _get_attr(moe, "expert_intermediate_dim"),
-        )
-        if s is not None and s != getattr(global_config, moe_size_field, None):
-            return True
-
-    if info and info.extra_config_fields:
-        for block_path, config_attr in info.extra_config_fields.items():
-            parts = block_path.split(".", 1)
-            if len(parts) != 2:
-                raise ValueError(
-                    f"extra_config_fields key {block_path!r} must be "
-                    f"'section.key' format (e.g. 'ffn.hidden_size')"
-                )
-            val = _get_block_attr(block_config, parts[0], parts[1])
-            if val is not None and val != getattr(global_config, config_attr, None):
-                return True
-
-    return False
+    return any(key != "skip" for key in _layer_entry_items(layer_overrides))
 
 
 def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
@@ -535,7 +403,7 @@ def _patch_anymodel_layers(
         if arch_info.layer_hf_config
         else config
     )
-    block_configs = layer_base_config.block_configs
+    per_layer_config = layer_base_config.per_layer_config
 
     obj = model
     for part in arch_info.layers_path.split("."):
@@ -543,26 +411,22 @@ def _patch_anymodel_layers(
     layers: nn.ModuleList = obj
     layers_prefix = maybe_prefix(base_init_prefix, arch_info.layers_path)
 
-    if len(block_configs) != len(layers):
-        logger.warning(
-            "block_configs length (%d) != layers length (%d); "
-            "extra entries will be ignored.",
-            len(block_configs),
-            len(layers),
-        )
-
-    for layer_idx, block_config in enumerate(block_configs):
-        if layer_idx >= len(layers):
-            break
+    for layer_idx, layer_overrides in _iter_layer_overrides(per_layer_config):
+        if not 0 <= layer_idx < len(layers):
+            logger.warning(
+                "per_layer_config has entry for layer %d but model has %d "
+                "layers; ignoring.",
+                layer_idx,
+                len(layers),
+            )
+            continue
         layer = layers[layer_idx]
         if isinstance(layer, PPMissingLayer):
             continue
 
-        if _has_overrides(block_config, arch_info) and _overrides_differ(
-            block_config, layer_base_config, arch_info
-        ):
-            per_layer_config = _create_layer_config(
-                layer_base_config, block_config, arch_info
+        if _has_overrides(layer_overrides):
+            layer_config = _create_layer_config(
+                layer_base_config, layer_overrides, arch_info
             )
             layer_cls = _resolve_layer_class(arch_info, layer_base_config, layer_idx)
             layer_prefix = f"{layers_prefix}.{layer_idx}"
@@ -573,7 +437,7 @@ def _patch_anymodel_layers(
                     layer_cls,
                     vllm_config,
                     layer_prefix,
-                    per_layer_config,
+                    layer_config,
                     layer_idx,
                 )
             layers[layer_idx] = new_layer
@@ -581,11 +445,12 @@ def _patch_anymodel_layers(
             new_layer.to(target_device)
             layer = new_layer
 
-        _apply_no_ops(layer, block_config, arch_info)
+        _apply_no_ops(layer, layer_overrides, arch_info)
 
         layer_prefix = maybe_prefix(layers_prefix, str(layer_idx))
-        attn_noop = _get_block_attr(block_config, "attention", "no_op", False)
-        ffn_noop = _get_block_attr(block_config, "ffn", "no_op", False)
+        skip = _layer_skip_set(layer_overrides)
+        attn_noop = _SKIP_GROUP_ATTENTION in skip
+        ffn_noop = _SKIP_GROUP_MLP in skip
         shared_module = arch_info.attn_module == arch_info.ffn_module
 
         if shared_module:
@@ -662,7 +527,8 @@ class AnyModel(nn.Module, HasNoOps):
 
     ``__new__`` creates a wrapper subclass ``(AnyModel, BaseModelCls)``.
     ``__init__`` delegates to the base model, then patches layers per
-    ``block_configs``.  All base model methods are inherited automatically."""
+    ``per_layer_config``.  All base model methods are inherited automatically.
+    """
 
     has_noops = True
     _anymodel_arch_info: ClassVar[ArchInfo | None] = None
@@ -739,9 +605,9 @@ class AnyModel(nn.Module, HasNoOps):
                 if arch_info.layer_hf_config
                 else config
             )
-            block_configs = getattr(layer_base_config, "block_configs", None)
-            if block_configs:
-                noop_prefixes = _collect_noop_prefixes(block_configs, arch_info)
+            per_layer_config = getattr(layer_base_config, "per_layer_config", None)
+            if per_layer_config:
+                noop_prefixes = _collect_noop_prefixes(per_layer_config, arch_info)
                 if noop_prefixes:
                     noop_prefixes = _expand_noop_prefixes_for_mapper(
                         noop_prefixes, type(self)

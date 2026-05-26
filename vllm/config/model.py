@@ -1299,8 +1299,25 @@ class ModelConfig:
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
         elif self.has_noops:
-            block_configs = self.hf_config.block_configs
-            return sum(not bc.attention.no_op for bc in block_configs[start:end])
+            per_layer_config = self.hf_config.per_layer_config
+
+            def _entry_skip(entry):
+                if isinstance(entry, dict):
+                    return entry.get("skip") or ()
+                return getattr(entry, "skip", None) or ()
+
+            def _lookup(layer_idx):
+                # JSON keys are strings; Python construction may use ints.
+                return (
+                    per_layer_config.get(layer_idx)
+                    or per_layer_config.get(str(layer_idx))
+                    or {}
+                )
+
+            return sum(
+                "attention" not in _entry_skip(_lookup(layer_idx))
+                for layer_idx in range(start, end)
+            )
         else:
             # Hybrid model Jamba
             layers_block_type_value = getattr(

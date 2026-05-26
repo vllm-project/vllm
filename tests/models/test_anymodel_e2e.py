@@ -37,7 +37,7 @@ from .utils import dummy_hf_overrides
 _NUM_LAYERS = 4
 
 
-def _dense_block_configs(hf_config: PretrainedConfig) -> list[dict]:
+def _dense_per_layer_config(hf_config: PretrainedConfig) -> dict[int, dict]:
     text_cfg = hf_config.get_text_config()
     isize = getattr(text_cfg, "intermediate_size", 1024)
     kv = getattr(
@@ -45,69 +45,40 @@ def _dense_block_configs(hf_config: PretrainedConfig) -> list[dict]:
         "num_key_value_heads",
         getattr(text_cfg, "num_attention_heads", 4),
     )
-    return [
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}},
-        {
-            "attention": {"no_op": False},
-            "ffn": {"no_op": False, "intermediate_size": max(64, isize // 2)},
-        },
-        {
-            "attention": {
-                "no_op": False,
-                "num_key_value_heads": max(1, kv // 2),
-            },
-            "ffn": {"no_op": False},
-        },
-        {
-            "attention": {"no_op": True},
-            "ffn": {
-                "no_op": False,
-                "intermediate_size": max(64, isize // 2),
-            },
-        },
-    ]
+    return {
+        1: {"intermediate_size": max(64, isize // 2)},
+        2: {"num_key_value_heads": max(1, kv // 2)},
+        3: {"skip": ["attention"], "intermediate_size": max(64, isize // 2)},
+    }
 
 
-def _moe_block_configs(
+def _moe_per_layer_config(
     hf_config: PretrainedConfig,
     *,
     experts_field: str = "num_local_experts",
     expert_size_field: str | None = None,
-) -> list[dict]:
+) -> dict[int, dict]:
     text_cfg = hf_config.get_text_config()
     n_experts = getattr(text_cfg, experts_field, 4)
     exp_isize = (
         getattr(text_cfg, expert_size_field, None) if expert_size_field else None
     )
     reduced = max(2, n_experts // 2)
-    moe_override: dict[str, Any] = {"num_local_experts": reduced}
-    if exp_isize is not None:
-        moe_override["expert_intermediate_size"] = max(64, exp_isize // 2)
-    return [
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}},
-        {
-            "attention": {"no_op": False},
-            "ffn": {"no_op": False, "moe": moe_override},
-        },
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}},
-        {"attention": {"no_op": True}, "ffn": {"no_op": False}},
-    ]
+    moe_override: dict[str, Any] = {experts_field: reduced}
+    if exp_isize is not None and expert_size_field is not None:
+        moe_override[expert_size_field] = max(64, exp_isize // 2)
+    return {
+        1: moe_override,
+        3: {"skip": ["attention"]},
+    }
 
 
-def _nemotronh_block_configs(hf_config: PretrainedConfig) -> list[dict]:
+def _nemotronh_per_layer_config(hf_config: PretrainedConfig) -> dict[int, dict]:
     kv = getattr(hf_config, "num_key_value_heads", 4)
-    return [
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}},
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}},
-        {
-            "attention": {
-                "no_op": False,
-                "num_key_value_heads": max(1, kv // 2),
-            },
-            "ffn": {"no_op": False},
-        },
-        {"attention": {"no_op": False}, "ffn": {"no_op": True}},
-    ]
+    return {
+        2: {"num_key_value_heads": max(1, kv // 2)},
+        3: {"skip": ["mlp"]},
+    }
 
 
 @dataclass
@@ -115,7 +86,7 @@ class _Case:
     id: str
     base_arch: str
     hf_model: str
-    make_block_configs: Any
+    make_per_layer_config: Any
     trust_remote_code: bool = False
     max_model_len: int = 1024
     attention_backend: str | None = None
@@ -131,25 +102,28 @@ _CASES: list[_Case] = [
         "llama",
         "LlamaForCausalLM",
         "meta-llama/Llama-3.2-1B-Instruct",
-        _dense_block_configs,
+        _dense_per_layer_config,
     ),
     _Case(
         "mistral",
         "MistralForCausalLM",
         "mistralai/Mistral-7B-Instruct-v0.1",
-        _dense_block_configs,
+        _dense_per_layer_config,
     ),
     _Case(
-        "qwen2", "Qwen2ForCausalLM", "Qwen/Qwen2-0.5B-Instruct", _dense_block_configs
+        "qwen2",
+        "Qwen2ForCausalLM",
+        "Qwen/Qwen2-0.5B-Instruct",
+        _dense_per_layer_config,
     ),
-    _Case("qwen3", "Qwen3ForCausalLM", "Qwen/Qwen3-8B", _dense_block_configs),
+    _Case("qwen3", "Qwen3ForCausalLM", "Qwen/Qwen3-8B", _dense_per_layer_config),
     # MoE
     _Case(
         "qwen2moe",
         "Qwen2MoeForCausalLM",
         "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         partial(
-            _moe_block_configs,
+            _moe_per_layer_config,
             experts_field="num_experts",
             expert_size_field="moe_intermediate_size",
         ),
@@ -158,13 +132,13 @@ _CASES: list[_Case] = [
         "mixtral",
         "MixtralForCausalLM",
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
-        partial(_moe_block_configs, experts_field="num_local_experts"),
+        partial(_moe_per_layer_config, experts_field="num_local_experts"),
     ),
     _Case(
         "gptoss",
         "GptOssForCausalLM",
         "lmsys/gpt-oss-20b-bf16",
-        partial(_moe_block_configs, experts_field="num_local_experts"),
+        partial(_moe_per_layer_config, experts_field="num_local_experts"),
         attention_backend="TRITON_ATTN",
     ),
     # Hybrid
@@ -172,7 +146,7 @@ _CASES: list[_Case] = [
         "nemotronh",
         "NemotronHForCausalLM",
         "nvidia/Nemotron-H-8B-Base-8K",
-        _nemotronh_block_configs,
+        _nemotronh_per_layer_config,
         trust_remote_code=True,
         extra_hf_overrides={"hybrid_override_pattern": "*-*-"},
     ),
@@ -181,7 +155,7 @@ _CASES: list[_Case] = [
         "qwen3vl",
         "Qwen3VLForConditionalGeneration",
         "Qwen/Qwen3-VL-4B-Instruct",
-        _dense_block_configs,
+        _dense_per_layer_config,
         max_model_len=4096,
     ),
 ]
@@ -199,7 +173,7 @@ def _anymodel_hf_overrides(
     hf_config.base_architecture = case.base_arch
     for key, val in case.extra_hf_overrides.items():
         setattr(text_cfg, key, val)
-    text_cfg.block_configs = case.make_block_configs(hf_config)
+    text_cfg.per_layer_config = case.make_per_layer_config(hf_config)
     if hasattr(hf_config, "vision_config"):
         hf_config.vision_config.update({"num_layers": 1, "num_hidden_layers": 1})
     return hf_config
@@ -259,13 +233,10 @@ def _identity_anymodel_overrides(
     hf_config: PretrainedConfig,
 ) -> PretrainedConfig:
     text_cfg = hf_config.get_text_config()
-    n_layers = getattr(text_cfg, "num_hidden_layers", 1)
     hf_config.architectures = ["AnyModel"]
     hf_config.base_architecture = _PARITY_BASE_ARCH
-    text_cfg.block_configs = [
-        {"attention": {"no_op": False}, "ffn": {"no_op": False}}
-        for _ in range(n_layers)
-    ]
+    # Sparse dict: empty means every layer uses the global config unchanged.
+    text_cfg.per_layer_config = {}
     return hf_config
 
 
@@ -471,21 +442,12 @@ def _reduced_anymodel_overrides(
         getattr(text_cfg, "num_attention_heads", 4),
     )
     half_i, half_kv = max(64, isize // 2), max(1, kv // 2)
-    text_cfg.block_configs = [
-        {
-            "attention": {"no_op": False},
-            "ffn": {"no_op": False, "intermediate_size": half_i},
-        },
-        {
-            "attention": {"no_op": False, "num_key_value_heads": half_kv},
-            "ffn": {"no_op": False, "intermediate_size": half_i},
-        },
-        {
-            "attention": {"no_op": True},
-            "ffn": {"no_op": False, "intermediate_size": half_i},
-        },
-        {"attention": {"no_op": True}, "ffn": {"no_op": True}},
-    ]
+    text_cfg.per_layer_config = {
+        0: {"intermediate_size": half_i},
+        1: {"num_key_value_heads": half_kv, "intermediate_size": half_i},
+        2: {"skip": ["attention"], "intermediate_size": half_i},
+        3: {"skip": ["attention", "mlp"]},
+    }
     return hf_config
 
 
@@ -542,17 +504,21 @@ def _run_puzzletron_nas_config():
 
     model = _get_model(llm)
     layers = model.model.layers
-    bcs = config["block_configs"]
-    assert len(layers) == len(bcs) == config["num_hidden_layers"]
+    entries = config["per_layer_config"]
+    assert len(layers) == config["num_hidden_layers"]
 
     hs = config["hidden_size"]
     hd = config["head_dim"]
     nh = config["num_attention_heads"]
     gkv = config["num_key_value_heads"]
+    gisize = config["intermediate_size"]
 
-    for i, (layer, bc) in enumerate(zip(layers, bcs)):
-        a_noop = bc["attention"]["no_op"]
-        f_noop = bc["ffn"]["no_op"]
+    for i, layer in enumerate(layers):
+        # JSON keys are strings; fall back to {} for layers not in the sparse dict.
+        entry = entries.get(str(i), entries.get(i, {}))
+        skip = set(entry.get("skip") or ())
+        a_noop = "attention" in skip
+        f_noop = "mlp" in skip
 
         assert isinstance(layer.self_attn, NoOpAttention) == a_noop, f"L{i} attn"
         assert isinstance(layer.input_layernorm, NoOpNorm) == a_noop, f"L{i} norm"
@@ -562,14 +528,14 @@ def _run_puzzletron_nas_config():
         )
 
         if not a_noop:
-            kv = bc["attention"].get("num_key_value_heads") or gkv
+            kv = entry.get("num_key_value_heads", gkv)
             assert layer.self_attn.qkv_proj.weight.shape == (
                 (nh + 2 * kv) * hd,
                 hs,
             ), f"L{i} qkv"
 
         if not f_noop:
-            isize = bc["ffn"]["intermediate_size"]
+            isize = entry.get("intermediate_size", gisize)
             assert layer.mlp.down_proj.weight.shape == (hs, isize), f"L{i} down"
             assert layer.mlp.gate_up_proj.weight.shape == (
                 2 * isize,
