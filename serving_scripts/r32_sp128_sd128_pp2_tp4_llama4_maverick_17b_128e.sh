@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=r32_sp128_sd512_tp8_llama4_maverick_17b_128e
+#SBATCH --job-name=r32_sp128_sd128_pp2_tp4_llama4_maverick_17b_128e
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
@@ -17,15 +17,16 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-llama4-maverick-17b-128e-tp8-workers-nsys-arc-slurm-tmp-v1"
+SCRIPT_VERSION="arc-ray-llama4-maverick-17b-128e-pp2-tp4-workers-nsys-arc-slurm-tmp-v1"
 
 # Configuration:
 #   2 nodes x 4 H100s/node = 8 total GPUs
-#   TP=8 spans both nodes
-#   PP=1
+#   TP=4 within each node
+#   PP=2 across the two nodes
 #
 # Layout:
-#   htc-g059 + htc-g060: one 8-GPU TP group
+#   htc-g059: 4-GPU TP group for PP stage 0
+#   htc-g060: 4-GPU TP group for PP stage 1
 #
 # This variant intentionally DOES NOT wrap the vLLM API server in:
 #   nsys profile python -m vllm.entrypoints.openai.api_server
@@ -819,7 +820,7 @@ copy_ray_logs_from_node() {
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
 SP="${SP:-128}"
-SD="${SD:-512}"
+SD="${SD:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
 REQUEST_RATE="${REQUEST_RATE:-1}"
 
@@ -926,14 +927,14 @@ MODEL_ID="${MODEL_ID:-meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-# Recommended layout for 2 nodes x 4 GPUs/node; TP spans both nodes for this model.
+# Recommended layout for 2 nodes x 4 GPUs/node.
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
 TOTAL_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
 
-# TP spans all GPUs across both nodes; PP is disabled for this Llama baseline.
-TP="${TP:-${TOTAL_GPUS}}"
-PP="${PP:-1}"
+# TP stays inside each node; PP spans the two nodes.
+TP="${TP:-${GPUS_PER_NODE}}"
+PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
 
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -945,7 +946,7 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
-# With TP=8 and PP=1, expect one Ray worker report per GPU, i.e. 4 per node.
+# With TP=4 and PP=2, expect one Ray worker report per GPU, i.e. 4 per node.
 EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
