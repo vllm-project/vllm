@@ -48,12 +48,15 @@ static inline unsigned long long my_min(unsigned long long a,
 
 static CUresult reserve_rocm_address(CUdeviceptr* d_mem, ssize_t size,
                                      size_t alignment) {
-  CUresult status = cuMemAddressReserve(d_mem, size, 0, 0, 0);
+  CUresult status = cuMemAddressReserve(d_mem, size, alignment, 0, 0);
   if (status == CUresult(0) || alignment == 0) {
     return status;
   }
 
-  return cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Let HIP choose the default
+  // alignment before surfacing the failure.
+  return cuMemAddressReserve(d_mem, size, 0, 0, 0);
 }
 
 static CUresult reserve_rocm_address_at(CUdeviceptr d_mem, ssize_t size) {
