@@ -694,15 +694,14 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, C) order; transpose to
-        # (B, N, H, C) = (num_blocks, block_size, num_heads, head_size)
-        # which FlashAttention expects, then split K/V on the content dim.
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
-        if self.vllm_flash_attn_version == 2:
-            # FA2 paged-attention kernels assume contiguous pages.
-            key_cache = key_cache.contiguous()
-            value_cache = value_cache.contiguous()
+        # KV cache arrives in logical (B, H, N, C) order where
+        # C = 2 * head_size (K and V interleaved on the content dim).
+        # Slice K/V as views — each (B, H, N, head_size) with stride(-1)=1.
+        # Transpose to NHC — produces strided views (no copy).
+        # All FA versions are stride-aware so this works regardless of
+        # the physical memory layout.
+        key_cache = kv_cache[..., : self.head_size].transpose(1, 2)
+        value_cache = kv_cache[..., self.head_size :].transpose(1, 2)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
@@ -1134,10 +1133,11 @@ def cascade_attention(
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
+    num_kv_heads = key_cache.shape[-2]
     assert common_prefix_len % block_size == 0
     num_common_kv_blocks = common_prefix_len // block_size
     assert num_common_kv_blocks > 0
-    descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
+    descale_shape = (cu_prefix_query_lens.shape[0] - 1, num_kv_heads)
 
     # Process shared prefix.
     prefix_output, prefix_lse = flash_attn_varlen_func(
@@ -1165,7 +1165,7 @@ def cascade_attention(
         num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
-    descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
+    descale_shape = (cu_query_lens.shape[0] - 1, num_kv_heads)
 
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(
