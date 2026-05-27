@@ -108,7 +108,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
             + ":"
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
-        self.mode = get_moriio_mode()
+        self.mode = get_moriio_mode(self.kv_transfer_config)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MoRIIOConnectorScheduler | None = (
                 MoRIIOConnectorScheduler(vllm_config, self.engine_id)
@@ -250,7 +250,7 @@ class MoRIIOConnectorScheduler:
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
-        self.mode = get_moriio_mode()
+        self.mode = get_moriio_mode(self.kv_transfer_config)
         self.host_ip = get_ip()
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
@@ -615,8 +615,11 @@ class MoRIIOConnectorWorker:
                 "is installed and properly configured."
             )
 
+        assert vllm_config.kv_transfer_config is not None
         self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
-        self.mode = get_moriio_mode()
+        self.mode = (
+            MoRIIOMode.READ if self.moriio_config.read_mode else MoRIIOMode.WRITE
+        )
 
         logger.info("Initializing MoRIIO worker %s", engine_id)
 
@@ -700,7 +703,12 @@ class MoRIIOConnectorWorker:
             if self.moriio_config.backend == "xgmi"
             else BackendType.RDMA
         )
-        self.moriio_wrapper.set_backend_type(backend)
+        self.moriio_wrapper.set_backend_type(
+            backend,
+            qp_per_transfer=self.moriio_config.qp_per_transfer,
+            post_batch_size=self.moriio_config.post_batch_size,
+            num_workers=self.moriio_config.num_workers,
+        )
         self.moriio_wrapper.notify_port = self.moriio_config.notify_port
         self.local_kv_cache_metadata: list[bytes] = []
         self.local_kv_cache_size: list[int] = []
