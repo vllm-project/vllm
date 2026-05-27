@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import tempfile
 
 from vllm import LLM, SamplingParams
@@ -42,8 +43,22 @@ with tempfile.TemporaryDirectory() as tmpdirname:
     )
 
     prompts = ["Generate a sentence with hidden states", "Write a python function"]
-    sampling_params = SamplingParams(max_tokens=1)
-    outputs = llm.generate(prompts, sampling_params)
+
+    # One request uses the default path, the other uses a custom path
+    sampling_params_list = [
+        SamplingParams(max_tokens=1),
+        SamplingParams(
+            max_tokens=1,
+            extra_args={
+                "kv_transfer_params": {
+                    "hidden_states_path": os.path.join(
+                        tmpdirname, "custom_output.safetensors"
+                    ),
+                }
+            },
+        ),
+    ]
+    outputs = llm.generate(prompts, sampling_params_list)
 
     for output in outputs:
         print("\nPrompt:", output.prompt)
@@ -51,16 +66,16 @@ with tempfile.TemporaryDirectory() as tmpdirname:
 
         hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
         assert hidden_states_path is not None
-        print("Prompt hidden states path:", hidden_states_path)
+        print("Hidden states path:", hidden_states_path)
 
         obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
         token_ids = obj["token_ids"]
         hidden_states = obj["hidden_states"]
 
-        print("Extracted token ids:", token_ids)  # Matches prompt token ids
+        print("Extracted token ids:", token_ids)
         print(
             "Extracted hidden states shape:", hidden_states.shape
-        )  # [prompt_len, num_extracted_layers, hidden_size]
+        )  # [num_tokens, num_extracted_layers, hidden_size]
         print("Extracted hidden states:", hidden_states)
 
         example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)

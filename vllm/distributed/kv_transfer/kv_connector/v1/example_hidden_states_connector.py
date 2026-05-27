@@ -85,9 +85,10 @@ class PendingSave:
 @dataclass
 class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
     pending_saves: list[PendingSave] = field(default_factory=list)
-    # req_ids of newly scheduled requests — the worker pre-creates lock files
-    # for these so the lock exists before the client receives the output path.
-    new_req_ids: list[str] = field(default_factory=list)
+    # req_id → filename for newly scheduled requests — the worker pre-creates
+    # lock files for these so the lock exists before the client receives the
+    # output path.
+    new_req_filenames: dict[str, str] = field(default_factory=dict)
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
@@ -142,9 +143,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
-        # Scheduler-side state: populated by request_finished,
-        # consumed by build_connector_meta.
+        # Scheduler-side state
         self._pending_saves: dict[str, PendingSave] = {}
+        self._request_filenames: dict[str, str] = {}
 
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
@@ -212,11 +213,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         if not isinstance(metadata, ExampleHiddenStatesConnectorMetadata):
             return
-        for req_id in metadata.new_req_ids:
+        for req_id, filename in metadata.new_req_filenames.items():
             if req_id in self._lock_fds:
                 continue
-            lock_path = os.path.join(self._storage_path, f"{req_id}.safetensors.lock")
-            os.makedirs(self._storage_path, exist_ok=True)
+            lock_path = filename + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             self._lock_fds[req_id] = lock_fd
@@ -344,7 +345,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         prior = self._req_futures.get(pending.req_id)
         assert prior is None, "Found another KV transfer request with same req_id!"
 
-        os.makedirs(self._storage_path, exist_ok=True)
+        os.makedirs(os.path.dirname(pending.filename), exist_ok=True)
 
         # Use the pre-created lock fd from wait_for_save (already holds
         # LOCK_EX). Falls back to creating one here if use_lock is True
@@ -413,10 +414,20 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         meta.pending_saves = list(self._pending_saves.values())
         self._pending_saves.clear()
 
-        # Tell the worker about new requests so it can pre-create lock files
-        # before the scheduler returns the output path to the client.
+        # Resolve save paths for new requests and tell the worker so it can
+        # pre-create lock files before the client receives the output path.
         for new_req in scheduler_output.scheduled_new_reqs:
-            meta.new_req_ids.append(new_req.req_id)
+            kv_params = (
+                new_req.sampling_params.extra_args.get("kv_transfer_params")
+                if new_req.sampling_params and new_req.sampling_params.extra_args
+                else None
+            ) or {}
+            filename = kv_params.get(
+                "hidden_states_path",
+                os.path.join(self._storage_path, f"{new_req.req_id}.safetensors"),
+            )
+            self._request_filenames[new_req.req_id] = filename
+            meta.new_req_filenames[new_req.req_id] = filename
 
         return meta
 
@@ -433,7 +444,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         the hidden states from the KV cache.
         """
         req_id = request.request_id
-        filename = os.path.join(self._storage_path, f"{req_id}.safetensors")
+        filename = self._request_filenames.pop(req_id)
         if self.include_output_tokens:
             token_ids = torch.tensor(list(request.all_token_ids))
         else:
