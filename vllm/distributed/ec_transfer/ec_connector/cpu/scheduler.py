@@ -257,6 +257,11 @@ class ECCPUScheduler:
             # the end of build_connector_meta.
             self._pending_reload: set[str] = set()
             self._peer_pool: dict[tuple[str, int], ConsumerPeer] = {}
+            # Tracks the NIXL agent name of the most-recently-evicted peer per
+            # address.  Used by _get_or_add_peer to issue a best-effort
+            # re-removal before retrying add_remote_agent when UCX hasn't
+            # finished tearing down the old endpoint.
+            self._last_evicted_agent: dict[PeerAddr, str] = {}
 
     # ==========================================================================
     # Producer role
@@ -745,6 +750,7 @@ class ECCPUScheduler:
             return existing
         if existing is not None:
             self.on_peer_down(key)
+        stale_agent_name = self._last_evicted_agent.get(key)
 
         dealer = make_zmq_socket(
             ctx=self._zmq_ctx,
@@ -764,15 +770,28 @@ class ECCPUScheduler:
         try:
             agent_name = self._nixl.add_remote_agent(metadata)
         except Exception as exc:
-            logger.exception(
-                "ec: add_remote_agent failed for peer %s: %s (type=%s)",
+            if type(exc).__name__ != "nixlNotAllowedError":
+                dealer.close(linger=0)
+                mon.close(linger=0)
+                raise
+            # UCX hasn't finished tearing down the previous endpoint.
+            # Re-issuing remove_remote_agent is a GIL-releasing C call that
+            # lets UCX background threads process the pending cleanup before
+            # we retry add_remote_agent.
+            logger.warning(
+                "ec: add_remote_agent nixlNotAllowedError for peer %s "
+                "(UCX endpoint still tearing down); retrying after re-removal",
                 key,
-                exc,
-                type(exc).__name__,
             )
-            dealer.close(linger=0)
-            mon.close(linger=0)
-            raise
+            if stale_agent_name is not None:
+                with contextlib.suppress(Exception):
+                    self._nixl.remove_remote_agent(stale_agent_name)
+            try:
+                agent_name = self._nixl.add_remote_agent(metadata)
+            except Exception:
+                dealer.close(linger=0)
+                mon.close(linger=0)
+                raise
         entry = ConsumerPeer(
             zmq_dealer=dealer,
             nixl_agent_name=agent_name,
@@ -780,6 +799,7 @@ class ECCPUScheduler:
             zmq_monitor=mon,
         )
         self._peer_pool[key] = entry
+        self._last_evicted_agent.pop(key, None)
         return entry
 
     def _poll_dead_peers(self) -> list[PeerAddr]:
@@ -805,6 +825,7 @@ class ECCPUScheduler:
         peer = self._peer_pool.pop(addr, None)
         if peer is None:
             return
+        self._last_evicted_agent[addr] = peer.nixl_agent_name
         if peer.zmq_monitor is not None:
             try:
                 peer.zmq_dealer.disable_monitor()
