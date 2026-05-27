@@ -805,6 +805,7 @@ def nvfp4_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -823,6 +824,7 @@ def nvfp4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -886,20 +888,33 @@ def int4_w4a16_moe_quant_config(
 def fp8_w8a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
+    fp8_dtype = current_platform.fp8_dtype()
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w1_scale, None, None
+            fp8_dtype,
+            group_shape,
+            w1_scale,
+            None,
+            None,
+            w1_bias,
         ),
         _w2=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w2_scale, None, None
+            fp8_dtype,
+            group_shape,
+            w2_scale,
+            None,
+            None,
+            w2_bias,
         ),
     )
 
@@ -909,6 +924,8 @@ def int8_w8a16_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_zp: torch.Tensor | None,
     w2_zp: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -918,8 +935,8 @@ def int8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
         _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
+        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -1270,6 +1287,11 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
+
+    # SwiGLU clamp limit. When set, backends that do not implement the clamp
+    # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
+    # cannot silently select one and drop the clamp.
+    swiglu_limit: float | None = None
 
     # This flag is used to disable the inplace optimization
     # in MoE kernels. If this flag is True then the kernel
