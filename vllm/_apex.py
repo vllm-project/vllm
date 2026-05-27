@@ -49,6 +49,41 @@ _ENABLED = os.environ.get("VLLM_APEX_HINTS", "0") == "1"
 # which lets the hook body stay traceable in vLLM's fullgraph mode.
 # Default off so the green --enforce-eager path stays the safe default.
 _USE_CUSTOM_OP = os.environ.get("VLLM_APEX_USE_CUSTOM_OP", "0") == "1"
+
+# Phase-A perf knob: when the model + KV cache fit comfortably in HBM,
+# the runtime cost of emitting hints (Python hook + ctypes + Unix socket
+# + optional sysfs write) is pure overhead — there's nothing to prefetch.
+# We let the harness signal "real tier hierarchy in play" via APEX_OFFLOAD_GB
+# (or APEX_HAS_OFFLOAD=1 for non-numeric scenarios). With the default
+# APEX_AUTO_NOOP_IF_FITS=1, registrations + counters still happen (cheap
+# and useful for verification), but the *per-forward* emit path becomes a
+# fast no-op when no offload was declared. Set
+# APEX_AUTO_NOOP_IF_FITS=0 to force-emit for benchmarking the overhead
+# itself.
+def _auto_noop_active() -> bool:
+    if os.environ.get("APEX_AUTO_NOOP_IF_FITS", "1") != "1":
+        return False
+    try:
+        offload_gb = float(os.environ.get("APEX_OFFLOAD_GB", "0") or "0")
+    except ValueError:
+        offload_gb = 0.0
+    has_offload = os.environ.get("APEX_HAS_OFFLOAD", "0") == "1"
+    return offload_gb <= 0.0 and not has_offload
+
+_EMIT_NOOP = _auto_noop_active()
+
+# Phase-A perf knob: rate-cap per-token emissions. The forward hook fires
+# 26× per token on DeepSeek-V2-Lite; that's a lot of ctypes round-trips.
+# When set to N > 0, we emit at most one hint per N microseconds across
+# the whole process — the predictor degrades gracefully (next layer's
+# prediction comes from the *last* observed top-k, not the current one),
+# but ctypes call frequency drops by orders of magnitude. 0 disables the
+# rate-cap and emits on every layer.
+try:
+    _EMIT_MIN_INTERVAL_US = int(os.environ.get("APEX_EMIT_MIN_INTERVAL_US", "0"))
+except ValueError:
+    _EMIT_MIN_INTERVAL_US = 0
+_last_emit_ns = [0]  # mutable holder so hook can update without `global`
 _lib: ctypes.CDLL | None = None
 _init_lock = threading.Lock()
 _init_done = False
@@ -116,6 +151,18 @@ def _start_stats_persistence() -> None:
 def enabled() -> bool:
     """True iff vLLM should emit APEX hints in this process."""
     return _ENABLED and not _load_failed
+
+
+def emit_active() -> bool:
+    """True iff *per-forward* hint emission should pay its cost.
+
+    Independent from :func:`enabled` — registration hints, KV-cache
+    block hints, and the diagnostic counters still run when APEX is
+    enabled but emit is "noop'd". This is the chokepoint the
+    forward-hook fast-path consults; if it returns False the
+    expert-prefetch hook returns in a couple of nanoseconds.
+    """
+    return enabled() and not _EMIT_NOOP
 
 
 def _load() -> ctypes.CDLL | None:
@@ -614,8 +661,18 @@ def _on_experts_forward(module, args, kwargs, output):
     Either way the hook body itself is small and uses only attributes
     stamped at init time, so it stays Dynamo-traceable.
     """
-    if not enabled():
+    if not emit_active():
         return
+    # Rate-cap: avoid 26× ctypes round-trips per token when most of them
+    # will predict the same set of experts. Uses time.monotonic_ns which
+    # is cheap and lock-free.
+    if _EMIT_MIN_INTERVAL_US > 0:
+        import time
+        now_ns = time.monotonic_ns()
+        last_ns = _last_emit_ns[0]
+        if last_ns and (now_ns - last_ns) < (_EMIT_MIN_INTERVAL_US * 1000):
+            return
+        _last_emit_ns[0] = now_ns
     layer_idx = getattr(module, "_apex_layer_idx", -1)
     top_k = getattr(module, "_apex_topk", 0)
     n_experts = getattr(module, "_apex_n_routed_experts", 0)
@@ -893,5 +950,12 @@ def install_hooks() -> bool:
 
     _hooks_installed = any_installed
     if any_installed:
-        logger.info("apex: runtime hooks installed")
+        logger.info(
+            "apex: runtime hooks installed (emit_active=%s, "
+            "emit_min_interval_us=%d, auto_noop=%s, offload_gb=%s)",
+            emit_active(),
+            _EMIT_MIN_INTERVAL_US,
+            _EMIT_NOOP,
+            os.environ.get("APEX_OFFLOAD_GB", "0"),
+        )
     return any_installed
