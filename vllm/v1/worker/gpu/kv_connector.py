@@ -34,7 +34,7 @@ class KVConnector:
         pass
 
     def post_forward(
-        self, scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         return None
 
@@ -74,10 +74,7 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context())
 
     def post_forward(
-        self,
-        scheduler_output: "SchedulerOutput",
-        wait_for_save: bool = True,
-        clear_metadata: bool = True,
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
@@ -86,7 +83,7 @@ class ActiveKVConnector(KVConnector):
         if wait_for_save:
             self.kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = (
-            self.kv_connector.get_finished(scheduler_output.finished_req_ids)
+            self.kv_connector.get_finished(finished_req_ids)
         )
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
@@ -94,9 +91,7 @@ class ActiveKVConnector(KVConnector):
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
-
-        if clear_metadata:
-            self.kv_connector.clear_connector_metadata()
+        self.kv_connector.clear_connector_metadata()
         return output
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
@@ -104,7 +99,8 @@ class ActiveKVConnector(KVConnector):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         self.pre_forward(scheduler_output)
-        kv_connector_output = self.post_forward(scheduler_output, wait_for_save=False)
+        finished_req_ids = scheduler_output.finished_req_ids
+        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         if kv_connector_output is None or kv_connector_output.is_empty():
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)

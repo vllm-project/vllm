@@ -1,5 +1,5 @@
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, repeat, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -183,16 +183,17 @@ fn tool_block_end_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2
 
 /// Parse a complete MiniMax M2 invoke block.
 fn invoke_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    let (name, raw_params) = seq!(
+    let (name, body) = seq!(
         _: ws0,
         _: literal(INVOKE_START),
         _: (ws1, literal("name=")),
-        attr_value,
+        partial_attr_value,
         _: literal(">"),
-        repeat(0.., terminated(parameter, ws0)),
+        take_until(0.., INVOKE_END),
         _: literal(INVOKE_END),
     )
     .parse_next(input)?;
+    let raw_params = parse_invoke_params(body)?;
 
     Ok(MinimaxM2Event::Invoke {
         name: name.trim().to_string(),
@@ -200,8 +201,14 @@ fn invoke_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
     })
 }
 
+/// Parse all parameter blocks inside a complete MiniMax M2 invoke body.
+fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<(String, String)>> {
+    let mut input = invoke_body;
+    delimited(ws0, repeat(0.., terminated(parameter, ws0)), eof).parse_next(&mut input)
+}
+
 /// Parse a MiniMax M2 parameter block.
-fn parameter(input: &mut MinimaxM2Input<'_>) -> ModalResult<(String, String)> {
+fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
     let (name, value) = seq!(
         _: literal(PARAMETER_START),
         _: (ws1, literal("name=")),
@@ -216,7 +223,17 @@ fn parameter(input: &mut MinimaxM2Input<'_>) -> ModalResult<(String, String)> {
 }
 
 /// Parse a quoted or unquoted XML attribute value.
-fn attr_value<'i>(input: &mut MinimaxM2Input<'i>) -> ModalResult<&'i str> {
+fn attr_value<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
+    alt((
+        delimited(literal("\""), take_until(1.., "\""), literal("\"")),
+        delimited(literal("'"), take_until(1.., "'"), literal("'")),
+        take_until(1.., ">"),
+    ))
+    .parse_next(input)
+}
+
+/// Parse a quoted or unquoted XML attribute value from partial streaming input.
+fn partial_attr_value<'i>(input: &mut MinimaxM2Input<'i>) -> ModalResult<&'i str> {
     alt((
         delimited(literal("\""), take_until(1.., "\""), literal("\"")),
         delimited(literal("'"), take_until(1.., "'"), literal("'")),
@@ -468,6 +485,31 @@ mod tests {
         assert_eq!(result.calls.len(), 2);
         assert_eq!(result.calls[0].tool_index, 0);
         assert_eq!(result.calls[1].tool_index, 1);
+    }
+
+    #[test]
+    fn minimax_m2_streaming_handles_template_whitespace_and_split_parameters() {
+        let text = concat!(
+            "I will call the tools.\n",
+            "<minimax:tool_call>\n",
+            "<invoke name=\"get_weather\">\n",
+            "<parameter name=\"city\">Seattle</parameter>\n",
+            "</invoke>\n",
+            "<invoke name=\"get_weather\">\n",
+            "<parameter name=\"city\">NYC</parameter>\n",
+            "</invoke>\n",
+            "</minimax:tool_call>",
+        );
+        let chunks = split_by_chars(text, 7);
+        let mut parser = MinimaxM2ToolParser::new(&test_tools());
+        let result = collect_stream(&mut parser, &chunks);
+
+        assert_eq!(result.normal_text, "I will call the tools.\n");
+        assert_eq!(result.calls.len(), 2);
+        assert_eq!(result.calls[0].tool_index, 0);
+        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls[1].tool_index, 1);
+        assert_eq!(result.calls[1].name.as_deref(), Some("get_weather"));
     }
 
     #[test]

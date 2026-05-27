@@ -655,8 +655,18 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
-    def _reset_caches(self, reset_running_requests=True) -> None:
-        self.reset_prefix_cache(reset_running_requests=reset_running_requests)
+    def _reset_caches(
+        self,
+        reset_running_requests: bool = True,
+        reset_connector: bool = True,
+    ) -> None:
+        # reset_connector=True so external connectors clear alongside
+        # local caches, matching the pause_generation(clear_cache=True)
+        # contract. No-op when no connector is configured.
+        self.reset_prefix_cache(
+            reset_running_requests=reset_running_requests,
+            reset_connector=reset_connector,
+        )
         self.reset_mm_cache()
         self.reset_encoder_cache()
 

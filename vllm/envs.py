@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -1104,6 +1105,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # MoE sorting dispatch policy for AITER fused MoE kernels.
+    #   0 = auto (default): single-pass for small batches, multi-pass
+    #       for large batches
+    #   1 = always single-pass: one kernel launch, no workspace,
+    #       may be preferred for low-concurrency decode workloads
+    #   2 = always multi-pass: can be faster for MoE-heavy models
+    #       (e.g., +2-5% on Qwen3-Next, +1.5% on DeepSeek-V3 at TP4,
+    #       see PR #39177 for benchmarks)
+    "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
