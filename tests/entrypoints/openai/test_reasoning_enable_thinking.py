@@ -9,12 +9,11 @@ is injected automatically.
 """
 
 import pytest
+from openai.types.shared import Reasoning
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from openai.types.shared import Reasoning
-
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
