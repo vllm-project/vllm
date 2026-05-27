@@ -7,7 +7,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_till, take_until};
 
 use super::utils::{parse_buffered_event, safe_text_len};
-use super::{Result, ToolCallDelta, ToolParseResult, ToolParser};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
 const TOOL_CALL_START: &str = "<|tool_call>";
@@ -51,16 +51,16 @@ impl Gemma4ToolParser {
         }
     }
 
-    fn apply_event(&mut self, event: Gemma4Event, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: Gemma4Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             Gemma4Event::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             Gemma4Event::ToolCall { name, args } => {
                 let arguments = serde_json::to_string(&args)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index: self.emitted_tool_count,
                     name: Some(name),
                     arguments,
@@ -71,9 +71,9 @@ impl Gemma4ToolParser {
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.emitted_tool_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 }
 
@@ -89,33 +89,35 @@ impl ToolParser for Gemma4ToolParser {
         true
     }
 
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) =
             parse_buffered_event(&self.buffer, parse_next_gemma4_event)?
         {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
 
         if !self.buffer.is_empty() {
             if self.buffer.starts_with(TOOL_CALL_START) {
-                self.reset();
                 return Err(parsing_failed!("incomplete Gemma4 tool call"));
             }
-            result.normal_text.push_str(&self.buffer);
+            output.normal_text.push_str(&self.buffer);
         }
 
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
+    }
+
+    fn reset(&mut self) -> String {
+        Gemma4ToolParser::reset(self)
     }
 }
 
@@ -285,10 +287,10 @@ mod tests {
     use winnow::stream::Partial;
 
     use super::{
-        Gemma4ToolParser, ToolCallDelta, ToolParseResult, ToolParser, gemma4_args,
+        Gemma4ToolParser, ToolCallDelta, ToolParser, ToolParserOutput, gemma4_args,
         gemma4_array_content,
     };
-    use crate::Tool;
+    use crate::{Tool, ToolParserTestExt as _};
 
     fn parse_gemma4_args(args: &str) -> super::Result<serde_json::Map<String, Value>> {
         let mut input = Partial::new(args);
@@ -367,18 +369,18 @@ mod tests {
         ]
     }
 
-    fn collect_stream(chunks: &[&str]) -> ToolParseResult {
+    fn collect_stream(chunks: &[&str]) -> ToolParserOutput {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         for chunk in chunks {
-            result.append(parser.push(chunk).unwrap());
+            output.append(parser.parse_chunk(chunk).unwrap());
         }
-        result.append(parser.finish().unwrap());
-        result.coalesce_calls()
+        output.append(parser.finish().unwrap());
+        output.coalesce_calls()
     }
 
-    fn first_call(result: &ToolParseResult) -> &ToolCallDelta {
-        result.calls.first().expect("expected one tool call")
+    fn first_call(output: &ToolParserOutput) -> &ToolCallDelta {
+        output.calls.first().expect("expected one tool call")
     }
 
     #[test]
@@ -416,15 +418,15 @@ mod tests {
     #[test]
     fn gemma4_parse_complete_extracts_single_tool_call() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete("<|tool_call>call:get_weather{location:<|\"|>London<|\"|>}<tool_call|>")
             .unwrap();
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "London" })
         );
     }
@@ -441,7 +443,7 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_basic_single_tool_call() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:get_weather{",
             "location:<|\"|>Paris",
@@ -450,17 +452,17 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "Paris, France" })
         );
     }
 
     #[test]
     fn gemma4_streaming_text_before_and_after_tool_call() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "Let me check ",
             "the weather. ",
             "<|tool_call>",
@@ -470,10 +472,10 @@ mod tests {
             "div>",
         ]);
 
-        assert_eq!(result.normal_text, "Let me check the weather. <div>");
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text, "Let me check the weather. <div>");
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "London" })
         );
     }
@@ -481,68 +483,68 @@ mod tests {
     #[test]
     fn gemma4_streaming_waits_for_complete_tool_call() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
 
         for chunk in [
             "<|tool_call>",
             "call:get_weather{",
             "location:<|\"|>Paris<|\"|>}",
         ] {
-            result.append(parser.push(chunk).unwrap());
-            assert!(result.calls.is_empty());
+            output.append(parser.parse_chunk(chunk).unwrap());
+            assert!(output.calls.is_empty());
         }
 
-        result.append(parser.push("<tool_call|>").unwrap());
-        let result = result.coalesce_calls();
+        output.append(parser.parse_chunk("<tool_call|>").unwrap());
+        let output = output.coalesce_calls();
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "Paris" })
         );
     }
 
     #[test]
     fn gemma4_streaming_handles_boolean_split_across_chunks() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:search{input:{all:tru",
             "e}}",
             "<tool_call|>",
         ]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("search"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("search"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "input": { "all": true } })
         );
     }
 
     #[test]
     fn gemma4_streaming_handles_false_split_across_chunks() {
-        let result = collect_stream(&["<|tool_call>", "call:set{flag:fals", "e}", "<tool_call|>"]);
+        let output = collect_stream(&["<|tool_call>", "call:set{flag:fals", "e}", "<tool_call|>"]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("set"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("set"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "flag": false })
         );
     }
 
     #[test]
     fn gemma4_streaming_handles_number_split_across_chunks() {
-        let result = collect_stream(&["<|tool_call>", "call:set{count:4", "2}", "<tool_call|>"]);
+        let output = collect_stream(&["<|tool_call>", "call:set{count:4", "2}", "<tool_call|>"]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("set"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("set"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "count": 42 })
         );
     }
 
     #[test]
     fn gemma4_streaming_handles_split_string_delimiter() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:todowrite{",
             "content:<|\"|>Buy milk<|",
@@ -550,17 +552,17 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("todowrite"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("todowrite"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "content": "Buy milk" })
         );
-        assert!(!first_call(&result).arguments.contains("<|"));
+        assert!(!first_call(&output).arguments.contains("<|"));
     }
 
     #[test]
     fn gemma4_streaming_handles_end_marker_literal_inside_string() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:todowrite{",
             "content:<|\"|>literal }<tool_call|> inside",
@@ -568,16 +570,16 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("todowrite"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("todowrite"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "content": "literal }<tool_call|> inside" })
         );
     }
 
     #[test]
     fn gemma4_streaming_handles_html_argument_without_duplication() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:write_file{",
             "path:<|\"|>index.html<|\"|>,",
@@ -590,9 +592,9 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("write_file"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("write_file"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({
                 "path": "index.html",
                 "content": "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width\">\n",
@@ -602,7 +604,7 @@ mod tests {
 
     #[test]
     fn gemma4_streaming_trailing_bare_bool_is_not_duplicated() {
-        let result = collect_stream(&[
+        let output = collect_stream(&[
             "<|tool_call>",
             "call:Edit{",
             "file_path:<|\"|>src/env.py<|\"|>,",
@@ -613,9 +615,9 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("Edit"));
+        assert_eq!(first_call(&output).name.as_deref(), Some("Edit"));
         assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({
                 "file_path": "src/env.py",
                 "old_string": "old_val",
@@ -624,7 +626,7 @@ mod tests {
             })
         );
         assert_eq!(
-            first_call(&result).arguments.matches("replace_all").count(),
+            first_call(&output).arguments.matches("replace_all").count(),
             1
         );
     }
@@ -632,18 +634,18 @@ mod tests {
     #[test]
     fn gemma4_finish_flushes_partial_start_marker_as_text() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let mut result = parser.push("<").unwrap();
-        result.append(parser.finish().unwrap());
+        let mut output = parser.parse_chunk("<").unwrap();
+        output.append(parser.finish().unwrap());
 
-        assert_eq!(result.normal_text, "<");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "<");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn gemma4_finish_rejects_complete_args_without_end_marker() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
         for chunk in ["<|tool_call>", "call:get_status{}"] {
-            parser.push(chunk).unwrap();
+            parser.parse_chunk(chunk).unwrap();
         }
 
         let error = parser.finish().unwrap_err();
