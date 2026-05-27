@@ -154,6 +154,30 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return_softmax_lse=return_softmax_lse,
         )
 
+    def run_prefill_new_tokens_pcp_chunk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=return_softmax_lse,
+        )
+
     def run_prefill_context_chunk(
         self,
         chunk_idx: int,
