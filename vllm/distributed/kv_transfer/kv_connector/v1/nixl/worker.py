@@ -207,9 +207,10 @@ class NixlConnectorWorker:
                         )
                         handle.append((addr + fa_offset, chunk, dev))
                     else:
-                        # GQA-deduped rank: no FA transfer issued (empty
-                        # block_ids at transfer time), but NIXL requires
-                        # a valid descriptor for handle registration.
+                        # GQA-deduped rank: no FA transfer issued for this
+                        # rank (empty block_ids at transfer time), but NIXL
+                        # requires a registered descriptor. Offset 0 is safe
+                        # because this descriptor is never used at transfer.
                         handle.append((addr, chunk, dev))
                 else:
                     # Assume SSM always sharded
@@ -1178,6 +1179,7 @@ class NixlConnectorWorker:
         # D_TP >= P_TP: single slice with non-zero offset.
         # P_TP > D_TP: all slices read from offset 0.
         fa_slice = next(iter(fa_slices.values()))
+        assert num_attn_reads == 1 or fa_slice.remote_read_offset == 0
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):

@@ -133,7 +133,8 @@ def _make_mock_worker_for_splits(
 
 class TestBuildSrcSplitHandles:
     @pytest.mark.parametrize("remote_tp_size", [2, 4])
-    def test_build_src_split_handles(self, remote_tp_size):
+    def test_split_shape(self, remote_tp_size):
+        """Each split has correct number of descs with correct chunk size."""
         tp_rank = 0
         tp_size = 1
         total_num_kv_heads = 8
@@ -162,6 +163,51 @@ class TestBuildSrcSplitHandles:
             assert len(handle) == len(src_blocks_data)
             for _, length, _ in handle:
                 assert length == 1024 // remote_tp_size
+
+    @pytest.mark.parametrize(
+        "remote_tp_size,total_num_kv_heads",
+        [(2, 4), (2, 8), (4, 8)],
+    )
+    def test_fa_offsets_p_gt_d(self, remote_tp_size, total_num_kv_heads):
+        """Verify concrete FA offsets for multi-head P>D (the previously buggy path).
+
+        With local_tp=1, the full local block covers all heads. Each remote
+        rank's slice should land at the correct byte offset proportional to
+        its position in the local tensor.
+        """
+        tp_rank = 0
+        tp_size = 1
+        engine_id = "remote_0"
+        local_block_len = 1024
+
+        fa_spec = _make_fa_spec(num_kv_heads=total_num_kv_heads // tp_size)
+        fa_slices = fa_spec.get_tp_transfer_slices(
+            tp_rank, tp_size, remote_tp_size, total_num_kv_heads
+        )
+        source_ranks = _source_ranks_from_slices(fa_slices)
+
+        worker = _make_mock_worker_for_splits(
+            group_specs=[fa_spec],
+            tp_mappings=(fa_slices,),
+            source_ranks=source_ranks,
+            engine_id=engine_id,
+        )
+        base_addr = 0x4000
+        src_blocks_data = [(base_addr, local_block_len, 0)]
+        splits = list(worker._build_local_splits(engine_id, src_blocks_data, 1))
+
+        assert len(splits) == remote_tp_size
+        chunk = local_block_len // remote_tp_size
+        for idx, (rank, sl) in enumerate(sorted(fa_slices.items())):
+            expected_offset = (
+                sl.local_write_offset * local_block_len // len(sl.local_shard)
+            )
+            # Offsets should tile the local block without overlap
+            assert expected_offset == idx * chunk
+            addr, length, dev = splits[idx][0]
+            assert addr == base_addr + expected_offset
+            assert length == chunk
+            assert dev == 0
 
 
 class TestMambaPlanSplitHandles:
