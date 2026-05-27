@@ -117,8 +117,11 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # V3.2: 576 (512 NoPE + 64 RoPE); DeepseekV4: 512 (448 NoPE + 64 RoPE)
-        return [512, 576]
+        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
+        # DeepSeek V4 uses 448 NoPE + 64 RoPE = 512 and overrides this in
+        # vllm/models/deepseek_v4/nvidia/flashmla.py:
+        # DeepseekV4FlashMLASparseBackend.get_supported_head_sizes.
+        return [576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -143,31 +146,6 @@ class FlashMLASparseBackend(AttentionBackend):
         if cache_dtype_str == "fp8_ds_mla":
             # V3.2 main MLA: 656-byte custom storage format. See module docstring.
             return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
-
-
-class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "V4_FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
         else:
             return (num_blocks, block_size, head_size)
 

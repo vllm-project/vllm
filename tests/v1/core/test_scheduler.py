@@ -774,6 +774,27 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+def test_reset_connector_cache_no_connector_is_no_op_success():
+    """``reset_connector_cache`` must return True when no connector is
+    configured.
+
+    Without this, ``reset_prefix_cache(reset_connector=True)`` returns
+    ``False`` on every engine that doesn't have a KV connector configured —
+    even when the local prefix cache reset succeeded — and any caller that
+    interprets the return value as "did the reset I asked for succeed?"
+    sees a spurious failure.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    assert scheduler.connector is None
+
+    # No-connector reset is treated as success.
+    assert scheduler.reset_connector_cache() is True
+
+    # End-to-end: reset_prefix_cache(reset_connector=True) on an idle
+    # scheduler succeeds with or without a connector.
+    assert scheduler.reset_prefix_cache(reset_connector=True) is True
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
@@ -3926,6 +3947,45 @@ def test_abort_request_finished_recving():
     # verify request is deleted
     assert request.request_id not in scheduler.requests
     assert not scheduler.finished_recving_kv_req_ids
+
+
+def test_delayed_kv_connector_free_keeps_scheduler_active():
+    scheduler = create_scheduler(use_kv_connector=True)
+    queued_request, request = create_requests(
+        num_requests=2, req_ids=["queued", "finished"]
+    )
+    scheduler.add_request(queued_request)
+
+    assert not scheduler.has_finished_requests()
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    scheduler.requests[request.request_id] = request
+    scheduler.finished_req_ids = set()
+
+    assert scheduler.has_finished_requests()
+    assert scheduler.has_requests()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.has_finished_requests()
 
 
 # ==============================================================================
