@@ -488,6 +488,21 @@ class Gemma4Attention(nn.Module):
         # V norm: no learnable scale (pure normalization only)
         self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
+        if self.is_kv_shared_layer:
+            # k_norm is never executed in forward() for KV-shared layers —
+            # they borrow K/V from an earlier layer. Register a hook so any
+            # future code path that accidentally calls k_norm here raises
+            # immediately rather than silently using wrong weights (the weight
+            # may be 1.0 for SFT checkpoints that omit it).
+            self.k_norm.register_forward_pre_hook(
+                lambda m, args: (_ for _ in ()).throw(
+                    AssertionError(
+                        "k_norm must not execute on KV-shared layers; "
+                        "k_norm.weight may be 1.0 (SFT checkpoint fallback)"
+                    )
+                )
+            )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
