@@ -244,10 +244,23 @@ def reshape_kv_cache(
     For ``AttentionSpec``, the raw int8 buffer is reinterpreted as
     ``spec.dtype``, viewed with the full 5D physical layout from
     ``layout.stride_order``, then permuted back to the logical
-    ``[L, B, H, N, C]`` shape.  ``result[i]`` gives slot *i*'s 4D view.
+    ``[L, B, H, N, C]`` shape.  ``result[i]`` gives slot *i*'s 4D
+    logical view ``(B, H, N, C)``.
 
-    For non-attention specs (e.g. ``MambaSpec``), returns the raw buffer
-    for each layer slot — the backend is responsible for interpreting it.
+    For non-``AttentionSpec`` specs (e.g. ``MambaSpec``), this function
+    currently returns raw ``int8`` byte slices — the buffer is split
+    into ``num_layer_slots`` equal-sized regions with no dtype cast and
+    no per-state reshape. This does NOT match what Mamba kernels expect
+    (a list of typed (conv, ssm, ...) state tensors, one per entry in
+    ``MambaSpec.shapes``/``dtypes``); the legacy ``gpu_model_runner.py``
+    path builds those typed views directly via ``torch.as_strided`` and
+    bypasses this function.
+
+    TODO(RFC #42082, part 2 — vllm-project/vllm#43151): extend this
+    path to produce the same typed per-state tensors that the legacy
+    path builds, so the new ``gpu/attn_utils.py`` allocation path can
+    serve Mamba layers without each backend having to reinterpret the
+    raw buffer itself.
     """
     if not isinstance(spec, AttentionSpec):
         slot_size = raw.numel() // num_layer_slots
