@@ -184,20 +184,21 @@ class XpuMemAllocator:
 
             backup_bytes += size_in_bytes
             device, _, _, _ = data.handle
-            cpu_backup = torch.empty(
+            cpu_backup_tensor = torch.empty(
                 size_in_bytes,
                 dtype=torch.uint8,
                 device="cpu",
                 pin_memory=is_pin_memory_available(),
             )
+            cpu_ptr = cpu_backup_tensor.data_ptr()
             _xpu_memcpy_sync(
-                cpu_backup.data_ptr(),
+                cpu_ptr,
                 ptr,
                 size_in_bytes,
                 MEMCPY_DEVICE_TO_HOST,
                 device,
             )
-            data.cpu_backup_tensor = cpu_backup
+            data.cpu_backup_tensor = cpu_backup_tensor
 
             unmap_and_release(data.handle)
 
