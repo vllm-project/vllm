@@ -1185,6 +1185,100 @@ def _fused_pcp_qkv_select_kernel(
                 )
 
 
+def _pcp_qkv_select_torch_fallback(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    pcp_world_size: int,
+    pcp_rank: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Pure-PyTorch equivalent of fused_pcp_qkv_select.
+
+    Slower than the Triton kernel (one cat per output per request) but
+    backend-agnostic — used as a fallback when the Triton kernel hits
+    Blackwell-specific masked-OOB-pointer trapping inside the kernel.
+
+    Semantics (must match the Triton kernel's outputs exactly):
+
+      For each request r with cumulative local Q start q_start[r] and
+      per-rank chunk = pcp_tokens[r] // 2:
+
+        q_head_parts[r] = q[q_start[r]              : q_start[r] +     chunk]
+        q_tail_parts[r] = q[q_start[r] +     chunk : q_start[r] + 2 * chunk]
+
+      For K/V (which are PCP-allgathered, so kv_start[r] = q_start[r] * ws):
+
+        k_head_parts[r] = k[kv_start[r] : kv_start[r] + (pcp_rank + 1) * chunk]
+        k_tail_parts[r] = k[kv_start[r] : kv_start[r] + (2*ws - pcp_rank) * chunk]
+        v_head_parts[r] = v[kv_start[r] : kv_start[r] + (pcp_rank + 1) * chunk]
+        v_tail_parts[r] = v[kv_start[r] : kv_start[r] + (2*ws - pcp_rank) * chunk]
+
+      Each part is concatenated across requests in request order.
+
+    Notes:
+      - q_start values come from `query_start_loc` which is a GPU tensor;
+        we move it to the CPU once to enumerate per-request slices. This
+        is a single small sync (num_reqs+1 int32 values) per call.
+      - The output buffer sizes match the Triton kernel's allocations:
+        q_head/q_tail are q.size(0)//2 rows;
+        k_head/v_head are q.size(0)//2 * (pcp_rank + 1) rows;
+        k_tail/v_tail are q.size(0)//2 * (2 * pcp_world_size - pcp_rank) rows.
+    """
+    starts_cpu = query_start_loc.cpu().tolist()
+    num_reqs = len(starts_cpu) - 1
+    ws = pcp_world_size
+
+    q_head_parts: list[torch.Tensor] = []
+    q_tail_parts: list[torch.Tensor] = []
+    k_head_parts: list[torch.Tensor] = []
+    k_tail_parts: list[torch.Tensor] = []
+    v_head_parts: list[torch.Tensor] = []
+    v_tail_parts: list[torch.Tensor] = []
+
+    for r in range(num_reqs):
+        q_start = int(starts_cpu[r])
+        q_end = int(starts_cpu[r + 1])
+        chunk = (q_end - q_start) // 2
+        if chunk == 0:
+            # Empty request slot (graph padding etc.) — emit zero-sized
+            # placeholders so cat behaves correctly.
+            continue
+        q_head_parts.append(q[q_start : q_start + chunk])
+        q_tail_parts.append(q[q_start + chunk : q_start + 2 * chunk])
+        kv_start = q_start * ws
+        head_kv_end = kv_start + (pcp_rank + 1) * chunk
+        tail_kv_end = kv_start + (2 * ws - pcp_rank) * chunk
+        k_head_parts.append(k[kv_start:head_kv_end])
+        k_tail_parts.append(k[kv_start:tail_kv_end])
+        v_head_parts.append(v[kv_start:head_kv_end])
+        v_tail_parts.append(v[kv_start:tail_kv_end])
+
+    if not q_head_parts:
+        # Edge case: every slot was zero-size. Return empty tensors that
+        # the caller can still feed through FA (FA will no-op on Sq=0).
+        empty_q = q.new_empty((0,) + q.shape[1:])
+        empty_k = k.new_empty((0,) + k.shape[1:])
+        empty_v = v.new_empty((0,) + v.shape[1:])
+        return empty_q, empty_k, empty_v, empty_q, empty_k, empty_v
+
+    q_head = torch.cat(q_head_parts, dim=0)
+    q_tail = torch.cat(q_tail_parts, dim=0)
+    k_head = torch.cat(k_head_parts, dim=0)
+    k_tail = torch.cat(k_tail_parts, dim=0)
+    v_head = torch.cat(v_head_parts, dim=0)
+    v_tail = torch.cat(v_tail_parts, dim=0)
+
+    return q_head, k_head, v_head, q_tail, k_tail, v_tail
+
+
 def fused_pcp_qkv_select(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1198,7 +1292,17 @@ def fused_pcp_qkv_select(
     Instead of calling `torch.index_select` multiple times, this function
     fuses the selection for Q, K, and V into a single kernel to reduce
     kernel launch overhead.
+
+    Set ``VLLM_PCP_QKV_SELECT_BACKEND=torch`` to fall back to the
+    backend-agnostic ``_pcp_qkv_select_torch_fallback`` (slower but
+    avoids the Triton kernel — useful on Blackwell where the kernel's
+    masked-OOB-pointer pattern trips cudaErrorIllegalAddress).
     """
+    import os
+    if os.environ.get("VLLM_PCP_QKV_SELECT_BACKEND", "triton") == "torch":
+        return _pcp_qkv_select_torch_fallback(
+            q, k, v, query_start_loc, pcp_world_size, pcp_rank
+        )
     q_head = torch.empty(
         (q.size(0) // 2,) + q.shape[1:], device=q.device, dtype=q.dtype
     )
