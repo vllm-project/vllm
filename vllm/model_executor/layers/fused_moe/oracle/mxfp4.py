@@ -622,16 +622,15 @@ def select_deepseek_v4_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
-    # DeepSeek-V4 on ROCm is more accurate with the unfused Triton MXFP4 path
-    # than the default AITER path. Prefer Triton-unfused for this routing mode,
-    # while keeping AITER as a fallback if Triton-unfused rejects the config.
+    # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
+    # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
     if (
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
-            Mxfp4MoeBackend.TRITON_UNFUSED,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
     else:
         priority_backends = _get_priority_backends()
@@ -1421,7 +1420,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
