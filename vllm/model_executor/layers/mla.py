@@ -324,8 +324,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
-        k_pe = k_pe.squeeze(2).squeeze(0)
-
         attn_out = self.mla_attn(
             q,
             kv_c_normed,

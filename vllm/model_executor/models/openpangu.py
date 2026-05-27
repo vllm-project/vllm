@@ -481,8 +481,8 @@ class PanguIndexer(_DeepseekIndexer):
             q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
             k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
-            q = torch.cat([q_pe, q_nope], dim=-1)
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        k = torch.cat([k_pe.reshape(-1, self.rope_dim), k_nope], dim=-1)
 
         q = q.view(-1, self.head_dim)
         q_fp8, q_scale = per_token_group_quant_fp8(

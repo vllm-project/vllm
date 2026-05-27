@@ -2025,8 +2025,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         else:
             # Fallback: Direct copies with efficient broadcasting
             k[..., : k_nope.shape[-1]] = k_nope
-            if k_pe.dim() == k_nope.dim() - 1:
-                k_pe = k_pe.unsqueeze(-2)  # [T, D] -> [T, 1, D]
             k[..., k_nope.shape[-1] :] = k_pe
         return k
 
