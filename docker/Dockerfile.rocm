@@ -135,13 +135,18 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
+ENV CARGO_NET_RETRY=10
+ENV RUSTUP_MAX_RETRIES=10
 
-# Build the release binary. Cache cargo registry/git, and copy the binary out
-# so it persists into the image layer for later COPY --from=rust-build.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+# Build the release binary. Cargo's registry/git caches can be written by
+# concurrent BuildKit jobs on shared workers, so lock those cache mounts while
+# keeping the cache benefit. Copy the binary out so it persists into the image
+# layer for later COPY --from=rust-build.
+RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
-    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh
+    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh \
+    && test -x /tmp/vllm-rs
 
 # -----------------------
 # vLLM build stages
@@ -495,6 +500,7 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 # ROCm and torch version mismatch) for tests with datasets package
 COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
 RUN bash /tmp/install_torchcodec.sh \
+    && uv pip check --system \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -572,7 +578,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    uv pip install --system /rixl_install/*.whl
+    uv pip install --system /rixl_install/*.whl \
+    && uv pip check --system
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE

@@ -35,25 +35,9 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-cleanup_docker() {
-  # Get Docker's root directory
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  if [ -z "$docker_root" ]; then
-    echo "Failed to determine Docker root directory."
-    exit 1
-  fi
-  echo "Docker root directory: $docker_root"
-
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
-  threshold=70
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
-  else
-    echo "Disk usage is below $threshold%. No cleanup needed."
-  fi
+report_docker_usage() {
+  echo "--- Docker usage"
+  docker system df || true
 }
 
 cleanup_network() {
@@ -89,6 +73,20 @@ handle_pytest_exit() {
     exit 0
   fi
   exit "$exit_code"
+}
+
+configure_image_validation_command() {
+  echo "--- Image validation setup"
+  docker image inspect "${image_name}" \
+    --format 'Image ID: {{.Id}}
+Repo digests: {{json .RepoDigests}}
+Created: {{.Created}}
+Size: {{.Size}}' || true
+  docker info --format 'Docker driver: {{.Driver}}; containers: {{.Containers}}; images: {{.Images}}' || true
+  docker system df || true
+
+  IMAGE_VALIDATION_COMMAND="(cd /tmp && if command -v uv >/dev/null 2>&1; then uv --version && uv pip check --system; else python3 -m pip --version && python3 -m pip check; fi)"
+  echo "Image validation command: ${IMAGE_VALIDATION_COMMAND}"
 }
 
 ###############################################################################
@@ -254,19 +252,28 @@ re_quote_pytest_markers() {
 echo "--- ROCm info"
 rocminfo
 
-# --- Docker housekeeping ---
-cleanup_docker
+# --- Docker status ---
+report_docker_usage
 
 # --- Pull test image ---
 echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
+configure_image_validation_command
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  # docker run uses --rm, so the container is normally already gone when the
+  # EXIT trap runs. Cleanup is best-effort and must not affect the test result.
+  docker rm -f "${container_name}" >/dev/null 2>&1 || true
 }
-trap remove_docker_container EXIT
+
+on_exit() {
+  local exit_code=$?
+  remove_docker_container
+  exit "$exit_code"
+}
+trap on_exit EXIT
 
 # --- Prepare commands ---
 echo "--- Running container"
@@ -312,6 +319,15 @@ else
   echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
 fi
 
+commands_is_multi_node=false
+if is_multi_node "$commands"; then
+  commands_is_multi_node=true
+fi
+
+if [[ "$commands_is_multi_node" == "false" && "${IMAGE_VALIDATION_COMMAND}" != "true" ]]; then
+  commands="${IMAGE_VALIDATION_COMMAND} && ${commands}"
+fi
+
 echo "Final commands: $commands"
 
 MYPYTHONPATH=".."
@@ -336,7 +352,7 @@ else
 fi
 
 # --- Route: multi-node vs single-node ---
-if is_multi_node "$commands"; then
+if [[ "$commands_is_multi_node" == "true" ]]; then
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
