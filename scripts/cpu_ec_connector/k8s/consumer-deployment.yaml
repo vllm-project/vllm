@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-ec-consumer        # CONFIGURE: run_id suffix added by driver
+  namespace: default             # CONFIGURE: set to your namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-ec-test
+      role: consumer
+      run-id: ec-test-placeholder  # CONFIGURE: set by driver per run
+  template:
+    metadata:
+      labels:
+        app: vllm-ec-test
+        role: consumer
+        run-id: ec-test-placeholder  # CONFIGURE: set by driver per run
+    spec:
+      securityContext:
+        runAsUser: 0
+      # OPTIONAL: uncomment for cross-node scheduling (--different-nodes flag)
+      # affinity:
+      #   podAntiAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #     - labelSelector:
+      #         matchLabels:
+      #           app: vllm-ec-test
+      #       topologyKey: kubernetes.io/hostname
+      containers:
+      - name: vllm
+        image: docker.io/vllm/vllm-openai:latest  # CONFIGURE: vLLM container image
+        imagePullPolicy: Always
+        workingDir: /vllm-workspace
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            #!/bin/bash
+            set -e
+
+            echo "[setup] apt-get update"
+            apt-get update -q
+            apt-get install -y curl git vim
+
+            echo "[setup] clone vllm fork"
+            cd /vllm-workspace
+            git clone https://github.com/omerpaz95/vllm.git
+            cd vllm
+            git checkout cpu_nixl_ec_connector
+
+            echo "[setup] install uv"
+            cd /vllm-workspace
+            mkdir -p /tmp/tmp /tmp/cache /tmp/ray
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+            echo "[setup] create venv and install vllm"
+            uv venv venv-vllm
+            source venv-vllm/bin/activate
+            cd vllm
+            VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+            uv pip install nixl pytest tblib
+
+            echo "[start] vllm server (consumer)"
+            cd /vllm-workspace
+            source venv-vllm/bin/activate
+            exec python -m vllm.entrypoints.cli.main serve \
+              "$VLLM_MODEL" \
+              --port="$VLLM_PORT" \
+              --dtype=bfloat16 \
+              --max-model-len=32768 \
+              --enforce-eager \
+              --gpu-memory-utilization="$GPU_MEMORY_UTILIZATION" \
+              --ec-transfer-config="$EC_TRANSFER_CONFIG"
+        env:
+        - name: VLLM_MODEL
+          value: "Qwen/Qwen2.5-VL-3B-Instruct"    # CONFIGURE: set by driver
+        - name: VLLM_PORT
+          value: "8002"                             # CONFIGURE: set by driver
+        - name: GPU_MEMORY_UTILIZATION
+          value: "0.5"                              # CONFIGURE: set by driver
+        - name: EC_TRANSFER_CONFIG
+          value: '{"ec_connector":"ECCPUConnector","ec_role":"ec_consumer","engine_id":"ec-consumer-0","ec_connector_extra_config":{"num_ec_blocks":80000}}'  # CONFIGURE: set by driver
+        - name: EC_TEST_ROLE
+          value: consumer
+        - name: PYTHONPATH
+          value: /sitecustomize
+        - name: VLLM_SERVER_DEV_MODE
+          value: "1"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-d-hf-token                       # CONFIGURE: secret name
+              key: HF_TOKEN
+        - name: HF_HOME
+          value: /vllm-workspace
+        - name: HOME
+          value: /vllm-workspace
+        - name: RAY_TMPDIR
+          value: /tmp/ray
+        - name: XDG_CACHE_HOME
+          value: /tmp/cache
+        - name: XDG_CONFIG_HOME
+          value: /tmp/cache
+        - name: TRITON_CACHE_DIR
+          value: /tmp/cache
+        - name: UCX_LOG_LEVEL
+          value: trace_data
+        - name: UCX_TLS
+          value: tcp,sm
+        ports:
+        - containerPort: 8002                      # CONFIGURE: matches VLLM_PORT
+        resources:
+          limits:
+            cpu: "128"
+            nvidia.com/gpu: "1"                    # CONFIGURE: GPU count
+          requests:
+            cpu: "12"
+            memory: 150Gi
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /workspace
+          name: workspace
+        - mountPath: /sitecustomize
+          name: sitecustomize
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 100Gi
+      - name: workspace
+        emptyDir: {}
+      - name: sitecustomize
+        configMap:
+          name: ec-test-sitecustomize              # CONFIGURE: run_id suffix added by driver

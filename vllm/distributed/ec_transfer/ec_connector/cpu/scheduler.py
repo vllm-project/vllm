@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import zmq
 from pybase64 import b64decode, b64encode
+from zmq.utils.monitor import recv_monitor_message
 
 from vllm import envs
 from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
@@ -60,6 +61,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     ConsumerPeer,
+    PeerAddr,
     ProducerPeer,
     build_block_descs,
     deserialize_mem_descriptor,
@@ -83,6 +85,11 @@ logger = init_logger(__name__)
 
 # NIXL memory-type tag for host DRAM-backed regions.
 _NIXL_DRAM = "DRAM"
+
+# ZMTP heartbeat for consumer DEALERs.
+_HEARTBEAT_IVL_MS = 2000
+_HEARTBEAT_TIMEOUT_MS = 4000
+_HEARTBEAT_TTL_MS = 8000  # 2 × TIMEOUT
 
 
 class ECCPUScheduler:
@@ -234,7 +241,11 @@ class ECCPUScheduler:
 
         # ----- Consumer-only --------------------------------------------
         if self._is_consumer:
-            self._remote_encodings: dict[str, list[int] | None] = {}
+            # Value is (block_indices, peer_key) while the XferReq is in flight,
+            # or None once tombstoned (NACK or peer down).
+            self._remote_encodings: dict[
+                str, tuple[list[int], tuple[str, int]] | None
+            ] = {}
             self._ready: set[str] = set()
             # Completed transfers whose mmap blocks are still held as a local
             # cache. Subsequent requests for the same mm_hash are re-served
@@ -667,7 +678,10 @@ class ECCPUScheduler:
             raise
         # Only record in-flight after the XferReq has left the socket —
         # an entry in `_remote_encodings` commits us to waiting for an ack.
-        self._remote_encodings[mm_hash] = indices
+        host = info["peer_host"]
+        port = int(info["peer_port"])
+        peer_addr: PeerAddr = (host, port)
+        self._remote_encodings[mm_hash] = (indices, peer_addr)
 
     def _drain_acks(self) -> None:
         """Non-blocking drain of XferAcks from every open DEALER.
@@ -676,6 +690,9 @@ class ECCPUScheduler:
         strips the identity, so we receive `[b"", payload]` and take the
         last frame.
         """
+        for addr in self._poll_dead_peers():
+            self.on_peer_down(addr)
+
         for peer in self._peer_pool.values():
             while True:
                 try:
@@ -699,10 +716,11 @@ class ECCPUScheduler:
                     continue
                 if ack.mm_hash not in self._remote_encodings:
                     continue
-                indices = self._remote_encodings[ack.mm_hash]
-                if indices is None:
-                    # Already tombstoned by a prior NACK; ignore duplicate.
+                entry = self._remote_encodings[ack.mm_hash]
+                if entry is None:
+                    # Already tombstoned by a prior NACK or peer-down; ignore.
                     continue
+                indices, _ = entry
                 if ack.ok:
                     self._ready.add(ack.mm_hash)
                 else:
@@ -726,19 +744,7 @@ class ECCPUScheduler:
         if existing is not None and existing.nixl_metadata_bytes == metadata:
             return existing
         if existing is not None:
-            try:
-                self._nixl.remove_remote_agent(existing.nixl_agent_name)
-            except Exception:
-                logger.warning(
-                    "ec: remove_remote_agent failed for %s",
-                    existing.nixl_agent_name,
-                    exc_info=True,
-                )
-            try:
-                existing.zmq_dealer.close(linger=0)
-            except Exception:
-                logger.warning("ec: close stale DEALER failed", exc_info=True)
-            self._peer_pool.pop(key, None)
+            self.on_peer_down(key)
 
         dealer = make_zmq_socket(
             ctx=self._zmq_ctx,
@@ -746,14 +752,98 @@ class ECCPUScheduler:
             socket_type=zmq.DEALER,
             bind=False,
         )
-        agent_name = self._nixl.add_remote_agent(metadata)
+        dealer.setsockopt(zmq.HEARTBEAT_IVL, _HEARTBEAT_IVL_MS)
+        dealer.setsockopt(zmq.HEARTBEAT_TIMEOUT, _HEARTBEAT_TIMEOUT_MS)
+        dealer.setsockopt(zmq.HEARTBEAT_TTL, _HEARTBEAT_TTL_MS)
+
+        monitor_addr = f"inproc://ec-peer-mon-{host}-{port}"
+        dealer.monitor(monitor_addr, zmq.EVENT_DISCONNECTED)
+        mon = self._zmq_ctx.socket(zmq.PAIR)
+        mon.connect(monitor_addr)
+
+        try:
+            agent_name = self._nixl.add_remote_agent(metadata)
+        except Exception as exc:
+            logger.exception(
+                "ec: add_remote_agent failed for peer %s: %s (type=%s)",
+                key,
+                exc,
+                type(exc).__name__,
+            )
+            dealer.close(linger=0)
+            mon.close(linger=0)
+            raise
         entry = ConsumerPeer(
             zmq_dealer=dealer,
             nixl_agent_name=agent_name,
             nixl_metadata_bytes=metadata,
+            zmq_monitor=mon,
         )
         self._peer_pool[key] = entry
         return entry
+
+    def _poll_dead_peers(self) -> list[PeerAddr]:
+        dead: list[PeerAddr] = []
+        for addr, peer in list(self._peer_pool.items()):
+            if peer.zmq_monitor is None:
+                continue
+            try:
+                while True:
+                    evt = recv_monitor_message(peer.zmq_monitor, flags=zmq.NOBLOCK)
+                    if evt["event"] == zmq.EVENT_DISCONNECTED:
+                        dead.append(addr)
+                        break
+            except zmq.Again:
+                pass
+            except Exception:
+                logger.warning(
+                    "ec: monitor poll failed for addr=%s", addr, exc_info=True
+                )
+        return dead
+
+    def on_peer_down(self, addr: PeerAddr) -> None:
+        peer = self._peer_pool.pop(addr, None)
+        if peer is None:
+            return
+        if peer.zmq_monitor is not None:
+            try:
+                peer.zmq_dealer.disable_monitor()
+            except Exception:
+                logger.warning(
+                    "ec: disable_monitor failed addr=%s", addr, exc_info=True
+                )
+            try:
+                peer.zmq_monitor.close(linger=0)
+            except Exception:
+                logger.warning("ec: close monitor failed addr=%s", addr, exc_info=True)
+        try:
+            self._nixl.remove_remote_agent(peer.nixl_agent_name)
+        except Exception:
+            logger.warning(
+                "ec: remove_remote_agent failed for %s",
+                peer.nixl_agent_name,
+                exc_info=True,
+            )
+        try:
+            peer.zmq_dealer.close(linger=0)
+        except Exception:
+            logger.warning("ec: close DEALER failed addr=%s", addr, exc_info=True)
+
+        n = 0
+        for mm_hash, entry in list(self._remote_encodings.items()):
+            if entry is None or entry[1] != addr:
+                continue
+            indices, _ = entry
+            if mm_hash not in self._ready:
+                self._region.free(indices)
+                self._remote_encodings[mm_hash] = None
+                n += 1
+        logger.info(
+            "ec: peer down addr=%s agent=%s tombstoned=%d",
+            addr,
+            peer.nixl_agent_name,
+            n,
+        )
 
     def has_cache_item(self, identifier: str) -> bool:
         """Consumer-side cache-existence check.
@@ -823,12 +913,13 @@ class ECCPUScheduler:
             #     the same mm_hash are re-served with a local mmap→GPU re-copy
             #     instead of a producer round-trip.
             for mm_hash in list(self._ready):
-                arrived = self._remote_encodings.pop(mm_hash, None)
-                if arrived is None:
+                entry = self._remote_encodings.pop(mm_hash, None)
+                if entry is None:
                     # Stale ack entry — drop.
                     continue
-                meta.loads[mm_hash] = arrived
-                self._loaded[mm_hash] = arrived
+                indices, _ = entry
+                meta.loads[mm_hash] = indices
+                self._loaded[mm_hash] = indices
             self._ready.clear()
 
             # (c) Re-serve cached entries requested this step via a local
@@ -940,12 +1031,8 @@ class ECCPUScheduler:
                     logger.debug("ec: router close failed", exc_info=True)
 
         if self._is_consumer:
-            for entry in self._peer_pool.values():
-                try:
-                    entry.zmq_dealer.close(linger=0)
-                except Exception:
-                    logger.warning("ec: failed to close peer dealer", exc_info=True)
-            self._peer_pool.clear()
+            for addr in list(self._peer_pool):
+                self.on_peer_down(addr)
 
         # NIXL cleanup — best-effort; we're on the teardown path.
         # Router thread is joined by now (producer) or never started

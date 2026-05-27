@@ -14,6 +14,9 @@ from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
 )
 from vllm.logger import init_logger
 
+# (host, port) pair identifying a remote peer's ZMQ side-channel endpoint.
+PeerAddr = tuple[str, int]
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -98,6 +101,7 @@ class ConsumerPeer:
     zmq_dealer: zmq.Socket
     nixl_agent_name: str
     nixl_metadata_bytes: bytes
+    zmq_monitor: zmq.Socket | None = None
 
 
 # Msgpack (de)serialization for the list-of-(addr, size, device_id)

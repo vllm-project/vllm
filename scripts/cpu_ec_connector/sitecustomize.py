@@ -80,6 +80,64 @@ def _install_ec_test_patches(role, log):
 
     _wrap(worker_mod.ECCPUWorker, "start_load_caches", _on_load)
 
+    # Producer: log ec_transfer_params being emitted (peer_host, mm_hashes).
+    def _on_request_finished(orig, self, request):
+        skip, params = orig(self, request)
+        if params:
+            first = next(iter(params.values()))
+            log.info(
+                "producer request_finished peer_host=%s peer_port=%s mm_hashes=%s",
+                first.get("peer_host"),
+                first.get("peer_port"),
+                list(params.keys()),
+            )
+        return skip, params
+
+    _wrap(sched_mod.ECCPUScheduler, "request_finished", _on_request_finished)
+
+    # Consumer: log incoming ec_transfer_params and peer connection events.
+    def _on_ensure_cache(orig, self, request, num_computed_tokens):
+        params = getattr(request, "ec_transfer_params", None) or {}
+        if params:
+            first = next(iter(params.values()))
+            log.info(
+                "consumer ensure_cache peer_host=%s peer_port=%s mm_hashes=%s",
+                first.get("peer_host"),
+                first.get("peer_port"),
+                list(params.keys()),
+            )
+        return orig(self, request, num_computed_tokens)
+
+    _wrap(sched_mod.ECCPUScheduler, "ensure_cache_available", _on_ensure_cache)
+
+    def _on_get_or_add_peer(orig, self, info):
+        host = info["peer_host"]
+        port = int(info["peer_port"])
+        key = (host, port)
+        existed = key in self._peer_pool
+        existing = self._peer_pool.get(key)
+        stale = existing is not None and existing.nixl_metadata_bytes != (
+            __import__("base64").b64decode(info["nixl_agent_metadata_b64"])
+        )
+        peer = orig(self, info)
+        if not existed:
+            log.info(
+                "consumer peer_pool ADD host=%s port=%s agent=%s",
+                host,
+                port,
+                peer.nixl_agent_name,
+            )
+        elif stale:
+            log.info(
+                "consumer peer_pool REPLACE host=%s port=%s agent=%s",
+                host,
+                port,
+                peer.nixl_agent_name,
+            )
+        return peer
+
+    _wrap(sched_mod.ECCPUScheduler, "_get_or_add_peer", _on_get_or_add_peer)
+
     # Both roles: encoder forward. Three call sites converge on
     # `embed_multimodal`; each is invoked every scheduler step but
     # short-circuits to an empty result on cache hit, so log only when the
