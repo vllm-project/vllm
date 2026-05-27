@@ -137,6 +137,78 @@ def test_parse_delta_both_parsers(tokenizer, request_obj):
     assert json.loads(tool_args) == {"city": "Dallas"}
 
 
+def stream_chunks(parser, tokenizer, chunks, request_obj):
+    """Stream pre-split token-ID chunks through the parser."""
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for chunk in chunks:
+        delta_text = tokenizer.decode(chunk)
+        result = parser.parse_delta(
+            delta_text, chunk, request_obj, prompt_token_ids=prompt_token_ids
+        )
+        prompt_token_ids = None
+        results.append(result)
+    return results
+
+
+def _boundary_chunks(tokenizer, parser):
+    """Split MODEL_OUTPUT into 3 chunks that straddle the </think> boundary."""
+    token_ids = tokenizer.encode(MODEL_OUTPUT, add_special_tokens=False)
+    end_token_id = parser._reasoning_parser.end_token_id
+    end_idx = token_ids.index(end_token_id)
+    return [
+        token_ids[: end_idx - 1],
+        token_ids[end_idx - 1 : end_idx + 2],
+        token_ids[end_idx + 2 :],
+    ]
+
+
+def test_parse_delta_reasoning_not_dropped_on_boundary(tokenizer, request_obj):
+    """Regression: reasoning must not be lost when a multi-token delta
+    spans the reasoning/tool-call boundary."""
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+    chunks = _boundary_chunks(tokenizer, parser)
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "think about this" in reasoning
+    assert content == ""
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_weather"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {"city": "Dallas"}
+
+
+def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
+    """When no tool parser is active, boundary-spanning chunks must still
+    preserve reasoning and pass post-</think> text as content."""
+    parser = make_parser(tokenizer, reasoning=True, tool=False)
+    chunks = _boundary_chunks(tokenizer, parser)
+    results = stream_chunks(parser, tokenizer, chunks, request_obj)
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "think about this" in reasoning
+    assert len(tool_calls) == 0
+    assert "<tool_call>" in content
+    assert "get_weather" in content
+
+
+def test_parse_delta_reasoning_only_no_think_leak(tokenizer, request_obj):
+    """Regression: </think> must not leak into content when streaming
+    token-by-token with reasoning=True, tool=False."""
+    parser = make_parser(tokenizer, reasoning=True, tool=False)
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "let me think about this" in reasoning
+    assert "</think>" not in content
+    assert "<think>" not in content
+
+
 def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     """Regression test for vllm-project/vllm#40466.
 

@@ -240,6 +240,10 @@ class SpecDecodeBaseProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
+            from vllm.models.deepseek_v4.amd.rocm import (
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
+            )
             from vllm.v1.attention.backends.mla.indexer import (
                 DeepseekV32IndexerMetadata,
             )
@@ -252,6 +256,8 @@ class SpecDecodeBaseProposer:
                 TritonAttentionMetadata,
                 RocmAttentionMetadata,
                 ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
                 DeepseekV32IndexerMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
