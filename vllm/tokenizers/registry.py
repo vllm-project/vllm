@@ -38,7 +38,10 @@ logger = init_logger(__name__)
 # temporary workaround and better long term solutions are:
 # - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
-_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
+    "deepseek_v3",
+    "step3_vl",
+}
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
@@ -235,7 +238,10 @@ def get_tokenizer(
     # Some models have an incorrect tokenizer_class on the hub.
     # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
     model_type = getattr(config, "model_type", None) if config else None
-    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+    if (
+        tokenizer_mode == "hf"
+        and model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS
+    ):
         from transformers.tokenization_utils_tokenizers import TokenizersBackend
 
         logger.debug(
