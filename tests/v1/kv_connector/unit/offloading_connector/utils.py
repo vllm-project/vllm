@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
@@ -239,14 +238,6 @@ class RequestRunner:
 
         # register worker kv_caches to enable OffloadingWorker creations
         # set_current_vllm_config is needed for get_kv_cache_layout() to work
-        # Mock get_layers_from_vllm_config so that mock layer names
-        # resolve to layers whose get_attn_backend() returns
-        # FlashAttentionBackend.
-        def _mock_get_layers(_vllm_config, _layer_type, layer_names):
-            mock_layer = MagicMock()
-            mock_layer.get_attn_backend.return_value = FlashAttentionBackend
-            return {name: mock_layer for name in layer_names}
-
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = group.kv_cache_spec
@@ -262,14 +253,7 @@ class RequestRunner:
                     dtype=spec.dtype,
                 )
 
-        with (
-            set_current_vllm_config(vllm_config),
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1"
-                ".offloading.worker.get_layers_from_vllm_config",
-                side_effect=_mock_get_layers,
-            ),
-        ):
+        with set_current_vllm_config(vllm_config):
             self.worker_connector.register_kv_caches(kv_caches)
 
         # extract connector of scheduler

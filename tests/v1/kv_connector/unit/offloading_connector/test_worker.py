@@ -8,7 +8,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -77,15 +76,6 @@ def _allocate_and_reshape_kv_caches(
     return runner._reshape_kv_cache_tensors(
         kv_cache_raw_tensors, kernel_block_sizes, layout=KVCacheLayout.LBNHC
     )
-
-
-def _make_mock_layer(backend_cls: type[AttentionBackend]):
-    """
-    Create a mock AttentionLayerBase whose get_attn_backend returns backend_cls.
-    """
-    layer = MagicMock()
-    layer.get_attn_backend.return_value = backend_cls
-    return layer
 
 
 def _make_worker(kv_cache_config: KVCacheConfig):

@@ -1,7 +1,7 @@
 use minijinja::value::{Kwargs, ViaDeserialize};
 use minijinja::{Error as MinijinjaError, ErrorKind, Value};
 use serde::Deserialize;
-use serde_json::{self, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use serde_json_fmt::{JsonFormat, JsonSyntaxError};
 use thiserror_ext::AsReport;
 
@@ -13,7 +13,7 @@ use thiserror_ext::AsReport;
 /// - extra kwargs such as `ensure_ascii`, `separators`, and `sort_keys`
 /// - Python-style `indent` handling
 pub(super) fn hf_tojson_filter(
-    value: Value,
+    ViaDeserialize(value): ViaDeserialize<JsonValue>,
     kwargs: Kwargs,
 ) -> std::result::Result<Value, MinijinjaError> {
     let ensure_ascii = kwargs.get::<Option<bool>>("ensure_ascii")?.unwrap_or(false);
@@ -30,18 +30,11 @@ pub(super) fn hf_tojson_filter(
 
     kwargs.assert_all_used()?;
 
-    let json_value: serde_json::Value = serde_json::to_value(&value).map_err(|e| {
-        MinijinjaError::new(
-            ErrorKind::InvalidOperation,
-            format!("Failed to convert to JSON value: {e}"),
-        )
-    })?;
-
     let json_str = {
         let value_to_serialize = if sort_keys {
-            &sort_json_keys(&json_value)
+            &sort_json_keys(&value)
         } else {
-            &json_value
+            &value
         };
 
         build_json_format(indent, separators.0, separators.1, ensure_ascii)?
@@ -212,6 +205,14 @@ mod tests {
         );
 
         assert_eq!(rendered, "{\"x\":[1,2]}");
+    }
+
+    #[test]
+    fn tojson_preserves_arbitrary_precision_number_spelling() {
+        let payload = serde_json::from_str(r#"{"x":2,"y":1.00}"#).unwrap();
+        let rendered = render("{{ payload|tojson }}", payload);
+
+        assert_eq!(rendered, "{\"x\": 2, \"y\": 1.00}");
     }
 
     #[test]

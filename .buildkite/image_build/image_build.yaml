@@ -98,3 +98,21 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+
+  - label: ":docker: Build arm64 image"
+    key: arm64-image-build
+    depends_on: []
+    source_file_dependencies:
+      - ".buildkite/image_build/image_build.yaml"
+      - ".buildkite/image_build/image_build_arm64.sh"
+      - "docker/Dockerfile"
+    commands:
+    - .buildkite/image_build/image_build_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
