@@ -594,16 +594,25 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
             # NVIDIA keeps the 3-way split. ROCm's measured default keeps
             # indexer work on default and overlaps only the compressor branch.
-            run_indexer: Callable[[], Any] = lambda: indexer(
-                hidden_states,
-                qr,
-                indexer_kv_score,
-                indexer_weights,
-                positions,
-                self.indexer_rotary_emb,
-                use_aux_stream=post_aux_streams is not None
-                and (not current_platform.is_rocm()),
-            )
+            def run_indexer() -> Any:
+                if current_platform.is_rocm():
+                    return indexer(
+                        hidden_states,
+                        qr,
+                        indexer_kv_score,
+                        indexer_weights,
+                        positions,
+                        self.indexer_rotary_emb,
+                        use_aux_stream=False,
+                    )
+                return indexer(
+                    hidden_states,
+                    qr,
+                    indexer_kv_score,
+                    indexer_weights,
+                    positions,
+                    self.indexer_rotary_emb,
+                )
 
             def run_compressor() -> Any:
                 local_kv_score = kv_score
