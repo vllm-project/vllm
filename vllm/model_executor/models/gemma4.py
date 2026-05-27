@@ -424,12 +424,6 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        # V norm: no learnable scale (pure normalization only)
-        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-
         # Determine layer type and sliding window
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
@@ -481,6 +475,18 @@ class Gemma4Attention(nn.Module):
                         f"{param_name_before_layers}.layers."
                         f"{kv_shared_layer_index}.self_attn.attn"
                     )
+
+        # Q/K norms: output = norm(x) * weight (learnable per-head scale).
+        # Initialised after is_kv_shared_layer is known so that load_weights()
+        # can fill in k_norm.weight with ones for KV-shared layers whose SFT
+        # checkpoint omits that parameter (they never call k_norm in forward).
+        # has_weight=True for k_norm on all layers supports both base-model
+        # checkpoints (which store k_norm.weight everywhere) and SFT checkpoints
+        # (handled in Gemma4Model.load_weights).
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        # V norm: no learnable scale (pure normalization only)
+        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -1500,6 +1506,17 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        # SFT checkpoints omit k_norm.weight for KV-shared layers because those
+        # layers reuse the KV cache from an earlier layer and never execute
+        # k_norm in the forward pass.  Fill any such missing parameter with
+        # ones so that it is not flagged as uninitialised.
+        for mod_name, mod in self.named_modules():
+            if isinstance(mod, Gemma4Attention) and mod.is_kv_shared_layer:
+                k_norm_key = f"{mod_name}.k_norm.weight"
+                if k_norm_key in params_dict and k_norm_key not in loaded_params:
+                    params_dict[k_norm_key].fill_(1.0)
+                    loaded_params.add(k_norm_key)
+
         return loaded_params
 
 
@@ -1719,3 +1736,4 @@ class Gemma4ForCausalLM(
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())
+
