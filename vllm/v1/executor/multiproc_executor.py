@@ -456,7 +456,7 @@ class MultiprocExecutor(Executor):
         """Properly shut down the executor and its workers"""
         if not getattr(self, "shutting_down", False):
             worker_count = len(getattr(self, "workers", None) or [])
-            logger.info(
+            logger.debug(
                 "[shutdown] Executor: start worker_count=%d",
                 worker_count,
             )
@@ -485,7 +485,7 @@ class MultiprocExecutor(Executor):
                 mq.shutdown()
             self.response_mqs = []
 
-        logger.info_once("[shutdown] Executor: complete")
+        logger.debug_once("[shutdown] Executor: complete")
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)

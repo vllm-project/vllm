@@ -595,7 +595,7 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
-        logger.info_once("[shutdown] EngineCore: tearing down local resources")
+        logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -610,7 +610,7 @@ class EngineCore:
         # Tear down distributed state initialized in this EngineCore process
         # before it exits and release cached memory.
         cleanup_dist_env_and_memory()
-        logger.info_once("[shutdown] EngineCore: local resource teardown complete")
+        logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)

@@ -1922,7 +1922,7 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
-    logger.info(
+    logger.debug(
         "[shutdown] Distributed: cleanup start shutdown_ray=%s",
         shutdown_ray,
     )
@@ -1960,7 +1960,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
                 "torch._C._host_emptyCache() only available in Pytorch >=2.5"
             )
 
-    logger.info_once("[shutdown] Distributed: cleanup complete")
+    logger.debug_once("[shutdown] Distributed: cleanup complete")
 
 
 def in_the_same_node_as(

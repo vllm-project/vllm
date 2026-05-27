@@ -391,7 +391,7 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
-        logger.info_once("[shutdown] MPClient: background resource cleanup start")
+        logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
             self.engine_manager.shutdown()
@@ -446,7 +446,7 @@ class BackgroundResources:
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
 
-        logger.info_once("[shutdown] MPClient: background resource cleanup complete")
+        logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):

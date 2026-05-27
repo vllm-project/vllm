@@ -440,7 +440,7 @@ def _shutdown_subprocesses(
         timeout = 0.0
     timeout = max(timeout, 5.0)
 
-    logger.info(
+    logger.debug(
         "[shutdown] Subprocess manager: start process_count=%d timeout=%ss",
         len(procs),
         timeout,
@@ -469,7 +469,7 @@ def _shutdown_subprocesses(
     for pid in remaining_pids:
         kill_process_tree(pid)
 
-    logger.info_once("[shutdown] Subprocess manager: complete")
+    logger.debug_once("[shutdown] Subprocess manager: complete")
 
 
 def run_api_server_worker_proc(
@@ -576,7 +576,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         # have a user-configured shutdown timeout.
         timeout = 5.0
 
-    logger.info(
+    logger.debug(
         "[shutdown] Process manager: start process_count=%d timeout=%ss",
         len(procs),
         timeout,
@@ -607,7 +607,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     for pid in remaining_pids:
         kill_process_tree(pid)
 
-    logger.info_once("[shutdown] Process manager: complete")
+    logger.debug_once("[shutdown] Process manager: complete")
 
 
 def copy_slice(
