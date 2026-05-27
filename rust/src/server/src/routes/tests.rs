@@ -14,6 +14,7 @@ use std::{fmt, fs};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
+use expect_test::expect;
 use futures::StreamExt as _;
 use rmpv::Value;
 use serde_json::json;
@@ -43,9 +44,48 @@ use vllm_text::{Prompt, TextBackend};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode};
+use super::{build_route_registry, build_router, build_router_with_dev_mode, route_log_lines};
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
+
+#[test]
+fn available_route_log_lines_match_registered_public_routes() {
+    expect![[r#"
+        [
+            "Route: /health, Methods: GET, HEAD",
+            "Route: /metrics, Methods: GET, HEAD",
+            "Route: /load, Methods: GET, HEAD",
+            "Route: /v1/models, Methods: GET, HEAD",
+            "Route: /v1/completions, Methods: POST",
+            "Route: /v1/chat/completions, Methods: POST",
+            "Route: /inference/v1/generate, Methods: POST",
+        ]
+    "#]]
+    .assert_debug_eq(&route_log_lines(&build_route_registry(false).routes));
+}
+
+#[test]
+fn available_route_log_lines_include_dev_routes_when_enabled() {
+    expect![[r#"
+        [
+            "Route: /health, Methods: GET, HEAD",
+            "Route: /metrics, Methods: GET, HEAD",
+            "Route: /load, Methods: GET, HEAD",
+            "Route: /v1/models, Methods: GET, HEAD",
+            "Route: /v1/completions, Methods: POST",
+            "Route: /v1/chat/completions, Methods: POST",
+            "Route: /inference/v1/generate, Methods: POST",
+            "Route: /reset_prefix_cache, Methods: POST",
+            "Route: /reset_mm_cache, Methods: POST",
+            "Route: /reset_encoder_cache, Methods: POST",
+            "Route: /collective_rpc, Methods: POST",
+            "Route: /sleep, Methods: POST",
+            "Route: /wake_up, Methods: POST",
+            "Route: /is_sleeping, Methods: GET, HEAD",
+        ]
+    "#]]
+    .assert_debug_eq(&route_log_lines(&build_route_registry(true).routes));
+}
 
 fn request_output(
     request_id: &str,
