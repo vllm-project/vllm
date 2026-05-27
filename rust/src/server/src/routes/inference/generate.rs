@@ -3,23 +3,31 @@ mod types;
 mod validate;
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::result::Result;
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
+use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tracing::info;
+use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
-use vllm_llm::{CollectedGenerateOutput, GenerateOutputStreamExt as _};
+use vllm_llm::{CollectedGenerateOutput, GenerateOutput, GenerateOutputStreamExt as _};
 
 use self::convert::prepare_generate_request;
-use self::types::{GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice};
-use crate::error::{ApiError, server_error};
+use self::types::{
+    GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
+    GenerateResponseStreamChoice, GenerateStreamResponse,
+};
+use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
-use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
+use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::resolve_request_context;
@@ -46,6 +54,7 @@ pub async fn generate(
     let log_request = state.enable_log_requests;
     let include_logprobs = prepared.include_logprobs;
     let include_prompt_logprobs = prepared.include_prompt_logprobs;
+    let stream = prepared.stream;
 
     let raw_stream = match state
         .chat
@@ -63,6 +72,20 @@ pub async fn generate(
             .into_response();
         }
     };
+
+    if stream {
+        let chunk_stream = generate_chunk_stream(
+            raw_stream,
+            prepared.request_id,
+            log_request,
+            prepared.include_usage,
+            prepared.include_continuous_usage,
+            include_logprobs,
+        );
+        let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
+
+        return Sse::new(sse_stream).into_response();
+    }
 
     let collected = match raw_stream.collect_output().instrument(request_span.clone()).await {
         Ok(collected) => collected,
@@ -96,6 +119,99 @@ pub async fn generate(
     };
 
     Json(response).into_response()
+}
+
+#[try_stream]
+async fn generate_chunk_stream(
+    stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
+    request_id: String,
+    log_request: bool,
+    include_usage: bool,
+    include_continuous_usage: bool,
+    include_logprobs: bool,
+    mut y: TryYielder<GenerateStreamResponse, ApiError>,
+) -> Result<(), ApiError> {
+    pin_mut!(stream);
+    let mut prompt_tokens = 0_u32;
+    let mut output_tokens = 0_u32;
+    let mut started = false;
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(output) => {
+                if !started {
+                    prompt_tokens = output
+                        .prompt_info
+                        .as_ref()
+                        .map(|info| info.prompt_token_ids.len() as u32)
+                        .unwrap_or_default();
+                    started = true;
+                }
+
+                let token_ids = output.token_ids;
+                output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
+                let finish_reason = output.finish_reason;
+
+                if let Some(finish_reason) = finish_reason.as_ref()
+                    && log_request
+                {
+                    info!(
+                        stream = true,
+                        prompt_tokens,
+                        output_tokens,
+                        finish_reason = finish_reason.as_str(),
+                        "generate finished"
+                    );
+                }
+
+                if token_ids.is_empty() {
+                    continue;
+                }
+
+                let logprobs = if include_logprobs {
+                    let logprobs = output.logprobs.as_ref().ok_or_else(|| {
+                        server_error!(
+                            "raw generate stream requested logprobs but generation returned none"
+                        )
+                    })?;
+                    Some(raw_logprobs_to_openai_chat(logprobs)?)
+                } else {
+                    None
+                };
+
+                y.yield_ok(GenerateStreamResponse {
+                    request_id: request_id.clone(),
+                    choices: vec![GenerateResponseStreamChoice {
+                        index: 0,
+                        logprobs,
+                        finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
+                        token_ids,
+                    }],
+                    usage: include_continuous_usage
+                        .then(|| Usage::from_counts(prompt_tokens, output_tokens)),
+                })
+                .await;
+            }
+            Err(error) => {
+                error!(
+                    error = %error.as_report(),
+                    "raw generate stream failed"
+                );
+                bail_server_error!("{}", error.to_report_string());
+            }
+        }
+    }
+
+    if include_usage {
+        y.yield_ok(GenerateStreamResponse {
+            request_id,
+            choices: Vec::new(),
+            usage: Some(Usage::from_counts(prompt_tokens, output_tokens)),
+        })
+        .await;
+    }
+
+    Ok(())
 }
 
 fn collect_generate(
@@ -212,4 +328,44 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
 
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
+}
+
+/// Convert one raw-generate chunk stream into SSE events.
+#[try_stream]
+async fn generate_sse_stream(
+    stream: impl Stream<Item = Result<GenerateStreamResponse, ApiError>>,
+    mut y: TryYielder<Event, Infallible>,
+) -> Result<(), Infallible> {
+    pin_mut!(stream);
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
+            Err(error) => {
+                y.yield_ok(to_error_sse_event(&error)).await;
+                break;
+            }
+        }
+    }
+
+    y.yield_ok(done_sse_event()).await;
+    Ok(())
+}
+
+fn to_sse_event(chunk: &GenerateStreamResponse) -> Event {
+    let payload = serde_json::to_string(chunk).expect("generate chunk must serialize to JSON");
+    trace!(payload, "generate emitting chunk");
+    Event::default().data(payload)
+}
+
+fn to_error_sse_event(error: &ApiError) -> Event {
+    let payload = serde_json::to_string(&error.to_error_response())
+        .expect("ErrorResponse must serialize to JSON");
+    trace!(payload, "generate emitting error");
+    Event::default().data(payload)
+}
+
+fn done_sse_event() -> Event {
+    trace!("generate emitting done");
+    Event::default().data("[DONE]")
 }

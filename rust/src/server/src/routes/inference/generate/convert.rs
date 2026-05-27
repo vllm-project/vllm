@@ -10,6 +10,9 @@ use crate::utils::{ResolvedRequestContext, merge_kv_transfer_params};
 pub struct PreparedRequest {
     pub request_id: String,
     pub text_request: TextRequest,
+    pub stream: bool,
+    pub include_usage: bool,
+    pub include_continuous_usage: bool,
     pub include_logprobs: bool,
     pub include_prompt_logprobs: bool,
 }
@@ -23,6 +26,17 @@ pub fn prepare_generate_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, served_model_names)?;
 
+    let stream = request.stream;
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .and_then(|options| options.include_usage)
+        .unwrap_or(false);
+    let include_continuous_usage = request
+        .stream_options
+        .as_ref()
+        .and_then(|options| options.continuous_usage_stats)
+        .unwrap_or(false);
     let include_logprobs = request.sampling_params.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
     let mut sampling_params = request.sampling_params;
@@ -47,6 +61,9 @@ pub fn prepare_generate_request(
     Ok(PreparedRequest {
         request_id: ctx.request_id,
         text_request,
+        stream,
+        include_usage,
+        include_continuous_usage,
         include_logprobs,
         include_prompt_logprobs,
     })

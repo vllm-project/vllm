@@ -2425,8 +2425,72 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn raw_generate_rejects_streaming() {
-    let mut app = test_app().await;
+async fn stream_raw_generate_returns_sse_chunks_and_usage() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-raw-generate-stream".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+                assert_eq!(request.external_req_id.as_deref(), Some("raw-stream"));
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: vec![
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![33],
+                                None,
+                                None,
+                                Some(sample_logprobs_for_token(33, 34)),
+                                None,
+                            ),
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![44],
+                                Some(EngineCoreFinishReason::Stop),
+                                None,
+                                Some(sample_logprobs_for_token(44, 45)),
+                                None,
+                            ),
+                        ],
+                        scheduler_stats: None,
+                        timestamp: 0.0,
+                        utility_output: None,
+                        finished_requests: None,
+                        wave_complete: None,
+                        start_wave: None,
+                    },
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -2437,9 +2501,17 @@ async fn raw_generate_rejects_streaming() {
                 .body(Body::from(
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "request_id": "raw-stream",
                         "token_ids": [11, 22],
                         "stream": true,
-                        "sampling_params": {}
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        },
+                        "sampling_params": {
+                            "max_tokens": 2,
+                            "logprobs": 1
+                        }
                     })
                     .to_string(),
                 ))
@@ -2448,10 +2520,40 @@ async fn raw_generate_rejects_streaming() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["param"], "stream");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    assert_eq!(payloads.len(), 4, "{text}");
+
+    let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
+    assert_eq!(first["request_id"], "raw-stream");
+    assert_eq!(first["choices"][0]["index"], 0);
+    assert_eq!(first["choices"][0]["token_ids"], json!([33]));
+    assert_eq!(
+        first["choices"][0]["logprobs"]["content"][0]["token"],
+        "token_id:33"
+    );
+    assert_eq!(first["usage"]["prompt_tokens"], 2);
+    assert_eq!(first["usage"]["completion_tokens"], 1);
+
+    let second: serde_json::Value = serde_json::from_str(payloads[1]).expect("second chunk json");
+    assert_eq!(second["choices"][0]["token_ids"], json!([44]));
+    assert_eq!(second["choices"][0]["finish_reason"], "stop");
+    assert_eq!(second["usage"]["completion_tokens"], 2);
+
+    let usage: serde_json::Value = serde_json::from_str(payloads[2]).expect("usage chunk json");
+    assert_eq!(usage["choices"], json!([]));
+    assert_eq!(usage["usage"]["prompt_tokens"], 2);
+    assert_eq!(usage["usage"]["completion_tokens"], 2);
+    assert_eq!(usage["usage"]["total_tokens"], 4);
+    assert_eq!(payloads[3], "[DONE]");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
