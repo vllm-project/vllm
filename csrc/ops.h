@@ -92,9 +92,9 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
-void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
-                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
-                     int64_t max_seq_len);
+void cooperative_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
+                      int64_t max_seq_len);
 
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,

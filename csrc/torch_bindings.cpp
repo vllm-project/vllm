@@ -126,9 +126,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   ops.def(
-      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
-  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
+  ops.impl("cooperative_topk", torch::kCUDA, &cooperative_topk);
 
   // Quantization ops
 #ifndef USE_ROCM

@@ -339,7 +339,7 @@ def sparse_attn_indexer(
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
-            torch.ops._C.persistent_topk(
+            torch.ops._C.cooperative_topk(
                 logits,
                 seq_lens,
                 topk_indices,
