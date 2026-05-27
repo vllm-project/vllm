@@ -32,9 +32,9 @@ def _disable_pct_by_default(monkeypatch):
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr("builtins.open", _no_pct_open)
-    numa_utils._is_xeon_6776p_with_pct.cache_clear()
+    numa_utils._pct_sku_config.cache_clear()
     yield
-    numa_utils._is_xeon_6776p_with_pct.cache_clear()
+    numa_utils._pct_sku_config.cache_clear()
 
 
 def _make_config(**parallel_kwargs):
@@ -82,12 +82,15 @@ def _patch_pct_gates(
     highest_perf: int | None,
     cpulist: str | None = "0-31,64-95",
     cpulist_by_node: dict[int, str | None] | None = None,
+    sku: str = "6776P",
 ):
-    """Force `_is_xeon_6776p_with_pct` and node cpulist read to deterministic state.
+    """Force `_pct_sku_config` and node cpulist read to deterministic state.
 
     ``cpulist`` is the default returned for any node not present in
     ``cpulist_by_node``. ``cpulist_by_node`` lets a test return different
-    cpulists for different NUMA nodes (e.g. node 0 vs node 1).
+    cpulists for different NUMA nodes (e.g. node 0 vs node 1). ``sku`` lets
+    the test pick which Granite Rapids SKU appears in the fake
+    ``/proc/cpuinfo`` ``model name`` (only used when ``model_match=True``).
     """
     import pathlib
     from io import StringIO
@@ -95,7 +98,7 @@ def _patch_pct_gates(
     import regex as re
 
     cpuinfo = (
-        "processor\t: 0\nmodel name\t: Intel(R) Xeon(R) Platinum 6776P CPU @ 2.40GHz\n"
+        f"processor\t: 0\nmodel name\t: Intel(R) Xeon(R) Platinum {sku} CPU @ 2.40GHz\n"
         if model_match
         else "processor\t: 0\nmodel name\t: Intel(R) Xeon(R) Platinum 8480+\n"
     )
@@ -132,7 +135,7 @@ def _patch_pct_gates(
 
     monkeypatch.setattr("builtins.open", fake_open)
     monkeypatch.setattr("pathlib.Path.read_text", fake_read_text)
-    numa_utils._is_xeon_6776p_with_pct.cache_clear()
+    numa_utils._pct_sku_config.cache_clear()
 
 
 def test_pct_binding_filters_cpus(monkeypatch):
@@ -140,12 +143,43 @@ def test_pct_binding_filters_cpus(monkeypatch):
     assert numa_utils._maybe_get_pct_cpu_binding([0]) == "0,1,16,17,64,65,80,81"
 
 
+@pytest.mark.parametrize(
+    "sku,expected_cpus",
+    [
+        # 64-core SKUs (stride 16): cpus from "0-31,64-95" with cpu_id % 16
+        # in (0, 1) -> 0, 1, 16, 17, 64, 65, 80, 81.
+        ("6776P", "0,1,16,17,64,65,80,81"),
+        ("6774P", "0,1,16,17,64,65,80,81"),
+        # 72-core SKU (stride 18): cpus from "0-31,64-95" with cpu_id % 18
+        # in (0, 1) -> 0, 1, 18, 19, 72, 73, 90, 91.
+        ("6962P", "0,1,18,19,72,73,90,91"),
+    ],
+)
+def test_pct_binding_fires_on_every_capable_sku(monkeypatch, sku, expected_cpus):
+    """Each SKU in ``_PCT_CAPABLE_SKUS`` engages the gate at its own
+    expected ``highest_perf`` and uses its own priority-core stride."""
+    sku_config = numa_utils._PCT_CAPABLE_SKUS[sku]
+    _patch_pct_gates(
+        monkeypatch,
+        model_match=True,
+        highest_perf=sku_config.highest_perf,
+        sku=sku,
+    )
+    assert numa_utils._maybe_get_pct_cpu_binding([0]) == expected_cpus
+
+
+def test_pct_binding_fails_closed_when_sku_perf_mismatch(monkeypatch):
+    """6962P with 6776P's highest_perf (46 vs expected 44) must fail closed."""
+    _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46, sku="6962P")
+    assert numa_utils._maybe_get_pct_cpu_binding([0]) is None
+
+
 def test_pct_binding_disabled_when_cpu_model_mismatch(monkeypatch):
     _patch_pct_gates(monkeypatch, model_match=False, highest_perf=46)
     assert numa_utils._maybe_get_pct_cpu_binding([0]) is None
 
 
-def test_pct_binding_disabled_when_highest_perf_not_46(monkeypatch):
+def test_pct_binding_disabled_when_highest_perf_does_not_match(monkeypatch):
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=42)
     assert numa_utils._maybe_get_pct_cpu_binding([0]) is None
 

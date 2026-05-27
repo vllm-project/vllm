@@ -14,7 +14,7 @@ import subprocess
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
 
@@ -112,37 +112,115 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
-_PCT_CPU_MODEL_SUBSTRING = "6776P"
-_PCT_HIGHEST_PERF_SIGNAL = 46
+# PCT (Priority Core Turbo) auto-detection workaround for Granite Rapids
+# Xeon SKUs.
+#
+# Background:
+#   * The Linux kernel does not expose PCT priority-core membership via any
+#     unprivileged sysfs path. The official interface
+#     (/dev/isst_interface, used by `intel-speed-select`) is root-only,
+#     which is a non-starter in most production deployments (shared
+#     clusters, prebuilt containers, managed cloud).
+#   * Even recent stable kernels (e.g. 6.14, March 2025) do not yet
+#     preferentially schedule work on PCT priority cores, so vLLM cannot
+#     just "let the scheduler handle it".
+#
+# Empirical heuristic (DGX B300 / Xeon 6776P, the SKU we measured):
+#   * /proc/cpuinfo `model name` contains the SKU number.
+#   * cpu0 is a PCT priority core on these SKUs, so it reports the
+#     priority-cohort CPPC `highest_perf` (the value matches the SKU's
+#     "Max PCT core frequency" in 100 MHz units, e.g. 4.6 GHz -> 46).
+#   * Priority cores within each NUMA node satisfy `cpu_id % S in (0, 1)`
+#     intersected with the node's cpulist, where `S` is the SKU's logical
+#     CPUs per priority "group" (= total threads / 8 priority cores; 16 on
+#     64-core SKUs, 18 on 72-core SKUs).
+#
+# SKU table:
+#   ``_PCT_CAPABLE_SKUS`` maps each known PCT-capable Granite Rapids part
+#   to a ``_PctSku(highest_perf, priority_stride)`` config:
+#     * highest_perf is the expected ``acpi_cppc/highest_perf`` on cpu0,
+#       derived from Intel ARK's "Max PCT core frequency" * 10 (CPPC max
+#       ratio reports in 100 MHz units).
+#     * priority_stride is the SKU's "Total Cores" / 4 (= total HT threads
+#       / 8 priority cores), used in the ``cpu_id % stride`` filter above.
+#   Values:
+#     * 6776P - 4.6 GHz, 64C/128T -> (46, 16)  measured on DGX B300
+#     * 6774P - 4.6 GHz, 64C/128T -> (46, 16)  per Intel ARK, not measured
+#     * 6962P - 4.4 GHz, 72C/144T -> (44, 18)  per Intel ARK, not measured
+#   The non-measured SKUs are listed best-effort: the gate fails closed
+#   (no PCT engagement) if a host's actual highest_perf doesn't match the
+#   table value, so adding entries is safe. If you have access to a 6962P
+#   or 6774P box and find a different value or cpu-id pattern, update the
+#   table below.
+#
+# This whole block is a stop-gap until the kernel exposes PCT membership
+# in an unprivileged way; see the tracking issue linked from the PR.
+
+
+class _PctSku(NamedTuple):
+    """Per-SKU config used by the PCT auto-detection gate."""
+
+    highest_perf: int
+    priority_stride: int
+
+
+_PCT_CAPABLE_SKUS: dict[str, _PctSku] = {
+    "6776P": _PctSku(highest_perf=46, priority_stride=16),
+    "6774P": _PctSku(highest_perf=46, priority_stride=16),
+    "6962P": _PctSku(highest_perf=44, priority_stride=18),
+}
 _PCT_HIGHEST_PERF_PATH = "/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf"
 _PROC_CPUINFO_PATH = "/proc/cpuinfo"
 
 
-@cache
-def _is_xeon_6776p_with_pct() -> bool:
-    """Detect Xeon 6776P (DGX B300) with Priority Core Turbo enabled.
+def _pct_sku_from_cpuinfo() -> _PctSku | None:
+    """Return the ``_PctSku`` config for this host's SKU, or None.
 
-    Gates: ``/proc/cpuinfo`` ``model name`` contains ``6776P`` and
-    ``/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf`` reads ``46``.
+    Reads ``/proc/cpuinfo``'s ``model name`` and looks the SKU up in
+    ``_PCT_CAPABLE_SKUS``. Returns ``None`` when the host is not a known
+    PCT-capable Granite Rapids Xeon (or when ``/proc/cpuinfo`` is
+    unreadable).
     """
     try:
         with open(_PROC_CPUINFO_PATH) as f:
-            has_model = any(
-                line.lstrip().lower().startswith("model name")
-                and _PCT_CPU_MODEL_SUBSTRING in line
-                for line in f
-            )
+            for line in f:
+                if not line.lstrip().lower().startswith("model name"):
+                    continue
+                for sku, config in _PCT_CAPABLE_SKUS.items():
+                    if sku in line:
+                        return config
     except OSError:
-        return False
-    if not has_model:
-        return False
+        return None
+    return None
+
+
+@cache
+def _pct_sku_config() -> _PctSku | None:
+    """Detect a PCT-capable Granite Rapids Xeon with PCT enabled.
+
+    See the comment block above ``_PCT_CAPABLE_SKUS`` for the full context
+    (why we hard-code SKUs, why we read CPPC ``highest_perf``, etc.).
+
+    Returns the matching ``_PctSku`` config when both gates hold:
+      * ``/proc/cpuinfo`` ``model name`` contains an SKU listed in
+        ``_PCT_CAPABLE_SKUS``.
+      * ``/sys/devices/system/cpu/cpu0/acpi_cppc/highest_perf`` matches
+        that SKU's expected ``highest_perf``.
+    Otherwise returns ``None`` and the caller falls back to the default
+    NUMA-node bind.
+    """
+    sku = _pct_sku_from_cpuinfo()
+    if sku is None:
+        return None
 
     try:
         with open(_PCT_HIGHEST_PERF_PATH) as f:
-            highest_perf = int(f.read().strip())
+            actual = int(f.read().strip())
     except (OSError, ValueError):
-        return False
-    return highest_perf == _PCT_HIGHEST_PERF_SIGNAL
+        return None
+    if actual != sku.highest_perf:
+        return None
+    return sku
 
 
 def _get_gpu_index(
@@ -193,16 +271,23 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
     """Return the union of PCT priority cores across ``numa_nodes`` (or None).
 
     PCT (Priority Core Turbo) lets a subset of cores boost above the rest;
-    we want workers and the EngineCore on those cores. Linux kernel does not
-    expose PCT membership yet, so we only handle the DGX B300 case (Xeon
-    6776P), where priority cores are ``cpu_id % 16 in (0, 1)`` intersected
-    with each node's ``cpulist``.
+    we want workers and the EngineCore on those cores. The Linux kernel does
+    not expose PCT membership without root, so we use the empirical heuristic
+    documented above ``_PCT_CAPABLE_SKUS``: priority cores within each NUMA
+    node satisfy ``cpu_id % stride in (0, 1)`` intersected with the node's
+    ``cpulist``, where ``stride`` is the SKU's logical CPUs per priority
+    group (16 on 64-core SKUs, 18 on 72-core SKUs). Only triggers on the
+    SKUs in ``_PCT_CAPABLE_SKUS`` with the expected CPPC ``highest_perf``
+    signal; on any other host it returns None and the caller falls back to
+    the default NUMA-node bind.
     """
-    if not _is_xeon_6776p_with_pct():
+    sku = _pct_sku_config()
+    if sku is None:
         return None
 
     from vllm.utils.cpu_resource_utils import parse_id_list
 
+    stride = sku.priority_stride
     union_cpus: set[int] = set()
     for numa_node in numa_nodes:
         cpulist_path = Path(f"/sys/devices/system/node/node{numa_node}/cpulist")
@@ -217,14 +302,14 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
         except ValueError:
             continue
 
-        priority = [cpu for cpu in node_cpus if cpu % 16 in (0, 1)]
+        priority = [cpu for cpu in node_cpus if cpu % stride in (0, 1)]
         if not priority:
             continue
         union_cpus.update(priority)
         logger.info(
-            "Detected Xeon 6776P with PCT (highest_perf=%d); NUMA node %d "
-            "priority cores: %s",
-            _PCT_HIGHEST_PERF_SIGNAL,
+            "Detected PCT-capable Granite Rapids Xeon (stride=%d); "
+            "NUMA node %d priority cores: %s",
+            stride,
             numa_node,
             ",".join(str(c) for c in priority),
         )
