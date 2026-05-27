@@ -80,6 +80,7 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 
 @dataclass(frozen=True)
 class TransferRegion:
+    region_id: str
     base_addr: int
     block_len: int
     kv_block_len: int
@@ -109,6 +110,7 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 def _expand_transfer_regions(
     base_addrs: list[int],
     block_lens: list[int],
+    region_ids: list[str],
     is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
@@ -116,11 +118,18 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching numbers of base addresses "
         f"and block lengths, got {len(base_addrs)} and {len(block_lens)}."
     )
+    assert len(base_addrs) == len(region_ids), (
+        "Mooncake transfer regions require matching numbers of base addresses "
+        f"and region IDs, got {len(base_addrs)} and {len(region_ids)}."
+    )
     regions: list[TransferRegion] = []
-    for base_addr, block_len in zip(base_addrs, block_lens):
+    for base_addr, block_len, region_id in zip(base_addrs, block_lens, region_ids):
         kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
+                region_id=(
+                    f"{region_id}:kv0" if is_kv_layout_blocks_first else region_id
+                ),
                 base_addr=base_addr,
                 block_len=block_len,
                 kv_block_len=kv_block_len,
@@ -129,6 +138,7 @@ def _expand_transfer_regions(
         if is_kv_layout_blocks_first:
             regions.append(
                 TransferRegion(
+                    region_id=f"{region_id}:kv1",
                     base_addr=base_addr + kv_block_len,
                     block_len=block_len,
                     kv_block_len=kv_block_len,
@@ -244,6 +254,34 @@ def _validate_asymmetric_region_lengths(
     return None
 
 
+def _align_transfer_regions(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+    """Align KV transfer regions by stable layer/segment identity.
+
+    PP shards own different layer subsets. Positional matching is therefore
+    wrong once producer and consumer have different PP layouts. Region IDs are
+    derived from layer names and per-layer segment indices during KV cache
+    registration, so a PP producer can transfer only the layers it owns to a
+    non-PP or differently-sharded consumer.
+    """
+    local_by_id = {region.region_id: region for region in local_regions}
+    remote_by_id = {region.region_id: region for region in remote_regions}
+    common_ids = sorted(local_by_id.keys() & remote_by_id.keys())
+    if not common_ids:
+        return [], [], (
+            "Mooncake found no common KV transfer regions between producer "
+            f"{sorted(local_by_id)} and consumer {sorted(remote_by_id)}."
+        )
+
+    return (
+        [local_by_id[region_id] for region_id in common_ids],
+        [remote_by_id[region_id] for region_id in common_ids],
+        None,
+    )
+
+
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     is_dense = getattr(tensor, "is_non_overlapping_and_dense", None)
     if callable(is_dense):
@@ -262,6 +300,9 @@ class MooncakeXferMetadata(
     req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
+    kv_cache_region_ids: list[str] = msgspec.field(default_factory=list)
+    remote_pp_size: int = 1
+    remote_pp_rank: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -782,17 +823,14 @@ class MooncakeConnectorWorker:
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_blocks = 0
         self.block_len_per_layer: list[int] = []
+        self.kv_cache_region_ids: list[str] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
         dp_local_rank = parallel_config.data_parallel_rank_local
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if pp_size > 1:
-            raise ValueError(
-                "Mooncake Transfer Engine does not support pipeline parallelism yet."
-            )
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
 
         self.kv_caches_base_addr: list[int] = []
@@ -857,6 +895,7 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        self._pp_size: dict[EngineId, int] = {self.engine_id: self.pp_size}
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1020,11 +1059,26 @@ class MooncakeConnectorWorker:
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
         local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr, self.block_len_per_layer
+            self.kv_caches_base_addr,
+            self.block_len_per_layer,
+            self.kv_cache_region_ids,
         )
         remote_regions = self._get_transfer_regions(
-            meta.kv_caches_base_addr, meta.block_lens
+            meta.kv_caches_base_addr,
+            meta.block_lens,
+            meta.kv_cache_region_ids,
         )
+        if meta.kv_cache_region_ids:
+            local_regions, remote_regions, align_err = _align_transfer_regions(
+                local_regions, remote_regions
+            )
+            if align_err is not None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=align_err,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
@@ -1099,7 +1153,7 @@ class MooncakeConnectorWorker:
                     # Mark it sending to avoid expiration.
                     send_meta.sending += 1
                     if not send_meta.need_send:
-                        self.resolve_need_send(send_meta, remote_tp_ranks)
+                        self.resolve_need_send(send_meta, remote_tp_ranks, meta)
                     ready_reqs.append((d_req_id, send_meta))
                 else:
                     # Otherwise (expired, very unlikely), just forget it.
@@ -1171,14 +1225,24 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
-    def resolve_need_send(self, send_meta: SendBlockMeta, remote_tp_ranks: list[int]):
+    def resolve_need_send(
+        self,
+        send_meta: SendBlockMeta,
+        remote_tp_ranks: list[int],
+        meta: MooncakeXferMetadata,
+    ):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
-        send_meta.need_send = len(remote_tp_ranks)
+        remote_pp_fanout = (
+            meta.remote_pp_size if self.pp_size != meta.remote_pp_size else 1
+        )
+        send_meta.need_send = len(remote_tp_ranks) * remote_pp_fanout
         logger.debug(
-            "Mooncake request %s will be served by %d consumer TP workers: %s",
+            "Mooncake request %s will be served by %d consumer workers: "
+            "TP ranks=%s, PP fanout=%d",
             send_meta.transfer_id,
             send_meta.need_send,
             remote_tp_ranks,
+            remote_pp_fanout,
         )
 
     async def _build_transfer_params(
@@ -1394,6 +1458,7 @@ class MooncakeConnectorWorker:
         kv_data_lens = []
         seen_base_addresses = []
         self.block_len_per_layer = []
+        self.kv_cache_region_ids = []
 
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
@@ -1405,7 +1470,7 @@ class MooncakeConnectorWorker:
                 len(cache_list),
             )
 
-            for cache in cache_list:
+            for segment_idx, cache in enumerate(cache_list):
                 self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
                 if base_addr in seen_base_addresses:
@@ -1428,6 +1493,7 @@ class MooncakeConnectorWorker:
                 block_len = cache.stride(0) * cache.element_size()
 
                 self.block_len_per_layer.append(block_len)
+                self.kv_cache_region_ids.append(f"{layer_name}:{segment_idx}")
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(self.num_blocks * block_len)
 
@@ -1547,6 +1613,9 @@ class MooncakeConnectorWorker:
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
+            kv_cache_region_ids=self.kv_cache_region_ids,
+            remote_pp_size=self.pp_size,
+            remote_pp_rank=self.pp_rank,
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -1629,6 +1698,13 @@ class MooncakeConnectorWorker:
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
+                    self._pp_size[remote_engine_id] = max(
+                        (
+                            len(tp_entry)
+                            for tp_entry in dp_entry["worker_addr"].values()
+                        ),
+                        default=1,
+                    )
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s: %s",
@@ -1648,16 +1724,29 @@ class MooncakeConnectorWorker:
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
             self._tp_size[remote_engine_id]
         )
-        count = len(remote_tp_ranks)
+        remote_pp_size = self._pp_size.get(remote_engine_id, 1)
+        worker_addrs: list[str] = []
+        selected_remote_pp: dict[int, list[int]] = {}
+        for remote_tp_rank in remote_tp_ranks:
+            pp_to_addr = self._remote_agents[remote_engine_id][remote_tp_rank]
+            if self.pp_size == remote_pp_size and self.pp_rank in pp_to_addr:
+                pp_ranks = [self.pp_rank]
+            else:
+                pp_ranks = sorted(pp_to_addr)
+            selected_remote_pp[remote_tp_rank] = pp_ranks
+            worker_addrs.extend(pp_to_addr[pp_rank] for pp_rank in pp_ranks)
+
+        count = len(worker_addrs)
         logger.debug(
-            "Receiving Mooncake KV for engine %s from producer TP ranks %s",
+            "Receiving Mooncake KV for engine %s from producer TP ranks %s "
+            "and PP ranks %s",
             remote_engine_id,
             remote_tp_ranks,
+            selected_remote_pp,
         )
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
-        for remote_tp_rank in remote_tp_ranks:
-            worker_addr = self._remote_agents[remote_engine_id][remote_tp_rank][0]
+        for worker_addr in worker_addrs:
             asyncio.create_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
@@ -1740,11 +1829,17 @@ class MooncakeConnectorWorker:
         return self.transfer_topo.local_replicates_kv_cache
 
     def _get_transfer_regions(
-        self, base_addrs: list[int], block_lens: list[int]
+        self,
+        base_addrs: list[int],
+        block_lens: list[int],
+        region_ids: list[str] | None = None,
     ) -> list[TransferRegion]:
+        if region_ids is None or len(region_ids) != len(base_addrs):
+            region_ids = [f"region:{idx}" for idx in range(len(base_addrs))]
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
+            region_ids=region_ids,
             is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
         )
 
