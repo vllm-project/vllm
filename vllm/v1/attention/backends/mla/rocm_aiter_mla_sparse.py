@@ -481,13 +481,13 @@ class ROCMAiterMLASparseMetadataBuilder(
         new_req_extent = int(req_id_per_token.shape[0])
         new_indices_extent = num_tokens * self.topk_tokens
         if self._prev_req_extent > new_req_extent:
-            self.req_id_per_token_buffer[
-                new_req_extent : self._prev_req_extent
-            ].fill_(0)
+            self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
+                0
+            )
         if self._prev_indices_extent > new_indices_extent:
-            self.paged_kv_indices[
-                new_indices_extent : self._prev_indices_extent
-            ].fill_(0)
+            self.paged_kv_indices[new_indices_extent : self._prev_indices_extent].fill_(
+                0
+            )
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
         self.req_id_per_token_buffer[:new_req_extent].copy_(
