@@ -16,7 +16,7 @@ reason about temporal order.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -41,6 +41,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -78,6 +79,9 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -872,6 +876,9 @@ class Gemma4MultimodalEmbedder(nn.Module):
         self,
         multimodal_config: Gemma4VisionConfig | Gemma4AudioConfig,
         text_config: Gemma4TextConfig,
+        *,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -895,6 +902,8 @@ class Gemma4MultimodalEmbedder(nn.Module):
             embedding_dim,
             self.text_hidden_size,
             bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embedding_projection"),
         )
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
@@ -959,7 +968,15 @@ class Gemma4ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
-                config.vision_config, config.text_config
+                config.vision_config,
+                config.text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "embed_vision"),
+            )
+            recursive_replace_linear(
+                self.vision_tower,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
@@ -972,7 +989,15 @@ class Gemma4ForConditionalGeneration(
                 # position embeddings, softcap, gradient_clipping).
                 self.audio_tower.post_init()
                 self.embed_audio = Gemma4MultimodalEmbedder(
-                    config.audio_config, config.text_config
+                    config.audio_config,
+                    config.text_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "embed_audio"),
+                )
+                recursive_replace_linear(
+                    self.audio_tower,
+                    quant_config,
+                    prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
             self.audio_tower = None
@@ -1230,7 +1255,9 @@ class Gemma4ForConditionalGeneration(
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
 
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        # Use embed_tokens dtype as compute dtype; embedding_projection.weight
+        # may be uint8 under BnB 4-bit, which would corrupt the cast.
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Project all images in a single batched call.
         flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
@@ -1273,7 +1300,7 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()

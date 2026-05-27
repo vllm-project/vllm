@@ -745,6 +745,29 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             stacked_quant_state_dict[quant_param_name][shard_index] = quant_state_dict[
                 non_stacked_param_name
             ]
+
+        # repeat k_proj for v_proj for k_eq_v models (e.g. Gemma4)
+        config = getattr(model, "config", None)
+        if config is not None:
+            text_config = config.get_text_config()
+            if getattr(text_config, "attention_k_eq_v", False):
+                shard_packed = {
+                    name
+                    for name, subs in self.modules_mapping.packed_mapping.items()
+                    if len(subs) == 3
+                }
+                for param_name, shards in stacked_quant_state_dict.items():
+                    is_target = (
+                        isinstance(shards, dict)
+                        and len(shards) == 2
+                        and any(
+                            param_name.endswith(f"{p}.weight") for p in shard_packed
+                        )
+                    )
+                    if is_target:
+                        assert 1 in shards and 2 not in shards
+                        shards[2] = shards[1]
+
         return stacked_quant_state_dict
 
     def _bind_quant_states_to_params(

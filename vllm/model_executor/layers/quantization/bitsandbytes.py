@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cached_property
 from typing import Any, Union
 
 import torch
@@ -168,6 +169,12 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
 
+class BitsAndBytesWeightParameter(torch.nn.Parameter):
+    @cached_property
+    def dtype(self) -> torch.dtype:
+        return torch.get_default_dtype()
+
+
 def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
     # Split the prefix into its dot-separated components
     components = prefix.split(".")
@@ -246,7 +253,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                     "The input size is not aligned with the quantized weight shape."
                 )
 
-            qweight = torch.nn.Parameter(
+            qweight = BitsAndBytesWeightParameter(
                 torch.empty(total_size // quant_ratio, 1, dtype=torch.uint8),
                 requires_grad=False,
             )
