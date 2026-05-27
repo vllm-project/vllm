@@ -61,9 +61,11 @@ struct CooperativeTopKParams {
   uint32_t num_rows, stride;
 };
 
+// ============================================================================
 // Common helpers
 // ============================================================================
 
+// converts the float32 score to a 32-bit ordered unsigned integer — the full precision key for radix sorting
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   uint32_t bits = __float_as_uint(x);
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
@@ -78,6 +80,8 @@ __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   return key >> (16 - kBits);
 }
 
+// running sum within each warp — thread 0 gets its own value, thread 1 gets thread 0 + thread 1, 
+// thread 2 gets threads 0+1+2, etc.
 __device__ __forceinline__ uint32_t warp_inclusive_sum(uint32_t lane, uint32_t v) {
 #pragma unroll
   for (uint32_t o = 1; o < 32; o *= 2) {
@@ -86,22 +90,22 @@ __device__ __forceinline__ uint32_t warp_inclusive_sum(uint32_t lane, uint32_t v
   return v;
 }
 
+// Returns the sum of a value across all 32 threads in the warp, and every thread gets the same result
+// SM90+ PTX instruction that does a hardware warp-wide reduction in a single instruction
+// w.r.t. warp::reduce_sum(), which uses a __shfl_xor_sync butterfly tree (5 shuffles for 32 lanes)
 __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
   uint32_t r;
   asm("redux.sync.add.u32 %0, %1, 0xFFFFFFFF;" : "=r"(r) : "r"(v));
   return r;
 }
 
+// only CS adjacent lanes participate (sub-warp reduce), in opposite to warp_reduce_sum_full
 template <uint32_t N>
 __device__ __forceinline__ uint32_t warp_reduce_sum_subN(uint32_t v) {
 #pragma unroll
   for (uint32_t m = N >> 1; m > 0; m >>= 1) v += __shfl_xor_sync(0xFFFFFFFF, v, m, 32);
   return v;
 }
-
-// ============================================================================
-// Cluster cooperative TopK
-// ============================================================================
 
 // ============================================================================
 // Helpers
@@ -135,35 +139,61 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties, uint32_t num_abov
   auto* s = static_cast<TS*>(_smem);
   const auto tx = threadIdx.x;
   const auto li = tx % kWarpSize, wi = tx / kWarpSize;
+
+  // Each thread loads one tie element.
   const bool has = tx < num_ties;
   const auto tie = has ? ties[tx] : Tie{0, 0.0f};
   const uint32_t key = convert_to_uint32_v2(tie.score);
-  bool active = has; uint32_t remain = TopK - num_above, wpos = TopK;
-  s->counter = 0; __syncthreads();
+
+  bool active = has; // tracks whether this thread's tie is still a candidate.
+  uint32_t remain = TopK - num_above; // decreases each round as ties are resolved.
+  uint32_t wpos = TopK;               // wpos will hold the final output position.
+  s->counter = 0; 
+  __syncthreads();
+
+  // The 4-round radix loop - each round narrows by 8 bits until ties are fully resolved
 #pragma unroll
   for (int r = 0; r < 4; r++) {
-    uint32_t sh = 24 - r * 8, bin = (key >> sh) & 0xFF;
+    uint32_t sh = 24 - r * 8; // round 0: bits 31-24, round 1: 23-16, etc.
+    uint32_t bin = (key >> sh) & 0xFF; // this tie's 8-bit bin for this round
+    
+    // Step 1: Build 256-bin histogram.
     if (tx < RADIX) s->histogram[tx] = 0; __syncthreads();
     if (active) atomicAdd(&s->histogram[bin], 1); __syncthreads();
+
+    // Step 2: Prefix scan to find threshold
     uint32_t hv = 0, wi2 = 0;
-    if (tx < RADIX) { hv = s->histogram[tx]; wi2 = warp_inclusive_sum(li, hv);
-      if (li == kWarpSize-1) s->warp_sum[wi] = wi2; }
+    if (tx < RADIX) { 
+      hv = s->histogram[tx]; 
+      wi2 = warp_inclusive_sum(li, hv);
+      if (li == kWarpSize-1) s->warp_sum[wi] = wi2; 
+    }
     __syncthreads();
+    
     if (tx < RADIX) {
       auto tmp = (li < RADIX/kWarpSize) ? s->warp_sum[li] : 0;
       auto tot = warp_reduce_sum_full(tmp);
       auto inter = warp_reduce_sum_full(li < wi ? tmp : 0);
       auto above = tot - (inter + wi2);
-      if (above < remain && above + hv >= remain) s->match = {tx, above, remain - above};
-    } __syncthreads();
-    auto [thr, na, _] = s->match;
+      if (above < remain && above + hv >= remain) {
+        s->match = {tx, above, remain - above};
+      }
+    } 
+    __syncthreads();
+    
+    // Step 3: Scatter
+    auto [thr, na, _] = s->match; // threshold bin, num above, unused
     if (active) {
-      if (bin > thr) { wpos = num_above + atomicAdd(&s->counter, 1); active = false; }
-      else if (bin < thr) active = false;
-      else if (r == 3) wpos = TopK - atomicAdd(&s->match.equal_count, -1u);
+      if (bin > thr) { 
+        wpos = num_above + atomicAdd(&s->counter, 1); // above -> place in output directly
+        active = false; 
+      }
+      else if (bin < thr) active = false; // below -> discard
+      else if (r == 3) wpos = TopK - atomicAdd(&s->match.equal_count, -1u); // last round: place remaining
     }
-    remain -= na; if (!remain) break;
+    remain -= na; if (!remain) break; // all ties resolved early
   }
+  // Final write
   if (wpos < TopK) output[wpos] = tie.idx;
 }
 
@@ -273,7 +303,6 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
   }
 }
 
-
 // ============================================================================
 // DSMEM histogram reduce
 // ============================================================================
@@ -329,6 +358,18 @@ __device__ __forceinline__ void find_threshold(uint32_t* histogram, uint32_t* wa
 // Uses 4096-bin (12-bit) histogram for better precision
 // ============================================================================
 
+template <uint32_t TopK, uint32_t HIST_BITS>
+struct RegisterTopKSmem {
+  static constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
+  alignas(128) uint32_t counter_gt;
+  alignas(128) uint32_t counter_eq;
+  MatchBin match;
+  uint32_t warp_sum[kNumWarps];
+  union { uint32_t histogram[HIST_BINS]; Tie tie_buffer[kMaxTies]; };
+  static_assert(sizeof(uint32_t) * HIST_BINS >= TopK * sizeof(Tie),
+                "histogram union must be large enough for TopK ties");
+};
+
 template <uint32_t TopK, uint32_t HIST_BITS, uint32_t VECS_PER_THREAD = kRegVecsPerThread>
 __device__ void register_topk(const float* __restrict__ scores,
                               int32_t* __restrict__ output,
@@ -339,17 +380,8 @@ __device__ void register_topk(const float* __restrict__ scores,
   constexpr uint32_t ITEMS_PER_THREAD = HIST_BINS / kBlockSize;
   static_assert(HIST_BINS >= kBlockSize, "HIST_BITS must give >= kBlockSize bins");
 
-  // Reinterpret smem with the right histogram size
-  struct LocalSmem {
-    alignas(128) uint32_t counter_gt;
-    alignas(128) uint32_t counter_eq;
-    MatchBin match;
-    uint32_t warp_sum[kNumWarps];
-    union { uint32_t histogram[HIST_BINS]; Tie tie_buffer[kMaxTies]; };
-    static_assert(sizeof(uint32_t) * HIST_BINS >= TopK * sizeof(Tie),
-                  "histogram union must be large enough for TopK ties");
-  };
-  auto* smem = static_cast<LocalSmem*>(_smem);
+  using Smem = RegisterTopKSmem<TopK, HIST_BITS>;
+  auto* smem = static_cast<Smem*>(_smem);
   const auto tx = threadIdx.x;
   const auto lane_id = tx % kWarpSize;
   const auto warp_id = tx / kWarpSize;
