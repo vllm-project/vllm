@@ -15,11 +15,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
+    TransferRegion,
+    _align_transfer_regions,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
@@ -55,6 +58,66 @@ class FakeMooncakeWrapper:
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
         return 0
+
+
+def test_align_transfer_regions_supports_pp_layer_subset():
+    """PP producer stages should match decoder regions by layer identity."""
+
+    local_regions = [
+        TransferRegion(
+            region_id="layers.1.self_attn:0:kv0",
+            base_addr=0x1000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            region_id="layers.3.self_attn:0:kv0",
+            base_addr=0x3000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            region_id="layers.0.self_attn:0:kv0",
+            base_addr=0xA000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            region_id="layers.1.self_attn:0:kv0",
+            base_addr=0xB000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            region_id="layers.2.self_attn:0:kv0",
+            base_addr=0xC000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            region_id="layers.3.self_attn:0:kv0",
+            base_addr=0xD000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions, remote_regions
+    )
+
+    assert err is None
+    assert [r.region_id for r in aligned_local] == [
+        "layers.1.self_attn:0:kv0",
+        "layers.3.self_attn:0:kv0",
+    ]
+    assert [r.region_id for r in aligned_remote] == [
+        "layers.1.self_attn:0:kv0",
+        "layers.3.self_attn:0:kv0",
+    ]
+    assert [r.base_addr for r in aligned_remote] == [0xB000, 0xD000]
 
 
 def test_basic_interface():
@@ -305,6 +368,107 @@ def patch_worker_dependencies():
             "mock_async_client": mock_async_client,
             "mock_http_client": mock_http_client_instance,
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local_pp_size", "local_pp_rank", "remote_pp_size", "expected_addrs"),
+    [
+        (1, 0, 2, ["tcp://producer-pp0:1234", "tcp://producer-pp1:1234"]),
+        (2, 1, 2, ["tcp://producer-pp1:1234"]),
+    ],
+    ids=["heterogeneous_pp_pulls_all_remote_pp", "matching_pp_pulls_same_rank"],
+)
+async def test_receive_kv_selects_remote_pp_workers(
+    local_pp_size: int,
+    local_pp_rank: int,
+    remote_pp_size: int,
+    expected_addrs: list[str],
+):
+    """Decode workers should not hard-code producer pp_rank 0."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        decode_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        decode_worker = decode_connector.connector_worker
+        decode_worker.pp_size = local_pp_size
+        decode_worker.pp_rank = local_pp_rank
+        decode_worker._remote_agents = {
+            "p-engine": {
+                0: {
+                    0: "tcp://producer-pp0:1234",
+                    1: "tcp://producer-pp1:1234",
+                }
+            }
+        }
+        decode_worker._tp_size["p-engine"] = 1
+        decode_worker._pp_size["p-engine"] = remote_pp_size
+
+        pull_metas = {
+            "d-req-1": PullReqMeta(
+                d_req_id="d-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[100, 101]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+            )
+        }
+        seen_addrs: list[str] = []
+
+        async def fake_receive(worker_addr: str, metas: dict[str, PullReqMeta]):
+            seen_addrs.append(worker_addr)
+            for meta in metas.values():
+                meta.pull_tasks_count -= 1
+
+        with patch.object(
+            decode_worker,
+            "receive_kv_from_single_worker",
+            side_effect=fake_receive,
+        ):
+            decode_worker.receive_kv("p-engine", pull_metas)
+            await asyncio.sleep(0)
+
+        assert seen_addrs == expected_addrs
+        assert pull_metas["d-req-1"].pull_tasks_count == 0
+        decode_worker.shutdown()
+
+
+def test_resolve_need_send_accounts_for_remote_pp_fanout():
+    """Producer-side completion should wait for every consumer PP pull."""
+
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.pp_size = 1
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    send_meta = SendBlockMeta(
+        p_req_id="p-req-1",
+        transfer_id="xfer-req-1",
+        local_block_ids=[[1]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=2,
+        remote_tp_rank=0,
+        req_blocks={"d-req-1": ("xfer-req-1", [[1]])},
+        kv_caches_base_addr=[0x2000],
+        block_lens=[4096],
+        remote_pp_size=4,
+        remote_pp_rank=0,
+    )
+
+    worker.resolve_need_send(send_meta, remote_tp_ranks=[0, 1], meta=xfer_meta)
+
+    assert send_meta.need_send == 8
 
 
 @pytest.mark.asyncio
@@ -643,6 +807,7 @@ def test_register_kv_caches():
             assert len(worker.block_len_per_layer) == len(registered_ptrs)
             for bl in worker.block_len_per_layer:
                 assert bl == tensor1.nbytes // tensor1.shape[0]
+            assert worker.kv_cache_region_ids == ["layer0:0", "layer1:0"]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
@@ -692,6 +857,7 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
             mla_cache.nbytes // mla_cache.shape[0],
             eagle_cache.nbytes // eagle_cache.shape[0],
         ]
+        assert worker.kv_cache_region_ids == ["mla_layer:0", "eagle_layer:0"]
 
 
 @pytest.mark.asyncio
