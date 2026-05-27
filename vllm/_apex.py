@@ -595,6 +595,7 @@ def _hook_gpu_model_runner() -> bool:
 
 
 _emit_log_counter = [0]
+_emit_error_log_counter = [0]
 
 
 def _on_experts_forward(module, args, kwargs, output):
@@ -767,9 +768,28 @@ def _do_emit_next_layer_hint(
         prefetch_experts(global_ids, top_k=top_k)
     except Exception as exc:
         _stats["errors"] += 1
-        if _stats["errors"] == 1:
+        if _emit_error_log_counter[0] < 1:
+            _emit_error_log_counter[0] += 1
+            import sys
+            import traceback
+            msg = (
+                f"apex: first emit error ({type(exc).__name__}): {exc!r}\n"
+                f"{traceback.format_exc()}"
+            )
             try:
-                logger.warning("apex: first emit error (%s): %r", type(exc).__name__, exc)
+                logger.warning(msg)
+            except Exception:
+                pass
+            try:
+                sys.__stderr__.write("[apex] " + msg + "\n")
+                sys.__stderr__.flush()
+            except Exception:
+                pass
+            try:
+                if _stats_file_path:
+                    err_path = _stats_file_path + ".firsterror"
+                    with open(err_path, "w") as f:
+                        f.write(msg)
             except Exception:
                 pass
 
