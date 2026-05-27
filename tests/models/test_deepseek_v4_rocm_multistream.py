@@ -7,20 +7,11 @@ import pytest
 import torch
 
 from vllm.models.deepseek_v4 import attention as dsv4_attention
-from vllm.models.deepseek_v4.amd import model as dsv4_model
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-only DeepSeek-V4 tests"
 )
-
-
-def test_deepseek_v4_rocm_aux_streams_enabled():
-    aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
-
-    assert aux_streams is not None
-    assert len(aux_streams) == 5
-    assert all(stream.priority == -1 for stream in aux_streams)
 
 
 def _swa_metadata(

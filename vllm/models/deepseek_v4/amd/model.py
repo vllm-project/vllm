@@ -56,14 +56,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 
-def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
-    if not current_platform.is_rocm():
-        return None
-    # Reserve the five-stream CSA decode topology. The measured ROCm default
-    # overlaps the compressor branch on aux[1] and keeps indexer fan-out off.
-    return [torch.cuda.Stream(priority=-1) for _ in range(5)]
-
-
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -624,7 +616,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        aux_stream_list = make_deepseek_v4_aux_streams()
+        aux_stream_list = [torch.cuda.Stream(priority=-1) for _ in range(5)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
