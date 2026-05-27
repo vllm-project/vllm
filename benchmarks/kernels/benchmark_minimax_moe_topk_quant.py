@@ -9,12 +9,10 @@ Example:
 """
 
 import argparse
-import csv
 import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 
@@ -31,6 +29,9 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
 
+AccuracyResult = tuple[int | None, float | None, float | None, float | None]
+
+
 @dataclass
 class BenchResult:
     mode: str
@@ -45,6 +46,10 @@ class BenchResult:
     fused_us: float
     speedup: float
     delta_us: float
+    topk_id_mismatch: int | None
+    topk_weight_max_abs_err: float | None
+    a1q_max_abs_err: float | None
+    a1q_scale_max_abs_err: float | None
 
 
 def _baseline_topk_sigmoid(
@@ -107,6 +112,12 @@ def _bench_us(
     return ms * 1000.0
 
 
+def _max_abs_err(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    if actual.numel() == 0:
+        return 0.0
+    return torch.max(torch.abs(actual - expected)).item()
+
+
 def _check_correctness(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -117,7 +128,7 @@ def _check_correctness(
         [torch.Tensor, torch.Tensor, torch.Tensor, int, int],
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     ],
-) -> None:
+) -> AccuracyResult:
     ref_topk_weights, ref_topk_ids, ref_a1q, ref_a1q_scale = _baseline_topk_quant(
         hidden_states,
         router_logits,
@@ -132,10 +143,21 @@ def _check_correctness(
         top_k,
         block_k,
     )
+    topk_id_mismatch = torch.count_nonzero(topk_ids != ref_topk_ids).item()
+    topk_weight_max_abs_err = _max_abs_err(topk_weights, ref_topk_weights)
+    a1q_max_abs_err = _max_abs_err(a1q.float(), ref_a1q.float())
+    a1q_scale_max_abs_err = _max_abs_err(a1q_scale, ref_a1q_scale)
+
     torch.testing.assert_close(topk_ids, ref_topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights, ref_topk_weights, atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(a1q.float(), ref_a1q.float(), atol=0, rtol=0)
     torch.testing.assert_close(a1q_scale, ref_a1q_scale, atol=1e-6, rtol=1e-6)
+    return (
+        topk_id_mismatch,
+        topk_weight_max_abs_err,
+        a1q_max_abs_err,
+        a1q_scale_max_abs_err,
+    )
 
 
 def _run_one(
@@ -164,8 +186,9 @@ def _run_one(
         (num_experts,), dtype=torch.float32, device=device
     )
 
+    accuracy: AccuracyResult = (None, None, None, None)
     if check_correctness:
-        _check_correctness(
+        accuracy = _check_correctness(
             hidden_states,
             router_logits,
             e_score_correction_bias,
@@ -226,7 +249,19 @@ def _run_one(
         fused_us=fused_us,
         speedup=speedup,
         delta_us=baseline_us - fused_us,
+        topk_id_mismatch=accuracy[0],
+        topk_weight_max_abs_err=accuracy[1],
+        a1q_max_abs_err=accuracy[2],
+        a1q_scale_max_abs_err=accuracy[3],
     )
+
+
+def _format_optional_int(value: int | None) -> str:
+    return "n/a" if value is None else str(value)
+
+
+def _format_optional_float(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2e}"
 
 
 def _print_header() -> None:
@@ -243,8 +278,12 @@ def _print_header() -> None:
         "fused_us".rjust(10),
         "speedup".rjust(9),
         "delta_us".rjust(10),
+        "id_mis".rjust(8),
+        "w_err".rjust(10),
+        "q_err".rjust(10),
+        "s_err".rjust(10),
     )
-    print("-" * 105)
+    print("-" * 147)
 
 
 def _print_result(result: BenchResult) -> None:
@@ -261,16 +300,11 @@ def _print_result(result: BenchResult) -> None:
         f"{result.fused_us:10.3f}",
         f"{result.speedup:9.3f}",
         f"{result.delta_us:10.3f}",
+        _format_optional_int(result.topk_id_mismatch).rjust(8),
+        _format_optional_float(result.topk_weight_max_abs_err).rjust(10),
+        _format_optional_float(result.a1q_max_abs_err).rjust(10),
+        _format_optional_float(result.a1q_scale_max_abs_err).rjust(10),
     )
-
-
-def _write_csv(path: Path, results: list[BenchResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(BenchResult.__dataclass_fields__))
-        writer.writeheader()
-        for result in results:
-            writer.writerow(result.__dict__)
 
 
 def parse_args():
@@ -322,12 +356,6 @@ def parse_args():
         default=True,
         help="Compare fused outputs with the baseline before timing each shape.",
     )
-    parser.add_argument(
-        "--output-csv",
-        type=Path,
-        default=None,
-        help="Optional path to save benchmark rows as CSV.",
-    )
     return parser.parse_args()
 
 
@@ -336,7 +364,6 @@ if __name__ == "__main__":
         raise RuntimeError("CUDA device is required to run this benchmark.")
 
     args = parse_args()
-    results: list[BenchResult] = []
     _print_header()
 
     configs = itertools.product(
@@ -356,9 +383,4 @@ if __name__ == "__main__":
             block_k=args.block_k,
             check_correctness=args.check_correctness,
         )
-        results.append(result)
         _print_result(result)
-
-    if args.output_csv is not None:
-        _write_csv(args.output_csv, results)
-        print(f"\nWrote CSV results to {args.output_csv}")
