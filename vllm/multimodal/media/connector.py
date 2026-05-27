@@ -235,14 +235,13 @@ class MediaConnector:
 
     def _load_data_url(
         self,
-        url_spec: Url,
+        url: str,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
-        url_spec_path = url_spec.path or ""
-        data_spec, data = url_spec_path.split(",", 1)
+        # Format per RFC 2397:
+        # data:[<mediatype>][;base64],<data>
+        data_spec, data = url[5:].split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
-        # media_type starts with a leading "/" (e.g., "/video/jpeg")
-        media_type = media_type.lstrip("/")
 
         if data_type != "base64":
             msg = "Only base64 data URLs are supported for now."
@@ -290,6 +289,9 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
+        if url[:5].lower() == "data:":
+            return self._load_data_url(url, media_io)
+
         url_spec = parse_url(url)
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
@@ -309,9 +311,6 @@ class MediaConnector:
             self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
 
-        if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io)
-
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
 
@@ -325,8 +324,15 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:
-        url_spec = parse_url(url)
         loop = asyncio.get_running_loop()
+
+        if url[:5].lower() == "data:":
+            future = loop.run_in_executor(
+                global_thread_pool, self._load_data_url, url, media_io
+            )
+            return await future
+
+        url_spec = parse_url(url)
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
@@ -351,12 +357,6 @@ class MediaConnector:
                 global_thread_pool, self._put_cached_bytes, url, data
             )
             future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
-
-        if url_spec.scheme == "data":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_data_url, url_spec, media_io
-            )
             return await future
 
         if url_spec.scheme == "file":

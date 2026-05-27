@@ -1115,6 +1115,75 @@ def test_anyof_object_param_not_double_encoded_streaming(
 
 
 # ---------------------------------------------------------------------------
+# anyOf array schema — value parsed as a list
+# ---------------------------------------------------------------------------
+
+_ANYOF_ARRAY_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "set_items",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "string"}},
+                            {"type": "null"},
+                        ],
+                    },
+                },
+            },
+        },
+    )
+]
+
+_ANYOF_ARRAY_OUTPUT = (
+    "<tool_call>\n"
+    "<function=set_items>\n"
+    '<parameter=items>["a", "b", "c"]</parameter>\n'
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+def test_anyof_array_null_parses_as_list_nonstreaming(
+    qwen3_tokenizer, parser_cls
+):
+    """anyOf [{type: array}, {type: null}] must parse a JSON array value as
+    a list (the first non-null type is ``array``), not as a raw string.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_ARRAY_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_ANYOF_ARRAY_TOOLS
+    )
+    result = parser.extract_tool_calls(_ANYOF_ARRAY_OUTPUT, request=request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert isinstance(args["items"], list), (
+        f"anyOf array|null was not parsed as a list: {args['items']!r}"
+    )
+    assert args["items"] == ["a", "b", "c"]
+
+
+def test_anyof_array_null_parses_as_list_streaming(qwen3_tokenizer, parser_cls):
+    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_ARRAY_TOOLS)
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=_ANYOF_ARRAY_TOOLS
+    )
+    reconstructor = run_tool_extraction_streaming(
+        parser, _ANYOF_ARRAY_OUTPUT, request, assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert isinstance(args["items"], list), (
+        f"anyOf array|null was not a list in streaming: {args['items']!r}"
+    )
+    assert args["items"] == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
 # Object param double-encoded as JSON-encoded Python repr
 # ---------------------------------------------------------------------------
 

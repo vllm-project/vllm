@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
@@ -239,37 +238,22 @@ class RequestRunner:
 
         # register worker kv_caches to enable OffloadingWorker creations
         # set_current_vllm_config is needed for get_kv_cache_layout() to work
-        # Mock get_layers_from_vllm_config so that mock layer names
-        # resolve to layers whose get_attn_backend() returns
-        # FlashAttentionBackend.
-        def _mock_get_layers(_vllm_config, _layer_type, layer_names):
-            mock_layer = MagicMock()
-            mock_layer.get_attn_backend.return_value = FlashAttentionBackend
-            return {name: mock_layer for name in layer_names}
-
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 # Shape follows FlashAttention layout:
-                # (2, num_blocks, block_size, num_kv_heads, head_size)
+                # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
                 kv_caches[layer_name] = torch.empty(
-                    2,
                     num_gpu_blocks,
+                    2,
                     spec.block_size,
                     spec.num_kv_heads,
                     spec.head_size,
                     dtype=spec.dtype,
                 )
 
-        with (
-            set_current_vllm_config(vllm_config),
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1"
-                ".offloading.worker.get_layers_from_vllm_config",
-                side_effect=_mock_get_layers,
-            ),
-        ):
+        with set_current_vllm_config(vllm_config):
             self.worker_connector.register_kv_caches(kv_caches)
 
         # extract connector of scheduler
@@ -348,10 +332,14 @@ class RequestRunner:
     def _parse_transfers(self):
         for transfer_spec in self.offloading_spec.get_flushed_transfers():
             src_spec, dst_spec = transfer_spec
-            assert isinstance(src_spec, GPULoadStoreSpec)
-
-            for block_id in src_spec.block_ids:
-                self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            if isinstance(src_spec, GPULoadStoreSpec):
+                # store flush
+                for block_id in src_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
+            else:
+                # load flush
+                for block_id in dst_spec.block_ids:
+                    self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
         block_size_factor = self.block_size_factor
 
@@ -458,9 +446,6 @@ class RequestRunner:
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
-
-            if scheduler_output.total_num_scheduled_tokens > 0:
-                self.worker_connector.wait_for_save()
 
             if complete_transfers:
                 self.offloading_spec.complete_transfers()

@@ -488,6 +488,10 @@ def _run_eagle_correctness(
 
 
 @single_gpu_only
+@pytest.mark.skipif(
+    current_platform.is_device_capability_family(100),
+    reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
+)
 @pytest.mark.parametrize(
     [
         "model_setup",
@@ -718,7 +722,15 @@ def test_eagle_correctness_heavy(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
-        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        pytest.param(
+            ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1),
+            False,
+            0.0,
+            marks=pytest.mark.skipif(
+                current_platform.is_device_capability_family(100),
+                reason="DeepSeek MTP: TRTLLM MoE top_k check fails on Blackwell",
+            ),
+        ),  # dummy model
         (
             ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1),
             False,
@@ -1303,7 +1315,7 @@ def test_dflash_acceptance_rates(dflash_config):
     expected_acceptance_lengths = {
         "mt-bench": 4.24,
         "humaneval": 6.50,
-        "gsm8k": 6.54 * 0.95,  # runs with a subset of prompts so extra wide tol here
+        "gsm8k": 6.54 * 0.975,  # runs with a subset of prompts so extra wide tol here
     }
 
     tokenizer = spec_llm.get_tokenizer()
@@ -1335,7 +1347,10 @@ def test_dflash_acceptance_rates(dflash_config):
             acceptance_lengths.append(acceptance_len)
 
         mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
-        expected_len = expected_len * 0.9
+        # Fairly tight tolerance of 95% against the paper's figures,
+        # watching for regressions. Can be relaxed if test is flaky but be sure to
+        # check for genuine issues such as #40727.
+        expected_len = expected_len * 0.95
         print(
             f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
             f" (expected at least {expected_len:.2f})"

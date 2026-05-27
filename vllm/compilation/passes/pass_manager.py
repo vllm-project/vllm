@@ -7,7 +7,7 @@ from typing import Any, ParamSpec, TypeVar
 from torch import fx as fx
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -33,6 +33,7 @@ if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
+    from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -43,7 +44,6 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
-    from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -142,14 +142,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
+                # Run the more specific RMSNorm+router-pad fusion before
+                # AR+RMS, since both consume fused_add_rms_norm.
+                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
             if self.pass_config.fuse_allreduce_rms:
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:
                     self.passes += [AllReduceFusionPass(config)]
-
-            if self.pass_config.fuse_minimax_qk_norm:
-                self.passes += [MiniMaxQKNormPass(config)]
 
             if self.pass_config.fuse_norm_quant:
                 if rocm_aiter_ops.is_enabled():
@@ -163,16 +165,20 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
-                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
-
-            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+            if (
+                self.pass_config.fuse_mla_dual_rms_norm
+                and rocm_aiter_ops.is_enabled()
+                and check_aiter_fused_qk_rmsnorm()
+            ):
                 self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache_cat_mla:
+                self.passes += [MLARoPEKVCacheCatFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnQuantFusionPass(config)]
