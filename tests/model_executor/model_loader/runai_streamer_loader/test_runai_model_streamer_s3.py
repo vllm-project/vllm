@@ -32,7 +32,7 @@ def test_runai_model_loader_download_files_s3_mocked_with_patch(
         patcher.shim_list_safetensors,
     )
     monkeypatch.setattr(
-        "vllm.transformers_utils.runai_utils.runai_pull_files",
+        "runai_model_streamer.safetensors_streamer.safetensors_streamer.pull_files",
         patcher.shim_pull_files,
     )
     monkeypatch.setattr(
