@@ -10,8 +10,6 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include "dsv3_router_gemm_utils.h"
-
 // ---------------------------------------------------------------------------
 // Load helpers
 // ---------------------------------------------------------------------------
@@ -78,7 +76,7 @@ __device__ __forceinline__ void load_activation<__nv_bfloat16, 8>(
 // Weight is always fp32; output is always fp32.
 // VPT = 16 / sizeof(InputT):  4 for fp32, 8 for bf16
 template <typename InputT, int kBlockSize, int kNumTokens, int kNumExperts,
-          int kHiddenDim, bool ENABLE_PDL>
+          int kHiddenDim>
 __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
     float* out, InputT const* mat_a, float const* mat_b) {
   constexpr int VPT = 16 / sizeof(InputT);
@@ -103,11 +101,8 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
     k_bases[ki] = ki * k_elems_per_k_iteration + tid * VPT;
   }
 
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) && \
-    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if constexpr (ENABLE_PDL) {
-    asm volatile("griddepcontrol.wait;");
-  }
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("griddepcontrol.wait;");
 #endif
 
   for (int ki = 0; ki < k_iterations; ki++) {
@@ -152,12 +147,8 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
     }
   }
 
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) && \
-    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if constexpr (ENABLE_PDL) {
-    __syncthreads();
-    asm volatile("griddepcontrol.launch_dependents;");
-  }
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("griddepcontrol.launch_dependents;");
 #endif
 }
 
@@ -169,29 +160,20 @@ template <typename InputT, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream) {
   constexpr int kBlockSize = 128;
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
-  if (getEnvEnablePDL()) {
-    cudaLaunchConfig_t config;
-    config.gridDim = kNumExperts;
-    config.blockDim = kBlockSize;
-    config.dynamicSmemBytes = 0;
-    config.stream = stream;
-    cudaLaunchAttribute attrs[1];
-    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attrs[0].val.programmaticStreamSerializationAllowed = 1;
-    config.numAttrs = 1;
-    config.attrs = attrs;
-    cudaLaunchKernelEx(&config,
-                       fp32_router_gemm_kernel<InputT, kBlockSize, kNumTokens,
-                                               kNumExperts, kHiddenDim, true>,
-                       output, mat_a, mat_b);
-    return;
-  }
-#endif
-
-  fp32_router_gemm_kernel<InputT, kBlockSize, kNumTokens, kNumExperts,
-                          kHiddenDim, false>
-      <<<kNumExperts, kBlockSize, 0, stream>>>(output, mat_a, mat_b);
+  cudaLaunchConfig_t config;
+  config.gridDim = kNumExperts;
+  config.blockDim = kBlockSize;
+  config.dynamicSmemBytes = 0;
+  config.stream = stream;
+  cudaLaunchAttribute attrs[1];
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  config.numAttrs = 1;
+  config.attrs = attrs;
+  cudaLaunchKernelEx(&config,
+                     fp32_router_gemm_kernel<InputT, kBlockSize, kNumTokens,
+                                             kNumExperts, kHiddenDim>,
+                     output, mat_a, mat_b);
 }
 
 // ---------------------------------------------------------------------------
