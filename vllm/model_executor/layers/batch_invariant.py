@@ -950,21 +950,29 @@ def enable_batch_invariant_mode():
 
         _register_common_overrides(_batch_invariant_LIB, "CUDA")
     elif current_platform.is_xpu():
+        # Intel GPUs load DPAS operands directly into registers (not through
+        # shared memory), so the shared-memory threshold used for CUDA does not
+        # directly apply.  Use 128 as the safe default that works across all
+        # Intel GPU variants (PVC, BMG, Arc).
+        _fp16_block_size_n = 128
         _register_matmul_overrides(_batch_invariant_LIB, "XPU")
         _register_common_overrides(_batch_invariant_LIB, "XPU")
 
     torch.bmm = bmm_batch_invariant
 
-    reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0") else False
-    )
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
-        reduced_precision_val
-    )
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
-        reduced_precision_val
-    )
     if current_platform.is_cuda():
+        # Disable cuBLAS reduced-precision accumulation for determinism.
+        # XPU does not need this: all matmul/bmm ops are replaced by Triton
+        # kernels that explicitly use FP32 accumulators.
+        reduced_precision_val = (
+            (False, False) if is_torch_equal_or_newer("2.10.0") else False
+        )
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+            reduced_precision_val
+        )
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+            reduced_precision_val
+        )
         torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 

@@ -32,7 +32,7 @@ On XPU, the attention backend affects the level of batch invariance:
 
 - **Triton Attention** (`attention_config={"backend": "TRITON_ATTN"}`): Provides **bitwise** batch invariance. The Triton unified attention kernel uses a 2D launch grid that processes each sequence independently when `VLLM_BATCH_INVARIANT=1`.
 
-- **Flash Attention** (default on XPU): Does **not** guarantee batch invariance. The XPU Flash Attention wrapper in `_xpu_ops.py` accepts the `num_splits` parameter but does not pass it through to the underlying IPEX kernel. As a result, the `num_splits=1` constraint that `VLLM_BATCH_INVARIANT` sets to prevent split-k non-determinism has no effect. Outputs may still match in many cases, but bitwise invariance is not guaranteed. This is a known limitation that may need to be fixed in the XPU Flash Attention integration.
+- **Flash Attention** (default on XPU): Does **not** guarantee batch invariance. The XPU Flash Attention wrapper in `_xpu_ops.py` accepts the `num_splits` parameter but does not pass it through to the underlying `vllm_xpu_kernels` flash attention kernel. As a result, the `num_splits=1` constraint that `VLLM_BATCH_INVARIANT` sets to prevent split-k non-determinism has no effect. Outputs may still match in many cases, but bitwise invariance is not guaranteed. This is a known limitation tracked in the `vllm_xpu_kernels` project.
 
 For use cases requiring bitwise-identical logprobs (e.g., RL reward computation), explicitly select the Triton attention backend:
 
