@@ -98,15 +98,22 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if params.thinking_token_budget is not None and (
-                self.vllm_config.reasoning_config is None
-                or not self.vllm_config.reasoning_config.enabled
-            ):
-                raise ValueError(
-                    "thinking_token_budget is set but reasoning_config is "
-                    "not configured. Please set --reasoning-config to use "
-                    "thinking_token_budget."
-                )
+            if params.thinking_token_budget is not None:
+                if (
+                    self.vllm_config.reasoning_config is None
+                    or not self.vllm_config.reasoning_config.enabled
+                ):
+                    raise ValueError(
+                        "thinking_token_budget is set but reasoning_config is "
+                        "not configured. Please set --reasoning-config to use "
+                        "thinking_token_budget."
+                    )
+                if self.vllm_config.use_v2_model_runner:
+                    raise ValueError(
+                        "thinking_token_budget is not yet supported by the V2 "
+                        "model runner. To use it, run vLLM with "
+                        "VLLM_USE_V2_MODEL_RUNNER=0."
+                    )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS

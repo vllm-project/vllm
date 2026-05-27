@@ -1978,10 +1978,6 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
-        if self.reasoning_config is not None:
-            # TODO: add reasoning budget enforcement to ModelRunnerV2.
-            unsupported.append("reasoning budget enforcement")
-
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
