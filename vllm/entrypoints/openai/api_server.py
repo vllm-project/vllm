@@ -52,7 +52,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
     log_response,
     validation_exception_handler,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMValidationError, VLLMNotFoundError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -251,7 +251,17 @@ def build_app(
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
+    # Register specific exception types so they are handled by
+    # ExceptionMiddleware (inside the Prometheus middleware) rather than
+    # ServerErrorMiddleware (outside it). Without this, these exceptions
+    # propagate through Prometheus as unhandled and get recorded as 5xx
+    # even though they result in 4xx responses to the client.
     app.exception_handler(VLLMValidationError)(exception_handler)
+    app.exception_handler(VLLMNotFoundError)(exception_handler)
+    app.exception_handler(ValueError)(exception_handler)
+    app.exception_handler(TypeError)(exception_handler)
+    app.exception_handler(OverflowError)(exception_handler)
+    app.exception_handler(NotImplementedError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
