@@ -80,10 +80,16 @@ def _decode_topk_logits_width(
     return min(max_model_len, max(logits_width, topk_tokens))
 
 
-def _sparse_indexer_requires_deep_gemm() -> bool:
-    return current_platform.is_cuda() and not (
-        current_platform.is_device_capability_family(120)
-    )
+def _sparse_indexer_requires_deep_gemm(use_fp4_cache: bool = False) -> bool:
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.is_device_capability_family(120):
+        # The SM120 fallback path covers FP8-Q sparse indexer calls. FP4-Q
+        # indexer calls still route through DeepGEMM's fp8_fp4 kernels, so
+        # fail during construction instead of letting the first forward hit
+        # the generic DeepGEMM missing-dependency error.
+        return use_fp4_cache
+    return True
 
 
 def _gather_workspace_shapes(
@@ -542,7 +548,7 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        if _sparse_indexer_requires_deep_gemm() and not has_deep_gemm():
+        if _sparse_indexer_requires_deep_gemm(use_fp4_cache) and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
