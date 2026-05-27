@@ -1217,9 +1217,12 @@ def fused_pcp_qkv_select(
     SEQ_BLOCK_SIZE: int = 256
     assert q.shape[1] == k.shape[1] == v.shape[1]
     n_head = q.shape[1]
-    n_dim_block = (
-        max(q.shape[2], k.shape[2], v.shape[2]) + DIM_BLOCK_SIZE
-    ) // DIM_BLOCK_SIZE
+    # Use standard ceil division so we don't launch a trailing dim block that
+    # is entirely masked out — masked-out lanes still compute the pointer
+    # (ptr + dim_off, where dim_off goes well past the head_dim), and on
+    # Blackwell that triggers cudaErrorIllegalAddress for the OOB address
+    # even though the store itself is predicated off.
+    n_dim_block = cdiv(max(q.shape[2], k.shape[2], v.shape[2]), DIM_BLOCK_SIZE)
     grid = (
         2 * pcp_world_size * BS,
         n_head,
@@ -1238,6 +1241,12 @@ def fused_pcp_qkv_select(
         query_start_loc,
         q_head,
         q_tail,
+        # NOTE order must match the kernel signature:
+        # (out_k_head, out_k_tail, out_v_head, out_v_tail). A prior bug
+        # passed (k_head, v_head, k_tail, v_tail) which swapped k_tail
+        # and v_head — the kernel then wrote K-shaped rows (k_head_dim=192)
+        # into the V_head buffer (v_head_dim=128 per row), causing an
+        # illegal memory access at the first PCP prefill iteration.
         k_head,
         k_tail,
         v_head,

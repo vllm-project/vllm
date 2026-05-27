@@ -4001,7 +4001,21 @@ class GPUModelRunner(
         # the kernel writes the all-gathered K/V into the right cache slots.
         # The active "real" portion of the slot map has length global_total
         # rather than num_tokens_unpadded (which is local under PCP).
-        if self.pcp_world_size > 1:
+        #
+        # IMPORTANT: only enter the PCP padding branch when partition_inputs
+        # has actually been called this iteration (i.e., padded_total > 0).
+        # Dummy runs (compile/warmup, memory profiling) call
+        # _get_slot_mappings without going through _prepare_inputs, so the
+        # PCPManager still carries stale (zero) padded_total/global_total
+        # from __init__. Falling into the PCP branch in that case produces
+        # an empty padded slot_mapping while K/V tensors are local-sized,
+        # which corrupts the CUDA context inside concat_and_cache_mla.
+        pcp_active = (
+            self.pcp_world_size > 1
+            and self.pcp_manager is not None
+            and self.pcp_manager.padded_total > 0
+        )
+        if pcp_active:
             assert self.pcp_manager is not None
             global_real_tokens = self.pcp_manager.global_total
         else:
@@ -4025,7 +4039,7 @@ class GPUModelRunner(
                 # than the local num_tokens_padded slice.
                 view_len = (
                     max(global_real_tokens, num_tokens_padded)
-                    if self.pcp_world_size > 1
+                    if pcp_active
                     else num_tokens_padded
                 )
                 slot_mapping = blk_table.slot_mapping.gpu[:view_len]
@@ -4044,7 +4058,8 @@ class GPUModelRunner(
         # Under PCP, expand each group's slot_mapping (which is currently
         # length=global_total + graph padding) into the padded all-gather
         # layout: real tokens at unpadded positions, -1 at padding positions.
-        if self.pcp_world_size > 1 and self.pcp_manager is not None:
+        if pcp_active:
+            assert self.pcp_manager is not None
             slot_mappings_by_gid = {
                 gid: self.pcp_manager.pad_slot_mapping(sm[:global_real_tokens])
                 for gid, sm in slot_mappings_by_gid.items()
