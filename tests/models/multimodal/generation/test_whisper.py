@@ -274,6 +274,8 @@ def test_models(
     enforce_eager: bool,
 ) -> None:
     check_model_available(model)
+    if current_platform.is_xpu() and dtype == "float":
+        pytest.skip("Skipping test as float dtype not supported in FLASH_ATTN on XPU")
     if current_platform.is_cpu() and not enforce_eager:
         pytest.skip("Skipping test for CPU with non-eager mode")
     run_test(
