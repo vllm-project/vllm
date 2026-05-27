@@ -365,7 +365,7 @@ def main():
     license_data = decrypt_license()
     available_server = check_online_server_availability()
     online_ok = verify_license_online(license_data["license_key"], license_data["session_id"], available_server)
-    
+
     if not online_ok:
         logger.info("Online license verification failed.")
 
@@ -389,16 +389,20 @@ def main():
             license_data["session_id"], get_session_id(),
         )
         sys.exit(1)
-    
-
 
     args, unknown_args = parser.parse_known_args()
+
     if args.command == "serve":
         if "--easy" in unknown_args:
             # remove --easy
             unknown_args = [arg for arg in unknown_args if arg != "--easy"]
         else:
-            unknown_args += ["--async-scheduling", "--speculative-config", '{"method":"ngram_gpu","unieai_dsc":true,"num_speculative_tokens":4,"draft_tensor_parallel_size":1,"prompt_lookup_min":3,"prompt_lookup_max":8}']
+            is_overlap = any(
+                arg == "--kv-cache-dtype" or arg.startswith("--kv-cache-dtype=")
+                for arg in unknown_args
+            )
+            if not is_overlap:
+                unknown_args += ["--kv-cache-dtype", "fp8"]
         cmd = ["vllm", "serve", args.model_name] + unknown_args
         # logger.info("Running UnieConfig with command: %s", " ".join(cmd))
         subprocess.run(cmd, check=True, shell=False, text=True)

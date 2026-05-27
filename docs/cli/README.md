@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,serve-optuna,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
 ```
 
 ## serve
@@ -37,23 +37,35 @@ vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
 Check with --help for more options:
 
 ```bash
-# To list all groups
-vllm serve --help=listgroup
+# To list all flags
+vllm serve --help=all
 
-# To view a argument group
+# To view an argument group
 vllm serve --help=ModelConfig
 
 # To view a single argument
 vllm serve --help=max-num-seqs
 
-# To search by keyword
+# To search by keyword or flag name
 vllm serve --help=max
-
-# To view full help with pager (less/more)
-vllm serve --help=page
 ```
 
 See [vllm serve](./serve.md) for the full reference of all available arguments.
+
+## launch
+
+Launch individual vLLM components.
+
+```bash
+# Launch the rendering server component
+vllm launch render meta-llama/Llama-3.2-1B-Instruct
+
+# Inspect all available flags for the render component
+vllm launch render --help=all
+```
+
+See [vllm launch render](./launch/render.md) for the current launch
+component reference.
 
 ## chat
 
@@ -146,24 +158,6 @@ vllm bench throughput \
 ```
 
 See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
-
-## serve-optuna
-
-Tune `vllm serve` parameters with Optuna and benchmark scoring across multiple concurrencies.
-
-```bash
-vllm serve-optuna \
-    --serve-cmd 'vllm serve Qwen/Qwen3-0.6B' \
-    --score-concurrencies 1,8,64,256 \
-    --n-trials 20 \
-    -o benchmarks/results
-```
-
-`--search-space` is optional. If omitted, vLLM uses built-in default serve tuning ranges.
-`--bench-cmd` is optional. If omitted, vLLM auto-fills model/base-url/tokenizer from `--serve-cmd`.
-By default, the best server config is started after optimization. Use `--no-start-best-server` to skip.
-
-See [vllm bench sweep serve_optuna](./bench/sweep/serve_optuna.md) for the full reference of all available arguments.
 
 ## collect-env
 
