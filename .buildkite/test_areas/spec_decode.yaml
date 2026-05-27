@@ -32,6 +32,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
     - tests/v1/e2e/spec_decode/
   commands:

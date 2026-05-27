@@ -141,6 +141,7 @@ bbc5b7ede = "bbc5b7ede"
 NOOPs = "NOOPs"
 nin_shortcut = "nin_shortcut"
 cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
+sharedMemPerBlockOptin = "sharedMemPerBlockOptin"
 
 depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
 pard_token = "pard_token"
@@ -181,6 +182,8 @@ VALU = "VALU"
 # Walsh-Hadamard Transform
 wht = "wht"
 WHT = "WHT"
+# Huawei Compute Architecture for Neural Networks
+CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
