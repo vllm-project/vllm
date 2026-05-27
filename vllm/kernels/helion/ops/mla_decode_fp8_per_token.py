@@ -107,6 +107,7 @@ def mla_decode_kv_split(
     q_absorbed: torch.Tensor,  # query (batch, heads, d_model)
     latent_kv: torch.Tensor,  # latent kv vector (num_pages, page_size, latent+rope)
     attn_out: torch.Tensor,  # output (batch, heads, d_model)
+    logsum_exp: torch.Tensor,
     kv_dequant: torch.Tensor,  # scale to dequant fp8 latent kv cache
     sm_scale: torch.Tensor,  # normalising scale for attention product
     B_seq_len: torch.Tensor,  # seq_len of each request (batch,)
@@ -128,8 +129,8 @@ def mla_decode_kv_split(
     for seq, head, kv_split in hl.tile(grid, block_size=[1, 1, None]):
         q = q_absorbed[seq, head, :]
         if rope_dim > 0:
-            q_latent = q[:, :, :latent_dim]
-            q_rope = q[:, :, latent_dim:rope_dim]
+            q_latent = q[:latent_dim]
+            q_rope = q[latent_dim : latent_dim + rope_dim]
         else:
             q_latent = q
 
@@ -149,44 +150,35 @@ def mla_decode_kv_split(
                 log_page_offs = offs_n // PAGE_SIZE
                 kv_page_number = hl.load(
                     Req_to_Tokens,
-                    [batch, log_page_offs],
+                    [seq, log_page_offs],
                     extra_mask=offs_n < split_kv_end,
                 )
 
                 page_offs = offs_n % PAGE_SIZE
-                latent_slice = slice(None, latent_dim)
 
-                k_latent = hl.load(
+                k = hl.load(
                     latent_kv,
-                    [kv_page_number, page_offs, latent_slice],
+                    [kv_page_number, page_offs, slice(None)],
                     extra_mask=offs_n < split_kv_end,
                 )
-
-                qk = hl.dot(q_latent, k_latent)
+                if k.dtype == torch.float8_e4m3fn:
+                    k = (k.to(torch.float32) * kv_dequant).to(q.dtype)
 
                 if rope_dim > 0:
-                    pos_slice = slice(latent_dim, rope_dim)
-                    k_rope = hl.load(
-                        latent_kv,
-                        [
-                            kv_page_number,
-                            page_offs,
-                            pos_slice,
-                        ],
-                        extra_mask=offs_n < split_kv_end,
-                    )
+                    k_latent = k[:latent_dim]
+                    qk = hl.dot(q_latent, torch.transpose(k_latent))
+                    k_rope = k[latent_dim : latent_dim + rope_dim]
 
-                    if k_rope.dtype == torch.float8_e4m3fn:
-                        k_rope = (k_rope.to(torch.float32) * kv_dequant).to(q.dtype)
-
-                    qk = hl.dot(q_rope, k_rope, qk)
+                    qk = hl.dot(q_rope, torch.transpose(k_rope), qk)
+                else:
+                    qk = hl.dot(q_latent, torch.transpose(k_latent))
 
                 qk *= sm_scale
                 if logit_cap > 0:
                     qk = logit_cap * torch.tanh(qk / logit_cap)
                 qk = torch.where(offs_n < split_kv_end, qk, float("-inf"))
 
-                v = torch.transpose(k_latent)
+                v = k_latent
 
                 n_e_max = torch.max(torch.max(qk), e_max)
                 re_scale = torch.exp(e_max - n_e_max)
@@ -196,3 +188,6 @@ def mla_decode_kv_split(
 
                 e_sum = e_sum * re_scale + torch.sum(p)
                 e_max = n_e_max
+
+            hl.store(attn_out, [seq, head, kv_split, slice(None)], acc / e_sum)
+            hl.store(logsum_exp, [seq, head, kv_split], e_max + torch.log(e_sum))
