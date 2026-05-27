@@ -51,6 +51,8 @@ steps:
     torch_nightly: {}
     amd:
       device: mi300_1
+      timeout_in_minutes: 240
+      parallelism: 4
       depends_on:
       - image-build-amd
       commands:
