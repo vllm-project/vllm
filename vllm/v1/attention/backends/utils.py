@@ -69,21 +69,6 @@ def get_flashinfer_layout_string() -> str:
     return _FLASHINFER_LAYOUT_NAMES.get(name, name)
 
 
-@functools.lru_cache
-def get_kv_cache_layout() -> str:
-    """Return the resolved layout name string.
-
-    .. deprecated::
-        Use :func:`resolve_kv_cache_layout` which returns a
-        :class:`KVCacheLayout` object.  This wrapper exists only for
-        callers that still need the string form.
-    """
-    global _KV_CACHE_LAYOUT_OVERRIDE
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        return _KV_CACHE_LAYOUT_OVERRIDE
-    return resolve_kv_cache_layout().name
-
-
 def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
     """Override the KV cache layout (for tests and platform constraints).
 
@@ -93,7 +78,6 @@ def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
     """
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    get_kv_cache_layout.cache_clear()
     resolve_kv_cache_layout.cache_clear()
 
 
