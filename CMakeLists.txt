@@ -1267,13 +1267,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+
+  # skinny_gemms.cu is built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude it from the
+  # gfx1250 build and disable its op registrations (VLLM_SKIP_SKINNY_GEMMS);
+  # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
+  if(VLLM_GPU_ARCHES MATCHES "gfx1250")
+    message(STATUS "gfx1250 detected: excluding csrc/rocm/skinny_gemms.cu from _rocm_C")
+    list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
+    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
+  endif()
 
   define_extension_target(
     _rocm_C
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    COMPILE_FLAGS ${VLLM_ROCM_EXT_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
