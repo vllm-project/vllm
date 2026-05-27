@@ -1471,7 +1471,6 @@ def _prepare_expert_assignment(
     )
 
 
-# TODO (bnell): replace this with modular op.
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
