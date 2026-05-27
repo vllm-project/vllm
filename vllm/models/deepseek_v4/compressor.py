@@ -174,9 +174,11 @@ class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
     Owns the linear / norm / state-cache / ape state and the shared forward
-    prologue (kv/score split, save_partial_states launch). The per-platform
-    compress → norm → RoPE → store step is dispatched to
-    ``compress_norm_rope_store`` imported from ``nvidia/`` or ``amd/``.
+    prologue (kv/score split, save_partial_states launch). The
+    compress → norm → RoPE → store step is dispatched to a triton kernel
+    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    head_dim=128 indexer path which uses the cutedsl kernel
+    (``compress_norm_rope_store_cutedsl``) for better performance.
     """
 
     def __init__(
