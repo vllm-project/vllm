@@ -253,6 +253,9 @@ class MistralTokenizer(TokenizerLike):
         self._max_chars_per_token = max(len(tok) for tok in self._vocab)
 
         # Build reverse mapping (piece -> lowest token id) in a single O(n) pass.
+        # Iterates len(self._vocab) ids, not self.vocab_size: the mistral_common
+        # tokenizer's vocab() is the authoritative id range (and _get_special_token_ids
+        # already uses range(len(self._vocab)) for the same reason).
         # Reverse iteration ensures the lowest token id wins when multiple ids share
         # the same piece string (e.g. byte-fallback tokens that collapse to "<?>").
         self._vocab_dict = {tok: i for i, tok in reversed(list(enumerate(self._vocab)))}
