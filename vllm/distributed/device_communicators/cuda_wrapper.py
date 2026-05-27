@@ -78,10 +78,6 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
-        # cudaError_t cudaGetLastError ( void )
-        Function("cudaGetLastError", cudaError_t, []),
-        # cudaError_t cudaPeekAtLastError ( void )
-        Function("cudaPeekAtLastError", cudaError_t, []),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
@@ -96,8 +92,6 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
-        "cudaGetLastError": "hipGetLastError",
-        "cudaPeekAtLastError": "hipPeekAtLastError",
     }
 
     # class attribute to store the mapping from the path to the library
@@ -194,11 +188,3 @@ class CudaRTLibrary:
             )
         )
         return devPtr
-
-    def cudaGetLastError(self) -> int:
-        """Read AND clear the last CUDA/HIP runtime error. Returns the error code."""
-        return int(self.funcs["cudaGetLastError"]())
-
-    def cudaPeekAtLastError(self) -> int:
-        """Read the last CUDA/HIP runtime error without clearing it."""
-        return int(self.funcs["cudaPeekAtLastError"]())

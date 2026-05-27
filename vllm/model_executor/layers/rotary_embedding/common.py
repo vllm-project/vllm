@@ -135,6 +135,7 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
+        self._flash_attn_validated = False
         if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
@@ -253,7 +254,11 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        if self.apply_rotary_emb_flash_attn is not None:
+        if (
+            not self._flash_attn_validated
+            and self.apply_rotary_emb_flash_attn is not None
+        ):
+            self._flash_attn_validated = True
             # The flash_attn Triton rotary kernel on AMD requires the rotary_dim
             # (= cos.shape[-1] * 2) to be a power of 2.  When it is not (e.g.
             # head_dim=72 in the Qwen3.5 ViT encoder), the HIP cooperative-grid
@@ -261,10 +266,10 @@ class ApplyRotaryEmb(CustomOp):
             # the kernel permanently so we never pay the HIP error penalty.
             rotary_dim = cos.shape[-1] * 2
             if rotary_dim & (rotary_dim - 1):  # not a power of 2
-                logger.warning(
-                    "ROCm: flash_attn Triton rotary kernel requires power-of-2 "
-                    "rotary_dim, but got %d. Falling back to native PyTorch "
-                    "implementation permanently for this layer.",
+                logger.warning_once(
+                    "[ROCm] flash_attn Triton rotary kernel requires power-of-2 "
+                    "rotary_dim, but got %d. All layers with this rotary_dim "
+                    "will fall back to native PyTorch implementation.",
                     rotary_dim,
                 )
                 self.apply_rotary_emb_flash_attn = None
@@ -280,38 +285,9 @@ class ApplyRotaryEmb(CustomOp):
                 ...
             """
             interleaved = not self.is_neox_style
-            try:
-                flash_attn_func = self.apply_rotary_emb_flash_attn
-                if flash_attn_func is None:
-                    raise RuntimeError(
-                        "Flash attention kernel was disabled by another thread."
-                    )
-                output = flash_attn_func(x, cos, sin, interleaved=interleaved).type_as(
-                    x
-                )
-            except RuntimeError:
-                self.apply_rotary_emb_flash_attn = None
-                logger.warning(
-                    "ROCm: flash_attn Triton rotary kernel failed. Clearing "
-                    "stale HIP runtime error and falling back to native PyTorch "
-                    "implementation permanently for this layer."
-                )
-                # The failed Triton/HIP kernel leaves a sticky error in the HIP
-                # runtime error slot.  Any subsequent HIP op (including plain
-                # PyTorch tensor arithmetic) will inherit and raise that error.
-                # cudaGetLastError() reads and resets the slot so forward_static
-                # can execute cleanly.
-                try:
-                    from vllm.distributed.device_communicators.cuda_wrapper import (
-                        CudaRTLibrary,
-                    )
-
-                    CudaRTLibrary().cudaGetLastError()
-                except Exception:
-                    pass  # library unavailable; best-effort error drain
-                output = self.forward_static(
-                    x, cos, sin, self.is_neox_style, self.enable_fp32_compute
-                )
+            output = self.apply_rotary_emb_flash_attn(
+                x, cos, sin, interleaved=interleaved
+            ).type_as(x)
 
             output = self._post_process(output, origin_shape, origin_dtype)
         else:
