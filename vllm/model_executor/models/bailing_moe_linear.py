@@ -17,6 +17,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
@@ -38,7 +39,6 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.linear_attn import (
     MiniMaxText01LinearAttention,
     MiniMaxText01LinearKernel,
-    MiniMaxText01RMSNormTP,
     clear_linear_attention_cache_for_new_sequences,
     linear_attention_decode,
     linear_attention_prefill_and_mix,
@@ -48,6 +48,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -63,6 +64,7 @@ from vllm.model_executor.models.bailing_moe import BailingMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
@@ -204,14 +206,19 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config)
+        rope_parameters = _build_rope_parameters(config) or {}
+        # MLA rotates the full qk_rope_head_dim,
+        # partial_rotary_factor is for the linear-attn head only.
+        rope_parameters = {
+            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+        }
+        rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             head_size=self.qk_rope_head_dim,
             max_position=max_position,
             is_neox_style=False,
-            rope_parameters=rope_parameters or None,
-            dtype=torch.float32,
+            rope_parameters=rope_parameters,
         )
 
         # Build MLAModules for MultiHeadLatentAttentionWrapper
@@ -425,17 +432,21 @@ class BailingGroupRMSNormGate(RMSNormGated):
         param.data.copy_(loaded_weight[shard].contiguous())
 
 
-class BailingMoELinearAttention(nn.Module, MambaBase):
-    """
-    Bailing MoE Linear Attention implementation using minimax backend.
+# --8<-- [start:bailing_moe_linear_attention]
+@PluggableLayer.register("bailing_moe_linear_attention")
+class BailingMoELinearAttention(PluggableLayer, MambaBase):
+    """Pluggable Bailing MoE Linear Attention layer which allows OOT backends
+    to add custom implementations.
 
-    This implements the linear attention mechanism from sglang, adapted for vLLM's
-    v1 engine with MambaBase interface support.
+    This implements the linear attention mechanism from sglang, adapted for
+    vLLM's v1 engine with MambaBase interface support.
     """
+
+    # --8<-- [end:bailing_moe_linear_attention]
 
     @property
-    def mamba_type(self) -> str:
-        return "linear_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.LINEAR
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         """Return state shape for linear attention cache.
@@ -569,7 +580,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             self.head_dim,
             max_position=self.max_position_embeddings,
             is_neox_style=True,
-            dtype=torch.float32,
             rope_parameters=rope_parameters or None,
         )
 
@@ -754,8 +764,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_prefills = attn_metadata.num_prefills
         hidden = linear_attention_decode(
             q,
             k,
@@ -763,10 +771,10 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             kv_cache,
             self.tp_slope,
             state_indices_tensor,
-            q_start=num_prefill_tokens,
-            q_end=None,
-            slot_start=num_prefills,
-            slot_end=None,
+            q_start=0,
+            q_end=attn_metadata.num_decode_tokens,
+            slot_start=0,
+            slot_end=attn_metadata.num_decodes,
             block_size=32,
         )
         return hidden
@@ -1149,6 +1157,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:

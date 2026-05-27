@@ -21,7 +21,7 @@ from vllm.config.multimodal import (
     MultiModalConfig,
 )
 from vllm.config.pooler import PoolerConfig
-from vllm.config.quantization import OnlineQuantizationConfigArgs
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -80,6 +80,16 @@ else:
 
 logger = init_logger(__name__)
 
+
+def is_cumem_allocator_available() -> bool:
+    try:
+        from vllm.device_allocator.cumem import cumem_available
+    except ImportError:
+        return False
+
+    return cumem_available
+
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -136,7 +146,13 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
-    - Other custom values can be supported via plugins."""
+    - Other custom values can be supported via plugins.
+
+    To swap the Rust BPE backend that powers HF fast tokenizers for the
+    [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
+    `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
+    `qwen_vl`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -201,10 +217,11 @@ class ModelConfig:
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
-    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None = None
-    """Arguments for online quantization.
-    Auto-created when `quantization` equals to one of the string values of
-    the `OnlineQuantScheme` enum."""
+    quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
+    """User-facing quantization configuration. Carries per-layer-kind specs
+    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    Auto-populated from the matching online shorthand when `quantization` is
+    one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
@@ -227,6 +244,10 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
+    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
+    of significantly lower kernel throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -285,6 +306,13 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    enable_cumem_allocator: bool = False
+    """Enable the custom cumem allocator to leverage advanced GPU memory
+    allocation features such as multi-node NVLink support.
+
+    Sleep mode automatically enables this allocator. Only cuda and hip
+    platforms are supported.
+    """
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:
 
@@ -302,9 +330,15 @@ class ModelConfig:
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
     renderer_num_workers: int = 1
-    """Number of worker threads in the renderer thread pool. This pool
-    handles async tokenization, chat template rendering, and multimodal
-    preprocessing."""
+    """Number of worker threads in the renderer thread pool. The pool is
+    consumed by the async renderer path (e.g. the OpenAI-compatible API
+    server started by `vllm serve`) to parallelize tokenization, chat
+    template rendering, and multimodal preprocessing across concurrent
+    requests.
+
+    The offline `LLM` entrypoint uses the synchronous renderer path and
+    processes prompts (including multimodal preprocessing) serially, so
+    this setting has no effect there."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -359,6 +393,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -499,8 +534,16 @@ class ModelConfig:
                 stacklevel=2,
             )
 
-        if self.enable_sleep_mode and not current_platform.is_sleep_mode_available():
-            raise ValueError("Sleep mode is not supported on current platform.")
+        if self.enable_sleep_mode:
+            if not current_platform.is_sleep_mode_available():
+                raise ValueError("Sleep mode is not supported on current platform.")
+            if not self.enable_cumem_allocator:
+                logger.info_once(
+                    "Enabling cumem allocator because sleep mode requires it."
+                )
+                self.enable_cumem_allocator = True
+        if self.enable_cumem_allocator and not is_cumem_allocator_available():
+            raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
             self.hf_config_path or self.model,
@@ -535,11 +578,22 @@ class ModelConfig:
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(
+            architectures, self.runner, self.convert
+        )
         self.convert_type = self._get_convert_type(
             architectures, self.runner_type, self.convert
         )
 
+        if (
+            is_pooling_model
+            and not is_generative_model
+            and self.runner_type in ("draft", "generate")
+        ):
+            raise ValueError(
+                f"Embedding models do not support `--runner {self.runner_type}`. "
+                "Use `--runner pooling` or `--runner auto` for embedding models."
+            )
         if self.runner_type == "generate" and not is_generative_model:
             generate_converts = _RUNNER_CONVERTS["generate"]
             if self.convert_type not in generate_converts:
@@ -873,11 +927,15 @@ class ModelConfig:
         self,
         architectures: list[str],
         runner: RunnerOption,
+        convert: ConvertOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        if convert in {"auto", "none"}:
+            runner_type = self._get_default_runner_type(architectures)
+        else:
+            runner_type = "pooling"
 
         # Don't log the most common case
         if runner_type != "generate":
@@ -955,6 +1013,8 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "auto_gptq",
+                "gptq",
                 "gptq_marlin",
                 "awq_marlin",
                 "inc",
@@ -1340,7 +1400,7 @@ class ModelConfig:
                 )
             raise AssertionError(f"Unsupported block type: {block_type}")
 
-    def get_mamba_chunk_size(self) -> int | None:
+    def get_mamba_chunk_size(self) -> int:
         """
         Returns the mamba chunk size if it exists
         """
@@ -1351,7 +1411,7 @@ class ModelConfig:
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
         # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 1024.
+        # we use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 

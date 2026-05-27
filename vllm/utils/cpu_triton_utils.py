@@ -204,8 +204,16 @@ def _rejection_greedy_sample_kernel_impl(
     bonus_token_ids,
     is_greedy,
     max_spec_len,
+    uniform_probs=None,
+    synthetic_conditional_rates=None,
+    SYNTHETIC_MODE=False,
 ):
     # C++ kernel expects int64 for all integer tensors.
+    # Note: uniform_probs, synthetic_conditional_rates, and SYNTHETIC_MODE are
+    # passed by the rejection sampler for synthetic mode support, but are not
+    # yet implemented in the C++ CPU kernel. We accept them here to maintain
+    # compatibility with the kernel calling convention.
+    assert not SYNTHETIC_MODE, "Synthetic acceptance not supported with CPU sampling"
     orig_dtype = output_token_ids.dtype
     output_token_ids_i64 = _ensure_int64(output_token_ids)
     torch.ops._C.rejection_greedy_sample_kernel_impl(
@@ -233,11 +241,18 @@ def _rejection_random_sample_kernel_impl(
     is_greedy,
     max_spec_len,
     vocab_size,
+    synthetic_conditional_rates=None,
     NO_DRAFT_PROBS=False,
+    SYNTHETIC_MODE=False,
 ):
     # C++ kernel expects int64 for all integer tensors and float32 for probs.
     # uniform_probs is intentionally float64 in Python to avoid exact-zero
     # samples; cast to float32 here for C++ compatibility.
+    # Note: synthetic_conditional_rates and SYNTHETIC_MODE are passed by the
+    # rejection sampler for synthetic mode support, but are not yet implemented
+    # in the C++ CPU kernel. We accept them here to maintain compatibility with
+    # the kernel calling convention.
+    assert not SYNTHETIC_MODE, "Synthetic acceptance not supported with CPU sampling"
     orig_dtype = output_token_ids.dtype
     output_token_ids_i64 = _ensure_int64(output_token_ids)
     torch.ops._C.rejection_random_sample_kernel_impl(

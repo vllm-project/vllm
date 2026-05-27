@@ -7,9 +7,10 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -24,6 +25,39 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+
+MAX_LOGPROB_TOKEN_IDS = 128
+"""Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
+the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+
+def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
+    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, float)) or not isinstance(value, int):
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    if value == -1:
+        return None
+    if value < 0:
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    return value
+
+
+ThinkingTokenBudget = Annotated[
+    int | None,
+    BeforeValidator(validate_thinking_token_budget),
+]
 
 
 class SamplingType(IntEnum):
@@ -290,6 +324,13 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -397,6 +438,10 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
+
+        self.thinking_token_budget = validate_thinking_token_budget(
+            self.thinking_token_budget
+        )
 
         if self.stop is None:
             self.stop = []
@@ -531,6 +576,12 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        assert isinstance(self.bad_words, list)
+        if any(not bad_word for bad_word in self.bad_words):
+            raise ValueError(
+                f"bad_words cannot contain an empty string. "
+                f"Got bad_words={self.bad_words}"
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -628,6 +679,16 @@ class SamplingParams(
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
+    @property
+    def num_logprobs(self) -> int | None:
+        """Number of sample logprobs to return per output token, or `None` if
+        no sample logprobs were requested. Takes `logprob_token_ids` into
+        account: when `logprobs` is unset but `logprob_token_ids` is set,
+        returns `len(logprob_token_ids)`."""
+        if self.logprobs is not None:
+            return self.logprobs
+        return len(self.logprob_token_ids) if self.logprob_token_ids else None
+
     def clone(self) -> "SamplingParams":
         """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
@@ -664,6 +725,25 @@ class SamplingParams(
                     f"which is greater than max allowed: {max_logprobs}",
                     parameter="logprobs",
                     value=num_logprobs,
+                )
+
+        # Validate logprob_token_ids.
+        if self.logprob_token_ids is not None:
+            n = len(self.logprob_token_ids)
+            if n > MAX_LOGPROB_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Requested logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
+                )
+            if self.logprobs is not None and self.logprobs != n:
+                raise VLLMValidationError(
+                    f"When both logprobs and logprob_token_ids are set, "
+                    f"logprobs must equal len(logprob_token_ids). Got "
+                    f"logprobs={self.logprobs}, len(logprob_token_ids)={n}.",
+                    parameter="logprob_token_ids",
+                    value=n,
                 )
 
         # Validate prompt logprobs.
