@@ -6280,9 +6280,14 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
-        # Add `is_profile` here to pre-allocate communication buffers
+        # Add `is_profile` here to pre-allocate communication buffers.
+        # Under PCP each rank only processes 1/pcp_world_size of the tokens
+        # at the model layer, so size the profile accordingly — passing the
+        # full global token count makes the per-rank Q tensor too large and
+        # the dummy forward fails on intermediate buffer allocation.
+        profile_num_tokens = self.max_num_tokens // max(self.pcp_world_size, 1)
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            profile_num_tokens, is_profile=True
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

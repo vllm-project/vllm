@@ -104,6 +104,11 @@ g_fi_workspace = torch.zeros(
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    # PCP integration is fully in MLACommonImpl.forward_impl + forward_mha;
+    # FlashInfer's forward_mqa reads from the (already-full) KV cache after
+    # forward()'s pcp_kv_allgather_and_restore + padded slot_mapping write.
+    supports_pcp: bool = True
+
     def __init__(
         self,
         num_heads: int,
