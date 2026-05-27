@@ -43,7 +43,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -1072,7 +1076,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV4Model(nn.Module):
+class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1179,6 +1183,24 @@ class DeepseekV4Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        layer: DeepseekV4DecoderLayer | None = None,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            if layer is not None and residual is not None:
+                value = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+            else:
+                value = hidden_states
+            aux_hidden_states.append(value.flatten(1))
+        return aux_hidden_states
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -1205,7 +1227,7 @@ class DeepseekV4Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1219,8 +1241,12 @@ class DeepseekV4Model(nn.Module):
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, None)
+
         residual, post_mix, res_mix = None, None, None
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -1229,6 +1255,16 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+            self._maybe_add_hidden_state(
+                aux_hidden_states,
+                idx + 1,
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                layer,
+            )
+
         if layer is not None and current_platform.is_cuda():
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
@@ -1248,6 +1284,9 @@ class DeepseekV4Model(nn.Module):
             self.hc_eps,
         )
         hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1406,7 +1445,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
+class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
@@ -1455,10 +1494,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
+        model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
-        return hidden_states
+        return model_output
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,

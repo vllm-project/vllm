@@ -69,6 +69,8 @@ class ExtractHiddenStatesProposer:
             )
         self.num_hidden_states = len(layer_ids)
         self.hidden_size = vllm_config.model_config.get_hidden_size()
+        hc_mult = getattr(vllm_config.model_config.hf_config, "hc_mult", 1)
+        self.hidden_size *= hc_mult
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.num_hidden_states, self.hidden_size),
             dtype=self.dtype,

@@ -340,6 +340,8 @@ class ExtractHiddenStatesModel(nn.Module):
         self.vllm_config = vllm_config
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         self.hidden_size = vllm_config.model_config.get_hidden_size()
+        hc_mult = getattr(vllm_config.model_config.hf_config, "hc_mult", 1)
+        self.hidden_size *= hc_mult
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
         )
