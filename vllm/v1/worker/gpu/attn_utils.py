@@ -167,7 +167,7 @@ def _allocate_kv_cache(
 
 
 def _reshape_kv_cache(
-    attn_groups: Iterable[AttentionGroup],
+    attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     cache_dtype: str,
     kernel_block_sizes: list[int],
@@ -350,9 +350,6 @@ def init_kv_cache(
     kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
     )
-    # NOTE: To avoid exhausting the generator, there are 2 times the generator is
-    # iterated in hybrid models, use list comprehension to flatten attn_groups,
-    # instead of using a generator expression.
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
         attn_groups=flattened_attn_groups,
