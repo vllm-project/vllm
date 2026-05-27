@@ -7,6 +7,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -406,7 +407,7 @@ def _run_fused_moe_lora_one_shot(
 
     # NPID_FACTOR heuristic: scale N-axis parallelism when base CTA count is
     # short of saturating the SM array. Cap by the cost of redundant shrink.
-    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    sm_count = current_platform.num_compute_units(device.index)
     base_programs = max(M_blocks * num_slices * grid_lora_dim, 1)
     shrink_ratio = K / max(K + N_per_slice, 1)
     max_npid_by_budget = max(1, int(1.5 / max(shrink_ratio, 1e-3)) + 1)
@@ -786,7 +787,7 @@ def _run_fused_moe_lora_small_batch(
     N_tiles = triton.cdiv(N_per_slice, BLOCK_N)
     pair_slices = M_grid * num_slices
 
-    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    sm_count = current_platform.num_compute_units(device.index)
     n_tiles_per_program = _pick_small_batch_chunk(pair_slices, N_tiles, sm_count)
     n_chunks = triton.cdiv(N_tiles, n_tiles_per_program)
     work_total = pair_slices * n_chunks

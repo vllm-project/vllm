@@ -32,7 +32,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.nvidia.ops.attention import (
+    from vllm.models.deepseek_v4.attention import (
         DeepseekV4MLAAttention,
     )
 
@@ -591,6 +591,10 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     """ROCm sparse MLA implementation used by DeepSeek V4's custom MLA layer."""
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
+
+    @classmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        return num_heads
 
     @classmethod
     def forward_mqa(  # type: ignore[override]
