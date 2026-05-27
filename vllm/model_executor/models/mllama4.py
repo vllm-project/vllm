@@ -31,13 +31,18 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import set_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -49,10 +54,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -61,7 +64,6 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -453,7 +455,9 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_vit
+    dynamic_arg_dims={"images_flattened": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
@@ -543,9 +547,6 @@ class Llama4VisionModel(nn.Module):
 
 
 class Mllama4ProcessingInfo(BaseProcessingInfo):
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(ctx)
-
     def get_hf_config(self) -> Llama4Config:
         return self.ctx.get_hf_config(Llama4Config)
 
@@ -591,10 +592,6 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-
-        if mm_data is None:
-            return tokenizer(prompt, add_special_tokens=False)  # exclude bos
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -703,14 +700,13 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         (target_width, target_height) = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -762,12 +758,7 @@ class Llama4ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
-            from vllm.compilation.backends import set_model_tag
-
-            with (
-                set_current_vllm_config(vllm_config),
-                set_model_tag("Llama4VisionModel", is_encoder=True),
-            ):
+            with set_current_vllm_config(vllm_config):
                 self.vision_model = Llama4VisionModel(
                     config=config.vision_config,
                     quant_config=None,
@@ -805,20 +796,16 @@ class Llama4ForConditionalGeneration(
         self.num_moe_layers = len(self.moe_layers)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """Set which layers should output auxiliary hidden states for EAGLE3."""
         # Delegate to underlying language model (Llama4ForCausalLM)
         assert hasattr(self.language_model, "set_aux_hidden_state_layers")
         self.language_model.set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Get the layer indices for auxiliary hidden state outputs.
-
-        Note: The GPU model runner will override this with layers from
-        the speculative config if available, providing dynamic configuration.
-        """
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         # Delegate to underlying language model (Llama4ForCausalLM)
-        assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers")
-        return self.language_model.get_eagle3_aux_hidden_state_layers()
+        assert hasattr(
+            self.language_model, "get_eagle3_default_aux_hidden_state_layers"
+        )
+        return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
     def set_eplb_state(
         self,
@@ -883,10 +870,7 @@ class Llama4ForConditionalGeneration(
         if image_input is None:
             return []
 
-        with (
-            set_forward_context(None, self.vllm_config),
-        ):
-            return self._process_image_input(image_input)
+        return self._process_image_input(image_input)
 
     def forward(
         self,
@@ -1090,7 +1074,7 @@ class Llama4ForConditionalGeneration(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1148,6 +1132,28 @@ class Llama4ForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="multi_modal_projector.",
+            connector=[
+                "multi_modal_projector.",
+                "vision_model.vision_adapter.",
+            ],
             tower_model="vision_model.",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        if num_image_tokens <= 0 or patches_per_chunk <= 0:
+            return 0
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        num_chunks = num_image_tokens // patches_per_chunk
+        # Encoder processes raw_patches + 1 (CLS) per chunk
+        return num_chunks * (raw_patches + 1)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        if num_vision_tokens <= 0:
+            return 0
+        num_chunks = num_vision_tokens // (raw_patches + 1)
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        return num_chunks * patches_per_chunk

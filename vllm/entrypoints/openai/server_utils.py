@@ -15,18 +15,27 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import URL, Headers, MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.entrypoints.utils import sanitize_message
+from vllm.entrypoints.launcher import terminate_if_errored
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    GenerationError,
+)
+from vllm.entrypoints.utils import create_error_response, sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger("vllm.entrypoints.openai.server_utils")
+
+
+GUARDED_PREFIX = ("/v1", "/v2", "/inference")
 
 
 class AuthenticationMiddleware:
@@ -38,7 +47,7 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
     """
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
@@ -63,15 +72,18 @@ class AuthenticationMiddleware:
         return token_match
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] not in ("http", "websocket") or scope["method"] == "OPTIONS":
+        if (
+            scope["type"] not in ("http", "websocket")
+            or scope.get("method") == "OPTIONS"
+        ):
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
         root_path = scope.get("root_path", "")
-        url_path = URL(scope=scope).path.removeprefix(root_path)
+        url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
@@ -309,7 +321,81 @@ async def log_response(request: Request, call_next):
     return response
 
 
-async def http_exception_handler(_: Request, exc: HTTPException):
+async def engine_error_handler(
+    req: Request, exc: EngineDeadError | EngineGenerateError
+):
+    """
+    VLLM V1 AsyncLLM catches exceptions and returns
+    only two types: EngineGenerateError and EngineDeadError.
+
+    EngineGenerateError is raised by the per request generate()
+    method. This error could be request specific (and therefore
+    recoverable - e.g. if there is an error in input processing).
+
+    EngineDeadError is raised by the background output_handler
+    method. This error is global and therefore not recoverable.
+
+    We register these @app.exception_handlers to return nice
+    responses to the end user if they occur and shut down if needed.
+    See https://fastapi.tiangolo.com/tutorial/handling-errors/
+    for more details on how exception handlers work.
+
+    If an exception is encountered in a StreamingResponse
+    generator, the exception is not raised, since we already sent
+    a 200 status. Rather, we send an error message as the next chunk.
+    Since the exception is not raised, this means that the server
+    will not automatically shut down. Instead, we use the watchdog
+    background task for check for errored state.
+    """
+
+    if req.app.state.args.log_error_stack:
+        logger.exception(
+            "Engine Exception caught. Request id: %s",
+            req.state.request_metadata.request_id
+            if hasattr(req.state, "request_metadata")
+            else None,
+        )
+
+    terminate_if_errored(
+        server=req.app.state.server,
+        engine=req.app.state.engine_client,
+    )
+    err = create_error_response(exc)
+    return JSONResponse(err.model_dump(), status_code=err.error.code)
+
+
+async def generation_error_handler(req: Request, exc: GenerationError):
+    """Handle GenerationError without logging stack traces.
+
+    GenerationError is a known, expected error (e.g. KV cache load failure)
+    that should be returned to the client as a 500 response without polluting
+    server logs with stack traces.
+    """
+    err = create_error_response(exc)
+    return JSONResponse(err.model_dump(), status_code=err.error.code)
+
+
+async def exception_handler(req: Request, exc: Exception):
+    if req.app.state.args.log_error_stack:
+        logger.error(
+            "Exception caught. Request id: %s",
+            req.state.request_metadata.request_id
+            if hasattr(req.state, "request_metadata")
+            else None,
+        )
+
+    err = create_error_response(exc)
+    return JSONResponse(err.model_dump(), status_code=err.error.code)
+
+
+async def http_exception_handler(req: Request, exc: HTTPException):
+    if req.app.state.args.log_error_stack:
+        logger.exception(
+            "HTTPException caught. Request id: %s",
+            req.state.request_metadata.request_id
+            if hasattr(req.state, "request_metadata")
+            else None,
+        )
     err = ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(exc.detail),
@@ -320,7 +406,15 @@ async def http_exception_handler(_: Request, exc: HTTPException):
     return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
 
-async def validation_exception_handler(_: Request, exc: RequestValidationError):
+async def validation_exception_handler(req: Request, exc: RequestValidationError):
+    if req.app.state.args.log_error_stack:
+        logger.exception(
+            "RequestValidationError caught. Request id: %s",
+            req.state.request_metadata.request_id
+            if hasattr(req.state, "request_metadata")
+            else None,
+        )
+
     param = None
     errors = exc.errors()
     for error in errors:

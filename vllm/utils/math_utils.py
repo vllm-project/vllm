@@ -14,16 +14,7 @@ def cdiv(a: int, b: int) -> int:
 
 def next_power_of_2(n: int) -> int:
     """The next power of 2 (inclusive)"""
-    if n < 1:
-        return 1
-    return 1 << (n - 1).bit_length()
-
-
-def prev_power_of_2(n: int) -> int:
-    """The previous power of 2 (inclusive)"""
-    if n <= 0:
-        return 0
-    return 1 << (n.bit_length() - 1)
+    return 1 if n < 1 else 1 << (n - 1).bit_length()
 
 
 def round_up(x: int, y: int) -> int:
@@ -34,3 +25,8 @@ def round_up(x: int, y: int) -> int:
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y
+
+
+def largest_power_of_2_divisor(n: int) -> int:
+    """Return the largest power-of-2 that divides *n* (isolate lowest set bit)."""
+    return n & (-n)

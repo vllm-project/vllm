@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import regex as re
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
 )
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.logger import init_logger
@@ -29,8 +31,8 @@ logger = init_logger(__name__)
 
 
 class xLAMToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []

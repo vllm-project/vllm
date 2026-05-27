@@ -43,7 +43,6 @@ class DummyRequest(Request):
                 stop_token_ids=[STOP_TOKEN], max_tokens=max_tokens
             ),
             pooling_params=None,
-            eos_token_id=None,
             mm_features=mm_features,
             resumable=resumable,
         )
@@ -77,6 +76,7 @@ def create_scheduler() -> Scheduler:
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=16,
+        hash_block_size=16,
     )
 
 

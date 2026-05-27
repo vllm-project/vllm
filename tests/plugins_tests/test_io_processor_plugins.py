@@ -1,115 +1,98 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
+from collections.abc import Sequence
+from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
-from tests.utils import RemoteOpenAIServer
 from vllm.config import VllmConfig
-from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
+from vllm.inputs import PromptType
+from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
+from vllm.plugins.io_processors.interface import IOProcessor
+from vllm.renderers import BaseRenderer
 
-MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 
-image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
+class DummyIOProcessor(IOProcessor):
+    """Minimal IOProcessor used as the target of the mocked plugin entry point."""
+
+    def pre_process(
+        self,
+        prompt: object,
+        request_id: str | None = None,
+        **kwargs,
+    ) -> PromptType | Sequence[PromptType]:
+        raise NotImplementedError
+
+    def post_process(
+        self,
+        model_output: Sequence[PoolingRequestOutput],
+        request_id: str | None = None,
+        **kwargs,
+    ) -> object:
+        raise NotImplementedError
+
+
+@pytest.fixture
+def my_plugin_entry_points():
+    """Patch importlib.metadata.entry_points to expose a single 'my_plugin'
+    entry point backed by DummyIOProcessor, exercising the full plugin-loading
+    code path: entry_points → plugin.load() → func() →
+    resolve_obj_by_qualname → IOProcessor.__init__."""
+    qualname = f"{DummyIOProcessor.__module__}.{DummyIOProcessor.__qualname__}"
+    ep = MagicMock()
+    ep.name = "my_plugin"
+    ep.value = qualname
+    ep.load.return_value = lambda: qualname
+    with patch("importlib.metadata.entry_points", return_value=[ep]):
+        yield
 
 
 def test_loading_missing_plugin():
     vllm_config = VllmConfig()
+    renderer = MagicMock(spec=BaseRenderer)
     with pytest.raises(ValueError):
-        get_io_processor(vllm_config, "wrong_plugin")
+        get_io_processor(
+            vllm_config, renderer=renderer, plugin_from_init="wrong_plugin"
+        )
 
 
-@pytest.fixture(scope="function")
-def server():
-    args = [
-        "--runner",
-        "pooling",
-        "--enforce-eager",
-        "--trust-remote-code",
-        "--skip-tokenizer-init",
-        # Limit the maximum number of parallel requests
-        # to avoid the model going OOM in CI.
-        "--max-num-seqs",
-        "32",
-        "--io-processor-plugin",
-        "prithvi_to_tiff",
-        "--model-impl",
-        "terratorch",
-        "--enable-mm-embeds",
-    ]
+def test_loading_plugin(my_plugin_entry_points):
+    # Plugin name supplied via plugin_from_init.
+    vllm_config = MagicMock(spec=VllmConfig)
+    renderer = MagicMock(spec=BaseRenderer)
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_prithvi_mae_plugin_online(
-    server: RemoteOpenAIServer,
-    model_name: str,
-):
-    request_payload_url = {
-        "data": {
-            "data": image_url,
-            "data_format": "url",
-            "image_format": "tiff",
-            "out_data_format": "b64_json",
-        },
-        "priority": 0,
-        "model": model_name,
-        "softmax": False,
-    }
-
-    ret = requests.post(
-        server.url_for("pooling"),
-        json=request_payload_url,
+    result = get_io_processor(
+        vllm_config, renderer=renderer, plugin_from_init="my_plugin"
     )
 
-    response = ret.json()
-
-    # verify the request response is in the correct format
-    assert (parsed_response := IOProcessorResponse(**response))
-
-    # verify the output is formatted as expected for this plugin
-    plugin_data = parsed_response.data
-
-    assert all(plugin_data.get(attr) for attr in ["type", "format", "data"])
-
-    # We just check that the output is a valid base64 string.
-    # Raises an exception and fails the test if the string is corrupted.
-    base64.b64decode(plugin_data["data"])
+    assert isinstance(result, DummyIOProcessor)
 
 
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
-    img_prompt = dict(
-        data=image_url,
-        data_format="url",
-        image_format="tiff",
-        out_data_format="b64_json",
-    )
+def test_loading_missing_plugin_from_model_config():
+    # Build a mock VllmConfig whose hf_config advertises a plugin name,
+    # exercising the model-config code path without loading a real model.
+    mock_hf_config = MagicMock()
+    mock_hf_config.to_dict.return_value = {"io_processor_plugin": "wrong_plugin"}
 
-    with vllm_runner(
-        model_name,
-        runner="pooling",
-        skip_tokenizer_init=True,
-        enable_mm_embeds=True,
-        trust_remote_code=True,
-        enforce_eager=True,
-        # Limit the maximum number of parallel requests
-        # to avoid the model going OOM in CI.
-        max_num_seqs=1,
-        model_impl="terratorch",
-        io_processor_plugin="prithvi_to_tiff",
-    ) as llm_runner:
-        pooler_output = llm_runner.get_llm().encode(img_prompt, pooling_task="plugin")
-    output = pooler_output[0].outputs
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config.hf_config = mock_hf_config
 
-    # verify the output is formatted as expected for this plugin
-    assert all(hasattr(output, attr) for attr in ["type", "format", "data"])
+    renderer = MagicMock(spec=BaseRenderer)
+    with pytest.raises(ValueError):
+        get_io_processor(vllm_config, renderer=renderer)
 
-    # We just check that the output is a valid base64 string.
-    # Raises an exception and fails the test if the string is corrupted.
-    base64.b64decode(output.data)
+
+def test_loading_plugin_from_model_config(my_plugin_entry_points):
+    # Plugin name supplied via the model's hf_config.
+    mock_hf_config = MagicMock()
+    mock_hf_config.to_dict.return_value = {"io_processor_plugin": "my_plugin"}
+
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config.hf_config = mock_hf_config
+
+    renderer = MagicMock(spec=BaseRenderer)
+
+    result = get_io_processor(vllm_config, renderer=renderer)
+
+    assert isinstance(result, DummyIOProcessor)

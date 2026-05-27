@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import mimetypes
 import os
+import shutil
+import time
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
+import aiohttp
 import numpy as np
+import pybase64 as base64
 import pytest
+import requests
 import torch
 from PIL import Image, ImageChops
 
@@ -318,3 +322,168 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 
     with pytest.raises(ValueError):
         _, _ = await connector.fetch_video_async(disallowed_url)
+
+
+@pytest.mark.asyncio
+async def test_ssrf_bypass_backslash_in_url(local_asset_server):
+    """Verify that backslash-@ URL parsing confusion cannot bypass the
+    allowed_media_domains check (GHSA-v359-jj2v-j536).
+
+    urllib3.parse_url() and aiohttp/yarl disagree on how to parse a
+    backslash before ``@``.  urllib3 treats ``\\`` as part of the path
+    (encoding it as ``%5C``), while yarl treats it as a userinfo
+    separator, changing the effective host.  The fix normalises the URL
+    through urllib3 *before* handing it to aiohttp so both layers agree.
+    """
+    port = local_asset_server.port
+    asset = TEST_IMAGE_ASSETS[0]
+
+    # Craft the bypass payload: urllib3 sees host=127.0.0.1, but an
+    # un-patched aiohttp would see host=example.com.
+    bypass_url = f"http://127.0.0.1:{port}\\@example.com/{asset}"
+
+    connector = MediaConnector(
+        allowed_media_domains=["127.0.0.1"],
+    )
+
+    # After the fix the request is made to 127.0.0.1 (the local asset
+    # server) using the normalised URL.  The normalised path will be
+    # /%5C@example.com/<asset> which won't match any file the server
+    # knows about, so we expect an HTTP error — but crucially NOT a
+    # successful fetch from example.com.
+    with pytest.raises(requests.exceptions.HTTPError):
+        connector.fetch_image(bypass_url)
+
+    with pytest.raises(aiohttp.ClientResponseError):
+        await connector.fetch_image_async(bypass_url)
+
+
+@pytest.mark.asyncio
+async def test_ssrf_bypass_backslash_disallowed_domain():
+    """The reverse direction: even when the *attacker-controlled* host
+    appears in the urllib3-parsed hostname position the allowlist must
+    still block it.
+    """
+    # urllib3.parse_url sees host=example.com which is NOT in the
+    # allowlist, so this must be rejected before any request is made.
+    bypass_url = "https://example.com\\@safe.example.org/image.png"
+
+    connector = MediaConnector(
+        allowed_media_domains=["safe.example.org"],
+    )
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        connector.fetch_image(bypass_url)
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        await connector.fetch_image_async(bypass_url)
+
+
+def _make_cached_connector(cache_dir, *, max_mb=10, ttl_hours=24):
+    """Create a MediaConnector with caching enabled via monkeypatched internals.
+
+    We bypass __init__'s env-var path and wire up the cache fields directly
+    so tests don't depend on environment variables. URLs in these tests are
+    only used as cache keys (hashed to derive filenames); no HTTP requests
+    are made.
+    """
+    connector = MediaConnector()
+    connector._media_cache_dir = cache_dir
+    connector._media_cache_max_bytes = max_mb * 1024 * 1024
+    connector._media_cache_ttl_secs = ttl_hours * 3600
+    return connector
+
+
+def test_cache_put_and_get():
+    """Basic round-trip: put bytes, get them back."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        url = "https://example.com/image.png"
+        data = b"fake-image-bytes"
+
+        connector._put_cached_bytes(url, data)
+        cached = connector._get_cached_bytes(url)
+        assert cached == data
+
+
+def test_cache_ttl_expiry():
+    """Entries older than TTL are evicted on read."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir, ttl_hours=24)
+        url = "https://example.com/old.png"
+        data = b"old-data"
+
+        connector._put_cached_bytes(url, data)
+
+        # Backdate the file's mtime so it appears expired
+        cache_path = connector._media_cache_path(url)
+        expired_time = time.time() - (25 * 3600)  # 25 hours ago
+        os.utime(cache_path, (expired_time, expired_time))
+
+        assert connector._get_cached_bytes(url) is None
+        assert not cache_path.exists()
+
+
+def test_cache_lru_eviction():
+    """Oldest entries are evicted when cache exceeds size budget."""
+    with TemporaryDirectory() as cache_dir:
+        # Set a very small max size: 100 bytes
+        connector = _make_cached_connector(cache_dir, max_mb=0)
+        connector._media_cache_max_bytes = 100
+
+        # Write three 50-byte entries (total 150 > 100 budget)
+        urls = [f"https://example.com/{i}.png" for i in range(3)]
+        for i, url in enumerate(urls):
+            connector._put_cached_bytes(url, b"x" * 50)
+            # Stagger mtime so eviction order is deterministic
+            path = connector._media_cache_path(url)
+            os.utime(path, (time.time() + i, time.time() + i))
+
+        # The oldest entry (urls[0]) should have been evicted
+        assert connector._get_cached_bytes(urls[0]) is None
+        # The newest entries should still be present
+        assert connector._get_cached_bytes(urls[2]) == b"x" * 50
+
+
+def test_cache_ttl_eviction_during_write():
+    """_maybe_evict removes expired files even if under size budget."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir, ttl_hours=1)
+        url_old = "https://example.com/stale.png"
+        url_new = "https://example.com/fresh.png"
+
+        connector._put_cached_bytes(url_old, b"stale")
+        # Backdate old entry past TTL
+        old_path = connector._media_cache_path(url_old)
+        expired_time = time.time() - (2 * 3600)
+        os.utime(old_path, (expired_time, expired_time))
+
+        # Writing a new entry triggers _maybe_evict
+        connector._put_cached_bytes(url_new, b"fresh")
+
+        assert not old_path.exists()
+        assert connector._get_cached_bytes(url_new) == b"fresh"
+
+
+def test_put_cached_bytes_missing_dir():
+    """_put_cached_bytes does not crash when the cache dir disappears."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        # Remove the directory to simulate it disappearing at runtime
+        shutil.rmtree(cache_dir)
+
+        # Should not raise (graceful degradation)
+        connector._put_cached_bytes("https://example.com/x.png", b"data")
+
+
+def test_get_cached_bytes_file_deleted_before_read():
+    """_get_cached_bytes returns None if the file vanishes mid-read."""
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir)
+        url = "https://example.com/vanish.png"
+
+        connector._put_cached_bytes(url, b"data")
+        # Delete the file to simulate concurrent eviction
+        connector._media_cache_path(url).unlink()
+
+        assert connector._get_cached_bytes(url) is None

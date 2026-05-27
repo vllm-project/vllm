@@ -35,11 +35,11 @@ __global__ void batched_moe_align_block_size_kernel(
   int32_t const block_ids_size = sorted_ids_size / block_size;
   int32_t const SENTINEL =
       num_batches * max_tokens_per_batch;  // To denote invalid entries.
-  // Intialize sorted_ids
+  // Initialize sorted_ids
   for (size_t i = threadIdx.x; i < sorted_ids_size; i += stride) {
     sorted_ids[i] = SENTINEL;
   }
-  // Intialize expert_ids with -1
+  // Initialize expert_ids with -1
   for (size_t i = threadIdx.x; i < block_ids_size; i += stride) {
     block_ids[i] = -1;
   }
@@ -172,7 +172,7 @@ __device__ void _moe_align_block_size(
     }
   }
 
-  // Fill remaining expert_ids with 0
+  // Fill remaining expert_ids with -1
   const size_t fill_start_idx =
       cumsum[cumsum_offset + num_experts] / block_size + threadIdx.x;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += blockDim.x) {
@@ -265,7 +265,7 @@ __device__ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  // Fill remaining expert_ids with 0
+  // Fill remaining expert_ids with -1
   const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
     expert_ids[expert_ids_offset + i] = inactive_expert_id;
@@ -332,7 +332,7 @@ __global__ void moe_align_block_size_kernel(
       topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
       num_experts, padded_num_experts, experts_per_warp, block_size, numel,
       cumsum, max_num_tokens_padded, CEILDIV(max_num_tokens_padded, block_size),
-      0, 0, topk_num, nullptr, has_expert_map);
+      0, -1, topk_num, nullptr, has_expert_map);
 }
 
 template <typename scalar_t>
@@ -373,7 +373,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
   _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
       topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
       num_experts, block_size, numel, max_num_tokens_padded,
-      CEILDIV(max_num_tokens_padded, block_size), 0, 0, topk_num, nullptr,
+      CEILDIV(max_num_tokens_padded, block_size), -1, 0, topk_num, nullptr,
       has_expert_map);
 }
 
@@ -390,7 +390,13 @@ __global__ void moe_lora_align_block_size_kernel(
     int32_t* __restrict__ token_mask, bool has_expert_map) {
   int lora_idx = blockIdx.x / 2;
   int lora_id = lora_ids[lora_idx];
-  if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+  // Output buffers are indexed by lora_id (in [0, max_loras)). The grid
+  // iterates one extra slot to accommodate the "-1" entry that
+  // active_lora_ids may hold in position 0 for mixed base + LoRA batches;
+  // guard against any other unexpected lora_id >= max_loras to avoid
+  // out-of-bounds writes. This mirrors the `lora_id >= max_loras` guard in
+  // the Triton _fused_moe_lora_kernel.
+  if (lora_id == -1 || lora_id >= max_loras || adapter_enabled[lora_id] == 0) {
     return;
   }
 
@@ -420,10 +426,21 @@ __global__ void lora_count_and_sort_expert_tokens_kernel(
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
     int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
     int32_t max_num_tokens_padded, int32_t topk_num, int32_t* token_mask,
-    int32_t* lora_ids, bool has_expert_map) {
+    int32_t max_loras, int32_t* lora_ids, int32_t* adapter_enabled,
+    bool has_expert_map) {
   int lora_idx = blockIdx.x;
   int lora_id = lora_ids[lora_idx];
-  if (lora_id == -1) {
+  // Same guard rationale as moe_lora_align_block_size_kernel. Additionally
+  // skip disabled adapter slots: moe_lora_align_block_size_kernel early-returns
+  // for them and leaves token_mask[lora_id, :] uninitialized (token_mask is
+  // allocated with torch::empty), so running the sort loop here would traverse
+  // garbage mask bits and pollute this slot's rows of sorted_token_ids and
+  // cumsum_buffer. Downstream consumers already skip disabled slots, so the
+  // pollution is dormant today, but the check keeps behavior symmetric with
+  // the other two align kernels and avoids O(numel) wasted work per disabled
+  // slot. Short-circuit evaluation ensures adapter_enabled is only indexed
+  // after lora_id is confirmed to be in [0, max_loras).
+  if (lora_id == -1 || lora_id >= max_loras || adapter_enabled[lora_id] == 0) {
     return;
   }
 
@@ -446,7 +463,8 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     int32_t* token_mask, bool has_expert_map) {
   int lora_idx = blockIdx.x;
   int lora_id = lora_ids[lora_idx];
-  if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+  // Same guard rationale as moe_lora_align_block_size_kernel.
+  if (lora_id == -1 || lora_id >= max_loras || adapter_enabled[lora_id] == 0) {
     return;
   }
 
@@ -698,7 +716,15 @@ void moe_lora_align_block_size(
                   scalar_t, fill_threads>;
           AT_CUDA_CHECK(VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
               (void*)kernel, shared_mem));
-          kernel<<<max_loras, blockDim, shared_mem, stream>>>(
+          // Grid size is (max_loras + 1) because active_lora_ids has length
+          // max_loras + 1: sorted-unique values of token_lora_mapping, which
+          // can include -1 (base-model tokens) in addition to up to max_loras
+          // real LoRA slots. Using max_loras would drop the real LoRA slot
+          // when -1 is present at position 0 and leave output buffers
+          // uninitialized, causing illegal memory accesses in downstream
+          // MoE-LoRA kernels. This mirrors the fix made for the Triton
+          // _fused_moe_lora_kernel grid in vllm-project/vllm#32277.
+          kernel<<<max_loras + 1, blockDim, shared_mem, stream>>>(
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(), block_size,
               expert_map.data_ptr<int32_t>(), num_experts, max_loras,
@@ -722,10 +748,17 @@ void moe_lora_align_block_size(
           auto align_kernel =
               vllm::moe::moe_lora_align_block_size_kernel<scalar_t>;
 
-          // launch two threadblocks for each lora
+          // Launch two threadblocks per LoRA slot, across max_loras + 1 slots
+          // to cover the extra "-1" (base-model tokens) entry that
+          // active_lora_ids may contain in addition to up to max_loras real
+          // LoRA slots. Using max_loras would drop the real LoRA slot when -1
+          // occupies position 0 and leave the output buffers uninitialized,
+          // causing illegal memory accesses downstream. Mirrors the grid fix
+          // applied to _fused_moe_lora_kernel in vllm-project/vllm#32277.
           // blockIdx.x % 2 == 0: counting experts and aligning
           // blockIdx.x % 2 == 1: filling sorted_token_ids
-          align_kernel<<<max_loras * 2, blockDim, shared_mem_size, stream>>>(
+          align_kernel<<<(max_loras + 1) * 2, blockDim, shared_mem_size,
+                         stream>>>(
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(), block_size,
               expert_map.data_ptr<int32_t>(), num_experts, max_loras,
@@ -744,7 +777,10 @@ void moe_lora_align_block_size(
           const int max_blocks = 65535;
           const int actual_blocks = std::min(num_blocks, max_blocks);
 
-          dim3 gridDims(max_loras, actual_blocks);
+          // Same rationale as align_kernel above: iterate over max_loras + 1
+          // slots so the sort kernel processes the real LoRA slot even when
+          // active_lora_ids has -1 at position 0.
+          dim3 gridDims(max_loras + 1, actual_blocks);
           auto sort_kernel =
               vllm::moe::lora_count_and_sort_expert_tokens_kernel<scalar_t>;
 
@@ -753,7 +789,8 @@ void moe_lora_align_block_size(
               sorted_token_ids.data_ptr<int32_t>(), cumsum.data_ptr<int32_t>(),
               expert_map.data_ptr<int32_t>(), topk_ids.numel(), num_experts,
               max_num_tokens_padded, topk_num, token_mask.data_ptr<int32_t>(),
-              lora_ids.data_ptr<int32_t>(), has_expert_map);
+              max_loras, lora_ids.data_ptr<int32_t>(),
+              adapter_enabled.data_ptr<int32_t>(), has_expert_map);
         }
       });
 }

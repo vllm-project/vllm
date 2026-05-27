@@ -3,6 +3,7 @@
 import contextlib
 from importlib.util import find_spec
 from types import ModuleType
+from typing import Any
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -10,9 +11,15 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.passes.fusion.rms_quant_fusion import (
+    _rms_input_weight_dtype_match,
+)
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -22,13 +29,24 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+)
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    VllmPatternReplacement,
+)
+from .matcher_utils import MatcherQuantFP8
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+# The empirical value for small batch
+PDL_ADVANCE_LAUNCH_TOKENS = 16
 
 logger = init_logger(__name__)
 
@@ -44,10 +62,8 @@ if find_spec("flashinfer"):
     except ImportError:
         pass
 
-logger = init_logger(__name__)
-
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
-    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
@@ -61,6 +77,11 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
         2: 64,  # 64MB
         4: 32,  # 32MB
         8: 1,  # 1MB
+    },
+    103: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 2,  # 2MB
     },
 }
 
@@ -78,11 +99,23 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
         4: 4,  # 4MB
         8: 1,  # 1MB
     },
+    103: {
+        2: 32,  # 32MB
+        4: 4,  # 4MB
+        8: 2,  # 2MB
+    },
 }
 
 
 if flashinfer_comm is not None:
-    _FI_WORKSPACE = None
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        destroy_fi_ar_workspace,
+        get_fi_ar_quant_workspace,
+        get_fi_ar_workspace,
+    )
+
+    ar_fusion_patterns = flashinfer_comm.AllReduceFusionPattern
+
     MiB = 1024 * 1024
 
     def call_trtllm_fused_allreduce_norm(
@@ -122,9 +155,27 @@ if flashinfer_comm is not None:
             max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
         )
 
-        assert _FI_WORKSPACE is not None, (
-            "Flashinfer must be enabled when using flashinfer"
+        # Select workspace based on pattern: quant patterns use the
+        # trtllm quant workspace, non-quant patterns use the primary workspace.
+        is_quant_pattern = pattern_code in (
+            ar_fusion_patterns.kARResidualRMSNormFP8Quant,
+            ar_fusion_patterns.kARResidualRMSNormFP4Quant,
         )
+        get_workspace_fn = (
+            get_fi_ar_quant_workspace if is_quant_pattern else get_fi_ar_workspace
+        )
+        workspace = get_workspace_fn(
+            world_size=world_size,
+            rank=get_tensor_model_parallel_rank(),
+            max_token_num=max_token_num,
+            hidden_dim=hidden_size,
+            dtype=allreduce_in.dtype,
+            group=get_tp_group().device_group,
+        )
+        assert workspace is not None, (
+            "Flashinfer allreduce workspace must be initialized when using flashinfer"
+        )
+        assert flashinfer_comm is not None
         if norm_out is None:
             norm_out = allreduce_in
             residual_out = residual
@@ -133,25 +184,31 @@ if flashinfer_comm is not None:
             # as flashinfer does not support rms_norm
             # and allreduce_out together
             residual_out = allreduce_in
-        # For the sizes that are smaller than the max size,
-        # we only use flashinfer one shot allreduce
+
+        layout_code = None
+        # layout_code only supported by trtllm backend
+        if workspace.backend == "trtllm":
+            # in vllm we only support swizzled layout
+            layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
+
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
-            workspace=_FI_WORKSPACE,
+            workspace=workspace,
             pattern=pattern_code,
-            residual_in=residual,
+            launch_with_pdl=launch_with_pdl,
+            output=None,
             residual_out=residual_out,
             norm_out=norm_out,
-            rms_gamma=rms_gamma,
-            rms_eps=rms_eps,
-            launch_with_pdl=launch_with_pdl,
-            use_oneshot=use_oneshot,
-            fp32_acc=fp32_acc,
             quant_out=quant_out,
             scale_out=scale_out,
-            # in vllm we only support swizzled layout
-            layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
+            residual_in=residual,
+            rms_gamma=rms_gamma,
+            rms_eps=rms_eps,
             scale_factor=scale_factor,
+            layout_code=layout_code,
+            use_oneshot=use_oneshot,
+            fp32_acc=fp32_acc,
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(
@@ -218,6 +275,12 @@ class BasePattern:
         self.tp = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
 
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=self.dtype, device=self.device, **kwargs)
+
+    def empty_f32(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
+
 
 class AllReduceRMSNormPattern(BasePattern):
     """
@@ -236,20 +299,17 @@ class AllReduceRMSNormPattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, weight = self.rmsnorm_matcher.inputs()
-
-        # input goes through allreduce first, always 16-bit
-        return [input.to(self.dtype), weight]
+        # input, weight
+        return [self.empty(5, 16), self.empty(16)]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = self.rmsnorm_matcher(allreduce_output, weight)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
 
             return rms, allreduce_output
 
@@ -275,7 +335,12 @@ class AllReduceRMSNormPattern(BasePattern):
             return allreduce[3], allreduce[1]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -296,10 +361,11 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, residual, weight = self.rmsnorm_matcher.inputs()
+        input = self.empty(5, 16)
+        residual = self.empty(5, 16)
+        weight = self.empty(16)
 
         # input goes through allreduce first, always 16-bit
         return [residual, input.to(self.dtype), weight]
@@ -309,7 +375,9 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
             return rms, residual
 
         def replacement(
@@ -367,15 +435,13 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, weight = self.rmsnorm_matcher.inputs()
         _, scale = self.quant_matcher.inputs()
 
-        # input goes through allreduce first, always 16-bit
-        return [input.to(self.dtype), weight, scale]
+        # input, weight
+        return [self.empty(5, 16), self.empty(16), scale]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -384,7 +450,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = self.rmsnorm_matcher(all_reduce, weight)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -416,7 +482,12 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             return allreduce[4], allreduce[1]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -440,11 +511,12 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
 
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, residual, weight = self.rmsnorm_matcher.inputs()
+        input = self.empty(5, 16)
+        residual = self.empty(5, 16)
+        weight = self.empty(16)
         _, scale = self.quant_matcher.inputs()
 
         # input goes through allreduce first, always 16-bit
@@ -458,7 +530,9 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, res = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            rms, res = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
             quant, _ = self.quant_matcher(rms, scale)
 
             return quant, res
@@ -513,7 +587,6 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([1, 16, 16], device=self.device, dtype=self.dtype)
@@ -535,14 +608,14 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = self.rmsnorm_matcher(all_reduce, weight)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms,
-                output_scale=output_scale,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
 
             # quant_out, allreduce_output, output_scale
@@ -579,7 +652,12 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             return allreduce[4], allreduce[1], allreduce[5]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -601,7 +679,6 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([16, 16], device=self.device, dtype=self.dtype)
@@ -633,14 +710,16 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms,
-                output_scale=output_scale,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
 
             # quant_out, allreduce_output, output_scale
@@ -729,17 +808,30 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             scope="global",
         )
 
-        self.workspace = flashinfer_comm.create_allreduce_fusion_workspace(
-            backend="trtllm",
+        workspace_kwargs = dict(
             world_size=self.tp_size,
             rank=rank,
             max_token_num=self.max_token_num,
             hidden_dim=self.hidden_dim,
             dtype=self.model_dtype,
+            group=self.group,
         )
+        if get_fi_ar_workspace(**workspace_kwargs) is None:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce-norm fusion will be disabled."
+            )
+            return
 
-        global _FI_WORKSPACE
-        _FI_WORKSPACE = self.workspace
+        self.supports_quant_fusion = (
+            get_fi_ar_quant_workspace(**workspace_kwargs) is not None
+        )
+        if not self.supports_quant_fusion:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce-norm-quant fusion will be disabled."
+            )
+
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
             max_token_num=self.max_token_num,
@@ -751,31 +843,32 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def register_patterns(self) -> None:
         for epsilon in [1e-5, 1e-6]:
-            AllReduceFusedRMSNormStaticQuantFP8Pattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
-            AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
-            if current_platform.has_device_capability(100):
-                AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+            if self.supports_quant_fusion:
+                AllReduceFusedRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
                 ).register(self.patterns)
-                AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
                 ).register(self.patterns)
+                if current_platform.has_device_capability(100):
+                    AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
+                    AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
             AllReduceRMSNormPattern(
                 epsilon,
                 self.model_dtype,
@@ -813,6 +906,203 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
-        if getattr(self, "workspace", None) is not None:
+        with contextlib.suppress(Exception):
+            destroy_fi_ar_workspace()
+
+
+# TODO: make BasePattern to inherit from VllmPatternReplacement
+class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        use_aiter_rmsnorm: bool = True,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.dtype = dtype
+        self.epsilon = epsilon
+        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+
+            return rms, allreduce_output
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            allreduce = self.FUSED_AR_RMSNORM_OP(
+                input_=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            return allreduce[0], allreduce[1]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        use_aiter_rmsnorm: bool = True,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.FUSED_AR_RMSNORM_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # input, residual, weight
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
+            return rms, residual
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce = self.FUSED_AR_RMSNORM_OP(
+                input_=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            return allreduce[0], allreduce[1]
+
+        return _replacement
+
+
+class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
+        self.disabled = True
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if self.tp_size <= 1:
+            logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
+            return
+
+        if config.model_config is None:
+            logger.warning_once(
+                "AllReduce fusion pass is disabled for missing model_config."
+            )
+            return
+
+        device_comm = get_tp_group().device_communicator
+        if device_comm is None:
+            logger.warning_once("Device communicator is required.")
+            return
+
+        ca_comm = getattr(device_comm, "ca_comm", None)
+        if ca_comm is None:
+            logger.warning_once("Custom Allreduce is required.")
+            return
+        self.ca_comm = ca_comm
+
+        assert isinstance(ca_comm, CustomAllreduce)
+
+        group = get_tp_group().cpu_group
+        rocm_aiter_ops.initialize_aiter_allreduce(group, self.device)
+        hidden_dim = config.model_config.get_hidden_size()
+        element_size = torch.tensor([], dtype=self.model_dtype).element_size()
+        max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+        if max_size is None:
+            logger.warning("AITER allreduce fusion must be initialized")
+            return
+
+        # Aiter's fused_allreduce_rmsnorm kernel dispatches on hidden_dim.
+        # Before aiter v0.1.12 the launcher was template-specialized on HIDDEN_DIM
+        # and silently no-op'd for sizes outside {512, 1024, 2048, 4096}. From v0.1.12
+        # hidden_dim is a runtime argument. Detect the older API via the missing
+        # `_pool` attribute and skip fusion for unsupported sizes.
+        # Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
+        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
+        if (
+            aiter_ar is not None
+            and not hasattr(aiter_ar, "_pool")
+            and hidden_dim not in _AITER_OLD_FUSED_AR_RMS_HIDDEN
+        ):
+            logger.warning_once(
+                "AITER allreduce-rmsnorm fusion disabled: aiter<0.1.12 "
+                "only supports hidden_dim in %s; got %d. Upgrade aiter to "
+                ">=0.1.12 to enable fusion for this model.",
+                _AITER_OLD_FUSED_AR_RMS_HIDDEN,
+                hidden_dim,
+            )
+            # Tear down aiter's custom-allreduce so its IPC handles don't
+            # race with vllm's ca_comm on the unfused fallback path.
             with contextlib.suppress(Exception):
-                self.workspace.destroy()
+                rocm_aiter_ops.destroy_aiter_allreduce()
+            return
+
+        max_token_num = max_size // (hidden_dim * element_size)
+        self.max_token_num = min(
+            max_token_num,
+            config.scheduler_config.max_num_batched_tokens,
+        )
+
+        for epsilon in [1e-5, 1e-6]:
+            self.register(
+                AiterAllreduceFusedRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+
+            # WARNING: This is a hack to clear the pattern matcher cache
+            # and allow multiple values of epsilon.
+            torch._inductor.pattern_matcher._seen_patterns.clear()
+
+        self.disabled = False
+
+        self.dump_patterns(config, self.pm_pass)
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        if self.disabled:
+            logger.warning_once("AllReduce fusion pass is disabled.")
+            return False
+        return bool(compile_range.end <= self.max_token_num)
+
+    def __del__(self) -> None:
+        if getattr(self, "disabled", True):
+            return
+        with contextlib.suppress(Exception):
+            rocm_aiter_ops.destroy_aiter_allreduce()

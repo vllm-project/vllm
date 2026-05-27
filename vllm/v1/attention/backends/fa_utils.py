@@ -3,6 +3,7 @@
 
 from typing import Any
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -52,10 +53,12 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
-def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
-    # import here to avoid circular dependencies
-    from vllm.platforms import current_platform
-
+def get_flash_attn_version(
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
+) -> int | None:
     if current_platform.is_xpu():
         return 2
     if current_platform.is_rocm():
@@ -72,9 +75,15 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         assert device_capability is not None
 
         # 1. default version depending on platform
-        fa_version = (
-            3 if (device_capability.major == 9 and is_fa_version_supported(3)) else 2
-        )
+        if device_capability.major == 9 and is_fa_version_supported(3):
+            # Hopper (SM90): prefer FA3
+            fa_version = 3
+        elif device_capability.major == 10 and is_fa_version_supported(4):
+            # Blackwell (SM100+, restrict to SM100 for now): prefer FA4
+            fa_version = 4
+        else:
+            # Fallback to FA2
+            fa_version = 2
 
         # 2. override if passed by environment or config
         from vllm.config import get_current_vllm_config_or_none
@@ -87,16 +96,74 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
             fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
-        if device_capability.major == 10 and fa_version == 3:
+        if device_capability.major >= 10 and fa_version == 3:
             logger.warning_once(
                 "Cannot use FA version 3 on Blackwell platform, "
-                "defaulting to FA version 2."
+                "defaulting to FA version 4 if supported, otherwise FA2."
             )
-            fa_version = 2
+            fa_version = 4 if is_fa_version_supported(4) else 2
 
         if requires_alibi and fa_version == 3:
             logger.warning_once(
                 "Cannot use FA version 3 with ALiBi, defaulting to FA version 2."
+            )
+            fa_version = 2
+
+        if requires_alibi and fa_version == 4:
+            logger.warning_once(
+                "Cannot use FA version 4 with ALiBi, defaulting to FA version 2."
+            )
+            fa_version = 2
+
+        # Some FA3 unsupported SM90 cases can use FA4 when available.
+        if (
+            fa_version == 3
+            and device_capability.major == 9
+            and is_fa_version_supported(4)
+        ):
+            upgrade_reason = None
+            if head_size is not None and head_size > 256:
+                upgrade_reason = f"FA3 does not support head_size={head_size} on SM90"
+            elif (
+                has_sinks
+                and head_size is not None
+                and head_size_v is not None
+                and head_size != head_size_v
+            ):
+                upgrade_reason = "Diff-KV with sinks"
+            if upgrade_reason:
+                logger.info_once(
+                    "%s: upgrading FlashAttention 3 -> 4",
+                    upgrade_reason,
+                    scope="local",
+                )
+                fa_version = 4
+
+        # FA4 currently uses batch-shape-dependent scheduling
+        # heuristics on SM100+, which breaks batch invariance.
+        if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
+            logger.warning_once(
+                "Cannot use FA version 4 with batch invariance, "
+                "defaulting to FA version 2.",
+            )
+            fa_version = 2
+
+        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
+        # supported head dimensions.
+        # See: https://github.com/Dao-AILab/flash-attention/issues/1959
+        # Exception: hdim 192 is supported for MLA's diff-headdim case
+        # (qk=192, v=128), added upstream in commits 1a15733e/1b36ab19.
+        if (
+            fa_version == 4
+            and device_capability.major >= 10
+            and head_size is not None
+            and head_size > 128
+            and head_size != 192
+        ):
+            logger.warning_once(
+                "FA4 on Blackwell does not support head_size=%d due to TMEM "
+                "capacity limits, defaulting to FA version 2.",
+                head_size,
             )
             fa_version = 2
 
@@ -113,18 +180,25 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
         return None
 
 
-def flash_attn_supports_fp8() -> bool:
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
-    )
+def is_fa_version_supported(fa_version: int) -> bool:
+    try:
+        from vllm.vllm_flash_attn.flash_attn_interface import (
+            is_fa_version_supported as _is_fa_version_supported,
+        )
+
+        return _is_fa_version_supported(fa_version)
+    except ImportError:
+        return False
+
+
+def flash_attn_supports_quant_query_input() -> bool:
+    return not current_platform.is_xpu()
 
 
 def flash_attn_supports_sinks() -> bool:
     if current_platform.is_xpu():
         return True
-    else:
-        return get_flash_attn_version() == 3
+    return get_flash_attn_version() in (3, 4)
 
 
 def flash_attn_supports_mla():
@@ -139,6 +213,10 @@ def flash_attn_supports_mla():
             return is_fa_version_supported(
                 3
             ) and current_platform.is_device_capability_family(90)
+
+            # NOTE(Lucas): FA4 CuteDSL does NOT currently support MLA's non-standard
+            # head dimensions (576 for qk, 512 for v) due to TMEM capacity limits.
+
         except (ImportError, AssertionError):
             pass
     return False

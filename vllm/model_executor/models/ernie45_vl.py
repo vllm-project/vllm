@@ -23,9 +23,8 @@
 # limitations under the License.
 """Inference-only Ernie VL model compatible with HuggingFace weights."""
 
-import itertools
 import math
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -34,12 +33,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
+from transformers import BaseImageProcessor, BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import (
@@ -58,7 +58,6 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -446,10 +445,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
     def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
@@ -818,10 +818,9 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
 
@@ -829,13 +828,31 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
+
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                min_pixels=size[min_pixels_key],
+                max_pixels=size[max_pixels_key],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -855,12 +872,14 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_image_tokens
 
@@ -870,35 +889,43 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Any | None,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_video_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.get_image_processor()
+
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return max_image_size
 
     def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_image_tokens = self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return num_image_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
@@ -909,7 +936,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=None,
+                image_processor=image_processor,
+                mm_kwargs={},
             )
 
             if next_max_tokens > max_tokens:
@@ -942,13 +970,15 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 
@@ -1152,8 +1182,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1163,8 +1192,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -1191,49 +1220,33 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ):
-        if overrides:
-            if overrides.num_frames:
-                if overrides.num_frames > num_frames:
-                    logger.warning(
-                        "video.num_frames override (%d) exceeds model's "
-                        "maximum number of frames (%d), will be ignored",
-                        overrides.num_frames,
-                        num_frames,
-                    )
-                num_frames = min(num_frames, overrides.num_frames)
-            if overrides.width:
-                if overrides.width > width:
-                    logger.warning(
-                        "video.width override (%d) exceeds model's "
-                        "maximum width (%d), will be ignored",
-                        overrides.width,
-                        width,
-                    )
-                width = min(width, overrides.width)
-            if overrides.height:
-                if overrides.height > height:
-                    logger.warning(
-                        "video.height override (%d) exceeds model's "
-                        "maximum height (%d), will be ignored",
-                        overrides.height,
-                        height,
-                    )
-                height = min(height, overrides.height)
-        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+        # ernie4.5-vl requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": [i for i in range(num_frames)],
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
                 "do_sample_frames": False,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
+
         return video_items
 
 
@@ -1343,7 +1356,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        """compute logits"""
         return self.language_model.compute_logits(hidden_states)
 
     def _vision_forward(
@@ -1388,131 +1400,62 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw"},
-        )
-        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
-        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-
-        hf_config = self.config
-        image_token_id = hf_config.im_patch_id
-        video_start_token_id = hf_config.video_start_token_id
-        video_end_token_id = hf_config.video_end_token_id
-        spatial_conv_size = hf_config.spatial_conv_size
-        temporal_conv_size = hf_config.temporal_conv_size
         llm_pos_ids_list: list = []
+        st = 0
 
-        if image_grid_thw or video_grid_thw:
-            input_token_type: list[str] = []
-            video_check_flg = False
-            for token in input_tokens:
-                if token == video_start_token_id:
-                    video_check_flg = True
-                elif token == video_end_token_id:
-                    video_check_flg = False
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
 
-                if (token == image_token_id) and (video_check_flg is False):
-                    input_token_type.append("image")
-                elif (token == image_token_id) and (video_check_flg is True):
-                    input_token_type.append("video")
-                else:
-                    input_token_type.append("text")
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w)).reshape(
+                3, -1
+            )
+            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
 
-            input_type_group: list[tuple[str, int, int]] = []
-            for key, group_iter in itertools.groupby(
-                enumerate(input_token_type), lambda x: x[1]
-            ):
-                group_list = list(group_iter)
-                start_index = group_list[0][0]
-                end_index = group_list[-1][0] + 1
-                input_type_group.append((key, start_index, end_index))
+        if st < len(input_tokens):
+            text_len = len(input_tokens) - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
 
-            video_frame_num = 1
-            mm_data_idx = 0
-            for modality_type, start_idx, end_idx in input_type_group:
-                st_idx = (
-                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                )
-                if modality_type == "image":
-                    t, h, w = image_grid_thw[mm_data_idx]
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t,
-                        h // spatial_conv_size,
-                        w // spatial_conv_size,
-                    )
-
-                    t_index = (
-                        torch.arange(llm_grid_t)
-                        .view(-1, 1)
-                        .expand(-1, llm_grid_h * llm_grid_w)
-                        .flatten()
-                    )
-                    h_index = (
-                        torch.arange(llm_grid_h)
-                        .view(1, -1, 1)
-                        .expand(llm_grid_t, -1, llm_grid_w)
-                        .flatten()
-                    )
-                    w_index = (
-                        torch.arange(llm_grid_w)
-                        .view(1, 1, -1)
-                        .expand(llm_grid_t, llm_grid_h, -1)
-                        .flatten()
-                    )
-                    llm_pos_ids_list.append(
-                        torch.stack([t_index, h_index, w_index]) + st_idx
-                    )
-                    mm_data_idx += 1
-
-                elif modality_type == "video":
-                    t, h, w = video_grid_thw[mm_data_idx]
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t // temporal_conv_size,
-                        h // spatial_conv_size,
-                        w // spatial_conv_size,
-                    )
-
-                    for t_idx in range(llm_grid_t):
-                        t_index = (
-                            torch.tensor(t_idx)
-                            .view(-1, 1)
-                            .expand(-1, llm_grid_h * llm_grid_w)
-                            .flatten()
-                        )
-                        h_index = (
-                            torch.arange(llm_grid_h)
-                            .view(1, -1, 1)
-                            .expand(1, -1, llm_grid_w)
-                            .flatten()
-                        )
-                        w_index = (
-                            torch.arange(llm_grid_w)
-                            .view(1, 1, -1)
-                            .expand(1, llm_grid_h, -1)
-                            .flatten()
-                        )
-                        llm_pos_ids_list.append(
-                            torch.stack([t_index, h_index, w_index]) + st_idx
-                        )
-
-                    mm_data_idx += 1
-                    video_frame_num += 1
-
-                else:
-                    text_len = end_idx - start_idx
-                    llm_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                    )
-                    video_frame_num = 1
-
-        else:
-            text_len = len(input_tokens)
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        return llm_positions, mrope_position_delta
+        return torch.from_numpy(llm_positions), mrope_position_delta
+
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        spatial_conv_size = self.config.spatial_conv_size
+        temporal_conv_size = self.config.temporal_conv_size
+
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            if mm_feature.data is None:
+                raise ValueError("M-RoPE calculation requires multimodal feature data")
+
+            offset = mm_feature.mm_position.offset
+            if mm_feature.modality == "image":
+                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                yield offset, t, h // spatial_conv_size, w // spatial_conv_size
+            elif mm_feature.modality == "video":
+                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                yield (
+                    offset,
+                    t // temporal_conv_size,
+                    h // spatial_conv_size,
+                    w // spatial_conv_size,
+                )
+            else:
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -1634,7 +1577,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -1647,7 +1589,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

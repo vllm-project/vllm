@@ -17,14 +17,14 @@
 #
 # Environment variables:
 #   S3_BUCKET   - Bucket name (default: vllm-wheels)
-#   VARIANT     - ROCm variant (default: rocm700)
+#   VARIANT     - ROCm variant (default: rocm721)
 #   DRY_RUN     - Set to 1 for preview mode (same as --dry-run)
 
 set -euo pipefail
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
-VARIANT="${VARIANT:-rocm700}"
+VARIANT="${VARIANT:-rocm721}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE_VERSION=""
 
@@ -190,7 +190,7 @@ echo ""
 # List what would be uploaded
 echo "Files to upload:"
 find "$WORK_DIR/output" -name "*.html" -type f | while read -r file; do
-    rel_path="${file#$WORK_DIR/output/}"
+    rel_path="${file#"$WORK_DIR"/output/}"
     echo "  rocm/$rel_path"
 done
 echo ""

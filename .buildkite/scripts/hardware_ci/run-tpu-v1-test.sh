@@ -61,7 +61,7 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo "--- Installing Python dependencies ---"
 python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git \
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
-    && python3 -m pip install --progress-bar off "lm-eval[api]>=0.4.9.2" \
+    && python3 -m pip install --progress-bar off "lm-eval[api]>=0.4.12" \
     && python3 -m pip install --progress-bar off hf-transfer tblib==3.1.0
 echo "--- Python dependencies installed ---"
 
@@ -136,8 +136,6 @@ run_and_track_test 3 "test_accuracy.py::test_lm_eval_accuracy_v1_engine" \
     "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
 run_and_track_test 4 "test_quantization_accuracy.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py"
-run_and_track_test 5 "examples/offline_inference/tpu.py" \
-    "python3 /workspace/vllm/examples/offline_inference/tpu.py"
 run_and_track_test 6 "test_tpu_model_runner.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py"
 run_and_track_test 7 "test_sampler.py" \

@@ -2,11 +2,39 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pytest configuration for vLLM multimodal tests."""
 
+import os
 import warnings
 
+import pytest
 import torch
 
+from tests.utils import prewarm_hf_cache
 from vllm.platforms import current_platform
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prewarm_hf_cache():
+    # tokenization_qwen.py downloads SimSun.ttf from
+    # qianwen-res.oss-cn-beijing.aliyuncs.com; both Qwen/Qwen-VL and
+    # Qwen/Qwen-VL-Chat look it up from the Chat repo.
+    prewarm_hf_cache([("Qwen/Qwen-VL-Chat", "SimSun.ttf")])
+
+
+def pytest_configure(config):
+    """Early ROCm configuration that must happen before test collection."""
+    if not current_platform.is_rocm():
+        return
+
+    # Disable skinny GEMM on ROCm to avoid non-deterministic results
+    # from atomic reductions in wvSplitKrc kernel.
+    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+    os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+    warnings.warn(
+        "ROCm: Set VLLM_ROCM_USE_SKINNY_GEMM=0 to avoid non-deterministic "
+        "results from skinny GEMM atomic reductions",
+        UserWarning,
+        stacklevel=1,
+    )
 
 
 def pytest_collection_modifyitems(config, items):

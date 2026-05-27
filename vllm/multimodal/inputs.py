@@ -15,7 +15,6 @@ from typing import (
     TypedDict,
     Union,
     cast,
-    final,
 )
 
 import numpy as np
@@ -32,14 +31,9 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
-
-    from vllm.inputs.data import _InputOptions
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
-    _InputOptions = dict
-
-_T = TypeVar("_T")
 
 HfImageItem: TypeAlias = Union["Image", np.ndarray, "torch.Tensor"]
 """
@@ -98,15 +92,6 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-ModalityData: TypeAlias = _T | list[_T | None] | None
-"""
-Either a single data item, or a list of data items. Can only be None if UUID
-is provided.
-
-The number of data items allowed per modality is restricted by
-`--limit-mm-per-prompt`.
-"""
-
 
 class VisionChunkImage(TypedDict):
     """Represents an image wrapped as a vision chunk."""
@@ -126,44 +111,8 @@ class VisionChunkVideo(TypedDict):
     video_idx: int
 
 
-VisionChunk = VisionChunkImage | VisionChunkVideo
+VisionChunk: TypeAlias = VisionChunkImage | VisionChunkVideo
 """A vision chunk is either an image or a video chunk."""
-
-
-@final
-class MultiModalDataBuiltins(TypedDict, total=False):
-    """Type annotations for modality types predefined by vLLM."""
-
-    image: ModalityData[ImageItem]
-    """The input image(s)."""
-
-    video: ModalityData[VideoItem]
-    """The input video(s)."""
-
-    audio: ModalityData[AudioItem]
-    """The input audio(s)."""
-
-    vision_chunk: ModalityData[VisionChunk]
-    """The input visual atom(s) - unified modality for images and video chunks."""
-
-
-MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
-"""
-A dictionary containing an entry for each modality type to input.
-
-The built-in modalities are defined by
-[`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
-"""
-
-MultiModalUUIDDict: TypeAlias = Mapping[str, list[str | None] | str]
-"""
-A dictionary containing user-provided UUIDs for items in each modality.
-If a UUID for an item is not provided, its entry will be `None` and
-MultiModalHasher will compute a hash for the item.
-
-The UUID will be used to identify the item for all caching purposes
-(input processing caching, embedding caching, prefix caching, etc).
-"""
 
 
 @dataclass(frozen=True)
@@ -196,14 +145,15 @@ class PlaceholderRange:
     """
 
     @cached_property
-    def embeds_cumsum(self) -> torch.Tensor | None:
-        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
+    def embeds_cumsum(self) -> list[int] | None:
+        # python list so python indexing avoids torch C++ overhead/conversions/deallocs
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0).tolist()
 
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
 
-        return int(self.embeds_cumsum[-1])
+        return self.embeds_cumsum[-1] if self.embeds_cumsum else 0
 
     def get_embeds_indices_in_range(
         self, start_idx: int, end_idx: int
@@ -221,10 +171,8 @@ class PlaceholderRange:
         if self.embeds_cumsum is None:
             return start_idx, end_idx
 
-        embeds_start_idx = (
-            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
-        )
-        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+        embeds_start_idx = self.embeds_cumsum[start_idx - 1] if start_idx > 0 else 0
+        embeds_end_idx = self.embeds_cumsum[end_idx - 1] if end_idx > 0 else 0
 
         return embeds_start_idx, embeds_end_idx
 
@@ -289,12 +237,29 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
         return isinstance(a, torch.Tensor) and torch.equal(b, a)
 
     if isinstance(a, list):
-        return isinstance(b, list) and all(
-            nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)
+        return (
+            isinstance(b, list)
+            and len(a) == len(b)
+            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
         )
     if isinstance(b, list):
-        return isinstance(a, list) and all(
-            nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)
+        return (
+            isinstance(a, list)
+            and len(b) == len(a)
+            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+        )
+
+    if isinstance(a, tuple):
+        return (
+            isinstance(b, tuple)
+            and len(a) == len(b)
+            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+        )
+    if isinstance(b, tuple):
+        return (
+            isinstance(a, tuple)
+            and len(b) == len(a)
+            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
         )
 
     # Both a and b are scalars
@@ -1048,56 +1013,3 @@ MultiModalKwargsOptionalItems: TypeAlias = (
     MultiModalKwargsItems[MultiModalKwargsItem]
     | MultiModalKwargsItems[MultiModalKwargsItem | None]
 )
-
-
-MultiModalHashes = dict[str, list[str]]
-"""
-A dictionary containing per-item hashes for each modality.
-"""
-
-
-MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
-"""
-A dictionary containing per-item placeholder ranges for each modality.
-"""
-
-
-class MultiModalInputs(_InputOptions):
-    """
-    Represents the outputs of
-    [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor],
-    ready to be passed to vLLM internals.
-    """
-
-    type: Literal["multimodal"]
-    """The type of inputs."""
-
-    prompt_token_ids: list[int]
-    """The processed token IDs which includes placeholder tokens."""
-
-    mm_kwargs: MultiModalKwargsOptionalItems
-    """Keyword arguments to be directly passed to the model after batching."""
-
-    mm_hashes: MultiModalHashes
-    """The hashes of the multi-modal data."""
-
-    mm_placeholders: MultiModalPlaceholderDict
-    """
-    For each modality, information about the placeholder tokens in
-    `prompt_token_ids`.
-    """
-
-
-class MultiModalEncDecInputs(MultiModalInputs):
-    """
-    Represents the outputs of
-    [`EncDecMultiModalProcessor`][vllm.multimodal.processing.EncDecMultiModalProcessor]
-    ready to be passed to vLLM internals.
-
-    Note: Even text-only encoder-decoder models are currently implemented
-    as multi-modal models for convenience.
-    (Example: https://github.com/vllm-project/bart-plugin)
-    """
-
-    encoder_prompt_token_ids: list[int]
-    """The processed token IDs of the encoder prompt."""

@@ -51,9 +51,9 @@ More API details can be found in the [Offline Inference](../api/README.md#offlin
 
 The code for the `LLM` class can be found in [vllm/entrypoints/llm.py](../../vllm/entrypoints/llm.py).
 
-### OpenAI-Compatible API Server
+### Online Serving
 
-The second primary interface to vLLM is via its OpenAI-compatible API server.
+The second primary interface to vLLM is via its online server.
 This server can be started using the `vllm serve` command.
 
 ```bash
@@ -76,7 +76,7 @@ python -m vllm.entrypoints.openai.api_server --model <model>
 
 That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
 
-More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
+More details on the API server can be found in the [Online Serving](../serving/online_serving/README.md) document.
 
 ## V1 Process Architecture
 
@@ -119,10 +119,10 @@ The code can be found in [vllm/v1/engine/coordinator.py](../../vllm/v1/engine/co
 For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel size, and `A` API server count:
 
 | Process Type | Count | Notes |
-|---|---|---|
+| - | - | - |
 | API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
 | Engine Core | `DP` (default 1) | Scheduler and KV cache management |
-| GPU Worker | `N` (= `DP x TP`) | One per GPU, executes model forward passes |
+| GPU Worker | `N` (= `DP x PP x TP`) | One per GPU, executes model forward passes |
 | DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
 | **Total** | **`A + DP + N` (+ 1 if DP > 1)** | |
 
@@ -208,9 +208,7 @@ configurations affect the class we ultimately get.
 
 The following figure shows the class hierarchy of vLLM:
 
-> <figure markdown="span">
->   ![](../assets/design/hierarchy.png){ align="center" alt="query" width="100%" }
-> </figure>
+![Class Hierarchy](../assets/design/hierarchy.png)
 
 There are several important design choices behind this class hierarchy:
 

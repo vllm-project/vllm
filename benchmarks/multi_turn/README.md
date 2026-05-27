@@ -7,7 +7,7 @@ First start serving your model
 ```bash
 export MODEL_PATH=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
 
-vllm serve $MODEL_PATH --served-model-name Llama --disable-log-requests
+vllm serve $MODEL_PATH --served-model-name Llama
 ```
 
 The variable `MODEL_PATH` should be a path to the model files (e.g. downloaded from huggingface).

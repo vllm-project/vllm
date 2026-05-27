@@ -39,13 +39,6 @@ class FlexOlmoConfig(PretrainedConfig):
         if "architectures" not in kwargs:
             kwargs["architectures"] = ["FlexOlmoForCausalLM"]
 
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -80,3 +73,10 @@ class FlexOlmoConfig(PretrainedConfig):
         # BC: if there is a 'type' field, move it to 'rope_type'.
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )

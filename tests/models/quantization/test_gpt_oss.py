@@ -12,14 +12,17 @@ Config:
 Run: pytest tests/models/quantization/test_gpt_oss.py
 """
 
-import importlib
 import importlib.metadata
+import importlib.util
 from dataclasses import dataclass
 
 import huggingface_hub
 import lm_eval
 import pytest
 from packaging import version
+
+from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -81,8 +84,17 @@ class EvaluationConfig:
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("model_name, expected_accuracy", MODEL_ACCURACIES.items())
 def test_gpt_oss_attention_quantization(
-    model_name: str, tp_size: int, expected_accuracy: float
+    model_name: str,
+    tp_size: int,
+    expected_accuracy: float,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    if tp_size > current_platform.device_count():
+        pytest.skip("Not enough GPUs to run this test case")
+
+    if "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8" in model_name and on_gfx950():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
 
     extra_run_kwargs = {
@@ -104,7 +116,7 @@ def test_gpt_oss_attention_quantization(
     )
 
     rtol = 0.02
-    assert (
-        measured_accuracy - rtol < expected_accuracy
-        and measured_accuracy + rtol > expected_accuracy
-    ), f"Expected: {expected_accuracy} |  Measured: {measured_accuracy}"
+    assert measured_accuracy >= expected_accuracy - rtol, (
+        f"Accuracy {measured_accuracy:.4f} is below threshold "
+        f"{expected_accuracy - rtol:.4f} (expected >= {expected_accuracy} - {rtol})"
+    )

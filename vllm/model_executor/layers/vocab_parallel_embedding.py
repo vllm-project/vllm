@@ -8,13 +8,17 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.batch_invariant import (
+    linear_batch_invariant,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -66,6 +70,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+            return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
@@ -182,8 +188,8 @@ def get_masked_input_and_mask(
 
 
 # --8<-- [start:vocab_parallel_embedding]
-@CustomOp.register("vocab_parallel_embedding")
-class VocabParallelEmbedding(CustomOp):
+@PluggableLayer.register("vocab_parallel_embedding")
+class VocabParallelEmbedding(PluggableLayer):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
@@ -284,6 +290,7 @@ class VocabParallelEmbedding(CustomOp):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
         # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(
@@ -432,6 +439,12 @@ class VocabParallelEmbedding(CustomOp):
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
+            if (
+                loaded_weight.ndim == 0
+                and param.data.ndim == 1
+                and param.data.numel() == 1
+            ):
+                loaded_weight = loaded_weight.reshape(1)
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
@@ -461,7 +474,7 @@ class VocabParallelEmbedding(CustomOp):
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
-    def forward_native(self, input_):
+    def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -483,9 +496,6 @@ class VocabParallelEmbedding(CustomOp):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
-    def forward_cuda(self, input_):
-        return self.forward_native(input_)
-
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
@@ -496,7 +506,7 @@ class VocabParallelEmbedding(CustomOp):
 
 
 # --8<-- [start:parallel_lm_head]
-@CustomOp.register("parallel_lm_head")
+@PluggableLayer.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
