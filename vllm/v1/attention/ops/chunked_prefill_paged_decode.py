@@ -27,9 +27,10 @@ def has_native_kv_cache_layout(
 ) -> bool:
     """Return whether KV cache blocks can use the native ROCm pairing.
 
-    The native reshape_and_cache writer assumes packed blocks. If cache update
-    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
-    should use the matching Triton path too.
+    The C++ ``ops.paged_attention_rocm`` custom kernel requires each block
+    to be contiguous in memory. Returns False for stride-padded hybrid
+    layouts and for the unified KV cache (RFC #42082, see
+    :meth:`PagedAttention.split_kv_cache`), routing them to Triton.
     """
     return (
         key_cache.stride(0) == key_cache.shape[1:].numel()
@@ -47,7 +48,7 @@ def kernel_paged_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
     key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    value_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
     sink_ptr,  # [num_query_heads]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
@@ -170,7 +171,9 @@ def kernel_paged_attention_2d(
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
-        # 4D addressing logic of V (Slot is innermost)
+        # 4D addressing logic of V
+        # stride_v_cache_2 = head_size dim stride
+        # stride_v_cache_3 = block-position (N) dim stride
         v_offset = (
             p_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_1
@@ -320,7 +323,7 @@ def chunked_prefill_paged_decode(
             causal=causal,
         )
 
-    block_size = value_cache.shape[3]
+    block_size = value_cache.shape[2]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     # key may be None in cross-attention decode (already cached from encoder)
@@ -415,7 +418,7 @@ def chunked_prefill_paged_decode(
             "Cannot use ROCm custom paged attention kernel,"
             " falling back to Triton implementation."
         )
-        real_block_size = value_cache.shape[3]
+        real_block_size = value_cache.shape[2]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
         # Cap at 128 to avoid exceeding GPU shared memory limits
@@ -479,8 +482,8 @@ def chunked_prefill_paged_decode(
             stride_k_cache_4=key_cache.stride(4),
             stride_v_cache_0=value_cache.stride(0),
             stride_v_cache_1=value_cache.stride(1),
-            stride_v_cache_2=value_cache.stride(2),
-            stride_v_cache_3=value_cache.stride(3),
+            stride_v_cache_2=value_cache.stride(3),
+            stride_v_cache_3=value_cache.stride(2),
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
