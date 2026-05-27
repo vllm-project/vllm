@@ -110,7 +110,7 @@ class RoutedExpertsCapturer:
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
 
-        Under data parallelism, ``topk_ids`` may have three different batch
+        Under data parallelism, ``topk_ids`` may have four different batch
         layouts depending on where the DP combine happens and whether
         Sequence Parallelism (SP) is active for the MoE layer:
           - ``n == total`` (naive dispatch): all DP ranks' tokens are
@@ -119,6 +119,12 @@ class RoutedExpertsCapturer:
           - ``n == token_num_per_dp`` (modular-kernel path): DP combine
             happens inside ``quant_method.apply``; ``select_experts`` only
             ever sees this rank's tokens, so we take the whole tensor.
+          - ``n == total_with_padding`` (padded all-gather path): tokens are
+            padded to max_tokens before all-gather across DP group; each
+            DP rank occupies a contiguous block of size max_tokens, and we
+            extract only the actual tokens for this rank (skip padding).
+            When all DP ranks have equal token counts, ``total == total_with_padding``,
+            so the naive dispatch branch fires instead (equivalent result).
           - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
             path): tokens were split along dim=0 across the TP group by
             ``_sequence_parallel_context``
