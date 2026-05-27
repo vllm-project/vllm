@@ -170,6 +170,8 @@ class XpuMemAllocator:
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
 
+        assert isinstance(offload_tags, tuple)
+
         total_bytes = 0
         backup_bytes = 0
 
