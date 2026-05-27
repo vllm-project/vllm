@@ -450,6 +450,22 @@ class Worker(WorkerBase):
             - cudagraph_memory_estimate_applied
         )
 
+        if (
+            self.model_config.is_multimodal_model
+            and not self.model_runner.supports_mm_inputs
+        ):
+            buffer_mb = envs.VLLM_MM_TEXT_ONLY_BUFFER_MB
+            if buffer_mb > 0:
+                buffer_bytes = buffer_mb * 1024 * 1024
+                logger.info(
+                    "Multimodal model in text-only mode: applying %d MiB "
+                    "safety buffer to KV cache budget.",
+                    buffer_mb,
+                )
+                self.available_kv_cache_memory_bytes = max(
+                    0, self.available_kv_cache_memory_bytes - buffer_bytes
+                )
+
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
             "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",

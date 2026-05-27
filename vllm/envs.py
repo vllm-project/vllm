@@ -278,6 +278,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_MM_TEXT_ONLY_BUFFER_MB: int = 2048
 
 
 def get_default_cache_root():
@@ -1969,6 +1970,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # overlap the base layer compute with the LoRA fast path).
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
+    ),
+    # Safety buffer for multimodal models in text-only mode
+    "VLLM_MM_TEXT_ONLY_BUFFER_MB": lambda: int(
+        os.getenv("VLLM_MM_TEXT_ONLY_BUFFER_MB", "2048")
     ),
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
