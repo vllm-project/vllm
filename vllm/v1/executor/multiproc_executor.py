@@ -813,8 +813,7 @@ class WorkerProc:
         signal.signal(signal.SIGINT, signal_handler)
 
         # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
-        set_worker_net_device(
-            kwargs.get("local_rank", 0), kwargs["vllm_config"])
+        set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
         worker = None
         ready_writer = kwargs.pop("ready_pipe")

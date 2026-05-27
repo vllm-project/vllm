@@ -867,7 +867,6 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return None
 
 
-
 # Autodetect either NVML-enabled or non-NVML platform
 # based on whether NVML is available.
 nvml_available = False
