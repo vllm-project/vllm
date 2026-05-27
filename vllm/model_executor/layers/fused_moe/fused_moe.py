@@ -1332,7 +1332,7 @@ def try_get_optimal_moe_config(
     return config
 
 
-def outplace_fused_experts(
+def fused_experts_op(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1386,7 +1386,7 @@ def outplace_fused_experts(
     )
 
 
-def outplace_fused_experts_fake(
+def fused_experts_op_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1416,9 +1416,9 @@ def outplace_fused_experts_fake(
 
 
 direct_register_custom_op(
-    op_name="outplace_fused_experts",
-    op_func=outplace_fused_experts,
-    fake_impl=outplace_fused_experts_fake,
+    op_name="fused_experts",
+    op_func=fused_experts_op,
+    fake_impl=fused_experts_op_fake,
 )
 
 
@@ -1488,7 +1488,7 @@ def fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    return torch.ops.vllm.outplace_fused_experts(
+    return torch.ops.vllm.fused_experts(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,
