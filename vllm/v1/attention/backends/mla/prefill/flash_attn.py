@@ -163,6 +163,25 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # `out` / `output_scale` are vLLM-FA (FA4) extensions; upstream ROCm
+        # flash_attn rejects unknown kwargs. supports_quant_output() gates
+        # these to vLLM-FA only, so non-vLLM-FA callers must leave them unset.
+        if self._is_vllm_fa:
+            return self._flash_attn_varlen_diff_headdims(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=self._prefill_metadata.query_start_loc,
+                cu_seqlens_k=self._prefill_metadata.query_start_loc,
+                max_seqlen_q=self._prefill_metadata.max_query_len,
+                max_seqlen_k=self._prefill_metadata.max_query_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=return_softmax_lse,
+                out=out,
+                output_scale=output_scale,
+            )
+        assert out is None and output_scale is None
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -174,8 +193,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=return_softmax_lse,
-            out=out,
-            output_scale=output_scale,
         )
 
     def run_prefill_context_chunk(
