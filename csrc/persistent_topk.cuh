@@ -69,6 +69,7 @@ __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
+// Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits -> bin 0-4095)
 template <uint32_t kBits>
 __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   __half h = __float2half_rn(x);
@@ -327,21 +328,11 @@ __device__ __forceinline__ void find_threshold(uint32_t* histogram, uint32_t* wa
 // Uses 4096-bin (12-bit) histogram for better precision
 // ============================================================================
 
-struct RegSmem {
-  alignas(128) uint32_t counter_gt;
-  alignas(128) uint32_t counter_eq;
-  MatchBin match;
-  uint32_t warp_sum[kNumWarps];
-  union {
-    uint32_t histogram[kRegHistBins];
-    Tie tie_buffer[kMaxTies];
-  };
-};
-
 template <uint32_t TopK, uint32_t HIST_BITS, uint32_t VECS_PER_THREAD = kRegVecsPerThread>
 __device__ void register_topk(const float* __restrict__ scores,
-                               int32_t* __restrict__ output,
-                               uint32_t length, void* _smem) 
+                              int32_t* __restrict__ output,
+                              uint32_t length, 
+                              void* _smem) 
 {
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
   constexpr uint32_t ITEMS_PER_THREAD = HIST_BINS >= kBlockSize ? HIST_BINS / kBlockSize : 1;
@@ -362,9 +353,10 @@ __device__ void register_topk(const float* __restrict__ scores,
   const auto lane_id = tx % kWarpSize;
   const auto warp_id = tx / kWarpSize;
 
-  // Fused: zero histogram + load data (both independent, saves one __syncthreads__)
-  float4 vecs[VECS_PER_THREAD];
+  // Phase 1: Load all data into RF + build histogram
+  float4 vecs[VECS_PER_THREAD]; // 4 vectors x 4 floats = 16 elements per thread
   if constexpr (MULTI_ITEM && ITEMS_PER_THREAD >= 4) {
+    // Zero the histogram (SMEM writes)
     for (uint32_t i = 0; i < ITEMS_PER_THREAD / 4; i++)
       reinterpret_cast<uint4*>(smem->histogram)[tx * (ITEMS_PER_THREAD / 4) + i] = make_uint4(0, 0, 0, 0);
   } else {
@@ -378,51 +370,57 @@ __device__ void register_topk(const float* __restrict__ scores,
   for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
     const uint32_t base = (tx + v * kBlockSize) * 4;
     if (base < length) {
+      // TODO (roberto): try if 256-bit loads are faster (GMEM->RF)
       vecs[v] = *reinterpret_cast<const float4*>(scores + base);
-    }
-  }
-  __syncthreads();  // single barrier: histogram zeroed + data loaded
-
-  // Build histogram from registers
-  {
-    bool done = false;
-#pragma unroll
-    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-      const float* elems = reinterpret_cast<const float*>(&vecs[v]);
-#pragma unroll
-      for (uint32_t e = 0; e < 4 && !done; e++) {
-        const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
-        if (idx >= length) {
-          done = true;
-        } else {
-          atomicAdd(&smem->histogram[extract_coarse_bin_N<HIST_BITS>(elems[e])], 1);
-        }
-      }
     }
   }
   __syncthreads();
 
-  // Find threshold via prefix scan
+  // Build histogram from RF via atomic adds into the shared histogram
+  bool done = false;
+#pragma unroll
+  for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
+#pragma unroll
+    for (uint32_t e = 0; e < 4 && !done; e++) {
+      const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+      if (idx >= length) {
+        done = true;
+      } else {
+        atomicAdd(&smem->histogram[extract_coarse_bin_N<HIST_BITS>(elems[e])], 1);
+      }
+    }
+  }  
+  __syncthreads();
+
+  // Phase 2: Prefix scan to find threshold bin
   if constexpr (MULTI_ITEM) {
     // Multi-element scan (4096 bins: 4 per thread, 256 bins: not used here)
     uint32_t orig[ITEMS_PER_THREAD];
     uint32_t local_sum = 0;
+    
+    // Step 1: Each thread sums its 4 bins
 #pragma unroll
     for (uint32_t i = 0; i < ITEMS_PER_THREAD; i++) {
       orig[i] = smem->histogram[tx * ITEMS_PER_THREAD + i];
       local_sum += orig[i];
     }
+    
+    // Step 2: Warp-level inclusive prefix sum on local_sum
     const auto warp_inc = warp_inclusive_sum(lane_id, local_sum);
     if (lane_id == kWarpSize - 1) smem->warp_sum[warp_id] = warp_inc;
     __syncthreads();
 
+    // Step 3: Inter-warp prefix via redux.sync
     const auto tmp = smem->warp_sum[lane_id];
-    uint32_t prefix = warp_reduce_sum_full(lane_id < warp_id ? tmp : 0);
-    prefix += warp_inc - local_sum;
+    uint32_t prefix = warp_reduce_sum_full(lane_id < warp_id ? tmp : 0); // sum of all prior warps
+    prefix += warp_inc - local_sum; // exclusive prefix within this thread's position
+
+    // Step 4: Find threshold - scan 4 bins, accumulate prefix
 #pragma unroll
     for (uint32_t i = 0; i < ITEMS_PER_THREAD; i++) {
       prefix += orig[i];
-      const auto above = length - prefix;
+      const auto above = length - prefix; // elements in bins ABOVE this one
       if (above < TopK && above + orig[i] >= TopK) {
         smem->match = {.bin = tx * ITEMS_PER_THREAD + i,
                        .above_count = above, .equal_count = orig[i]};
@@ -847,6 +845,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
     return;
   }
 
+  // Tie-breaking uses FP32 (4-round radix sort)
   if constexpr (TopK <= kBlockSize) {
     // copy ties from tie_ws back to smem, then refine
     const uint32_t num_ties = min(s_total_equal, kMaxTies);
