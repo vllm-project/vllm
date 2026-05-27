@@ -38,6 +38,12 @@ __global__ void merge_attn_states_kernel(
 
   if (global_idx >= token_head_threads) return;
 
+  // shared memory config
+  const uint heads_per_block = NUM_THREADS / threads_per_head;
+  extern __shared__ float shmem[];
+  float* p_lse_smem = shmem;
+  float* s_lse_smem = shmem + heads_per_block;
+
   // global_idx -> token_idx + head_idx + pack_idx
   const uint token_head_idx = global_idx / threads_per_head;
   const uint pack_idx = global_idx % threads_per_head;
@@ -53,6 +59,16 @@ __global__ void merge_attn_states_kernel(
   const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
   const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
   output_t* output_head_ptr = output + dst_head_offset;
+
+  // store p_lse and s_lse into shared memory
+  if (pack_idx == 0)
+  {
+    float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
+    float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+    p_lse_smem[head_idx % heads_per_block] = p_lse;
+    s_lse_smem[head_idx % heads_per_block] = s_lse;
+  }
+  __syncthreads();
 
   // Pre-invert scale: multiplication is faster than division
   float fp8_scale_inv = 1.0f;
@@ -84,15 +100,14 @@ __global__ void merge_attn_states_kernel(
       }
     }
     if (output_lse != nullptr && pack_idx == 0) {
-      float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
-      output_lse[head_idx * num_tokens + token_idx] = s_lse;
+      output_lse[head_idx * num_tokens + token_idx] = s_lse_smem[head_idx % heads_per_block];   // load from shared memory
     }
     return;
   }
 
   // For tokens within prefix range, merge prefix and suffix
-  float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
-  float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+  float p_lse = p_lse_smem[head_idx % heads_per_block];        // load p_lse from shared memory
+  float s_lse = s_lse_smem[head_idx % heads_per_block];        // load s_lse from shared memory
   p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
   s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
 
@@ -212,9 +227,11 @@ __global__ void merge_attn_states_kernel(
 #define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS,           \
                                  USE_FP8_OUTPUT)                            \
   {                                                                         \
+    const uint heads_per_block = NUM_THREADS / threads_per_head;            \
+    const size_t smem_size = sizeof(float) * heads_per_block * 2;           \
     vllm::merge_attn_states_kernel<scalar_t, output_t, NUM_THREADS,         \
                                    USE_FP8_OUTPUT>                          \
-        <<<grid, block, 0, stream>>>(                                       \
+        <<<grid, block, smem_size, stream>>>(                               \
             reinterpret_cast<output_t*>(output.data_ptr()), output_lse_ptr, \
             reinterpret_cast<scalar_t*>(prefix_output.data_ptr()),          \
             reinterpret_cast<float*>(prefix_lse.data_ptr()),                \
