@@ -1053,6 +1053,37 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
 
 
+def _maybe_pcp_allgather_kv(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    attn_metadata: "MLACommonMetadata | None",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """PCP all-gather of K/V if the metadata indicates this rank only holds
+    the local DualChunkSwap slice. Used by the torch.ops dispatch path so
+    its do_kv_cache_update and forward_impl see the same gathered K/V the
+    direct-call path computes in MLAAttention.forward().
+    """
+    if (
+        attn_metadata is None
+        or getattr(attn_metadata, "pcp_allgather_restore_idx", None) is None
+    ):
+        return kv_c_normed, k_pe
+    try:
+        pcp_group = get_pcp_group()
+    except AssertionError:
+        return kv_c_normed, k_pe
+    if pcp_group.world_size <= 1:
+        return kv_c_normed, k_pe
+    num_actual_toks = attn_metadata.num_actual_tokens
+    return pcp_kv_allgather_and_restore(
+        kv_c_normed,
+        k_pe,
+        num_actual_toks,
+        attn_metadata.pcp_allgather_restore_idx,
+        pcp_group,
+    )
+
+
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
@@ -1065,7 +1096,13 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
+    # PCP: gather K/V across PCP ranks so concat_and_cache_mla writes the
+    # FULL sequence into this rank's cache (matching the padded
+    # slot_mapping built by gpu_model_runner._get_slot_mappings).
+    kv_c_normed, k_pe = _maybe_pcp_allgather_kv(kv_c_normed, k_pe, attn_metadata)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
@@ -1118,6 +1155,10 @@ def unified_mla_attention_with_output(
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    # PCP: same gather as unified_mla_kv_cache_update above. forward_impl
+    # under PCP > 1 expects the FULL sequence's K/V (pcp_world_size * num
+    # _actual_tokens), not the rank-local DualChunkSwap slice.
+    kv_c_normed, k_pe = _maybe_pcp_allgather_kv(kv_c_normed, k_pe, attn_metadata)
     layer.forward_impl(
         q,
         kv_c_normed,
