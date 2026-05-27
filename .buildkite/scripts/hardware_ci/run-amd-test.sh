@@ -75,20 +75,6 @@ handle_pytest_exit() {
   exit "$exit_code"
 }
 
-configure_image_validation_command() {
-  echo "--- Image validation setup"
-  docker image inspect "${image_name}" \
-    --format 'Image ID: {{.Id}}
-Repo digests: {{json .RepoDigests}}
-Created: {{.Created}}
-Size: {{.Size}}' || true
-  docker info --format 'Docker driver: {{.Driver}}; containers: {{.Containers}}; images: {{.Images}}' || true
-  docker system df || true
-
-  IMAGE_VALIDATION_COMMAND="(cd /tmp && python3 -c 'import importlib; [importlib.import_module(m) for m in (\"torch\", \"vllm\")]; print(\"required imports ok\")')"
-  echo "Image validation command: ${IMAGE_VALIDATION_COMMAND}"
-}
-
 ###############################################################################
 # Pytest marker/keyword re-quoting
 #
@@ -260,7 +246,6 @@ echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
-configure_image_validation_command
 
 remove_docker_container() {
   # docker run uses --rm, so the container is normally already gone when the
@@ -319,15 +304,6 @@ else
   echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
 fi
 
-commands_is_multi_node=false
-if is_multi_node "$commands"; then
-  commands_is_multi_node=true
-fi
-
-if [[ "$commands_is_multi_node" == "false" && "${IMAGE_VALIDATION_COMMAND}" != "true" ]]; then
-  commands="${IMAGE_VALIDATION_COMMAND} && ${commands}"
-fi
-
 echo "Final commands: $commands"
 
 MYPYTHONPATH=".."
@@ -352,7 +328,7 @@ else
 fi
 
 # --- Route: multi-node vs single-node ---
-if [[ "$commands_is_multi_node" == "true" ]]; then
+if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 

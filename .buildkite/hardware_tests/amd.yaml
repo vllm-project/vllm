@@ -17,6 +17,27 @@ steps:
       --target test
       --no-cache
       --progress plain .
+    - |
+      docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
+        test -d /vllm-workspace
+        test -d /vllm-workspace/tests
+        test -x /vllm-workspace/vllm/vllm-rs
+        command -v python3
+        command -v uv
+        command -v pytest
+        if ! command -v rocm-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
+          echo "No ROCm CLI found in image" >&2
+          exit 1
+        fi
+        python3 - <<'"'"'PY'"'"'
+      import torch
+      import vllm
+
+      print(f"torch=={torch.__version__}")
+      print(f"vllm=={vllm.__version__}")
+      PY
+        echo "AMD image smoke OK"
+      '
     - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
     env:
       DOCKER_BUILDKIT: "1"
