@@ -20,6 +20,7 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
+from collections import defaultdict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -163,7 +164,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Per-request set of secondary tiers that requested REQUEST_LEVEL
         # policy. Populated in get_request_offloading_context(),
         # cleaned up in on_request_finished().
-        self._request_level_tiers: dict[str, set[SecondaryTierManager]] = {}
+        self._request_level_tiers: defaultdict[str, set[SecondaryTierManager]] = (
+            defaultdict(set)
+        )
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -534,20 +537,17 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
-        request_level_tiers: set[SecondaryTierManager] = set()
         for tier in self.secondary_tiers:
             tier_ctx = tier.get_request_offloading_context(req_context)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
-                request_level_tiers.add(tier)
+                self._request_level_tiers[req_context.req_id].add(tier)
 
-        self._request_level_tiers[req_context.req_id] = request_level_tiers
-
-        result_policy = (
+        policy = (
             OffloadPolicy.REQUEST_LEVEL
-            if request_level_tiers
+            if req_context.req_id in self._request_level_tiers
             else OffloadPolicy.BLOCK_LEVEL
         )
-        return RequestOffloadingContext(policy=result_policy)
+        return RequestOffloadingContext(policy=policy)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.on_request_finished(req_context)
