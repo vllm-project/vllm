@@ -713,11 +713,6 @@ class Step3VLForConditionalGeneration(
     ) -> str:
         return "image"
 
-    def get_max_frames_per_video(
-        self,
-    ) -> int:
-        return 0
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -734,38 +729,17 @@ class Step3VLForConditionalGeneration(
         )
         return min_budget, max_budget
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(mm_kwargs.get("pixel_values", []))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
         img_output_tokens = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
-        )
-        patch_output_tokens = self._compute_spatial_tokens(
-            504,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-        return [
-            img_output_tokens + num_patch * patch_output_tokens
-            for num_patch in num_patches
-        ]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        img_grid = (
-            self.config.vision_config.image_size // self.config.vision_config.patch_size
         )
 
         # NOTE: 504 is the hard coded size for each patch after processing
@@ -773,13 +747,24 @@ class Step3VLForConditionalGeneration(
         # of the vision model and may need to be updated if the architecture changes.
         # The number of tokens for each patch is calculated based on this
         # size and the patch size.
+        patch_output_tokens = self._compute_spatial_tokens(
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+        img_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
         patch_grid = 504 // self.config.vision_config.patch_size
         total_image_pixel = img_grid * img_grid
         total_patch_pixel = patch_grid * patch_grid
 
-        num_patches = mm_kwargs.get("num_patches")
         return [
-            total_image_pixel + num_patch * total_patch_pixel
+            EncoderItemSpec(
+                input_size=(total_image_pixel + num_patch * total_patch_pixel),
+                output_tokens=(img_output_tokens + num_patch * patch_output_tokens),
+            )
             for num_patch in num_patches
         ]
 

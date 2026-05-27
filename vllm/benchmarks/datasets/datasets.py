@@ -2323,14 +2323,151 @@ class CustomImageDataset(CustomDataset):
         "prompt": "Which country has the most pokemons based on the given graphs?",
         "image_files": ["path/to/image.png"],
     }
+    {
+        "content": [
+            {"type": "text", "text": "Compare these images: "},
+            {"type": "image", "image": "path/to/image1.png"},
+            {"type": "text", "text": " and "},
+            {"type": "image_url", "image_url": {"url": "path/to/image2.png"}},
+        ],
+    }
     ```
-
-    NOTE: Only the first image file in "image_files" is used for each sample request.
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
 
     IS_MULTIMODAL = True
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        self.data: list[dict] = []
+
+        if not self.dataset_path.endswith(".jsonl"):
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomImageDataset."
+            )
+
+        with open(self.dataset_path, encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON in custom image dataset line {line_number}: {e}"
+                    ) from e
+
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Each custom image dataset line must contain a JSON object. "
+                        f"Found {type(item)} on line {line_number}."
+                    )
+
+                has_legacy_fields = "prompt" in item and "image_files" in item
+                has_interleaved_content = "content" in item
+                if not has_legacy_fields and not has_interleaved_content:
+                    raise ValueError(
+                        "Each custom image dataset line must contain either "
+                        "'prompt' and 'image_files' fields, or a 'content' field. "
+                        f"Invalid line: {line_number}."
+                    )
+
+                self.data.append(item)
+
+        random.seed(self.random_seed)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
+
+    @staticmethod
+    def _validate_content_parts(content: Any) -> list[dict[str, Any]]:
+        if not isinstance(content, list):
+            raise ValueError(
+                "'content' must be a list of text and image content dictionaries."
+            )
+
+        if not content:
+            raise ValueError("'content' must contain at least one item.")
+
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError(
+                    f"Each item in 'content' must be a dictionary. Found {type(part)}."
+                )
+            parts.append(part)
+
+        return parts
+
+    @classmethod
+    def _process_content_part(cls, part: dict[str, Any]) -> dict[str, Any]:
+        content_type = part.get("type")
+        if content_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ValueError("Text content parts must contain a string 'text'.")
+            return {"type": "text", "text": text}
+
+        if content_type == "image":
+            if "image" not in part:
+                raise ValueError("Image content parts must contain an 'image' field.")
+            return dict(process_image(part["image"]))
+
+        if content_type == "image_url":
+            image_url = part.get("image_url")
+            if isinstance(image_url, str):
+                return dict(process_image(image_url))
+
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if not isinstance(url, str):
+                    raise ValueError(
+                        "Image URL content parts must contain a string 'image_url.url'."
+                    )
+
+                processed_part = dict(process_image(url))
+                processed_image_url = dict(processed_part["image_url"])
+                processed_image_url.update(
+                    {key: value for key, value in image_url.items() if key != "url"}
+                )
+                processed_part["image_url"] = processed_image_url
+                return processed_part
+
+            raise ValueError(
+                "Image URL content parts must contain an 'image_url' string "
+                "or dictionary."
+            )
+
+        raise ValueError(
+            "Content parts must have type 'text', 'image', or 'image_url'. "
+            f"Found: {content_type!r}."
+        )
+
+    @classmethod
+    def _process_interleaved_content(cls, content: Any) -> list[dict[str, Any]]:
+        return [
+            cls._process_content_part(part)
+            for part in cls._validate_content_parts(content)
+        ]
+
+    @staticmethod
+    def _get_text_from_content(content: list[dict[str, Any]]) -> str:
+        return "".join(part["text"] for part in content if part.get("type") == "text")
+
+    @staticmethod
+    def _process_image_files(images: Any) -> dict[str, Any] | list[dict[str, Any]]:
+        if not isinstance(images, list) or not images:
+            raise ValueError("'image_files' must be a non-empty list.")
+
+        mm_content = [dict(process_image(image)) for image in images]
+        if len(mm_content) == 1:
+            return mm_content[0]
+
+        return mm_content
 
     def sample(
         self,
@@ -2356,17 +2493,33 @@ class CustomImageDataset(CustomDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
+
+            if "content" in item:
+                content = self._process_interleaved_content(item["content"])
+                text_prompt = self._get_text_from_content(content)
+                prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt = (
+                    [{"role": "user", "content": content}]
+                    if enable_multimodal_chat
+                    else content
+                )
+                sampled_requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                        multi_modal_data=None,
+                        request_id=request_id_prefix + str(i),
+                    )
+                )
+                continue
+
             prompt = item["prompt"]
+            if not isinstance(prompt, str):
+                raise ValueError("'prompt' must be a string.")
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
-                )
-            mm_content = process_image(images[0])
+            mm_content = self._process_image_files(item["image_files"])
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
