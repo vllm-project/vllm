@@ -1696,6 +1696,7 @@ def make_mxfp4_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s", experts_cls.__name__)
 
     extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:

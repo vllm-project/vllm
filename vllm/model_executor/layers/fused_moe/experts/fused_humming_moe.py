@@ -34,7 +34,20 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     swiglu_limit_func,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kInt4Static,
+    kInt8DynamicTokenSym,
+    kInt8Static,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+    kNvfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -51,15 +64,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_humming_moe_gemm_type() -> str:
-    env_gemm_type: str = envs.VLLM_HUMMING_MOE_GEMM_TYPE or ""
-    env_gemm_type = env_gemm_type.lower()
-    if env_gemm_type == "indexed":
-        gemm_type = env_gemm_type
-    elif env_gemm_type in ["grouped_contiguous", "grouped"]:
-        gemm_type = "grouped_contiguous"
-    else:
-        gemm_type = "indexed"
+def get_humming_moe_gemm_type() -> str | None:
+    env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
+    gemm_type = None
+    if env_gemm_type is not None:
+        env_gemm_type = env_gemm_type.lower()
+        if env_gemm_type == "indexed":
+            gemm_type = env_gemm_type
+        elif env_gemm_type in ["grouped_contiguous", "grouped"]:
+            gemm_type = "grouped_contiguous"
+        else:
+            gemm_type = "indexed"
 
     logger.info_once(f"Using {gemm_type} gemm for humming moe")  # noqa
     return gemm_type
@@ -141,8 +156,30 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TBD
-        return True
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
+            (kMxfp4Static, kMxfp8Dynamic),
+            (kNvfp4Static, None),
+            (kNvfp4Static, kFp8DynamicTokenSym),
+            (kNvfp4Static, kInt8DynamicTokenSym),
+            (kMxfp8Static, None),
+            (kMxfp8Static, kFp8DynamicTokenSym),
+            (kMxfp8Static, kInt8DynamicTokenSym),
+            (kFp8StaticChannelSym, None),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticChannelSym, kInt8DynamicTokenSym),
+            (kFp8Static128BlockSym, None),
+            (kFp8Static128BlockSym, kFp8DynamicTokenSym),
+            (kFp8Static128BlockSym, kInt8DynamicTokenSym),
+            (kInt4Static, None),
+            (kInt4Static, kFp8DynamicTokenSym),
+            (kInt4Static, kInt8DynamicTokenSym),
+            (kInt8Static, None),
+            (kInt8Static, kFp8DynamicTokenSym),
+            (kInt8Static, kInt8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     def supports_expert_map(self) -> bool:
         return True
@@ -269,7 +306,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             dtypes.float8e5m2: torch.float8_e5m2,
             dtypes.int8: torch.int8,
             dtypes.int4: torch.uint8,
-            dtypes.int16: torch.int16,
         }
 
         buffer_metas = {
@@ -344,7 +380,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         output_key = "down_output" if self.is_batched() else "output"
         output_shape = buffer_metas[output_key]["shape"]
-        elem_size = self.layer.param_dtype.itemsize
+        elem_size = self.layer.params_dtype.itemsize
 
         return (
             (workspace1_nbytes // elem_size,),
@@ -368,7 +404,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def make_workspaces(self, M: int, topk: int, activation: MoEActivation):
         shapes = self._workspace_shapes(M, topk, activation)
         workspace1_shape, workspace2_shape, output_shape = shapes
-        torch_dtype = self.layer.param_dtype
+        torch_dtype = self.layer.params_dtype
         workspace1, workspace2 = current_workspace_manager().get_simultaneous(
             (workspace1_shape, torch_dtype),
             (workspace2_shape, torch_dtype),
@@ -405,24 +441,27 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-            supported = cls.activation_format() == activation_format
-            reason = "activation_format mismatched"
-        elif activation_format == mk.FusedMoEActivationFormat.Standard:
-            if cls.activation_format() != mk.FusedMoEActivationFormat.Standard:
-                supported = False
-                reason = "activation_format mismatched"
-            else:
-                assert hasattr(cls, "humming_gemm_type")
-                gemm_type = cls.humming_gemm_type().value.lower()
-                preferred_gemm_type = get_humming_moe_gemm_type().lower()
-                supported = preferred_gemm_type == gemm_type
-                reason = "preferred gemm type mismatched"
-        else:
-            supported = False
-            reason = "unsupported activation_format"
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
 
-        return supported, None if supported else reason
+        if supported:
+            assert hasattr(cls, "humming_gemm_type")
+            gemm_type = cls.humming_gemm_type().value.lower()
+            preferred_gemm_type = get_humming_moe_gemm_type()
+            if preferred_gemm_type is not None:
+                supported = preferred_gemm_type.lower() == gemm_type
+                if not supported:
+                    reason = (
+                        f"preferred gemm type {preferred_gemm_type} != "
+                        f"supported gemm type {gemm_type}"
+                    )
+
+        return supported, reason
 
     def apply_activation(
         self,

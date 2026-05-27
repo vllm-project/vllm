@@ -37,6 +37,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    input_schema_to_quant_key,
+    weight_schema_to_quant_key,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -128,7 +132,7 @@ def prepare_param(tensor, name, extra_attrs):
     return param
 
 
-def prepare_moe_param(tensor, name, extra_attrs):
+def prepare_moe_param(tensor: torch.Tensor, name: str, extra_attrs: dict[str, Any]):
     param = torch.nn.Parameter(tensor, requires_grad=False)
     if "scale_type" in extra_attrs:
         extra_attrs["quant_method"] = extra_attrs["scale_type"]
@@ -632,12 +636,20 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
 
+        # Derive QuantKeys from humming schemas.
+        # Prefer force schemas (the final format after requant) over base.
+        weight_key = weight_schema_to_quant_key(
+            self.force_weight_schema or self.weight_schema
+        )
+        activation_key = input_schema_to_quant_key(
+            self.force_input_schema or self.input_schema
+        )
+
         # Select Humming MoE backend
         self.backend, self.experts_cls = select_humming_moe_backend(
             config=self.moe,
-            # TBD
-            weight_key=None,
-            activation_key=None,
+            weight_key=weight_key,
+            activation_key=activation_key,
         )
 
     def prepare_weight_loader(self, layer, weight_loader):
@@ -784,6 +796,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
+        assert self.backend is not None
         self.moe_kernel = make_humming_moe_kernel(
             self.moe_quant_config,
             self.moe,
