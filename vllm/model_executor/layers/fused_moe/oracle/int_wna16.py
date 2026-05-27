@@ -1645,6 +1645,7 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
+        from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
         if isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
             # These integrations build in K-first format even when the Triton
@@ -1657,6 +1658,42 @@ def convert_to_wna16_moe_kernel_format(
             # MoeWNA16 uses N-first uint8 weights and scales.
             w13_uint8 = w13.view(torch.uint8)
             w2_uint8 = w2.view(torch.uint8)
+
+        # On RDNA (gfx11/gfx12), repack int4 weights from N-first uint8
+        # [E, N, K//2] to N-packed int32 [E, K, N//8] so the Triton kernel
+        # unpacks them with tl.interleave (far fewer VGPRs than per-element
+        # shifts). Only the MoeWNA16 (AWQ/GPTQ) and compressed-tensors sources
+        # are handled; AutoGPTQ keeps its scalar-shift path. w13 and w2 feed
+        # separate kernel launches and dispatch per-tensor on dtype, so each is
+        # repacked independently and only when its N % 8 == 0 (else that weight
+        # keeps the uint8 layout and the kernel falls back to scalar shifts).
+        if isinstance(quant_config, MoeWNA16Config):
+            num_bits = quant_config.weight_bits
+        elif isinstance(quant_config, QuantizationArgs):
+            num_bits = quant_config.num_bits
+        else:
+            num_bits = None
+
+        from vllm.platforms.rocm import on_rdna
+
+        if num_bits == 4 and on_rdna():
+            from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
+                repack_int4_to_int32,
+                unpack_zp_int4_to_fp16,
+            )
+
+            # Zero points exist only for AWQ (compressed-tensors int4 is
+            # symmetric); unpack the uint8 [E, N//2, Kg] layout to fp16.
+            if w13_uint8.shape[1] % 8 == 0:
+                w13_uint8 = repack_int4_to_int32(w13_uint8)
+                w13_scale = w13_scale.permute(0, 2, 1).contiguous()
+                if w13_qzeros is not None:
+                    w13_qzeros = unpack_zp_int4_to_fp16(w13_qzeros)
+            if w2_uint8.shape[1] % 8 == 0:
+                w2_uint8 = repack_int4_to_int32(w2_uint8)
+                w2_scale = w2_scale.permute(0, 2, 1).contiguous()
+                if w2_qzeros is not None:
+                    w2_qzeros = unpack_zp_int4_to_fp16(w2_qzeros)
         return (
             w13_uint8,
             w2_uint8,

@@ -181,6 +181,25 @@ def benchmark_config(
             (num_experts, hidden_size, intermediate_size // group_size),
             dtype=dtype,
         )
+        # On AMD RDNA the fused MoE kernel unpacks int4 weights with
+        # tl.interleave, which needs N-packed int32 weights and per-N scales.
+        # Mirror the runtime repack so tuning targets the kernel that runs.
+        # w1 and w2 feed separate kernel launches, so each is repacked
+        # independently and only when its N % 8 == 0.
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna
+
+            if on_rdna():
+                from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (  # noqa: E501
+                    repack_int4_to_int32,
+                )
+
+                if w1.shape[1] % 8 == 0:
+                    w1 = repack_int4_to_int32(w1)
+                    w1_scale = w1_scale.permute(0, 2, 1).contiguous()
+                if w2.shape[1] % 8 == 0:
+                    w2 = repack_int4_to_int32(w2)
+                    w2_scale = w2_scale.permute(0, 2, 1).contiguous()
     elif use_int8_w8a16:
         w1_scale = torch.randn(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
