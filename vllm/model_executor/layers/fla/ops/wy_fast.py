@@ -11,19 +11,37 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 
-
-@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
+if current_platform.is_rocm():
+    _WU_CONFIGS = [
+        triton.Config(
+            {
+                "matrix_instr_nonkdim": 16,
+                "waves_per_eu": 2,
+                "kpack": 2,
+            },
+            num_warps=2,
+            num_stages=1,
+        ),
+    ]
+    _WU_KEY: list[str] = []  # static config; no key
+else:
+    _WU_CONFIGS = [
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    ]
+    _WU_KEY = ["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"]
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=_WU_CONFIGS,
+    key=_WU_KEY,
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
@@ -132,8 +150,9 @@ def recompute_w_u_fwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = 64
-    BV = 64
+    # AMD: larger BK/BV reduces inner iterations; for K=V=128 both cover full dim in 1 iter.
+    BK = 128 if K <= 128 else 64
+    BV = 128 if V <= 128 else 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
     recompute_w_u_fwd_kernel[(NT, B * H)](
