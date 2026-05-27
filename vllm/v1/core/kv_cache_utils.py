@@ -15,7 +15,12 @@ from typing import Any, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor, xxhash_cbor
+from vllm.utils.hashing import (
+    get_block_hash_fn,
+    hash_block_token_sequence,
+    sha256_cbor,
+    xxhash_cbor,
+)
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -562,9 +567,10 @@ def hash_block_tokens(
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
-    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHash(
-        hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))
+        hash_block_token_sequence(
+            hash_function, parent_block_hash, curr_block_token_ids, extra_keys
+        )
     )
 
 
@@ -641,6 +647,7 @@ def get_request_block_hasher(
     """
     Returns a function which computes the list of un-computed block hashes
     of a request."""
+    block_hash_fn = get_block_hash_fn(caching_hash_fn)
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * block_size
@@ -675,8 +682,9 @@ def get_request_block_hasher(
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
-            block_hash = hash_block_tokens(
-                caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
+            parent_hash = prev_block_hash_value or NONE_HASH
+            block_hash = BlockHash(
+                block_hash_fn(parent_hash, block_tokens, extra_keys)
             )
 
             new_block_hashes.append(block_hash)

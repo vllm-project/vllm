@@ -18,7 +18,14 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.hashing import (
+    _xxhash,
+    hash_block_token_sequence,
+    sha256,
+    sha256_cbor,
+    sha256_msgpack,
+    xxhash_msgpack,
+)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -625,6 +632,37 @@ def test_hash_block_tokens(hash_fn):
     )
     expected = hash_fn((parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash == expected
+
+
+@pytest.mark.parametrize(
+    "hash_fn",
+    [
+        sha256_msgpack,
+        pytest.param(
+            xxhash_msgpack,
+            marks=pytest.mark.skipif(_xxhash is None, reason="xxhash not installed"),
+        ),
+    ],
+)
+def test_hash_block_tokens_msgpack(hash_fn):
+    parent_block_hash = BlockHash(b"123")
+    curr_block_token_ids = (1, 2, 3)
+
+    block_hash = hash_block_tokens(hash_fn, parent_block_hash, curr_block_token_ids)
+    assert block_hash == hash_block_token_sequence(
+        hash_fn, parent_block_hash, curr_block_token_ids
+    )
+    assert block_hash == hash_block_tokens(
+        hash_fn, parent_block_hash, list(curr_block_token_ids)
+    )
+    assert block_hash != hash_block_tokens(
+        hash_fn, parent_block_hash, (1, 2, 4)
+    )
+
+    extra_keys = ("key1", "key2")
+    assert hash_block_tokens(
+        hash_fn, parent_block_hash, curr_block_token_ids, extra_keys
+    ) == hash_fn((parent_block_hash, curr_block_token_ids, extra_keys))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

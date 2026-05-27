@@ -11,16 +11,33 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import statistics
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
+from typing import NewType
 
-from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.v1.core.kv_cache_utils import BlockHash, hash_block_tokens, init_none_hash
+from vllm.utils.hashing import get_block_hash_fn, get_hash_fn_by_name
 
-SUPPORTED_ALGOS = ("sha256", "sha256_cbor", "xxhash", "xxhash_cbor")
+BlockHash = NewType("BlockHash", bytes)
+
+SUPPORTED_ALGOS = (
+    "sha256",
+    "sha256_cbor",
+    "sha256_msgpack",
+    "xxhash",
+    "xxhash_cbor",
+    "xxhash_msgpack",
+)
+
+
+def _init_none_hash(hash_fn: Callable[[object], bytes]) -> BlockHash:
+    hash_seed = os.getenv("PYTHONHASHSEED")
+    if hash_seed is None:
+        return BlockHash(os.urandom(32))
+    return BlockHash(hash_fn(hash_seed))
 
 
 def _generate_blocks(
@@ -37,10 +54,12 @@ def _hash_all_blocks(
     hash_fn: Callable[[object], bytes],
     blocks: Iterable[Sequence[int]],
 ) -> float:
+    none_hash = _init_none_hash(hash_fn)
+    block_hash_fn = get_block_hash_fn(hash_fn)
     parent_hash: BlockHash | None = None
     start = time.perf_counter()
     for block in blocks:
-        parent_hash = hash_block_tokens(hash_fn, parent_hash, block, extra_keys=None)
+        parent_hash = BlockHash(block_hash_fn(parent_hash or none_hash, block, None))
     end = time.perf_counter()
     return end - start
 
@@ -52,7 +71,6 @@ def _benchmark(
 ) -> tuple[float, float, float] | None:
     try:
         hash_fn = get_hash_fn_by_name(hash_algo)
-        init_none_hash(hash_fn)
         timings = [_hash_all_blocks(hash_fn, blocks) for _ in range(trials)]
     except ModuleNotFoundError as exc:
         print(f"Skipping {hash_algo}: {exc}", file=sys.stderr)

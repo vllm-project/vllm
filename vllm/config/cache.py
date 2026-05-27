@@ -34,7 +34,14 @@ CacheDType = Literal[
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
-PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
+PrefixCachingHashAlgo = Literal[
+    "sha256",
+    "sha256_cbor",
+    "sha256_msgpack",
+    "xxhash",
+    "xxhash_cbor",
+    "xxhash_msgpack",
+]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -97,6 +104,8 @@ class CacheConfig:
       default, as SHA256 is the most secure choice to avoid potential hash collisions.
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
       serializes objects using canonical CBOR and hashes them with SHA-256.
+    - "sha256_msgpack" serializes objects using MessagePack and hashes them
+      with SHA-256.
     - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
       non-cryptographic hashing. Requires the optional ``xxhash`` package.
       IMPORTANT: Use of a hashing algorithm that is not considered  cryptographically
@@ -105,7 +114,9 @@ class CacheConfig:
       Even if collisions are still very unlikely, it is important to consider your
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
-      reproducible hashing. Requires the optional ``xxhash`` package."""
+      reproducible hashing. Requires the optional ``xxhash`` package.
+    - "xxhash_msgpack" combines MessagePack serialization with xxHash.
+      Requires the optional ``xxhash`` package."""
     calculate_kv_scales: bool = False
     """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
