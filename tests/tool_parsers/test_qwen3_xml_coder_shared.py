@@ -10,6 +10,7 @@ target streaming-mode-specific quirks of one parser only stay in their
 parser-specific file (``test_qwen3xml_tool_parser.py`` or
 ``test_qwen3coder_tool_parser.py``).
 """
+
 import json
 from collections.abc import Generator
 
@@ -206,9 +207,7 @@ def stream_delta_message_generator(
 
 def test_extract_tool_calls_no_tools(parser):
     model_output = "This is a test response without any tool calls"
-    extracted_tool_calls = parser.extract_tool_calls(
-        model_output, request=None
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=None)
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -395,9 +394,7 @@ def test_extract_tool_calls(
     parser, model_output, expected_tool_calls, expected_content
 ):
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
     assert extracted_tool_calls.tools_called
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
     # Both ``None`` and ``""`` are acceptable when the expected content is
@@ -421,14 +418,10 @@ TX
 </parameter>
 </function>"""
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
-    assert (
-        extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
-    )
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
 # ---------------------------------------------------------------------------
@@ -479,9 +472,7 @@ hello world
 
     parser_inst = parser_cls(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = parser_inst.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser_inst.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -491,9 +482,7 @@ hello world
     assert args["obj_param"] == {"key": "value"}
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tokenizer, parser_cls
-):
+def test_extract_tool_calls_complex_type_with_single_quote(qwen3_tokenizer, parser_cls):
     """Object parameter expressed as a Python repr (single quotes)."""
     tools = [
         ChatCompletionToolsParam(
@@ -524,9 +513,7 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 
     parser_inst = parser_cls(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = parser_inst.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser_inst.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
@@ -595,9 +582,7 @@ def test_extract_tool_calls_streaming(
                         tool_states[idx]["name"] = tool_call.function.name
 
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += (
-                            tool_call.function.arguments
-                        )
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
 
     # Be tolerant about whitespace-only deltas between parallel tool calls;
     # see ``test_extract_tool_calls`` for the same reasoning.
@@ -638,15 +623,11 @@ fahrenheit
 </tool_call>"""
 
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
-    assert (
-        extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
-    )
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert "city" in args
     assert args["city"] == "Dallas"
@@ -655,9 +636,7 @@ fahrenheit
     assert "Let me check the weather for you:" in extracted_tool_calls.content
 
 
-def test_extract_tool_calls_streaming_missing_closing_tag(
-    parser, qwen3_tokenizer
-):
+def test_extract_tool_calls_streaming_missing_closing_tag(parser, qwen3_tokenizer):
     """Streaming with missing closing </parameter> tag."""
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -702,9 +681,7 @@ fahrenheit
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += (
-                            tool_call.function.arguments
-                        )
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
 
     assert "Let me check the weather for you:" in other_content
     assert len(tool_states) == 1
@@ -891,13 +868,9 @@ def test_extract_tool_calls_streaming_speculative_decode_loss(parser):
     request = ChatCompletionRequest(model="test", messages=[])
 
     text1 = "<tool_call>\n<function=test>\n"
-    parser.extract_tool_calls_streaming(
-        "", text1, text1, [], [1], [1], request
-    )
+    parser.extract_tool_calls_streaming("", text1, text1, [], [1], [1], request)
 
-    delta_str = (
-        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
-    )
+    delta_str = "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
     text2 = text1 + delta_str
     delta2 = parser.extract_tool_calls_streaming(
         text1, text2, delta_str, [1], [1, 2], [2], request
@@ -949,8 +922,7 @@ def test_string_null_value_preserved(qwen3_tokenizer, parser_cls):
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["query"] == "null", (
-        f"String parameter 'null' was converted incorrectly. "
-        f"Got: {args.get('query')!r}"
+        f"String parameter 'null' was converted incorrectly. Got: {args.get('query')!r}"
     )
 
 
@@ -1076,9 +1048,7 @@ def test_anyof_object_param_not_double_encoded_nonstreaming(
     qwen3_tokenizer, parser_cls
 ):
     parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_OBJECT_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_ANYOF_OBJECT_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_ANYOF_OBJECT_TOOLS)
     result = parser.extract_tool_calls(_ANYOF_OBJECT_OUTPUT, request=request)
 
     assert result.tools_called
@@ -1089,13 +1059,9 @@ def test_anyof_object_param_not_double_encoded_nonstreaming(
     assert args["data"] == {"key": "value", "count": 42}
 
 
-def test_anyof_object_param_not_double_encoded_streaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_anyof_object_param_not_double_encoded_streaming(qwen3_tokenizer, parser_cls):
     parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_OBJECT_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_ANYOF_OBJECT_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_ANYOF_OBJECT_TOOLS)
     deltas = [
         "<tool_call>",
         "\n<function=update_record>",
@@ -1109,26 +1075,46 @@ def test_anyof_object_param_not_double_encoded_streaming(
     assert len(reconstructor.tool_calls) == 1
     args = json.loads(reconstructor.tool_calls[0].function.arguments)
     assert isinstance(args["data"], dict), (
-        f"anyOf object param was double-encoded in streaming: "
-        f"data={args['data']!r}"
+        f"anyOf object param was double-encoded in streaming: data={args['data']!r}"
     )
 
 
 # ---------------------------------------------------------------------------
-# anyOf array schema — value parsed as a list
+# anyOf / nullable (Pydantic v2 Optional[T]) type resolution.
+# Both parsers extract the first non-null type from the anyOf union.
 # ---------------------------------------------------------------------------
 
-_ANYOF_ARRAY_TOOLS = [
+_ANYOF_TYPES_TOOLS = [
     ChatCompletionToolsParam(
         type="function",
         function={
-            "name": "set_items",
+            "name": "test_anyof",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "items": {
+                    "anyof_int": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "default": 5,
+                    },
+                    "anyof_str": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                    },
+                    "anyof_array": {
                         "anyOf": [
                             {"type": "array", "items": {"type": "string"}},
+                            {"type": "null"},
+                        ],
+                    },
+                    "anyof_obj": {
+                        "anyOf": [{"type": "object"}, {"type": "null"}],
+                    },
+                    "type_as_array": {
+                        "type": ["integer", "null"],
+                    },
+                    "multi_non_null": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "integer"},
                             {"type": "null"},
                         ],
                     },
@@ -1138,49 +1124,107 @@ _ANYOF_ARRAY_TOOLS = [
     )
 ]
 
-_ANYOF_ARRAY_OUTPUT = (
+_ANYOF_TYPES_OUTPUT = (
     "<tool_call>\n"
-    "<function=set_items>\n"
-    '<parameter=items>["a", "b", "c"]</parameter>\n'
+    "<function=test_anyof>\n"
+    "<parameter=anyof_int>5</parameter>\n"
+    "<parameter=anyof_str>hello</parameter>\n"
+    '<parameter=anyof_array>["a", "b", "c"]</parameter>\n'
+    '<parameter=anyof_obj>{"key": "value"}</parameter>\n'
+    "<parameter=type_as_array>42</parameter>\n"
+    "<parameter=multi_non_null>some text</parameter>\n"
     "</function>\n"
     "</tool_call>"
 )
 
 
-def test_anyof_array_null_parses_as_list_nonstreaming(
-    qwen3_tokenizer, parser_cls
-):
-    """anyOf [{type: array}, {type: null}] must parse a JSON array value as
-    a list (the first non-null type is ``array``), not as a raw string.
+def test_extract_tool_calls_anyof_type_conversion(qwen3_tokenizer, parser_cls):
+    """anyOf nullable schemas (Pydantic v2 ``Optional[T]``) must resolve to
+    the first non-null type and apply the matching conversion: int(),
+    list/dict via json, string passthrough.
     """
-    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_ARRAY_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_ANYOF_ARRAY_TOOLS
-    )
-    result = parser.extract_tool_calls(_ANYOF_ARRAY_OUTPUT, request=request)
+    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_TYPES_TOOLS)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_ANYOF_TYPES_TOOLS)
+    result = parser.extract_tool_calls(_ANYOF_TYPES_OUTPUT, request=request)
 
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
-    assert isinstance(args["items"], list), (
-        f"anyOf array|null was not parsed as a list: {args['items']!r}"
+    assert args["anyof_int"] == 5
+    assert isinstance(args["anyof_int"], int)
+    assert args["anyof_str"] == "hello"
+    assert isinstance(args["anyof_str"], str)
+    assert args["anyof_array"] == ["a", "b", "c"]
+    assert isinstance(args["anyof_array"], list)
+    assert args["anyof_obj"] == {"key": "value"}
+    assert isinstance(args["anyof_obj"], dict)
+    # JSON-Schema list-form type {"type": ["integer", "null"]} → int
+    assert args["type_as_array"] == 42
+    assert isinstance(args["type_as_array"], int)
+    # anyOf[string, integer, null] → first non-null type is string
+    assert args["multi_non_null"] == "some text"
+    assert isinstance(args["multi_non_null"], str)
+
+
+_ANYOF_STREAMING_TOOLS = [
+    ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "search_web",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                    },
+                    "count": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "default": 5,
+                    },
+                    "verbose": {
+                        "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                    },
+                },
+            },
+        },
     )
-    assert args["items"] == ["a", "b", "c"]
+]
+
+_ANYOF_STREAMING_OUTPUT = (
+    "<tool_call>\n"
+    "<function=search_web>\n"
+    "<parameter=query>vllm tool parser</parameter>\n"
+    "<parameter=count>10</parameter>\n"
+    "<parameter=verbose>true</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
 
 
-def test_anyof_array_null_parses_as_list_streaming(qwen3_tokenizer, parser_cls):
-    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_ARRAY_TOOLS)
+def test_extract_tool_calls_anyof_type_conversion_streaming(
+    qwen3_tokenizer, parser_cls
+):
+    """Streaming e2e for anyOf nullable schemas: string/int/bool types must
+    be resolved through the incremental pipeline for both parsers.
+    """
+    parser = parser_cls(qwen3_tokenizer, tools=_ANYOF_STREAMING_TOOLS)
     request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_ANYOF_ARRAY_TOOLS
+        model=MODEL, messages=[], tools=_ANYOF_STREAMING_TOOLS
     )
     reconstructor = run_tool_extraction_streaming(
-        parser, _ANYOF_ARRAY_OUTPUT, request, assert_one_tool_per_delta=False
+        parser,
+        _ANYOF_STREAMING_OUTPUT,
+        request,
+        assert_one_tool_per_delta=False,
     )
     assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "search_web"
     args = json.loads(reconstructor.tool_calls[0].function.arguments)
-    assert isinstance(args["items"], list), (
-        f"anyOf array|null was not a list in streaming: {args['items']!r}"
-    )
-    assert args["items"] == ["a", "b", "c"]
+    assert args["query"] == "vllm tool parser"
+    assert isinstance(args["query"], str)
+    assert args["count"] == 10
+    assert isinstance(args["count"], int)
+    assert args["verbose"] is True
+    assert isinstance(args["verbose"], bool)
 
 
 # ---------------------------------------------------------------------------
@@ -1273,12 +1317,12 @@ _WRITE_FILE_TOOLS = [
 ]
 
 _XML_TAGS_IN_CONTENT = (
-    'char_deltas = [\n'
+    "char_deltas = [\n"
     '    "<tool_call>\\n",\n'
     '    "<parameter=query>\\n",\n'
     '    "\\n</parameter>\\n",\n'
     '    "</function>\\n",\n'
-    ']\n'
+    "]\n"
 )
 
 _WRITE_FILE_XML_TAGS_OUTPUT = (
@@ -1291,21 +1335,15 @@ _WRITE_FILE_XML_TAGS_OUTPUT = (
 )
 
 
-def test_content_with_xml_structural_tags_nonstreaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_xml_structural_tags_nonstreaming(qwen3_tokenizer, parser_cls):
     """Non-streaming: a string param whose value embeds <tool_call>,
     <parameter=...>, </parameter>, </function> as literal text must be
     extracted intact, with no spurious extra params being created from
     the embedded tags.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
-    result = parser.extract_tool_calls(
-        _WRITE_FILE_XML_TAGS_OUTPUT, request=request
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+    result = parser.extract_tool_calls(_WRITE_FILE_XML_TAGS_OUTPUT, request=request)
 
     assert result.tools_called
     assert len(result.tool_calls) == 1
@@ -1321,14 +1359,10 @@ def test_content_with_xml_structural_tags_nonstreaming(
     )
 
 
-def test_content_with_xml_structural_tags_streaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_xml_structural_tags_streaming(qwen3_tokenizer, parser_cls):
     """Streaming variant: pre-formed chunks, full content in one delta."""
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     char_deltas = [
         "<tool_call>\n",
         "<function=write_file>\n",
@@ -1376,18 +1410,14 @@ _WRITE_FILE_PARAM_LIKE_LINES_OUTPUT = (
 )
 
 
-def test_content_with_param_like_lines_nonstreaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_param_like_lines_nonstreaming(qwen3_tokenizer, parser_cls):
     """Non-streaming: ``</parameter>`` and ``<parameter=NAME>`` on their
     own lines inside a string value must not terminate the parameter
     early.  Requires schema-based filtering so that ``new_string`` (not a
     real parameter of write_file) is treated as literal text.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     result = parser.extract_tool_calls(
         _WRITE_FILE_PARAM_LIKE_LINES_OUTPUT, request=request
     )
@@ -1411,20 +1441,18 @@ def test_content_with_param_like_lines_streaming(qwen3_tokenizer, parser_cls):
     structural close.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     char_deltas = [
         "<tool_call>\n",
         "<function=write_file>\n",
         "<parameter=path>\ntest_template.py\n</parameter>\n",
         '<parameter=content>\nTOOL_CALL_TEMPLATE = """\n',
-        "</parameter>\n",            # literal close — alone in its delta
+        "</parameter>\n",  # literal close — alone in its delta
         "<parameter=new_string>\n",  # literal new-param line
         "#!/usr/bin/env python3\n",
-        "</parameter>\n",            # second literal close
+        "</parameter>\n",  # second literal close
         '"""\n',
-        "</parameter>\n",            # REAL close of content
+        "</parameter>\n",  # REAL close of content
         "</function>\n",
         "</tool_call>\n",
     ]
@@ -1475,12 +1503,8 @@ def test_array_with_json_bool(qwen3_tokenizer, parser_cls):
     ``ast.literal_eval``.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_ARRAY_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_ARRAY_TOOLS
-    )
-    result = parser.extract_tool_calls(
-        _ARRAY_WITH_JSON_BOOL_OUTPUT, request=request
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_ARRAY_TOOLS)
+    result = parser.extract_tool_calls(_ARRAY_WITH_JSON_BOOL_OUTPUT, request=request)
 
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
@@ -1525,9 +1549,7 @@ def test_two_tool_calls_in_one_streaming_chunk(qwen3_tokenizer, parser_cls):
     emitted; dropping the second one is a regression.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WEATHER_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WEATHER_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WEATHER_TOOLS)
     reconstructor = run_tool_extraction_streaming(
         parser,
         [_TWO_TOOL_CALLS_IN_ONE_CHUNK],
@@ -1535,8 +1557,7 @@ def test_two_tool_calls_in_one_streaming_chunk(qwen3_tokenizer, parser_cls):
         assert_one_tool_per_delta=False,
     )
     assert len(reconstructor.tool_calls) == 2, (
-        f"Expected 2 tool calls in one delta, got "
-        f"{len(reconstructor.tool_calls)}"
+        f"Expected 2 tool calls in one delta, got {len(reconstructor.tool_calls)}"
     )
     args0 = json.loads(reconstructor.tool_calls[0].function.arguments)
     args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
@@ -1595,8 +1616,7 @@ def test_python_none_value_for_nullable_int(qwen3_tokenizer, parser_cls):
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["count"] is None, (
-        f"Python repr None was not converted to JSON null. "
-        f"Got: {args['count']!r}"
+        f"Python repr None was not converted to JSON null. Got: {args['count']!r}"
     )
 
 
@@ -1608,9 +1628,7 @@ def test_streaming_two_tool_calls_plus_trailing_text_one_delta(
     content in the same delta — not be silently dropped.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WEATHER_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WEATHER_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WEATHER_TOOLS)
     deltas = [
         _TWO_TOOL_CALLS_IN_ONE_CHUNK + "\nAll done!",
     ]
@@ -1635,9 +1653,7 @@ def test_streaming_trailing_text_with_final_close_in_same_delta(
     consumed by the parser's "advance to next tool" logic.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WEATHER_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WEATHER_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WEATHER_TOOLS)
     deltas = [
         # Build up the tool call up to and including </function>.
         "<tool_call>\n<function=get_weather>\n"
@@ -1666,11 +1682,7 @@ def test_streaming_trailing_text_with_final_close_in_same_delta(
 # ---------------------------------------------------------------------------
 
 _CONTENT_WITH_REAL_PARAM_NAME_LITERAL = (
-    'doc = """\n'
-    '<parameter=path>\n'
-    'literal/value\n'
-    '</parameter>\n'
-    '"""\n'
+    'doc = """\n<parameter=path>\nliteral/value\n</parameter>\n"""\n'
 )
 
 _REAL_PARAM_NAME_LITERAL_OUTPUT = (
@@ -1683,9 +1695,7 @@ _REAL_PARAM_NAME_LITERAL_OUTPUT = (
 )
 
 
-def test_content_with_real_param_name_literal_nonstreaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_real_param_name_literal_nonstreaming(qwen3_tokenizer, parser_cls):
     """Non-streaming: parameter ``content`` value embeds
     ``<parameter=path>...</parameter>`` where ``path`` IS the other real
     parameter of the same ``write_file`` tool.  Schema name filtering alone
@@ -1694,23 +1704,17 @@ def test_content_with_real_param_name_literal_nonstreaming(
     that closes the OUTER param, not the inner literal).
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
-    result = parser.extract_tool_calls(
-        _REAL_PARAM_NAME_LITERAL_OUTPUT, request=request
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
+    result = parser.extract_tool_calls(_REAL_PARAM_NAME_LITERAL_OUTPUT, request=request)
 
     assert result.tools_called
     assert len(result.tool_calls) == 1
     args = json.loads(result.tool_calls[0].function.arguments)
     assert list(args.keys()) == ["path", "content"], (
-        f"Spurious params from embedded same-name literal: "
-        f"{list(args.keys())}"
+        f"Spurious params from embedded same-name literal: {list(args.keys())}"
     )
     assert args["path"] == "fixture.py", (
-        f"Outer ``path`` was overwritten by embedded literal: "
-        f"{args.get('path')!r}"
+        f"Outer ``path`` was overwritten by embedded literal: {args.get('path')!r}"
     )
     expected = _CONTENT_WITH_REAL_PARAM_NAME_LITERAL.rstrip("\n")
     assert args["content"] == expected, (
@@ -1719,17 +1723,13 @@ def test_content_with_real_param_name_literal_nonstreaming(
     )
 
 
-def test_content_with_real_param_name_literal_streaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_real_param_name_literal_streaming(qwen3_tokenizer, parser_cls):
     """Streaming variant of the same case.  Each meaningful structural-
     looking line arrives in its own delta — the parser cannot wait for the
     full text to disambiguate.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     char_deltas = [
         "<tool_call>\n",
         "<function=write_file>\n",
@@ -1749,8 +1749,7 @@ def test_content_with_real_param_name_literal_streaming(
     assert len(reconstructor.tool_calls) == 1
     args = json.loads(reconstructor.tool_calls[0].function.arguments)
     assert list(args.keys()) == ["path", "content"], (
-        f"Spurious params from embedded same-name literal: "
-        f"{list(args.keys())}"
+        f"Spurious params from embedded same-name literal: {list(args.keys())}"
     )
     assert args["path"] == "fixture.py"
     expected = _CONTENT_WITH_REAL_PARAM_NAME_LITERAL.rstrip("\n")
@@ -1794,18 +1793,14 @@ _FULL_NESTED_CALL_OUTPUT = (
 )
 
 
-def test_content_with_full_nested_tool_call_nonstreaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_full_nested_tool_call_nonstreaming(qwen3_tokenizer, parser_cls):
     """Non-streaming: parameter ``content`` contains a complete literal
     ``<tool_call>...</tool_call>`` whose function/parameter names match
     the OUTER tool's schema.  Every literal must stay inside the value;
     no extra tool call must be generated.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     result = parser.extract_tool_calls(_FULL_NESTED_CALL_OUTPUT, request=request)
 
     assert result.tools_called
@@ -1823,17 +1818,13 @@ def test_content_with_full_nested_tool_call_nonstreaming(
     )
 
 
-def test_content_with_full_nested_tool_call_streaming(
-    qwen3_tokenizer, parser_cls
-):
+def test_content_with_full_nested_tool_call_streaming(qwen3_tokenizer, parser_cls):
     """Streaming variant: the literal nested ``<tool_call>...</tool_call>``
     crosses many delta boundaries; the parser must not start a second
     tool call.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     char_deltas = [
         "<tool_call>\n",
         "<function=write_file>\n",
@@ -1913,9 +1904,7 @@ def test_two_tools_second_with_out_of_schema_nested_literal_nonstreaming(
     not the literal ``</parameter>`` of the unknown-NAME nested open.
     """
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     result = parser.extract_tool_calls(
         _TWO_TOOLS_OUT_OF_SCHEMA_NESTED_OUTPUT, request=request
     )
@@ -1934,8 +1923,7 @@ def test_two_tools_second_with_out_of_schema_nested_literal_nonstreaming(
     assert args1["path"] == "fixture.py"
     expected = _OUT_OF_SCHEMA_NESTED_CONTENT.rstrip("\n")
     assert args1["content"] == expected, (
-        f"outer content truncated at literal </parameter>: "
-        f"{args1.get('content')!r}"
+        f"outer content truncated at literal </parameter>: {args1.get('content')!r}"
     )
 
 
@@ -1944,9 +1932,7 @@ def test_two_tools_second_with_out_of_schema_nested_literal_streaming(
 ):
     """Streaming variant of the same scenario."""
     parser = parser_cls(qwen3_tokenizer, tools=_WRITE_FILE_TOOLS)
-    request = ChatCompletionRequest(
-        model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS
-    )
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=_WRITE_FILE_TOOLS)
     char_deltas = [
         "<tool_call>\n<function=foo>\n",
         "<parameter=bar>baz</parameter>\n",
@@ -2104,8 +2090,7 @@ def test_inline_empty_tool_call_preserves_content_before_real_call(
         f"Pre-inline narrative lost from content: {result.content!r}"
     )
     assert "Now real:" in result.content, (
-        f"Content between inline literal and real tool_call lost: "
-        f"{result.content!r}"
+        f"Content between inline literal and real tool_call lost: {result.content!r}"
     )
 
 
@@ -2118,9 +2103,7 @@ def test_inline_empty_tool_call_preserves_content_before_real_call(
 # ---------------------------------------------------------------------------
 
 
-def test_anyof_string_null_with_null_literal_returns_none(
-    qwen3_tokenizer, parser_cls
-):
+def test_anyof_string_null_with_null_literal_returns_none(qwen3_tokenizer, parser_cls):
     """anyOf [{type: string}, {type: null}] with value "null" or "None"
     must convert to JSON null.  String-typed paths preserve the literal,
     but a nullable schema MUST recognise the null sentinel — otherwise

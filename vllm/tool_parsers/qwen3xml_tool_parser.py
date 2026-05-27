@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import contextlib
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -334,8 +335,8 @@ class StreamingXMLToolCallParser:
                     # Fallback (no schema): trust the name unless it is a
                     # repeat of the current/already-emitted param, which
                     # is almost always a literal in a parser fixture.
-                    structural_param_follows = (
-                        not self._is_already_emitted_param(candidate)
+                    structural_param_follows = not self._is_already_emitted_param(
+                        candidate
                     )
 
         # Return True when rest is an incomplete prefix of a structural
@@ -376,7 +377,7 @@ class StreamingXMLToolCallParser:
             idx = chunk.find(token, search)
             if idx == -1:
                 return False
-            rest = chunk[idx + len(token):].lstrip()
+            rest = chunk[idx + len(token) :].lstrip()
             if not rest or rest.startswith(end_token):
                 return True
             search = idx + len(token)
@@ -390,7 +391,7 @@ class StreamingXMLToolCallParser:
             idx = chunk.find(token, search)
             if idx == -1:
                 return False
-            rest = chunk[idx + len(token):].lstrip()
+            rest = chunk[idx + len(token) :].lstrip()
             if not rest or rest.startswith(start_token):
                 return True
             search = idx + len(token)
@@ -438,12 +439,9 @@ class StreamingXMLToolCallParser:
                 preprocessed_element = self._preprocess_xml_chunk(element)
                 # Check if a new tool_call starts and we have buffered text content
                 if (
-                    (
-                        preprocessed_element.strip().startswith("<tool_call>")
-                        or preprocessed_element.strip().startswith("<function name=")
-                    )
-                    and self.text_content_buffer
-                ):
+                    preprocessed_element.strip().startswith("<tool_call>")
+                    or preprocessed_element.strip().startswith("<function name=")
+                ) and self.text_content_buffer:
                     # Output previously collected text content first
                     text_delta = DeltaMessage(content=self.text_content_buffer)
                     self._emit_delta(text_delta)
@@ -494,11 +492,7 @@ class StreamingXMLToolCallParser:
         # the SAME delta as the closing </tool_call> (MTP / speculative
         # decoding) is buffered but never emitted — and is lost entirely
         # if EOS comes before any subsequent delta.
-        if (
-            found_any
-            and self.text_content_buffer
-            and self.current_call_id is None
-        ):
+        if found_any and self.text_content_buffer and self.current_call_id is None:
             text_delta = DeltaMessage(content=self.text_content_buffer)
             self._emit_delta(text_delta)
             self.text_content_buffer = ""
@@ -770,12 +764,14 @@ class StreamingXMLToolCallParser:
                     # Without deferral, the streaming string path emits
                     # ``"`` + chars + ``"`` and the literal stays
                     # quoted.
-                    is_nullable_string = (
-                        param_type in [
-                            "string", "str", "text", "varchar", "char", "enum",
-                        ]
-                        and self._param_allows_null(self._pre_current_param_name)
-                    )
+                    is_nullable_string = param_type in [
+                        "string",
+                        "str",
+                        "text",
+                        "varchar",
+                        "char",
+                        "enum",
+                    ] and self._param_allows_null(self._pre_current_param_name)
                     need_defer = (
                         is_complex_type
                         or is_object_type
@@ -798,9 +794,8 @@ class StreamingXMLToolCallParser:
         # describes the tool-call format.  Escape them unless they are
         # genuine structural delimiters.
         if self.current_param_name is not None:
-            if (
-                chunk.startswith(self.tool_call_start_token)
-                or chunk.startswith(self.function_start_token)
+            if chunk.startswith(self.tool_call_start_token) or chunk.startswith(
+                self.function_start_token
             ):
                 # Opening tool_call/function tags are always literal inside
                 # a parameter value.  Track nesting depth so that the
@@ -1115,20 +1110,20 @@ class StreamingXMLToolCallParser:
                 # kept verbatim as a string — never parsed as int,
                 # float, JSON, etc., even if it LOOKS like one.
                 _param_type_for_check = self._get_param_type(param_name)
-                if (
-                    _param_type_for_check in [
-                        "string", "str", "text", "varchar", "char", "enum",
-                    ]
-                    and self._param_allows_null(param_name)
-                ):
+                if _param_type_for_check in [
+                    "string",
+                    "str",
+                    "text",
+                    "varchar",
+                    "char",
+                    "enum",
+                ] and self._param_allows_null(param_name):
                     if raw_for_parse.strip().lower() in ("null", "none"):
                         parsed_value = None
                         output_arguments = "null"
                     else:
                         parsed_value = raw_for_parse
-                        output_arguments = json.dumps(
-                            raw_for_parse, ensure_ascii=False
-                        )
+                        output_arguments = json.dumps(raw_for_parse, ensure_ascii=False)
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -1177,13 +1172,11 @@ class StreamingXMLToolCallParser:
                             try:
                                 parsed_value = ast.literal_eval(parsed_value)
                             except (ValueError, SyntaxError, TypeError):
-                                try:
+                                with contextlib.suppress(
+                                    json.JSONDecodeError, ValueError
+                                ):
                                     parsed_value = json.loads(parsed_value)
-                                except (json.JSONDecodeError, ValueError):
-                                    pass
-                        output_arguments = json.dumps(
-                            parsed_value, ensure_ascii=False
-                        )
+                        output_arguments = json.dumps(parsed_value, ensure_ascii=False)
                     except (json.JSONDecodeError, ValueError):
                         try:
                             parsed_value = ast.literal_eval(raw_for_parse)
@@ -1194,31 +1187,22 @@ class StreamingXMLToolCallParser:
                             # case — try one more level.
                             if isinstance(parsed_value, str):
                                 try:
-                                    parsed_value = ast.literal_eval(
-                                        parsed_value
-                                    )
+                                    parsed_value = ast.literal_eval(parsed_value)
                                 except (
                                     ValueError,
                                     SyntaxError,
                                     TypeError,
                                 ):
-                                    try:
-                                        parsed_value = json.loads(
-                                            parsed_value
-                                        )
-                                    except (
-                                        json.JSONDecodeError,
-                                        ValueError,
+                                    with contextlib.suppress(
+                                        json.JSONDecodeError, ValueError
                                     ):
-                                        pass
+                                        parsed_value = json.loads(parsed_value)
                             output_arguments = json.dumps(
                                 parsed_value, ensure_ascii=False
                             )
                         except (ValueError, SyntaxError, TypeError):
                             # Fallback: output as string as-is
-                            output_arguments = json.dumps(
-                                raw_text, ensure_ascii=False
-                            )
+                            output_arguments = json.dumps(raw_text, ensure_ascii=False)
                             parsed_value = raw_text
 
                 delta = DeltaMessage(
@@ -1398,6 +1382,14 @@ class StreamingXMLToolCallParser:
         if param_name in properties and isinstance(properties[param_name], dict):
             prop = properties[param_name]
             param_type = prop.get("type")
+            if isinstance(param_type, list):
+                # JSON-Schema list-form type, e.g.
+                # {"type": ["integer", "null"]}. Pick the first non-null
+                # type, mirroring the anyOf handling below.
+                for option_type in param_type:
+                    if str(option_type).lower() != "null":
+                        return self.repair_param_type(str(option_type))
+                return "string"
             if param_type is None and "anyOf" in prop:
                 # Handle anyOf schemas (e.g. nullable types like
                 # anyOf: [{type: "integer"}, {type: "null"}]).
@@ -1421,15 +1413,16 @@ class StreamingXMLToolCallParser:
         if not self.tools or not self.current_function_name or not param_name:
             return False
         properties = find_tool_properties(self.tools, self.current_function_name)
-        if param_name not in properties or not isinstance(
-            properties[param_name], dict
-        ):
+        if param_name not in properties or not isinstance(properties[param_name], dict):
             return False
         prop = properties[param_name]
         if str(prop.get("type", "")).lower() == "null":
             return True
         for option in prop.get("anyOf", []) or []:
-            if isinstance(option, dict) and str(option.get("type", "")).lower() == "null":
+            if (
+                isinstance(option, dict)
+                and str(option.get("type", "")).lower() == "null"
+            ):
                 return True
         return False
 
@@ -1476,9 +1469,9 @@ class StreamingXMLToolCallParser:
         # ``"None"`` must still convert to JSON null.  Caller passes the
         # current parameter name via the parser state so we can query
         # the schema.
-        if (
-            self._param_allows_null(self.current_param_name)
-            and param_value.lower() in ("null", "none")
+        if self._param_allows_null(self.current_param_name) and param_value.lower() in (
+            "null",
+            "none",
         ):
             return None
         # String type takes precedence: the literal value "null" must remain
@@ -1503,8 +1496,7 @@ class StreamingXMLToolCallParser:
                 return int(param_value)
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' is not an integer, "
-                    "degenerating to string.",
+                    "Parsed value '%s' is not an integer, degenerating to string.",
                     param_value,
                 )
                 return param_value
@@ -1518,8 +1510,7 @@ class StreamingXMLToolCallParser:
                 )
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' is not a float, "
-                    "degenerating to string.",
+                    "Parsed value '%s' is not a float, degenerating to string.",
                     param_value,
                 )
                 return param_value

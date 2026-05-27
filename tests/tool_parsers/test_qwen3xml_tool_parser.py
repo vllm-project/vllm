@@ -27,6 +27,7 @@ MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 def qwen3_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
 
+
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
     def test_config(self) -> ToolParserTestConfig:
@@ -76,7 +77,7 @@ class TestQwen3xmlToolParser(ToolParserTests):
 
     def test_qwen3xml_async_streaming_free_text(self, qwen3_tokenizer):
         parser = Qwen3XMLToolParser(qwen3_tokenizer)
-        
+
         # 1. First tool call
         # 2. Free text
         # 3. Second tool call
@@ -85,19 +86,19 @@ class TestQwen3xmlToolParser(ToolParserTests):
             "\nNext, I will check the weather for London:\n"
             "<tool_call>\n<function=get_weather>\n<parameter=city>London</parameter>\n</function>\n</tool_call>"
         )
-        
+
         request = ChatCompletionRequest(messages=[], model="test")
         emitted_messages = []
         previous_text = ""
         previous_tokens = []
         token_ids = qwen3_tokenizer.encode(text_to_stream, add_special_tokens=False)
-        
+
         for i in range(1, len(token_ids) + 1):
             current_token_ids = token_ids[:i]
             current_text = qwen3_tokenizer.decode(current_token_ids)
-            delta_text = current_text[len(previous_text):]
-            token_delta = current_token_ids[len(previous_tokens):]
-            
+            delta_text = current_text[len(previous_text) :]
+            token_delta = current_token_ids[len(previous_tokens) :]
+
             delta = parser.extract_tool_calls_streaming(
                 previous_text,
                 current_text,
@@ -105,11 +106,11 @@ class TestQwen3xmlToolParser(ToolParserTests):
                 previous_tokens,
                 current_token_ids,
                 token_delta,
-                request
+                request,
             )
             if delta is not None:
                 emitted_messages.append(delta)
-                
+
             previous_text = current_text
             previous_tokens = current_token_ids
 
@@ -119,41 +120,46 @@ class TestQwen3xmlToolParser(ToolParserTests):
         for i, msg in enumerate(emitted_messages):
             if msg.content:
                 accumulated_content += msg.content
-            
+
             if "Next, I will check the weather for London" in accumulated_content:
-                # Check if we already saw "London" in any previous or current tool call arguments
+                # Check if we already saw "London" in any previous or
+                # current tool call arguments
                 is_london_emitted = any(
-                    tc.function.arguments and "London" in tc.function.arguments 
-                    for m in emitted_messages[:i+1] if m.tool_calls 
+                    tc.function.arguments and "London" in tc.function.arguments
+                    for m in emitted_messages[: i + 1]
+                    if m.tool_calls
                     for tc in m.tool_calls
                 )
                 if not is_london_emitted:
                     found_early = True
                 break
-        
-        assert found_early, "Free text between tool calls should be emitted as soon as the second tool call starts, not delayed."
+
+        assert found_early, (
+            "Free text between tool calls should be emitted as soon as the "
+            "second tool call starts, not delayed."
+        )
 
     def test_qwen3xml_streaming_text_after_tool_call(self, qwen3_tokenizer):
         parser = Qwen3XMLToolParser(qwen3_tokenizer)
-        
+
         # Tool call followed by free text
         text_to_stream = (
             "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
             "\nI hope this helps!"
         )
-        
+
         request = ChatCompletionRequest(messages=[], model="test")
         emitted_messages = []
         previous_text = ""
         previous_tokens = []
         token_ids = qwen3_tokenizer.encode(text_to_stream, add_special_tokens=False)
-        
+
         for i in range(1, len(token_ids) + 1):
             current_token_ids = token_ids[:i]
             current_text = qwen3_tokenizer.decode(current_token_ids)
-            delta_text = current_text[len(previous_text):]
-            token_delta = current_token_ids[len(previous_tokens):]
-            
+            delta_text = current_text[len(previous_text) :]
+            token_delta = current_token_ids[len(previous_tokens) :]
+
             delta = parser.extract_tool_calls_streaming(
                 previous_text,
                 current_text,
@@ -161,18 +167,20 @@ class TestQwen3xmlToolParser(ToolParserTests):
                 previous_tokens,
                 current_token_ids,
                 token_delta,
-                request
+                request,
             )
             if delta is not None:
                 emitted_messages.append(delta)
-                
+
             previous_text = current_text
             previous_tokens = current_token_ids
 
         # Aggregate all emitted content
         all_content = "".join([m.content for m in emitted_messages if m.content])
-        
-        assert "I hope this helps!" in all_content, "Free text after the last tool call should be emitted."
+
+        assert "I hope this helps!" in all_content, (
+            "Free text after the last tool call should be emitted."
+        )
 
 
 def test_qwen3xml_streaming_trailing_text_after_literal_close_in_value(
@@ -255,9 +263,18 @@ def test_qwen3xml_streaming_python_none_int_char_by_char(qwen3_tokenizer):
 
     # Char-by-char deltas emulate worst-case slow streaming.
     char_deltas = [
-        "<tool_call>\n", "<function=set_count>\n", "<parameter=count>",
-        "\n", "N", "o", "n", "e", "\n", "</parameter>\n",
-        "</function>\n", "</tool_call>",
+        "<tool_call>\n",
+        "<function=set_count>\n",
+        "<parameter=count>",
+        "\n",
+        "N",
+        "o",
+        "n",
+        "e",
+        "\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
     ]
     reconstructor = run_tool_extraction_streaming(
         parser, char_deltas, request, assert_one_tool_per_delta=False
@@ -320,7 +337,6 @@ def test_xml_streaming_parallel_tool_calls_preformed_chunks(qwen3_tokenizer):
     the tokenizer splits XML tags across multiple tokens.  It CAN trigger with
     speculative decoding multi-token flushes.
     """
-    
 
     tools = [
         ChatCompletionToolsParam(
@@ -410,10 +426,10 @@ def test_xml_streaming_boolean_true_not_false(qwen3_tokenizer):
         "<tool_call>",
         "\n<function=set_flag>",
         "\n<parameter=enabled>",
-        "t",   # ← first char triggers False → emits "false"
+        "t",  # ← first char triggers False → emits "false"
         "r",
         "u",
-        "e",   # ← full "true" but delta = "true"[5:] = ""
+        "e",  # ← full "true" but delta = "true"[5:] = ""
         "</parameter>",
         "\n</function>",
         "\n</tool_call>",
@@ -472,7 +488,7 @@ def test_xml_streaming_string_null_last_char_not_dropped(qwen3_tokenizer):
         "n",
         "u",
         "l",
-        "l",   # ← triggers _convert_param_value("null",…) = None → nothing emitted
+        "l",  # ← triggers _convert_param_value("null",…) = None → nothing emitted
         "</parameter>",
         "\n</function>",
         "\n</tool_call>",
@@ -549,9 +565,7 @@ fahrenheit
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += (
-                            tool_call.function.arguments
-                        )
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
 
     assert "I'll check the weather for you." in other_content
     assert len(tool_states) == 1

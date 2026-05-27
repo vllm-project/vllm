@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import contextlib
 import json
 import uuid
 from collections.abc import Sequence
@@ -242,10 +243,8 @@ class Qwen3CoderToolParser(ToolParser):
                     # Python repr like "{'k': 'v'}". json.loads returns a
                     # string in that case — try one more parse.
                     if isinstance(parsed, str):
-                        try:
+                        with contextlib.suppress(ValueError, SyntaxError, TypeError):
                             parsed = ast.literal_eval(parsed)
-                        except (ValueError, SyntaxError, TypeError):
-                            pass
                     return parsed
                 except (json.JSONDecodeError, TypeError, ValueError):
                     logger.debug(
@@ -262,10 +261,8 @@ class Qwen3CoderToolParser(ToolParser):
                 # had no JSON outer layer (e.g. bare Python repr
                 # "{'k': 'v'}").
                 if is_container_type and isinstance(param_value, str):
-                    try:
+                    with contextlib.suppress(ValueError, SyntaxError, TypeError):
                         param_value = ast.literal_eval(param_value)
-                    except (ValueError, SyntaxError, TypeError):
-                        pass
             except (ValueError, SyntaxError, TypeError):
                 logger.debug(
                     "Parsed value '%s' of parameter '%s' cannot be "
@@ -318,7 +315,7 @@ class Qwen3CoderToolParser(ToolParser):
             idx = text.find(self.function_end_token, search_pos)
             if idx == -1:
                 return -1
-            after = text[idx + len(self.function_end_token):]
+            after = text[idx + len(self.function_end_token) :]
             stripped = after.lstrip()
             if stripped == "" or stripped.startswith(self.tool_call_end_token):
                 return idx
@@ -362,12 +359,10 @@ class Qwen3CoderToolParser(ToolParser):
                 # legacy heuristic on the rest of the text.
                 rest_offset = self._find_true_function_end(after_func_open[pos:])
                 return pos + rest_offset if rest_offset != -1 else -1
-            name_end = after_func_open.find(
-                ">", pos + len(self.parameter_prefix)
-            )
+            name_end = after_func_open.find(">", pos + len(self.parameter_prefix))
             if name_end == -1:
                 return -1
-            param_name = after_func_open[pos + len(self.parameter_prefix):name_end]
+            param_name = after_func_open[pos + len(self.parameter_prefix) : name_end]
             value_start = name_end + 1
             if value_start < n and after_func_open[value_start] == "\n":
                 value_start += 1
@@ -436,7 +431,7 @@ class Qwen3CoderToolParser(ToolParser):
             idx = text.find(self.tool_call_end_token, search_pos)
             if idx == -1:
                 return -1
-            after = text[idx + len(self.tool_call_end_token):]
+            after = text[idx + len(self.tool_call_end_token) :]
             stripped = after.lstrip()
             if stripped == "" or stripped.startswith(self.tool_call_start_token):
                 return idx
@@ -466,18 +461,16 @@ class Qwen3CoderToolParser(ToolParser):
             func_open = text.find(self.tool_call_prefix, body_start)
             if func_open == -1:
                 break
-            name_end = text.find(
-                ">", func_open + len(self.tool_call_prefix)
-            )
+            name_end = text.find(">", func_open + len(self.tool_call_prefix))
             if name_end == -1:
                 break
-            func_name = text[func_open + len(self.tool_call_prefix):name_end]
+            func_name = text[func_open + len(self.tool_call_prefix) : name_end]
             valid_params: set[str] | None = None
             if self.tools:
                 cfg = find_tool_properties(self.tools, func_name)
                 if cfg:
                     valid_params = set(cfg.keys())
-            body_after_name = text[name_end + 1:]
+            body_after_name = text[name_end + 1 :]
             func_end_rel = self._scan_to_structural_function_end(
                 body_after_name, valid_params
             )
@@ -489,7 +482,7 @@ class Qwen3CoderToolParser(ToolParser):
                 # parameter would be erroneously treated as structural.
                 break
             func_end_abs = (name_end + 1) + func_end_rel
-            after = text[func_end_abs + len(self.function_end_token):]
+            after = text[func_end_abs + len(self.function_end_token) :]
             i = 0
             while i < len(after) and after[i] in " \t\n\r":
                 i += 1
@@ -532,9 +525,7 @@ class Qwen3CoderToolParser(ToolParser):
             # schema) still increments depth and its matching literal
             # ``</parameter>`` is balanced — otherwise that close would
             # appear unmatched and pass the structural lookahead.
-            next_open = self._next_structural_param_start(
-                value_text, pos, None
-            )
+            next_open = self._next_structural_param_start(value_text, pos, None)
             next_close = value_text.find(self.parameter_end_token, pos)
             if next_close == -1:
                 return -1
@@ -543,7 +534,7 @@ class Qwen3CoderToolParser(ToolParser):
                 depth += 1
                 pos = next_open + param_prefix_len
             elif depth == 0:
-                after = value_text[next_close + param_end_len:]
+                after = value_text[next_close + param_end_len :]
                 stripped = after.lstrip()
                 structural_next_param = False
                 if stripped.startswith(self.parameter_prefix):
@@ -552,8 +543,7 @@ class Qwen3CoderToolParser(ToolParser):
                         name_end = stripped.find(">", name_start)
                         if name_end != -1:
                             structural_next_param = (
-                                stripped[name_start:name_end]
-                                in valid_param_names
+                                stripped[name_start:name_end] in valid_param_names
                             )
                     else:
                         structural_next_param = True
@@ -614,9 +604,7 @@ class Qwen3CoderToolParser(ToolParser):
             # in the schema (e.g. renamed fields).  Schema filtering is
             # applied only when scanning INSIDE a parameter value, to
             # disambiguate real nested delimiters from literal text.
-            param_start = self._next_structural_param_start(
-                parameters, pos, None
-            )
+            param_start = self._next_structural_param_start(parameters, pos, None)
             if param_start == -1:
                 break
             name_start = param_start + len(self.parameter_prefix)
@@ -675,7 +663,7 @@ class Qwen3CoderToolParser(ToolParser):
             tc_start = model_output.find(self.tool_call_start_token, search_pos)
             if tc_start == -1:
                 break
-            after_open = model_output[tc_start + len(self.tool_call_start_token):]
+            after_open = model_output[tc_start + len(self.tool_call_start_token) :]
             tc_end = -1
             inner_search = 0
             while True:
@@ -683,7 +671,7 @@ class Qwen3CoderToolParser(ToolParser):
                 if idx == -1:
                     tc_end = -1
                     break
-                after_close = after_open[idx + len(self.tool_call_end_token):]
+                after_close = after_open[idx + len(self.tool_call_end_token) :]
                 stripped = after_close.lstrip()
                 if stripped == "" or stripped.startswith(self.tool_call_start_token):
                     tc_end = idx
@@ -694,8 +682,10 @@ class Qwen3CoderToolParser(ToolParser):
                 break
             raw_tool_calls.append(after_open[:tc_end])
             search_pos = (
-                tc_start + len(self.tool_call_start_token)
-                + tc_end + len(self.tool_call_end_token)
+                tc_start
+                + len(self.tool_call_start_token)
+                + tc_end
+                + len(self.tool_call_end_token)
             )
 
         # Back-off strategy if no tool_call tags found
@@ -714,7 +704,7 @@ class Qwen3CoderToolParser(ToolParser):
             func_start = tool_call.find(self.tool_call_prefix)
             if func_start == -1:
                 continue
-            after_func_open = tool_call[func_start + len(self.tool_call_prefix):]
+            after_func_open = tool_call[func_start + len(self.tool_call_prefix) :]
             name_end = after_func_open.find(">")
             valid_param_names: set[str] | None = None
             body_start = 0
@@ -728,7 +718,7 @@ class Qwen3CoderToolParser(ToolParser):
                 after_func_open[body_start:], valid_param_names
             )
             if scan_end != -1:
-                function_calls.append(after_func_open[:body_start + scan_end])
+                function_calls.append(after_func_open[: body_start + scan_end])
                 continue
             # Fallback to legacy heuristic.
             func_end = self._find_true_function_end(after_func_open)
@@ -785,9 +775,7 @@ class Qwen3CoderToolParser(ToolParser):
                 tc_pos = model_output.find(tc_start_token, search_pos)
                 if tc_pos == -1:
                     break
-                tc_close = model_output.find(
-                    tc_end_token, tc_pos + len(tc_start_token)
-                )
+                tc_close = model_output.find(tc_end_token, tc_pos + len(tc_start_token))
                 # Look for a ``<function=`` inside this tool_call block
                 # (or up to end-of-string if the block isn't closed).
                 limit = tc_close if tc_close != -1 else len(model_output)
@@ -797,9 +785,7 @@ class Qwen3CoderToolParser(ToolParser):
                 if func_pos != -1:
                     content_index = tc_pos
                     break
-                search_pos = (
-                    tc_close + len(tc_end_token) if tc_close != -1 else limit
-                )
+                search_pos = tc_close + len(tc_end_token) if tc_close != -1 else limit
             if content_index == -1:
                 # No structural ``<tool_call>`` block contains a
                 # ``<function=``: fall back to the standalone
@@ -870,9 +856,7 @@ class Qwen3CoderToolParser(ToolParser):
             # Use structural </tool_call> count: a literal </tool_call>
             # embedded in a parameter value must not trigger spurious
             # advance.
-            tool_ends = len(
-                self._structural_tool_call_end_positions(current_text)
-            )
+            tool_ends = len(self._structural_tool_call_end_positions(current_text))
             if tool_ends > self.current_tool_index:
                 # Advance to next tool; is_tool_call_started is reset so
                 # content between or after tool calls is emitted correctly.
@@ -906,7 +890,7 @@ class Qwen3CoderToolParser(ToolParser):
                 self.is_tool_call_started = True
                 # Return any content before the tool call
                 if last_start > self._sent_content_idx:
-                    content_before = current_text[self._sent_content_idx:last_start]
+                    content_before = current_text[self._sent_content_idx : last_start]
                     self._sent_content_idx = last_start
                     if content_before:
                         content_message = DeltaMessage(content=content_before)
@@ -925,7 +909,7 @@ class Qwen3CoderToolParser(ToolParser):
                     return None
 
                 if sendable_idx > self._sent_content_idx:
-                    content = current_text[self._sent_content_idx:sendable_idx]
+                    content = current_text[self._sent_content_idx : sendable_idx]
                     self._sent_content_idx = sendable_idx
                     if content:
                         return DeltaMessage(content=content)
@@ -936,7 +920,7 @@ class Qwen3CoderToolParser(ToolParser):
         # </tool_call> of completed calls) so that <tool_call> tokens
         # embedded in a parameter value of a completed call are not
         # counted as spurious new tool calls.
-        if self.tool_call_start_token not in current_text[self._sent_content_idx:]:
+        if self.tool_call_start_token not in current_text[self._sent_content_idx :]:
             return content_message
 
         # We're in a tool call, find the current tool call portion.
@@ -1022,7 +1006,9 @@ class Qwen3CoderToolParser(ToolParser):
                     tool_call_fragments = DeltaToolCall(
                         index=self.current_tool_index,
                         id=self.current_tool_id,
-                        function=DeltaFunctionCall(name=self.current_function_name, arguments=""),
+                        function=DeltaFunctionCall(
+                            name=self.current_function_name, arguments=""
+                        ),
                         type="function",
                     )
             if not self.header_sent:
@@ -1051,9 +1037,7 @@ class Qwen3CoderToolParser(ToolParser):
                 self.tools, self.current_function_name or ""
             )
             valid_param_names: set[str] | None = (
-                set(streaming_param_config.keys())
-                if streaming_param_config
-                else None
+                set(streaming_param_config.keys()) if streaming_param_config else None
             )
             param_starts: list[int] = []
             search_idx = 0
@@ -1075,7 +1059,7 @@ class Qwen3CoderToolParser(ToolParser):
                 )
                 if name_end_pos == -1:
                     break
-                after_name = tool_text[name_end_pos + 1:]
+                after_name = tool_text[name_end_pos + 1 :]
                 after_name_stripped = (
                     after_name[1:] if after_name.startswith("\n") else after_name
                 )
@@ -1096,15 +1080,11 @@ class Qwen3CoderToolParser(ToolParser):
                     # scanned).  A repeated NAME is almost always a
                     # literal embedded in the unfinished value, not a
                     # real next parameter.
-                    cand_name = (
-                        tool_text[
-                            param_start_pos + len(self.parameter_prefix)
-                            : name_end_pos
-                        ]
-                    )
-                    already_seen = (
-                        set(self.accumulated_params.keys())
-                        | ({cand_name} if cand_name else set())
+                    cand_name = tool_text[
+                        param_start_pos + len(self.parameter_prefix) : name_end_pos
+                    ]
+                    already_seen = set(self.accumulated_params.keys()) | (
+                        {cand_name} if cand_name else set()
                     )
                     unseen_valid: set[str] | None = (
                         (valid_param_names - already_seen)
@@ -1176,19 +1156,15 @@ class Qwen3CoderToolParser(ToolParser):
                             ">", tc_open_in_tool + len(self.tool_call_prefix)
                         )
                         if name_end_in_tool != -1:
-                            body_after_name = tool_text[name_end_in_tool + 1:]
-                            body_func_end_rel = (
-                                self._scan_to_structural_function_end(
-                                    body_after_name, valid_param_names
-                                )
+                            body_after_name = tool_text[name_end_in_tool + 1 :]
+                            body_func_end_rel = self._scan_to_structural_function_end(
+                                body_after_name, valid_param_names
                             )
                             if body_func_end_rel != -1:
                                 body_func_end_abs = (
                                     name_end_in_tool + 1 + body_func_end_rel
                                 )
-                                body_func_end_in_value = (
-                                    body_func_end_abs - value_start
-                                )
+                                body_func_end_in_value = body_func_end_abs - value_start
 
                     if body_func_end_in_value > 0:
                         # Function body is structurally complete; the
@@ -1196,9 +1172,8 @@ class Qwen3CoderToolParser(ToolParser):
                         # the next legitimate <parameter=NAME> (NAME
                         # unseen) before the structural </function> as
                         # the implicit end.
-                        already_seen = (
-                            set(self.accumulated_params.keys())
-                            | ({current_param_name} if current_param_name else set())
+                        already_seen = set(self.accumulated_params.keys()) | (
+                            {current_param_name} if current_param_name else set()
                         )
                         unseen_valid: set[str] | None = (
                             (valid_param_names - already_seen)
@@ -1284,14 +1259,12 @@ class Qwen3CoderToolParser(ToolParser):
                     tc_open_in_tool_for_close + len(self.tool_call_prefix),
                 )
                 if name_end_in_tool != -1:
-                    body_after_name = tool_text[name_end_in_tool + 1:]
+                    body_after_name = tool_text[name_end_in_tool + 1 :]
                     body_func_end_rel = self._scan_to_structural_function_end(
                         body_after_name, valid_param_names
                     )
                     if body_func_end_rel != -1:
-                        true_func_end = (
-                            name_end_in_tool + 1 + body_func_end_rel
-                        )
+                        true_func_end = name_end_in_tool + 1 + body_func_end_rel
             if not self.json_closed and true_func_end != -1:
                 self.json_closed = True
 
@@ -1384,9 +1357,7 @@ class Qwen3CoderToolParser(ToolParser):
                     # fragment is silently dropped whenever the outer
                     # already produced its own content.
                     if next_delta.content:
-                        result.content = (
-                            (result.content or "") + next_delta.content
-                        )
+                        result.content = (result.content or "") + next_delta.content
 
             # Emit trailing free text that follows the LAST structural
             # </tool_call> in this delta (MTP / spec-decoding bursts that
@@ -1396,13 +1367,9 @@ class Qwen3CoderToolParser(ToolParser):
             # past its tool's ``</tool_call>``, and an EOS-style empty
             # delta cannot recover content that was never emitted.
             if self.json_closed and not self.in_function:
-                end_positions = self._structural_tool_call_end_positions(
-                    current_text
-                )
+                end_positions = self._structural_tool_call_end_positions(current_text)
                 if end_positions:
-                    last_end = (
-                        end_positions[-1] + len(self.tool_call_end_token)
-                    )
+                    last_end = end_positions[-1] + len(self.tool_call_end_token)
                     if (
                         last_end < len(current_text)
                         and last_end > self._sent_content_idx
@@ -1410,9 +1377,7 @@ class Qwen3CoderToolParser(ToolParser):
                         trailing = current_text[last_end:]
                         if trailing:
                             self._sent_content_idx = len(current_text)
-                            result.content = (
-                                (result.content or "") + trailing
-                            )
+                            result.content = (result.content or "") + trailing
             return result
 
         return content_message
