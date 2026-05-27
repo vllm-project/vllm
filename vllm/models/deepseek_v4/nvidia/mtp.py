@@ -18,7 +18,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -251,7 +250,6 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         return logits
 
 
-@support_torch_compile
 class DeepSeekV4MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

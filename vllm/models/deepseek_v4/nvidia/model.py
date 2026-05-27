@@ -8,7 +8,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -212,7 +211,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
         # Register in the static forward context so the custom-op wrapper
-        # can look up this module by name from within a torch.compile graph.
+        # can look up this module by name at forward time.
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1071,7 +1070,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         return self._forward_cuda(x, positions, input_ids, post_mix, res_mix, residual)
 
 
-@support_torch_compile
 class DeepseekV4Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
