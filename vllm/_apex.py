@@ -37,6 +37,7 @@ import ctypes
 import logging
 import os
 import threading
+import weakref
 from typing import Iterable
 
 logger = logging.getLogger("vllm.apex")
@@ -55,6 +56,55 @@ _stats = {
     "kv_blocks_registered": 0,
     "errors": 0,
 }
+
+# When set, _apex periodically dumps `_stats` to this path so external
+# verification scripts (e.g. demo1/run_benchmark.sh) can read counters
+# from outside the vLLM process. Persistence is best-effort: a background
+# thread writes the file every APEX_STATS_INTERVAL_MS milliseconds.
+_stats_file_path = os.environ.get("APEX_STATS_FILE", "")
+try:
+    _stats_interval_ms = int(os.environ.get("APEX_STATS_INTERVAL_MS", "500"))
+except ValueError:
+    _stats_interval_ms = 500
+_stats_thread: threading.Thread | None = None
+_stats_stop = threading.Event()
+
+
+def _persist_stats_once() -> None:
+    if not _stats_file_path:
+        return
+    try:
+        import json
+
+        tmp = _stats_file_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_stats, f)
+        os.replace(tmp, _stats_file_path)
+    except Exception:
+        pass
+
+
+def _start_stats_persistence() -> None:
+    """Spawn a background thread that periodically dumps _stats to a JSON
+    file. Idempotent. No-op if APEX_STATS_FILE is unset."""
+    global _stats_thread
+    if not _stats_file_path or _stats_thread is not None:
+        return
+
+    def _run():
+        while not _stats_stop.wait(_stats_interval_ms / 1000.0):
+            _persist_stats_once()
+        _persist_stats_once()
+
+    t = threading.Thread(target=_run, name="apex-stats-persist", daemon=True)
+    t.start()
+    _stats_thread = t
+    try:
+        import atexit
+
+        atexit.register(_persist_stats_once)
+    except Exception:
+        pass
 
 
 def enabled() -> bool:
@@ -130,6 +180,7 @@ def _load() -> ctypes.CDLL | None:
 
         _lib = lib
         logger.info("APEX hint client loaded; emitting hints from vLLM")
+        _start_stats_persistence()
         return _lib
 
 
@@ -191,12 +242,20 @@ def register_kv_cache_tensor(
     layer_id: int,
     num_layers: int,
 ) -> int:
-    """Register every block inside one layer's contiguous KV-cache tensor.
+    """Register blocks inside one layer's contiguous KV-cache tensor.
 
     Block ids are encoded so they're globally unique across layers:
         global_block_id = layer_id * (num_total_blocks_per_layer) + local_idx
-    Returns the number of successfully registered blocks.
 
+    For very large KV caches (~1.8M tokens with 16-token blocks → ~113k
+    blocks per layer × N layers = millions of socket round-trips at
+    startup), we cap registrations per layer to the first
+    ``APEX_KV_BLOCKS_PER_LAYER`` blocks (default 256). Bumped to
+    something much larger for production runs that actually want full
+    block-level prefetch granularity. The rest of the cache still gets
+    prefetch hints by id (the daemon treats unknown ids as best-effort).
+
+    Returns the number of successfully registered blocks.
     Safe to call before vLLM starts serving — runs once at init.
     """
     if not enabled():
@@ -210,18 +269,28 @@ def register_kv_cache_tensor(
     if n_blocks <= 0:
         return 0
 
+    try:
+        cap = int(os.environ.get("APEX_KV_BLOCKS_PER_LAYER", "256"))
+    except ValueError:
+        cap = 256
+    if cap > 0:
+        n_to_register = min(n_blocks, cap)
+    else:
+        n_to_register = n_blocks
+
     layer_stride = 1_000_000  # generous: assume <1M blocks per layer
     success = 0
-    for i in range(n_blocks):
+    for i in range(n_to_register):
         global_id = layer_id * layer_stride + i
         if register_kv_block(global_id, base + i * block_size_bytes, block_size_bytes):
             success += 1
     logger.info(
-        "apex: registered %d/%d KV blocks for layer %d (%.1f MiB)",
+        "apex: registered %d/%d KV blocks for layer %d (%.1f MiB, cap=%d)",
         success,
         n_blocks,
         layer_id,
         total / (1024 * 1024),
+        cap,
     )
     return success
 
@@ -289,3 +358,411 @@ def encode_expert_id(layer_idx: int, expert_idx: int, n_experts_per_layer: int) 
     address both halves of an expert.
     """
     return (layer_idx * n_experts_per_layer + expert_idx) * 2
+
+
+# ---------------------------------------------------------------------------
+# Runtime monkey-patch overlay
+# ---------------------------------------------------------------------------
+#
+# When this file is dropped into the installed vLLM package (rather than
+# applied as a git patch on top of our fork's source tree), we still need
+# to register MoE expert weights, KV-cache blocks, and emit prefetch
+# hints at the right spots inside vLLM's model loader, block pool, and
+# DeepSeek MoE forward(). Doing it as monkey-patches lets the overlay
+# work across different vLLM revisions without editing those files.
+#
+# install_hooks() is idempotent; safe to call multiple times.
+#
+# All hooks are wrapped in try/except — they NEVER crash inference for a
+# prefetch failure.
+
+_hooks_installed = False
+
+
+def _extract_layer_index(qualified_name: str) -> int:
+    """Pull the integer right after ``.layers.`` in a module path like
+    ``model.layers.17.mlp``. Returns 0 if not found."""
+    marker = ".layers."
+    if marker not in qualified_name:
+        return 0
+    try:
+        rest = qualified_name.split(marker, 1)[1]
+        return int(rest.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _hook_block_pool() -> bool:
+    """Wrap ``BlockPool.get_new_blocks`` so freshly-allocated blocks are
+    announced via :func:`prefetch_blocks` for apexd to warm into DRAM."""
+    try:
+        from vllm.v1.core.block_pool import BlockPool
+    except Exception as exc:
+        logger.warning("apex: cannot import BlockPool (%s); skipping hook", exc)
+        return False
+
+    if getattr(BlockPool.get_new_blocks, "_apex_wrapped", False):
+        return True
+
+    original = BlockPool.get_new_blocks
+
+    def wrapped(self, *args, **kwargs):
+        ret = original(self, *args, **kwargs)
+        try:
+            if enabled() and ret:
+                block_ids = []
+                for b in ret:
+                    bid = getattr(b, "block_id", None)
+                    if bid is not None:
+                        block_ids.append(int(bid))
+                if block_ids:
+                    prefetch_blocks(block_ids, sequence_id=0)
+        except Exception:
+            _stats["errors"] += 1
+        return ret
+
+    wrapped._apex_wrapped = True  # type: ignore[attr-defined]
+    BlockPool.get_new_blocks = wrapped
+
+    def apex_prefetch_request_blocks(
+        self, block_ids, sequence_id: int = 0
+    ) -> None:
+        if not enabled() or not block_ids:
+            return
+        prefetch_blocks(block_ids, sequence_id=sequence_id)
+
+    BlockPool.apex_prefetch_request_blocks = apex_prefetch_request_blocks
+    return True
+
+
+def _apex_register_moe_experts(runner) -> None:
+    """Walk every FusedMoE module in the loaded model and register each
+    expert's (w13, w2) regions with apexd."""
+    try:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    except Exception as exc:
+        logger.warning("apex: cannot import FusedMoE (%s); skipping registration", exc)
+        return
+
+    model = getattr(runner, "model", None)
+    if model is None or not hasattr(model, "named_modules"):
+        logger.info("apex: runner.model not available; skipping MoE registration")
+        return
+
+    moe_modules: list[tuple[int, "FusedMoE"]] = []
+    for name, module in model.named_modules():
+        if isinstance(module, FusedMoE):
+            moe_modules.append((_extract_layer_index(name), module))
+
+    if not moe_modules:
+        logger.info("apex: no FusedMoE modules found — nothing to register")
+        return
+
+    n_experts_per_layer = 0
+    for _, m in moe_modules:
+        n = getattr(m, "logical_num_experts", 0) or getattr(m, "global_num_experts", 0)
+        if n and n > n_experts_per_layer:
+            n_experts_per_layer = int(n)
+    if n_experts_per_layer <= 0:
+        # Last-resort: derive from w13_weight.shape[0]
+        for _, m in moe_modules:
+            w = getattr(m, "w13_weight", None)
+            if w is not None and w.dim() >= 1:
+                n_experts_per_layer = max(n_experts_per_layer, int(w.shape[0]))
+    if n_experts_per_layer <= 0:
+        logger.warning("apex: cannot determine num_experts; skipping registration")
+        return
+
+    total = 0
+    for layer_idx, moe in moe_modules:
+        w13 = getattr(moe, "w13_weight", None)
+        w2 = getattr(moe, "w2_weight", None)
+        if w13 is None or w2 is None:
+            continue
+        local_n = min(int(w13.shape[0]), int(w2.shape[0]))
+        for eid in range(local_n):
+            w13_slice = w13[eid]
+            w2_slice = w2[eid]
+            base = encode_expert_id(layer_idx, eid, n_experts_per_layer)
+            if register_expert(
+                base,
+                int(w13_slice.data_ptr()),
+                int(w13_slice.nelement() * w13_slice.element_size()),
+            ):
+                total += 1
+            if register_expert(
+                base + 1,
+                int(w2_slice.data_ptr()),
+                int(w2_slice.nelement() * w2_slice.element_size()),
+            ):
+                total += 1
+
+    logger.info(
+        "apex: registered %d expert regions across %d FusedMoE modules "
+        "(n_experts_per_layer=%d)",
+        total,
+        len(moe_modules),
+        n_experts_per_layer,
+    )
+
+
+def _apex_register_kv_cache_tensors(runner, kv_cache_raw_tensors, kv_cache_config) -> None:
+    """Register each layer's raw KV cache tensor with apexd, broken into
+    page-sized blocks."""
+    layer_to_page: dict[str, int] = {}
+    try:
+        groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
+        for group in groups:
+            page = getattr(group.kv_cache_spec, "page_size_bytes", 0)
+            if page <= 0:
+                continue
+            for layer_name in getattr(group, "layer_names", []):
+                layer_to_page[layer_name] = int(page)
+    except Exception as exc:
+        logger.warning("apex: failed to read kv_cache_groups (%s)", exc)
+        return
+
+    already_done: set[int] = set()
+    items = sorted(kv_cache_raw_tensors.items())
+    for layer_idx, (layer_name, tensor) in enumerate(items):
+        page = layer_to_page.get(layer_name)
+        if page is None or page <= 0:
+            continue
+        tensor_id = int(tensor.data_ptr())
+        if tensor_id in already_done:
+            continue
+        already_done.add(tensor_id)
+        register_kv_cache_tensor(
+            tensor,
+            block_size_bytes=page,
+            layer_id=layer_idx,
+            num_layers=len(items),
+        )
+
+
+def _hook_gpu_model_runner() -> bool:
+    """Wrap ``GPUModelRunner.load_model`` and ``_allocate_kv_cache_tensors``
+    so expert weights and KV-cache blocks get registered with apexd at the
+    right moments. Tolerant to either method being absent in this revision."""
+    try:
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    except Exception as exc:
+        logger.warning(
+            "apex: cannot import GPUModelRunner (%s); skipping hook", exc
+        )
+        return False
+
+    if not getattr(GPUModelRunner.load_model, "_apex_wrapped", False):
+        original_load_model = GPUModelRunner.load_model
+
+        def wrapped_load_model(self, *args, **kwargs):
+            result = original_load_model(self, *args, **kwargs)
+            try:
+                if enabled():
+                    _apex_register_moe_experts(self)
+            except Exception as exc:
+                logger.warning("apex: MoE expert registration failed: %s", exc)
+                _stats["errors"] += 1
+            return result
+
+        wrapped_load_model._apex_wrapped = True  # type: ignore[attr-defined]
+        GPUModelRunner.load_model = wrapped_load_model
+
+    alloc = getattr(GPUModelRunner, "_allocate_kv_cache_tensors", None)
+    if alloc is not None and not getattr(alloc, "_apex_wrapped", False):
+        original_alloc = alloc
+
+        def wrapped_alloc(self, kv_cache_config, *args, **kwargs):
+            result = original_alloc(self, kv_cache_config, *args, **kwargs)
+            try:
+                if enabled() and isinstance(result, dict):
+                    _apex_register_kv_cache_tensors(self, result, kv_cache_config)
+            except Exception as exc:
+                logger.warning("apex: KV-cache registration failed: %s", exc)
+                _stats["errors"] += 1
+            return result
+
+        wrapped_alloc._apex_wrapped = True  # type: ignore[attr-defined]
+        GPUModelRunner._allocate_kv_cache_tensors = wrapped_alloc
+
+    return True
+
+
+_emit_log_counter = [0]
+
+
+def _on_experts_forward(module, args, kwargs, output):
+    """Forward hook fired AFTER ``module.forward`` returns.
+
+    Registered on each FusedMoE submodule (``self.experts``) inside a
+    DeepseekV2MoE. PyTorch invokes forward hooks from ``nn.Module.__call__``
+    *outside* the torch.compile'd graph — that's the whole point of using
+    a hook here instead of monkey-patching ``forward``: torch.compile in
+    vLLM's fullgraph mode can't trace through our ctypes-based emit code.
+
+    The hook reads ``router_logits`` from the call args/kwargs and emits
+    an ExpertPrefetch hint for the parent layer's *next* MoE layer.
+    """
+    if not enabled():
+        return
+    parent_ref = getattr(module, "_apex_parent_moe_ref", None)
+    parent = parent_ref() if parent_ref is not None else None
+    if parent is None:
+        return
+    try:
+        rl = kwargs.get("router_logits") if kwargs else None
+        if rl is None and len(args) >= 2:
+            rl = args[1]
+        if rl is None:
+            return
+        _emit_next_layer_hint(parent, rl)
+        if _emit_log_counter[0] < 1:
+            _emit_log_counter[0] += 1
+            logger.info(
+                "apex: DeepseekV2MoE experts forward-hook fired "
+                "(layer=%d, router_logits.shape=%s)",
+                getattr(parent, "_apex_layer_idx", -1),
+                tuple(rl.shape) if hasattr(rl, "shape") else "?",
+            )
+    except Exception:
+        _stats["errors"] += 1
+
+
+def _hook_deepseek_v2_moe() -> bool:
+    """Wrap ``DeepseekV2MoE.__init__`` to register a forward hook on
+    ``self.experts`` and stash the per-instance APEX metadata.
+
+    Crucially we do NOT replace ``DeepseekV2MoE.forward`` — that would
+    drag our ctypes-based emit path inside the torch.compile graph, and
+    vLLM's fullgraph mode bails on any ``torch.compiler.disable``-wrapped
+    call. Module forward hooks are explicitly handled by Dynamo and run
+    outside the compiled graph.
+    """
+    try:
+        from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
+    except Exception as exc:
+        logger.info("apex: deepseek_v2 not importable (%s); skipping hook", exc)
+        return False
+
+    if getattr(DeepseekV2MoE.__init__, "_apex_wrapped", False):
+        return True
+
+    original_init = DeepseekV2MoE.__init__
+
+    def wrapped_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        try:
+            prefix = kwargs.get("prefix", "")
+            self._apex_layer_idx = _extract_layer_index(prefix or "")
+            config = kwargs.get("config", None)
+            if config is None and args:
+                config = args[0]
+            self._apex_topk = int(getattr(config, "num_experts_per_tok", 8) or 8)
+            self._apex_n_routed_experts = int(
+                getattr(config, "n_routed_experts", 0) or 0
+            )
+            experts = getattr(self, "experts", None)
+            if experts is not None:
+                # Use a weakref so we don't create a circular reference in
+                # nn.Module._modules. Storing the parent directly would cause
+                # nn.Module.__setattr__ to register it as a submodule, which
+                # makes ``model.children()`` / ``model.train()`` recurse
+                # infinitely (the parent owns experts, experts now point
+                # back at the parent → cycle → RecursionError on .eval()).
+                experts._apex_parent_moe_ref = weakref.ref(self)
+                try:
+                    experts.register_forward_hook(
+                        _on_experts_forward, with_kwargs=True
+                    )
+                except TypeError:
+                    # Older torch (< 2.0) doesn't support with_kwargs.
+                    experts.register_forward_hook(
+                        lambda m, a, o: _on_experts_forward(m, a, {}, o)
+                    )
+        except Exception as exc:
+            logger.warning("apex: deepseek init hook failed: %s", exc)
+            _stats["errors"] += 1
+
+    wrapped_init._apex_wrapped = True  # type: ignore[attr-defined]
+    DeepseekV2MoE.__init__ = wrapped_init
+    return True
+
+
+def _emit_next_layer_hint(self, router_logits) -> None:
+    """Compute top-K predicted experts from this layer's gate logits and
+    emit an ExpertPrefetch hint targeting the *next* MoE layer (relies
+    on the ~85% layer-to-layer expert-id correlation in DeepSeek-V3 /
+    Kimi-K2).
+
+    Always called from a PyTorch forward hook (``register_forward_hook``),
+    which Dynamo handles by graph-breaking around ``__call__`` — so this
+    function never executes inside a compiled graph and is free to call
+    into ctypes / Python heap allocations.
+    """
+    try:
+        import torch
+
+        if router_logits is None or router_logits.dim() != 2:
+            return
+        if router_logits.shape[0] > 32:
+            router_logits = router_logits[-32:]
+        avg_logits = router_logits.mean(dim=0)
+        topk_attr = int(getattr(self, "_apex_topk", 8) or 8)
+        k = min(topk_attr, avg_logits.numel())
+        if k <= 0:
+            return
+        _, top_ids = torch.topk(avg_logits, k)
+        local_ids = top_ids.tolist()
+
+        n_experts = int(
+            getattr(self, "_apex_n_routed_experts", 0)
+            or getattr(self, "n_routed_experts", 0)
+            or 0
+        )
+        if n_experts <= 0:
+            return
+        next_layer = int(getattr(self, "_apex_layer_idx", 0) or 0) + 1
+        global_ids: list[int] = []
+        for eid in local_ids:
+            base = encode_expert_id(next_layer, int(eid), n_experts)
+            global_ids.append(base)
+            global_ids.append(base + 1)
+        prefetch_experts(global_ids, top_k=topk_attr)
+    except Exception:
+        _stats["errors"] += 1
+
+
+def install_hooks() -> bool:
+    """Install the monkey-patches that wire APEX hint emission into the
+    surrounding vLLM. Returns True iff at least one hook was installed.
+
+    Safe to call multiple times; each hook is idempotent.
+    """
+    global _hooks_installed
+    if _hooks_installed:
+        return True
+
+    if not _ENABLED:
+        # We still want to be importable when VLLM_APEX_HINTS=0; just
+        # skip the hook installation in that case so vanilla vLLM is
+        # bit-for-bit identical to upstream.
+        return False
+
+    any_installed = False
+    try:
+        any_installed |= _hook_block_pool()
+    except Exception as exc:
+        logger.warning("apex: block_pool hook failed: %s", exc)
+    try:
+        any_installed |= _hook_gpu_model_runner()
+    except Exception as exc:
+        logger.warning("apex: gpu_model_runner hook failed: %s", exc)
+    try:
+        any_installed |= _hook_deepseek_v2_moe()
+    except Exception as exc:
+        logger.info("apex: deepseek_v2 hook not applicable: %s", exc)
+
+    _hooks_installed = any_installed
+    if any_installed:
+        logger.info("apex: runtime hooks installed")
+    return any_installed
