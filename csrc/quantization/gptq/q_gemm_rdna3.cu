@@ -50,6 +50,8 @@
 
 #include "qdq_4_rdna3.cuh"
 
+#if defined(USE_ROCM)
+
 namespace vllm {
 namespace gptq_rdna3 {
 
@@ -669,6 +671,8 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 }  // namespace gptq_rdna3
 }  // namespace vllm
 
+#endif  // USE_ROCM
+
 // ---------------------------------------------------------------------------
 // Public entry point.
 // ---------------------------------------------------------------------------
@@ -698,16 +702,6 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               torch::Tensor b_g_idx, bool use_v2_format) {
 #if defined(USE_ROCM)
-  // Dispatch to the WMMA kernel for prefill / batched decode.
-  // The branch lives in C++ rather than in Python apply_weights to keep the
-  // torch.compile'd graph branch-free (an `if x.size(0) >= 16` inside the
-  // traced fwd previously caused a 7x decode regression — see git log).
-  //
-  // bf16 M≥16: scalar pays a tax for the missing v_pk_fma_bf16 on gfx11,
-  // so WMMA wins from M=16 onward.
-  // fp16 M≥64: with WMMA V7 (128M×64N, 8 waves), fp16 WMMA beats scalar
-  // by 1.2-2.2× at M≥64 across Qwen-class shapes. Below M=64 the scalar
-  // fp16 dequant bit-trick keeps the scalar path faster.
   if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
       b_q_weight.size(1) % 16 == 0 &&
       ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
@@ -715,7 +709,7 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
                                 use_v2_format);
   }
-#endif
+
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
@@ -744,8 +738,6 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  // c must be zeroed: the kernel atomically accumulates partial sums from
-  // every split-K block into it.
   at::Tensor c = torch::zeros({size_m, size_n}, opts);
 
   const int* g_idx_ptr = nullptr;
@@ -772,4 +764,8 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   }
 
   return c;
+#else
+  TORCH_CHECK(false, "gptq_gemm_rdna3 is only available on ROCm (gfx11)");
+  return a;
+#endif
 }

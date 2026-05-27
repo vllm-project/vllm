@@ -180,15 +180,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
 
-        # Same GPTQv1 vs v2 distinction as ExllamaLinearKernel — the
-        # MPLinearLayerConfig doesn't carry format info, so we hardcode v1
-        # to mirror the exllama path's behavior.
-        use_v2_format = False
-
         assert w_zp is not None, "Zero points are required by RDNA3 W4A16"
         assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
 
-        output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, w_g_idx, False)
 
         if bias is not None:
             output.add_(bias)
