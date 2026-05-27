@@ -14,11 +14,15 @@ Primary test entrypoint: [`tests/cohere/test_request_cancellation.py`](../../../
 ### Checks
 
 1. All completed (non-cancelled) requests pass **output quality validation**:
-   no gibberish, no invalid JSON when guided generation is active, and
-   `min_logprob` above threshold (`-50.0`).
+   no invalid JSON when guided generation is active, and `min_logprob` above
+   threshold (`-50.0`).
 2. **Doom loop detection** (excessive repetition ratio) emits a warning but
    does not fail the test.
-3. The server handles concurrent request cancellation gracefully without
+3. **Gibberish detection** (long non-letter runs or 200+ repeated chars)
+   emits a warning but does not fail the test. Downgraded from a hard
+   failure because it intermittently trips the B200 nightly under
+   speculative decoding; the warning is still surfaced in logs for triage.
+4. The server handles concurrent request cancellation gracefully without
    crashes or hangs across concurrency levels `32` and `64`.
 
 ### How it runs
@@ -79,6 +83,6 @@ Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/co
 3. Non-SD mode: `--disable-spec` flag, same model without draft.
 4. Concurrency sweep: `--num-requests 32 64`.
 5. Quality validation thresholds: `repetition_ratio` (warning only),
-   `min_logprob >= -50.0`, no gibberish, no invalid JSON.
+   gibberish patterns (warning only), `min_logprob >= -50.0`, no invalid JSON.
 
 See also: [Feature Matrix](../feature_matrix.md)
