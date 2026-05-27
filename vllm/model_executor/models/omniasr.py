@@ -74,10 +74,10 @@ class OmniASRModel(nn.Module):
         self.encoder_proj = ColumnParallelLinear(
             config.encoder_embed_dim, config.projection_dim, bias=True
         )
-        #self.text_frontend = VocabParallelEmbedding(
+        # self.text_frontend = VocabParallelEmbedding(
         #    config.target_vocab_size + config.n_special_tokens,
         #    config.text_config.hidden_size,
-        #)
+        # )
         self.lang_embeddings = VocabParallelEmbedding(
             config.num_languages, config.text_config.hidden_size
         )
@@ -425,7 +425,7 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
         return self.get_feature_extractor().get_seq_len(num_samples)
 
 
-class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
+class OmniASRMultiModalProcessor(EncDecMultiModalProcessor[OmniASRProcessingInfo]):
     """
     Multi-modal processor for the OmniASR model.
 
@@ -447,31 +447,40 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ):
-        # TODO: Implement custom audio processing for fairseq2-based OmniASR
-        # Cannot use HF processor — need to:
-        # 1. Accept raw audio waveform from mm_data
-        # 2. Return input_features tensor for Wav2Vec2Frontend
-        # 3. Return length tensor for sequence tracking
-        #
-        # Expected return format:
-        # {
-        #     "input_features": processed audio tensor,
-        #     "length": tensor of audio lengths,
-        #     "input_ids": tokenized prompt,
-        # }
-        audios = mm_data.get("audios", [])
+        data = {}
+
+        audios = []
+        if mm_data:
+            audios = mm_data.get("audios", [])
+            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            mm_kwargs = dict(
+                **mm_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         if isinstance(audios, list) and len(audios) > 0:
-            features = [torch.tensor(a, dtype=torch.float32) for a in audios]
+            features = []
+            for a in audios:
+                t = torch.tensor(a, dtype=torch.float32)
+                t = (t - t.mean()) / torch.sqrt(t.var() + 1e-7)
+                features.append(t)
             lengths = torch.tensor([f.shape[-1] for f in features])
         else:
             features = torch.zeros(1, 1, 16000)  # placeholder
             lengths = torch.tensor([16000])
 
-        return {
-            "input_features": features,
-            "length": lengths,
-            "input_ids": [0],
-        }
+        tokenizer = self.info.get_tokenizer()
+        encoded = tokenizer(prompt, return_tensors="pt")
+        data["input_ids"] = encoded["input_ids"]
+        data["input_features"] = features
+
+        #outputs = super()._call_hf_processor(
+        #    prompt=prompt,
+        #    mm_data=mm_data,
+        #    mm_kwargs=mm_kwargs,
+        #    tok_kwargs=tok_kwargs,
+        #)
+
+        return BatchFeature(data=data)
 
     def _get_mm_fields_config(
         self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
@@ -628,9 +637,9 @@ class OmniAsrForConditionalGeneration(
                 name = name.replace(".ffn.output_proj", ".mlp.down_proj")
                 name = name.replace(".ffn.gate_proj", ".mlp.gate_proj")
             elif name.startswith("text_frontend"):
-               name = name.replace(
-                   "text_frontend", "language_model.model.embed_tokens"
-               )
+                name = name.replace(
+                    "text_frontend", "language_model.model.embed_tokens"
+                )
             elif name.startswith("final_proj"):
                 pass
             else:
