@@ -911,23 +911,42 @@ def pcp_kv_allgather_and_restore(
     Args:
         key: key tensor for the current pcp rank.
         value: value tensor for the current pcp rank.
-        num_actual_tokens: number of actual tokens (excludes graph padding).
+        num_actual_tokens: caller's view of the actual (non-graph-padded)
+            token count. Currently unused — see note below.
         pcp_allgather_restore_idx: indices to restore the original order.
+            Sized ``padded_total = pcp_world_size * local_total``.
         pcp_group: PCP group coordinator.
 
     Returns:
-        (key, value) all-gathered and restored to original ordering.
+        (key, value) all-gathered and restored to the padded-layout ordering
+        described in ``PCPManager.partition_inputs``. Real positions hold the
+        correct K/V; padding positions hold whatever each rank had at its
+        clamped fallback index (those positions are written to slot -1 by
+        ``pad_slot_mapping`` so they are no-ops in the cache write).
+
+    Notes:
+        We derive the local slice length from ``pcp_allgather_restore_idx``
+        rather than the caller-supplied ``num_actual_tokens`` because under
+        PCP + piecewise-CG ``num_actual_tokens`` can include graph padding
+        beyond ``local_total``; gathering that padding would corrupt the
+        per-rank layout that ``pcp_allgather_restore_idx`` was built against.
     """
-    # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
-    # ignores the padding from CUDA Graph.
     # TODO(yyj) Batch all-gather operations to reduce launch overhead.
-    key_across_cp = pcp_group.all_gather(key[:num_actual_tokens].contiguous(), dim=0)
-    value_across_cp = pcp_group.all_gather(
-        value[:num_actual_tokens].contiguous(), dim=0
+    padded_total = pcp_allgather_restore_idx.shape[0]
+    local_count = padded_total // pcp_group.world_size
+    assert local_count <= num_actual_tokens, (
+        f"local_count={local_count} should not exceed num_actual_tokens="
+        f"{num_actual_tokens} (restore_idx shape {pcp_allgather_restore_idx.shape}, "
+        f"pcp_world_size={pcp_group.world_size})."
     )
 
-    # Reorder kv after pcp allgather.
-    # Note that there are duplicate decoding tokens after allgather.
+    key_across_cp = pcp_group.all_gather(key[:local_count].contiguous(), dim=0)
+    value_across_cp = pcp_group.all_gather(
+        value[:local_count].contiguous(), dim=0
+    )
+
+    # Reorder kv after pcp allgather. Note that there are duplicate decoding
+    # tokens after allgather (DualChunkSwap replicates decode rows).
     key = torch.index_select(key_across_cp, 0, pcp_allgather_restore_idx)
     value = torch.index_select(value_across_cp, 0, pcp_allgather_restore_idx)
 
