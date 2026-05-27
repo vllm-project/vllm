@@ -9,6 +9,7 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
+- [Gumiho (Hybrid Transformer + Parallel MLP)](gumiho.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
@@ -26,6 +27,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | Method | Low QPS (latency focused) | High QPS (throughput focused) | Notes |
 | --- | --- | --- | --- |
 | EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
+| Gumiho | High gain | Medium to high gain | Hybrid drafter: EAGLE-style transformer head for the first two tokens, parallel MLP heads for the rest. Lower drafter latency when `num_speculative_tokens > 2`. |
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
