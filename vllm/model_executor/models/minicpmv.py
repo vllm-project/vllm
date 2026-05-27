@@ -217,7 +217,9 @@ class Resampler2_5(BaseResampler):
         for i in range(bs):
             tgt_h, tgt_w = tgt_sizes[i].tolist()
             pos_embed.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+                self.pos_embed[:tgt_h, :tgt_w, :]
+                .reshape((tgt_h * tgt_w, -1))
+                .to(device=device, dtype=dtype)
             )  # patches * D
             key_padding_mask[i, patch_len[i] :] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
@@ -374,7 +376,9 @@ class Resampler4_5(Resampler2_5):
                     )
                 else:
                     pos_embed_temporal.append(
-                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(dtype)
+                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(
+                            device=device, dtype=dtype
+                        )
                     )  # D
 
             pos_embed_2d.append(
