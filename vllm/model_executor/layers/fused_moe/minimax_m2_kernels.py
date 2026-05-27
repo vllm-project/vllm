@@ -37,30 +37,33 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
     token_id = tl.program_id(0)
     group_id = tl.program_id(1)
 
-    hidden_offsets = group_id * GROUP_SIZE + tl.arange(0, BLOCK_H)
-    hidden_mask = (hidden_offsets < HIDDEN_SIZE) & (
-        hidden_offsets < (group_id + 1) * GROUP_SIZE
-    )
-    x = tl.load(
-        hidden_states_ptr + token_id * hidden_stride_m + hidden_offsets,
-        mask=hidden_mask,
-        other=0.0,
-    ).to(tl.float32)
+    if group_id < NUM_GROUPS:
+        # Quant program: each program handles one group of hidden states
+        hidden_offsets = group_id * GROUP_SIZE + tl.arange(0, BLOCK_H)
+        hidden_mask = (hidden_offsets < HIDDEN_SIZE) & (
+            hidden_offsets < (group_id + 1) * GROUP_SIZE
+        )
+        x = tl.load(
+            hidden_states_ptr + token_id * hidden_stride_m + hidden_offsets,
+            mask=hidden_mask,
+            other=0.0,
+        ).to(tl.float32)
 
-    absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1.0e-10)
-    scale = tl.math.div_rn(absmax, fp8_max_val)
-    x_q = tl.clamp(
-        tl.math.div_rn(x, scale), fp8_min, fp8_max
-    ).to(a1q_ptr.dtype.element_ty)
+        absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1.0e-10)
+        scale = tl.math.div_rn(absmax, fp8_max_val)
+        x_q = tl.clamp(tl.math.div_rn(x, scale), fp8_min, fp8_max)
+        x_q = x_q.to(a1q_ptr.dtype.element_ty)
 
-    tl.store(
-        a1q_ptr + token_id * a1q_stride_m + hidden_offsets,
-        x_q,
-        mask=hidden_mask,
-    )
-    tl.store(a1q_scale_ptr + token_id * NUM_GROUPS + group_id, scale)
+        tl.store(
+            a1q_ptr + token_id * a1q_stride_m + hidden_offsets,
+            x_q,
+            mask=hidden_mask,
+        )
+        tl.store(a1q_scale_ptr + token_id * NUM_GROUPS + group_id, scale)
 
-    if group_id == 0:
+    else:
+        # Topk program: separate program for sigmoid + top-k selection,
+        # no longer piggybacked on the first quant group.
         expert_offsets = tl.arange(0, BLOCK_E)
         expert_mask = expert_offsets < NUM_EXPERTS
         logits = tl.load(
@@ -81,15 +84,24 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
         scores_for_choice = sigmoid_scores + bias
         scores_for_choice = tl.where(expert_mask, scores_for_choice, -float("inf"))
 
+        # Accumulate selected weights/ids in registers, then store once
+        # normalized — avoids the global roundtrip of store-unaligned /
+        # load-normalize / store-normalized.
+        k_range = tl.arange(0, TOP_K)
+        selected_weights = tl.full((TOP_K,), 0.0, tl.float32)
+        selected_ids = tl.full((TOP_K,), 0, tl.int32)
         selected_sum = tl.full((), 0.0, tl.float32)
+
         for k_idx in tl.static_range(0, TOP_K):
             selected_id = tl.argmax(scores_for_choice, axis=0)
             selected_weight = tl.sum(
                 tl.where(expert_offsets == selected_id, sigmoid_scores, 0.0),
                 axis=0,
             )
-            tl.store(topk_ids_ptr + token_id * TOP_K + k_idx, selected_id)
-            tl.store(topk_weights_ptr + token_id * TOP_K + k_idx, selected_weight)
+            selected_ids = tl.where(k_range == k_idx, selected_id, selected_ids)
+            selected_weights = tl.where(
+                k_range == k_idx, selected_weight, selected_weights
+            )
             selected_sum += selected_weight
             scores_for_choice = tl.where(
                 expert_offsets == selected_id,
@@ -98,9 +110,11 @@ def _minimax_moe_topk_sigmoid_quant_kernel(
             )
 
         denom = tl.where(selected_sum > 0.0, selected_sum, 1.0)
-        for k_idx in tl.static_range(0, TOP_K):
-            weight = tl.load(topk_weights_ptr + token_id * TOP_K + k_idx)
-            tl.store(topk_weights_ptr + token_id * TOP_K + k_idx, weight / denom)
+        tl.store(
+            topk_weights_ptr + token_id * TOP_K + k_range,
+            selected_weights / denom,
+        )
+        tl.store(topk_ids_ptr + token_id * TOP_K + k_range, selected_ids)
 
 
 def _allocate_outputs(
@@ -156,6 +170,8 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
+    num_warps: int = 1,
+    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
 
@@ -169,8 +185,14 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
     if num_tokens == 0:
         return topk_weights, topk_ids, a1q, a1q_scale
 
+    # Grid: (num_tokens, num_groups + 1).
+    #   group_id <  num_groups  -> quant only
+    #   group_id == num_groups  -> topk only
+    # Topk no longer piggybacks on the first quant program, so all quant
+    # programs are uniform and the topk program does not add tail latency.
+    # num_warps=1 is optimal: quant tile is only 128 elements.
     fp8_min, fp8_max = get_fp8_min_max()
-    _minimax_moe_topk_sigmoid_quant_kernel[(num_tokens, num_groups)](
+    _minimax_moe_topk_sigmoid_quant_kernel[(num_tokens, num_groups + 1)](
         hidden_states,
         router_logits,
         e_score_correction_bias,
@@ -191,7 +213,8 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
         NUM_GROUPS=num_groups,
         BLOCK_E=triton.next_power_of_2(num_experts),
         BLOCK_H=triton.next_power_of_2(block_k),
-        num_warps=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
     return topk_weights, topk_ids, a1q, a1q_scale
@@ -203,6 +226,8 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
+    num_warps: int = 1,
+    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return _minimax_moe_topk_sigmoid_quant_triton_impl(
         hidden_states,
@@ -210,6 +235,8 @@ def _minimax_moe_topk_sigmoid_quant_impl(
         e_score_correction_bias,
         top_k,
         block_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
@@ -252,6 +279,8 @@ def minimax_moe_topk_sigmoid_quant(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
+    num_warps: int = 1,
+    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.minimax_moe_topk_sigmoid_quant(
         hidden_states,
@@ -259,4 +288,6 @@ def minimax_moe_topk_sigmoid_quant(
         e_score_correction_bias,
         top_k,
         block_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
