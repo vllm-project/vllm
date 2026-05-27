@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -13,19 +13,13 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    fused_kv_compress_norm_rope_insert,
+    compress_norm_rope_store_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING or not current_platform.is_rocm():
-    from vllm.models.deepseek_v4.nvidia.compressor import compress_norm_rope_store
-else:
-    # AMD head=512 has no extra logic over the shared triton launcher.
-    compress_norm_rope_store = fused_kv_compress_norm_rope_insert
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -339,12 +333,22 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
 
-        compress_norm_rope_insert_fn = (
-            fused_kv_compress_norm_rope_insert
-            if self.head_dim == 128
-            else compress_norm_rope_store
-        )
-        compress_norm_rope_insert_fn(
+        if current_platform.is_cuda():
+            # NVIDIA GPUs.
+            if self.head_dim == 128:
+                from .nvidia.ops import compress_norm_rope_store_cutedsl
+
+                # Indexer path. Use a cutedsl kernel as it performs better.
+                compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            else:
+                # Main compressor path (head_dim == 512). Use a triton kernel.
+                compress_norm_rope_store_fn = compress_norm_rope_store_triton
+        else:
+            # AMD GPUs.
+            # Always use a triton kernel.
+            compress_norm_rope_store_fn = compress_norm_rope_store_triton
+
+        compress_norm_rope_store_fn(
             state_cache=state_cache,
             num_actual=num_actual,
             token_to_req_indices=token_to_req_indices,

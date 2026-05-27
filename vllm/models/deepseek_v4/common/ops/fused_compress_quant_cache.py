@@ -28,7 +28,7 @@ from vllm.triton_utils import tl, triton
 from .fused_indexer_q import _fp32x2_to_fp4x2
 
 
-def fused_kv_compress_norm_rope_insert(
+def compress_norm_rope_store_triton(
     state_cache: torch.Tensor,
     num_actual: int,
     token_to_req_indices: torch.Tensor,
