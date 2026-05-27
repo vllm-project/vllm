@@ -19,6 +19,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm import envs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
@@ -329,6 +330,10 @@ direct_register_custom_op(
     fake_impl=fused_all_gather_flashinfer_fp4_matmul_fake,
 )
 
+if envs.VLLM_USE_HELION_BACKEND:
+    from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
+        helion_all_gather_fp8_gemm,
+    )
 
 class BasePattern:
     def __init__(self, dtype: torch.dtype, device: str | None) -> None:
@@ -405,6 +410,79 @@ class AllGatherGEMMPattern(BasePattern):
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+class HelionAllGatherScaledMMPattern(BasePattern):
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = (
+            torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+            .contiguous()
+            .transpose(0, 1)
+        )
+        s1 = x.shape[0] * self.tp_size
+
+        scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        return [x, weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        from vllm.kernels.helion.config_manager import ConfigManager
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        try:
+            config_manager = ConfigManager.get_instance()
+        except RuntimeError:
+            config_manager = ConfigManager()
+
+        # get current GPU platform
+        platform = get_canonical_gpu_name()
+
+        configs = config_manager.get_platform_configs(
+            "helion_matmul_w_progress_fp8", platform
+        )
+        if len(configs) == 0:
+            raise RuntimeError(f"No Helion FP8 configs found for platform {platform}")
+
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
+            )
+            
+            return torch.ops.aten._scaled_mm.default(
+                all_gather,
+                mat2=weight,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                bias=None,
+                scale_result=None,
+                out_dtype=self.dtype,
+            )
+
+        def replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+
+            ag_output, mm_outputs =  torch.ops.vllm.helion_all_gather_fp8_gemm(
+                x,
+                weight,
+                scale_a,
+                scale_b,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+            return mm_outputs
+        
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
 
 class ScaledMMReduceScatterPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
@@ -608,6 +686,90 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+class HelionAllGatherCutlassScaledMMPattern(BasePattern):                                                   
+    def get_inputs(self) -> list[torch.Tensor]:
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = (
+            torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+            .contiguous()
+            .transpose(0, 1)
+        )
+        s1 = x.shape[0] * self.tp_size
+
+        scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        s2 = weight.shape[1]
+        output = torch.empty([s1, s2], device=self.device, dtype=self.dtype)
+
+        return [x, weight, scale_a, scale_b, output]    
+                   
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        from vllm.kernels.helion.config_manager import ConfigManager
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+        try:                                                                                                
+            config_manager = ConfigManager.get_instance()                                                   
+        except RuntimeError:                                                                                
+            config_manager = ConfigManager()                                                                
+                                                                                                            
+        # get current GPU platform                                                                          
+        platform = get_canonical_gpu_name()                                                                 
+                                                                                                            
+        configs = config_manager.get_platform_configs(                                                      
+            "helion_matmul_w_progress_fp8", platform                                                        
+        )
+                                                                                              
+        if len(configs) == 0:                                                                               
+            raise RuntimeError(f"No Helion FP8 configs found for platform {platform}")                      
+                                                                                                            
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+            output: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
+            )
+
+            cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
+                torch.ops._C.cutlass_scaled_mm.default,
+                out=output,
+                a=all_gather,
+                b=weight,
+                a_scales=scale_a,
+                b_scales=scale_b,
+                bias=None,
+            )
+            return cutlass_scaled_mm[1]                                                                 
+                                                                                                        
+        def replacement(                                                                                    
+            x: torch.Tensor,                                                                                
+            weight: torch.Tensor,                                                                           
+            scale_a: torch.Tensor,                                                                          
+            scale_b: torch.Tensor,                                                                          
+            output: torch.Tensor,                                                                           
+        ) -> torch.Tensor:      
+            if scale_a.ndim == 0:
+                scale_a = scale_a.view(1, 1)
+            if scale_b.ndim == 0:
+                scale_b = scale_b.view(1, 1)
+
+            ag_output, mm_outputs = torch.ops.vllm.helion_all_gather_fp8_gemm(                              
+                x,                                                                                          
+                weight,                                                                                     
+                scale_a,                                                                                    
+                scale_b,                                                                                    
+                world_size=self.tp_size,                                                                    
+                group_name=self.tp.unique_name,                                                             
+            )                                                                                               
+                                                                                                            
+            return mm_outputs                                                                               
+                
+        pm.register_replacement(                                                                            
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
 
 class AllGatherCutlassScaledMMPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:

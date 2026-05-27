@@ -1,0 +1,144 @@
+(root) [root@l42-h02-000-xe8640 vllm]# vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 200 \
+  --max-concurrency 64 \
+  --input-len 127 \
+  --output-len 1
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7f4a37727a60>, trust_remote_code=False, seed=0, num_prompts=200, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=64, model='RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8', input_len=127, output_len=1, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-a80cbea6-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name=None, lora_modules=None, lora_assignment='random', ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 04-28 02:25:51 [datasets.py:700] Sampling input_len from [126, 126] and output_len from [1, 1]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 64
+100%|█████████████████████████████████████████████████| 200/200 [00:03<00:00, 54.83it/s]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     200       
+Failed requests:                         0         
+Maximum request concurrency:             64        
+Benchmark duration (s):                  3.65      
+Total input tokens:                      25200     
+Total generated tokens:                  200       
+Request throughput (req/s):              54.82     
+Output token throughput (tok/s):         54.82     
+Peak output token throughput (tok/s):    135.00    
+Peak concurrent requests:                135.00    
+Total token throughput (tok/s):          6962.68   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1141.36   
+Median TTFT (ms):                        414.81    
+P99 TTFT (ms):                           2747.62   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          0.00      
+Median TPOT (ms):                        0.00      
+P99 TPOT (ms):                           0.00      
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           0.00      
+Median ITL (ms):                         0.00      
+P99 ITL (ms):                            0.00      
+==================================================
+(root) [root@l42-h02-000-xe8640 vllm]#  vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 100 \
+  --max-concurrency 1 \
+  --input-len 8191 \
+  --output-len 1
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7f5189523a60>, trust_remote_code=False, seed=0, num_prompts=100, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=1, model='RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8', input_len=8191, output_len=1, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-78754681-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name=None, lora_modules=None, lora_assignment='random', ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 04-28 02:26:46 [datasets.py:700] Sampling input_len from [8190, 8190] and output_len from [1, 1]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 1
+100%|█████████████████████████████████████████████████| 100/100 [00:41<00:00,  2.42it/s]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     100       
+Failed requests:                         0         
+Maximum request concurrency:             1         
+Benchmark duration (s):                  41.32     
+Total input tokens:                      819000    
+Total generated tokens:                  100       
+Request throughput (req/s):              2.42      
+Output token throughput (tok/s):         2.42      
+Peak output token throughput (tok/s):    3.00      
+Peak concurrent requests:                4.00      
+Total token throughput (tok/s):          19822.84  
+---------------Time to First Token----------------
+Mean TTFT (ms):                          413.07    
+Median TTFT (ms):                        412.46    
+P99 TTFT (ms):                           418.82    
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          0.00      
+Median TPOT (ms):                        0.00      
+P99 TPOT (ms):                           0.00      
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           0.00      
+Median ITL (ms):                         0.00      
+P99 ITL (ms):                            0.00      
+==================================================
+(root) [root@l42-h02-000-xe8640 vllm]#  vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 128 \
+  --input-len 1023 \
+  --output-len 128
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7f8192d1fa60>, trust_remote_code=False, seed=0, num_prompts=400, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=1024, random_output_len=128, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=128, model='RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8', input_len=1023, output_len=128, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-a5234022-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name=None, lora_modules=None, lora_assignment='random', ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 04-28 02:27:43 [datasets.py:700] Sampling input_len from [1022, 1022] and output_len from [128, 128]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 128
+100%|█████████████████████████████████████████████████| 400/400 [00:26<00:00, 15.38it/s]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     400       
+Failed requests:                         0         
+Maximum request concurrency:             128       
+Benchmark duration (s):                  26.00     
+Total input tokens:                      408800    
+Total generated tokens:                  51200     
+Request throughput (req/s):              15.38     
+Output token throughput (tok/s):         1968.98   
+Peak output token throughput (tok/s):    6528.00   
+Peak concurrent requests:                256.00    
+Total token throughput (tok/s):          17690.05  
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1915.92   
+Median TTFT (ms):                        1555.66   
+P99 TTFT (ms):                           5098.78   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          46.99     
+Median TPOT (ms):                        47.77     
+P99 TPOT (ms):                           61.43     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           46.99     
+Median ITL (ms):                         19.78     
+P99 ITL (ms):                            370.19    
+==================================================
+(root) [root@l42-h02-000-xe8640 vllm]# vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 256 \
+  --input-len 1023 \
+  --output-len 128
