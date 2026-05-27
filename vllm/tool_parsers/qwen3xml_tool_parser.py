@@ -621,6 +621,13 @@ class StreamingXMLToolCallParser:
         if incoming_tag == "tool_call" and self.current_call_id:
             self._end_element("tool_call")
 
+    def _mint_new_tool_call_slot(self) -> None:
+        """Bump tool_call index, mint a fresh id, reset per-function state."""
+        self.parameters = {}
+        self.current_call_id = make_tool_call_id()
+        self.current_param_is_first = True
+        self.tool_call_index += 1
+
     def _start_element(self, name: str, attrs: dict[str, str]):
         """Handle XML start element events"""
 
@@ -632,10 +639,7 @@ class StreamingXMLToolCallParser:
             # automatically complete previous unclosed tags
             self._auto_close_open_parameter_if_needed("tool_call")
 
-            self.parameters = {}
-            self.current_call_id = make_tool_call_id()
-            self.current_param_is_first = True
-            self.tool_call_index += 1
+            self._mint_new_tool_call_slot()
             self.functions_in_tool_call = 0
         elif name.startswith("function") or (name == "function"):
             # If missing tool_call, manually complete
@@ -644,10 +648,7 @@ class StreamingXMLToolCallParser:
             # First function reuses <tool_call>'s slot; rest mint fresh.
             self.functions_in_tool_call += 1
             if self.functions_in_tool_call > 1:
-                self.parameters = {}
-                self.current_call_id = make_tool_call_id()
-                self.current_param_is_first = True
-                self.tool_call_index += 1
+                self._mint_new_tool_call_slot()
             # Before opening new function,
             # automatically complete previous unclosed tags (parameter/function)
             self._auto_close_open_parameter_if_needed("function")
