@@ -122,7 +122,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
-    from .cpu_wna16 import CPUAWQConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
@@ -166,7 +165,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
-        "cpu_awq": CPUAWQConfig,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
     }
