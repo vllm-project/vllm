@@ -99,9 +99,10 @@ class SimpleCPUOffloadWorker:
         # Build [num_blocks, block_bytes] int8 views from each unique
         # storage so that stride(0) gives block_bytes for the copy op.
         #
-        # With standardized layouts (RFC #42082), num_blocks is always the
-        # leading logical dim. Legacy backends with K/V outermost still
-        # produce outer segment dims. We detect them by comparing
+        # With standardized layouts (RFC #42082) num_blocks is always the
+        # leading logical dim, but cross-layer physical layouts
+        # (e.g. BLHNC) interleave layers between blocks, inflating the
+        # block stride.  Detect any such outer segment dims by comparing
         # byte-strides against page_size_bytes.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
