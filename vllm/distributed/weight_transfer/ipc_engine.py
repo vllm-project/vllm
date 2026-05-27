@@ -178,8 +178,9 @@ class IPCWeightTransferEngine(
         Requires ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` because the
         payload is deserialized via ``pickle.loads``.
         """
-        if "ipc_handles_pickled" in update_dict:
-            if "ipc_handles" in update_dict:
+        pickled = update_dict.pop("ipc_handles_pickled", None)
+        if pickled is not None:
+            if update_dict.get("ipc_handles") is not None:
                 raise ValueError(
                     "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
                 )
@@ -190,7 +191,6 @@ class IPCWeightTransferEngine(
                     "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
                 )
 
-            pickled = update_dict.pop("ipc_handles_pickled")
             update_dict["ipc_handles"] = pickle.loads(base64.b64decode(pickled))
 
         return super().parse_update_info(update_dict)

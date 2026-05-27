@@ -863,6 +863,28 @@ class TestIPCEngineParsing:
         assert gpu_uuid in update_info.ipc_handles[0]
         assert gpu_uuid in update_info.ipc_handles[1]
 
+    def test_parse_update_info_ignores_none_pickled_handles(self):
+        """Test Ray/asdict payloads with a null pickled field use ipc_handles."""
+        config = WeightTransferConfig(backend="ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = IPCWeightTransferEngine(
+            config, parallel_config, MagicMock(spec=torch.nn.Module)
+        )
+        ipc_handles = [{"gpu-uuid": ("ipc-args",)}]
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["w1"],
+                "dtype_names": ["float32"],
+                "shapes": [[1]],
+                "ipc_handles": ipc_handles,
+                "ipc_handles_pickled": None,
+            }
+        )
+
+        assert isinstance(update_info, IPCWeightTransferUpdateInfo)
+        assert update_info.ipc_handles == ipc_handles
+
     def test_parse_update_info_both_handles_and_pickled_raises(self):
         """Test that providing both ipc_handles and ipc_handles_pickled raises."""
         if torch.accelerator.device_count() < 1:
