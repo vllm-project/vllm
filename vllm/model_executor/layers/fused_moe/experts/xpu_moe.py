@@ -47,9 +47,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = False
-        self.is_mxfp4 = False
-        self.is_mxfp8 = False
         self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
@@ -135,6 +132,12 @@ class XPUExperts(mk.FusedMoEExpertsModular):
     ):
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
+            if (
+                self.quant_config is not None
+                and self.quant_config.weight_quant_dtype == "mxfp4"
+            ):
+                w1 = w1.view(torch.float4_e2m1fn_x2)
+                w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -147,9 +150,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
-                is_fp8=self.is_fp8,
-                is_mxfp4=self.is_mxfp4,
-                is_mxfp8=self.is_mxfp8,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
@@ -174,7 +174,6 @@ class XPUExpertsFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -203,7 +202,6 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
             num_dispatchers,
         )
         assert quant_config.quant_dtype == "mxfp8"
-        self.is_mxfp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -231,7 +229,6 @@ class XPUExpertsMXFp4(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_mxfp4 = True
 
     @staticmethod
     def _supports_quant_scheme(
