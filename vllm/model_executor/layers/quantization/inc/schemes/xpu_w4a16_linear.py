@@ -14,7 +14,7 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 
-from .base import INCLinearScheme
+from .inc_scheme import INCLinearScheme
 
 logger = init_logger(__name__)
 

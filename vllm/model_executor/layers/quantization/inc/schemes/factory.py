@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config_parser import INCLayerConfig
-    from .base import INCScheme
+    from .inc_scheme import INCScheme
 
 
 def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":

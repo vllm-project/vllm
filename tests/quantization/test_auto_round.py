@@ -20,7 +20,9 @@ from vllm.model_executor.layers.quantization.inc.schemes import (
     INCWna16Scheme,
     resolve_scheme,
 )
-from vllm.model_executor.layers.quantization.inc.schemes.base import INCLinearScheme
+from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
+    INCLinearScheme,
+)
 from vllm.model_executor.layers.quantization.inc.schemes.wna16 import (
     _resolve_awq_moe,
     _resolve_gptq_moe,

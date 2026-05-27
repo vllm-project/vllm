@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.scalar_type import scalar_types
 
-from .base import INCLinearScheme
+from .inc_scheme import INCLinearScheme
 
 if TYPE_CHECKING:
     import torch

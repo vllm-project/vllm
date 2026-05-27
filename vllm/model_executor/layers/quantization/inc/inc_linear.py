@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.layers.linear import LinearMethodBase
 
 if TYPE_CHECKING:
-    from .schemes.base import INCLinearScheme
+    from .schemes.inc_scheme import INCLinearScheme
 
 
 class INCLinearMethod(LinearMethodBase):

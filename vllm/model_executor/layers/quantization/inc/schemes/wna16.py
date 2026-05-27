@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from ..inc_linear import INCLinearMethod
-from .base import INCScheme
+from .inc_scheme import INCScheme
 
 if TYPE_CHECKING:
     import torch
