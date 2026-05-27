@@ -1,0 +1,75 @@
+[package]
+name = "vllm-tool-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-util = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+winnow.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+expect-test.workspace = true
+futures.workspace = true
+openai-protocol.workspace = true
+tool-parser.workspace = true
+
+[[bench]]
+name = "deepseek_v3"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "deepseek_v31"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "deepseek_v32"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "qwen3_coder"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "qwen3_xml"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "llama3_json"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "minimax_m2"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "glm45_moe"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "kimi_k2"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "gemma4"
+harness = false
+required-features = ["test-util"]
+
+[lints]
+workspace = true

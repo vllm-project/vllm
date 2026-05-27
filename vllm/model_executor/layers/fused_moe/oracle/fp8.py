@@ -421,6 +421,7 @@ def select_fp8_moe_backend(
 
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
+    # TODO(bnell): replace layer with weight_block_size
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -510,6 +511,8 @@ def make_fp8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
@@ -528,19 +531,13 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
 
-    # MARLIN is mixed precision W8A16 config.
-    if fp8_backend == Fp8MoeBackend.MARLIN:
+    # MARLIN and CPU are mixed precision W8A16 config.
+    if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
-            block_shape=block_shape,
-        )
-
-    # CPU is mixed precision W8A16 config.
-    if fp8_backend == Fp8MoeBackend.CPU:
-        return fp8_w8a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             block_shape=block_shape,
         )
 
@@ -551,6 +548,8 @@ def make_fp8_moe_quant_config(
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             a1_gscale=(1.0 / a1_scale),
@@ -568,6 +567,8 @@ def make_fp8_moe_quant_config(
             "mxfp8",
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_shape,
@@ -579,6 +580,8 @@ def make_fp8_moe_quant_config(
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
         block_shape=block_shape,

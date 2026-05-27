@@ -34,6 +34,8 @@ class MHCPreOp(CustomOp):
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         n_splits: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.mhc_pre_tilelang(
             residual,
@@ -46,6 +48,8 @@ class MHCPreOp(CustomOp):
             hc_post_mult_value,
             sinkhorn_repeat,
             n_splits,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_hip(
@@ -60,6 +64,8 @@ class MHCPreOp(CustomOp):
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         n_splits: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # TODO: Reenable aiter after we are at the aiter
         # version that has this bugfix
@@ -262,6 +268,8 @@ class MHCFusedPostPreOp(CustomOp):
         sinkhorn_repeat: int,
         n_splits: int = 1,
         tile_n: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.mhc_fused_post_pre_tilelang(
             x,
@@ -278,6 +286,8 @@ class MHCFusedPostPreOp(CustomOp):
             sinkhorn_repeat,
             n_splits,
             tile_n,
+            norm_weight,
+            norm_eps,
         )
 
     def forward_hip(self, *args, **kwargs):

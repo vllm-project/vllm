@@ -29,6 +29,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -79,6 +80,14 @@ class CompletionRequest(OpenAIBaseModel):
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
     # --8<-- [end:completion-sampling-params]
@@ -177,11 +186,12 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    thinking_token_budget: int | None = Field(
+    thinking_token_budget: ThinkingTokenBudget = Field(
         default=None,
         description=(
             "Maximum number of tokens allowed for thinking operations "
-            "(reasoning models). -1 = unlimited."
+            "(reasoning models). Non-negative integer sets the limit; "
+            "-1 means unlimited (treated as unset)."
         ),
     )
 
@@ -192,6 +202,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=self.max_tokens or 0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
