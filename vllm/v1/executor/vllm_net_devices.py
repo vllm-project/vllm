@@ -15,6 +15,7 @@ Requires two env vars set together:
 import os
 from pathlib import Path
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -73,16 +74,14 @@ def parse_gpu_nic_mapping(
             continue
         if "=" not in segment:
             raise ValueError(
-                "VLLM_GPU_NIC_PCIE_MAPPING: expected comma-separated gpu_bdf=nic_bdf pairs; "
-                f"ambiguous segment: {segment!r}"
+                "VLLM_GPU_NIC_PCIE_MAPPING: expected comma-separated"
+                f" gpu_bdf=nic_bdf pairs; ambiguous segment: {segment!r}"
             )
         gpu_s, nic_s = segment.split("=", 1)
         gpu_key = normalize_pci(gpu_s.strip())
         nic_val = normalize_pci(nic_s.strip())
         out[gpu_key] = nic_val
     return out
-
-
 
 
 def rdma_name_for_nic_pci(nic_pci: tuple[int, int, int, int]) -> str:
@@ -114,8 +113,7 @@ def rdma_name_for_nic_pci(nic_pci: tuple[int, int, int, int]) -> str:
         except ValueError:
             continue
     raise RuntimeError(
-        f"No /sys/class/infiniband device for NIC PCI {nic_pci}; "
-        f"have entries: {names}"
+        f"No /sys/class/infiniband device for NIC PCI {nic_pci}; have entries: {names}"
     )
 
 
@@ -143,10 +141,10 @@ def set_worker_gpu_nic_mapping(local_rank: int) -> None:
 
     Which env vars are set is controlled by ``VLLM_NIC_SELECTION_VARS``.
     """
-    raw = os.environ.get("VLLM_GPU_NIC_PCIE_MAPPING", "").strip()
+    raw = envs.VLLM_GPU_NIC_PCIE_MAPPING.strip()
     if not raw:
         return
-    selection_raw = os.environ.get("VLLM_NIC_SELECTION_VARS", "").strip()
+    selection_raw = envs.VLLM_NIC_SELECTION_VARS.strip()
     selection_vars = parse_nic_selection_vars(selection_raw)
     mapping = parse_gpu_nic_mapping(raw)
     pci_by_index = current_platform.get_all_gpu_pci_bus_ids()
@@ -225,10 +223,8 @@ def set_worker_net_device(local_rank: int, vllm_config: VllmConfig) -> None:
     Sets NIC selection env vars from ``VLLM_GPU_NIC_PCIE_MAPPING`` and
     ``VLLM_NIC_SELECTION_VARS`` if present; no-op otherwise.
     """
-    has_pcie_mapping = bool(
-        os.environ.get("VLLM_GPU_NIC_PCIE_MAPPING", "").strip())
-    has_selection_vars = bool(
-        os.environ.get("VLLM_NIC_SELECTION_VARS", "").strip())
+    has_pcie_mapping = bool(envs.VLLM_GPU_NIC_PCIE_MAPPING.strip())
+    has_selection_vars = bool(envs.VLLM_NIC_SELECTION_VARS.strip())
     if has_pcie_mapping and not has_selection_vars:
         raise RuntimeError(
             "VLLM_GPU_NIC_PCIE_MAPPING is set but VLLM_NIC_SELECTION_VARS "
