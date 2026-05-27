@@ -1937,9 +1937,39 @@ class GPUModelRunner(
         # used to gather input tokens from the host-side token_ids buffer.
         gathered_positions: np.ndarray | None = None
         # Preserve the GLOBAL cumsum prior to partitioning so we can compute
-        # logits_indices into the post-restore global hidden_states.
-        global_cu_num_tokens = cu_num_tokens
+        # logits_indices into the post-restore global hidden_states and so
+        # we can compute the GLOBAL slot_mapping (needed because the
+        # attention layer writes the all-gathered K/V back to the cache).
+        global_cu_num_tokens = cu_num_tokens.copy() if self.pcp_world_size > 1 else cu_num_tokens
+        global_req_indices = req_indices
+        global_positions_np = positions_np
+        global_total = int(global_cu_num_tokens[-1])
+
         if self.pcp_world_size > 1:
+            # ---- Compute GLOBAL slot_mapping BEFORE partitioning ----
+            # The MLA forward path all-gathers K/V across PCP and writes the
+            # full sequence into the cache, so slot_mapping must cover the
+            # GLOBAL token positions. Temporarily upload global data to the
+            # shared GPU buffers, run compute_slot_mapping, then overwrite
+            # with the LOCAL view further below.
+            self.req_indices.np[:global_total] = global_req_indices
+            self.req_indices.copy_to_gpu(global_total)
+            self.query_pos.copy_to_gpu(global_total)
+            _global_req_indices_gpu = self.req_indices.gpu[:global_total]
+            self.positions[:global_total] = (
+                self.num_computed_tokens[_global_req_indices_gpu].to(torch.int64)
+                + self.query_pos.gpu[:global_total]
+            )
+            self.query_start_loc.np[0] = 0
+            self.query_start_loc.np[1 : num_reqs + 1] = global_cu_num_tokens
+            self.query_start_loc.np[num_reqs + 1 :].fill(global_cu_num_tokens[-1])
+            self.query_start_loc.copy_to_gpu()
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:global_total],
+            )
+
             assert self.pcp_manager is not None
             (
                 total_num_scheduled_tokens,
@@ -2142,11 +2172,14 @@ class GPUModelRunner(
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        self.input_batch.block_table.compute_slot_mapping(
-            num_reqs,
-            self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
-        )
+        if self.pcp_world_size == 1:
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+            )
+        # else: slot_mapping was already computed against GLOBAL positions
+        # above (block_table.slot_mapping.gpu now holds the global view).
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -3963,6 +3996,16 @@ class GPUModelRunner(
         ):
             return None, None
 
+        # Under PCP, slot_mapping was computed against GLOBAL positions so
+        # the kernel writes the all-gathered K/V into the right cache slots.
+        # The active "real" portion of the slot map has length global_total
+        # rather than num_tokens_unpadded (which is local under PCP).
+        if self.pcp_world_size > 1:
+            assert self.pcp_manager is not None
+            global_real_tokens = self.pcp_manager.global_total
+        else:
+            global_real_tokens = num_tokens_unpadded
+
         def _get_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = self.kv_cache_config.kv_cache_groups[
@@ -3976,11 +4019,19 @@ class GPUModelRunner(
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
-                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
+                # Under PCP, the slot mapping buffer holds global_total real
+                # entries (followed by graph padding). Take that view rather
+                # than the local num_tokens_padded slice.
+                view_len = (
+                    max(global_real_tokens, num_tokens_padded)
+                    if self.pcp_world_size > 1
+                    else num_tokens_padded
+                )
+                slot_mapping = blk_table.slot_mapping.gpu[:view_len]
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+            # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID.
+            slot_mapping[global_real_tokens:].fill_(-1)
 
             return slot_mapping
 
@@ -3988,6 +4039,15 @@ class GPUModelRunner(
             gid: _get_slot_mapping(gid)
             for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         }
+
+        # Under PCP, expand each group's slot_mapping (which is currently
+        # length=global_total + graph padding) into the padded all-gather
+        # layout: real tokens at unpadded positions, -1 at padding positions.
+        if self.pcp_world_size > 1 and self.pcp_manager is not None:
+            slot_mappings_by_gid = {
+                gid: self.pcp_manager.pad_slot_mapping(sm[:global_real_tokens])
+                for gid, sm in slot_mappings_by_gid.items()
+            }
 
         slot_mappings_by_layer: dict[str, torch.Tensor] = {}
         for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
