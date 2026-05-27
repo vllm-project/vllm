@@ -199,7 +199,22 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if "vision_tower" in prefix or "vision_model" in prefix or "visual" in prefix:
             return UnquantizedLinearMethod()
 
-        # now, the layer is quantized, handle it here
+        # now, the layer is quantized, handle it here.
+        # Specialized LMHead method (e.g. NVFP4 with a VocabParallelEmbedding-
+        # aware weight_loader) takes precedence over the generic
+        # LinearMethodCls when a subclass has registered one. Subclasses that
+        # leave LMHeadMethodCls at its abstract default fall through to the
+        # LinearMethodCls path below, preserving the behavior introduced in
+        # #42124 (LM head quantization support for ModelOpt).
+        if (
+            isinstance(layer, ParallelLMHead)
+            and self.LMHeadMethodCls is not LinearMethodBase
+        ):
+            quant_method = self.LMHeadMethodCls(self)
+            if getattr(quant_method, "backend", "") == "marlin":
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             quant_method = self.LinearMethodCls(self)
             if getattr(quant_method, "backend", "") == "marlin":
@@ -209,14 +224,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
-        elif isinstance(layer, ParallelLMHead):
-            # NVFP4-quantized lm_head: use LMHead-specific method that
-            # provides a compatible weight_loader for
-            # VocabParallelEmbedding-based layers.
-            quant_method = self.LMHeadMethodCls(self)
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
