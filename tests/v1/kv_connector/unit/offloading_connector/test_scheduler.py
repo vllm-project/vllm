@@ -963,6 +963,99 @@ def test_flush_all_jobs_when_no_requests_remain(request_runner):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_preempt_offload_mode_explicit_flush(
+    request_runner, async_scheduling: bool
+):
+    """When preemption_mode='offload', _preempt_request calls
+    offload_preempted_request, which queues any unstored tail blocks AND
+    causes existing flush-on-preemption to wait for them, so the resume
+    path hits the CPU cache and skips recomputation.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+    # Switch the scheduler into offload preemption mode.
+    runner.scheduler.preemption_mode = "offload"
+
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    num_free_blocks_empty = free_block_queue.num_free_blocks
+
+    # Build up 3 full offloaded blocks (GPU blocks 0-8).
+    runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (3 * offloaded_block_size - block_size),
+        complete_transfers=False,
+    )
+
+    # Spy on the connector's offload_preempted_request to confirm wiring.
+    scheduler_connector = runner.scheduler_connector
+    real_offload = scheduler_connector.offload_preempted_request
+    calls: list = []
+
+    def spy(request):
+        calls.append(request.request_id)
+        return real_offload(request)
+
+    scheduler_connector.offload_preempted_request = spy
+
+    # Force preemption.
+    free_block_queue.num_free_blocks = 0
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+        expected_flushed=tuple(range(9)),
+        expected_stored=tuple(range(9)),
+    )
+    assert len(calls) == 1, "offload_preempted_request should fire exactly once"
+
+    # Restore capacity and resume; request should reload from CPU instead of
+    # recomputing. Mock the lookup to claim a full prefix hit.
+    free_block_queue.num_free_blocks = num_free_blocks_empty
+    runner.scheduler.reset_prefix_cache()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 3
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * block_size,
+        expected_loaded=tuple(range(9)),
+    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(9, 10, 11))
+
+    # All preempt-offload bookkeeping must clean up.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert runner.connector_scheduler._pending_preempt_store_jobs == {}
+    assert runner.connector_scheduler._preempt_offload_job_ids == set()
+
+
+def test_offload_preempted_request_returns_false_when_untracked(request_runner):
+    """A request that never went through the connector cannot be offloaded."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+
+    fake_request = MagicMock()
+    fake_request.request_id = "untracked"
+    assert (
+        runner.connector_scheduler.offload_preempted_request(fake_request) is False
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
     next_stored_block_idx for active requests and clears job tracking."""

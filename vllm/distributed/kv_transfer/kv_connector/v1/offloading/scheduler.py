@@ -235,6 +235,16 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
+        # Store jobs queued by offload_preempted_request, drained into
+        # store_jobs by build_connector_meta in the same step.
+        self._pending_preempt_store_jobs: dict[int, TransferJob] = {}
+        # Job IDs from offload_preempted_request. These jobs register their
+        # non-sliding-window block IDs in _block_id_to_pending_jobs at store
+        # creation (since the scheduler frees those GPU blocks immediately),
+        # so cleanup in update_connector_output must run unconditionally
+        # rather than only on request_finished.
+        self._preempt_offload_job_ids: set[int] = set()
+
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
         self._job_counter += 1
@@ -790,9 +800,13 @@ class OffloadingConnectorScheduler:
         ):
             self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
+        store_jobs = self._build_store_jobs(scheduler_output)
+        if self._pending_preempt_store_jobs:
+            store_jobs.update(self._pending_preempt_store_jobs)
+            self._pending_preempt_store_jobs = {}
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=self._build_store_jobs(scheduler_output),
+            store_jobs=store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
@@ -833,16 +847,21 @@ class OffloadingConnectorScheduler:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
+            is_preempt_offload = job_id in self._preempt_offload_job_ids
             if self._block_id_to_pending_jobs:
                 # Sliding window blocks are tracked from store creation
                 # and must be cleaned up unconditionally.
                 self._remove_pending_job(job_id, job_status.sliding_window_block_ids)
                 # Non-sliding-window blocks are only tracked after
                 # request_finished, so only clean up for finished requests.
-                if req_status.req.is_finished():
+                # Preempt-offload stores also register them upfront and must
+                # clean up unconditionally.
+                if req_status.req.is_finished() or is_preempt_offload:
                     self._remove_pending_job(
                         job_id, job_status.non_sliding_window_block_ids
                     )
+            if is_preempt_offload:
+                self._preempt_offload_job_ids.discard(job_id)
 
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
@@ -922,30 +941,166 @@ class OffloadingConnectorScheduler:
         self._stale_job_threshold = self._job_counter
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
+        self._pending_preempt_store_jobs = {}
+        self._preempt_offload_job_ids.clear()
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.clear()
 
-    def offload_preempted_request(self, request: "Request") -> bool:
-        """Offload KV cache of a preempted request to CPU.
+    def offload_preempted_request(self, request: Request) -> bool:
+        """Flush a preempted request's unstored KV blocks to CPU.
 
-        TODO: port the preempt-offload logic onto the new RequestOffloadState
-        / TransferJob machinery. Returning False keeps the scheduler on the
-        "discard" preemption path until that work lands.
+        Called by the scheduler immediately before freeing GPU blocks for a
+        request whose preemption_mode is "offload". After the resulting
+        store job completes, the manager's cache will hold all keys covering
+        the request's computed tokens, so the standard resume path
+        (get_num_new_matched_tokens -> update_state_after_alloc) will hit
+        the CPU cache and skip recomputation.
+
+        Returns True if all computed blocks are (or will be) on CPU, False
+        if the request cannot be offloaded (untracked, load in flight, or
+        backend refused).
         """
-        return False
+        req_status = self._req_status.get(request.request_id)
+        if req_status is None:
+            return False
 
-    def reload_preempted_request(
-        self, request: "Request", block_ids: list[int]
-    ) -> bool:
-        """Reload KV cache of a preempted request from CPU.
+        # Stores can coexist with other stores, but never with a load.
+        for jid in req_status.transfer_jobs:
+            if not self._jobs[jid].is_store:
+                return False
 
-        TODO: port the preempt-reload logic onto the new RequestOffloadState
-        / TransferJob machinery.
-        """
-        return False
+        req_status.update_offload_keys()
+
+        block_size_factor = self.config.block_size_factor
+        new_offload_keys: list[OffloadKey] = []
+        # (group_idx, start_block_idx, num_blocks) for each group with work.
+        group_ranges: list[tuple[int, int, int]] = []
+        for group_idx, (group_config, group_state) in enumerate(
+            zip(self.config.kv_group_configs, req_status.group_states)
+        ):
+            num_blocks = (
+                request.num_computed_tokens // group_config.offloaded_block_size
+            )
+            start_block_idx = group_state.next_stored_block_idx
+            if num_blocks <= start_block_idx:
+                continue
+
+            keys_slice = group_state.offload_keys[start_block_idx:num_blocks]
+            required_gpu_blocks = num_blocks * block_size_factor
+            if len(group_state.block_ids) < required_gpu_blocks:
+                # block_ids out of sync with offload_keys; skip group.
+                continue
+
+            # Match _build_store_jobs: sample the last GPU block per offloaded
+            # block. block_id == 0 means skipped (sliding window / Mamba).
+            offload_block_ids = group_state.block_ids[
+                start_block_idx * block_size_factor
+                + block_size_factor
+                - 1 : num_blocks * block_size_factor : block_size_factor
+            ]
+            assert len(offload_block_ids) == len(keys_slice)
+            for offload_key, bid in zip(keys_slice, offload_block_ids):
+                if bid != 0:
+                    new_offload_keys.append(offload_key)
+            group_ranges.append((group_idx, start_block_idx, num_blocks))
+
+        if not new_offload_keys:
+            # Incremental stores already cover everything computed; the
+            # request can resume from the existing CPU cache.
+            return True
+
+        store_output = self.manager.prepare_store(
+            new_offload_keys, req_status.req_context
+        )
+        if store_output is None or not store_output.keys_to_store:
+            return False
+
+        self._touch(req_status)
+        keys_to_store_set = set(store_output.keys_to_store)
+
+        group_sizes: list[int] = []
+        block_indices: list[int] = []
+        src_block_ids: list[int] = []
+        sliding_window_block_ids: list[int] = []
+        non_sliding_window_block_ids: list[int] = []
+        for group_idx, start_block_idx, num_blocks in group_ranges:
+            group_config = self.config.kv_group_configs[group_idx]
+            group_state = req_status.group_states[group_idx]
+            is_sliding_window = (
+                group_config.sliding_window_size_in_blocks is not None
+            )
+            block_ids = group_state.block_ids
+            num_group_blocks = 0
+            start_gpu_block_idx: int | None = None
+            for idx, offload_key in enumerate(
+                group_state.offload_keys[start_block_idx:num_blocks]
+            ):
+                if offload_key not in keys_to_store_set:
+                    continue
+                offloaded_block_idx = start_block_idx + idx
+                gpu_block_idx = offloaded_block_idx * block_size_factor
+                for i in range(block_size_factor):
+                    block_id = block_ids[gpu_block_idx + i]
+                    if block_id == 0:
+                        assert start_gpu_block_idx is None
+                        continue
+                    elif start_gpu_block_idx is None:
+                        start_gpu_block_idx = gpu_block_idx + i
+                    src_block_ids.append(block_id)
+                    num_group_blocks += 1
+                    if is_sliding_window:
+                        sliding_window_block_ids.append(block_id)
+                    else:
+                        non_sliding_window_block_ids.append(block_id)
+
+            group_sizes.append(num_group_blocks)
+            block_indices.append(start_gpu_block_idx or 0)
+            group_state.next_stored_block_idx = num_blocks
+
+        src_spec = GPULoadStoreSpec(
+            src_block_ids, group_sizes=group_sizes, block_indices=block_indices
+        )
+        dst_spec = store_output.store_spec
+
+        job_id = self._generate_job_id()
+        req_status.transfer_jobs.add(job_id)
+
+        # The scheduler is about to free this request's GPU blocks, so the
+        # KV cache manager's ref_cnt protection is gone. Register every src
+        # block (including non-sliding) so update_state_after_alloc's fence
+        # in the next step will wait for this store before reuse.
+        for bid in sliding_window_block_ids:
+            self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+        for bid in non_sliding_window_block_ids:
+            self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+        self._preempt_offload_job_ids.add(job_id)
+
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=request.request_id,
+            pending_count=self.config.num_workers,
+            keys=keys_to_store_set,
+            is_store=True,
+            non_sliding_window_block_ids=non_sliding_window_block_ids or None,
+            sliding_window_block_ids=sliding_window_block_ids or None,
+        )
+
+        self._pending_preempt_store_jobs[job_id] = TransferJob(
+            req_id=request.request_id,
+            transfer_spec=(src_spec, dst_spec),
+        )
+
+        logger.debug(
+            "Request %s: preempt-offload storing %d blocks up to %d tokens "
+            "(job %d)",
+            request.request_id,
+            len(keys_to_store_set),
+            request.num_computed_tokens,
+            job_id,
+        )
+        return True
 
     def shutdown(self) -> None:
         self.manager.shutdown()

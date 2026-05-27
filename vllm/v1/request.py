@@ -319,13 +319,10 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
-    WAITING_FOR_RELOAD = enum.auto()  # Waiting for offloaded KV cache to reload
     WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
-    PREEMPTED_OFFLOADED = enum.auto()  # Preempted with KV cache offloaded to CPU
-    # Note: anything after PREEMPTED_OFFLOADED will be considered
-    # as a finished status.
+    # Note: anything after PREEMPTED will be considered as a finished status.
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
@@ -338,7 +335,7 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
-        return status > RequestStatus.PREEMPTED_OFFLOADED
+        return status > RequestStatus.PREEMPTED
 
     @staticmethod
     def get_finished_reason(status: "RequestStatus") -> FinishReason | None:

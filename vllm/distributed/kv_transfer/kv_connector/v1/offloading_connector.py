@@ -171,25 +171,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.take_events()
 
     def offload_preempted_request(self, request: "Request") -> bool:
-        """Offload KV cache of a preempted request to CPU.
-
-        Returns True if offload was initiated, False otherwise. When False,
-        the scheduler falls back to "discard" preemption.
+        """Flush a preempted request's KV cache to CPU before its GPU blocks
+        are freed. Returns True if the cache is (or will be) on CPU; the
+        scheduler's standard resume path will then load it back without
+        recomputation. Returns False to signal recompute-on-resume.
         """
         if self.connector_scheduler is None:
             return False
         return self.connector_scheduler.offload_preempted_request(request)
-
-    def reload_preempted_request(
-        self, request: "Request", block_ids: list[int]
-    ) -> bool:
-        """Reload KV cache of a preempted request from CPU.
-
-        Returns True if reload was initiated, False otherwise.
-        """
-        if self.connector_scheduler is None:
-            return False
-        return self.connector_scheduler.reload_preempted_request(request, block_ids)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:

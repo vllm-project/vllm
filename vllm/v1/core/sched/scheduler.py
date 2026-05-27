@@ -333,43 +333,29 @@ class Scheduler(SchedulerInterface):
         request: Request,
         scheduled_timestamp: float,
     ) -> None:
-        """Handle preemption of a request based on preemption_mode.
+        """Preempt a request and put it back on the waiting queue.
 
-        Puts the request back on the waiting queue. When `preemption_mode` is
-        "offload" and a connector is available, attempts to offload the KV
-        cache to CPU first so the request can resume without recomputation.
+        When `preemption_mode` is "offload" and a KV connector is configured,
+        the connector is asked to flush any unstored blocks to CPU before
+        the GPU blocks are freed. The standard resume path then picks up
+        the offloaded cache via the connector's lookup, skipping
+        recomputation. On a connector miss the request simply recomputes,
+        identical to "discard" mode.
 
-        NOTE: The request should be popped from the running queue outside of
-        this method.
+        NOTE: The request must be popped from the running queue before
+        calling this method.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
 
-        offload_success = False
         if self.preemption_mode == "offload" and self.connector is not None:
-            offload_success = self.connector.offload_preempted_request(request)
+            self.connector.offload_preempted_request(request)
 
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
-
-        if offload_success:
-            request.status = RequestStatus.PREEMPTED_OFFLOADED
-            logger.debug(
-                "Request %s preempted with KV cache offloaded to CPU "
-                "(num_computed_tokens=%d)",
-                request.request_id,
-                request.num_computed_tokens,
-            )
-        else:
-            request.status = RequestStatus.PREEMPTED
-            request.num_computed_tokens = 0
-            if self.preemption_mode == "offload":
-                logger.warning(
-                    "Request %s: offload failed, falling back to discard",
-                    request.request_id,
-                )
-
+        request.status = RequestStatus.PREEMPTED
+        request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
