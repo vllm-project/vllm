@@ -562,10 +562,11 @@ def split_decodes_and_prefills(
         and (not require_uniform or decode_threshold <= 1)
         and treat_short_extends_as_decodes
     )
-    if all_decode_fast:
+    if all_decode_fast and (
+        num_computed is None or not bool(torch.any(num_computed == 0))
+    ):
         # Under PCP, ensure no request is a new prefill (num_computed_tokens=0).
-        if num_computed is None or not bool(torch.any(num_computed == 0)):
-            return num_reqs, 0, num_tokens, 0
+        return num_reqs, 0, num_tokens, 0
 
     if global_query_lens is not None:
         query_lens = global_query_lens

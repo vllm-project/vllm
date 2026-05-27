@@ -195,7 +195,6 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     PCPManager,
     check_attention_cp_compatibility,
-    get_total_cp_world_size,
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
@@ -1940,9 +1939,11 @@ class GPUModelRunner(
         # logits_indices into the post-restore global hidden_states and so
         # we can compute the GLOBAL slot_mapping (needed because the
         # attention layer writes the all-gathered K/V back to the cache).
-        global_cu_num_tokens = cu_num_tokens.copy() if self.pcp_world_size > 1 else cu_num_tokens
+        if self.pcp_world_size > 1:
+            global_cu_num_tokens = cu_num_tokens.copy()
+        else:
+            global_cu_num_tokens = cu_num_tokens
         global_req_indices = req_indices
-        global_positions_np = positions_np
         global_total = int(global_cu_num_tokens[-1])
 
         if self.pcp_world_size > 1:
