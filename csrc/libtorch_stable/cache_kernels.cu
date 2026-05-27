@@ -1567,6 +1567,10 @@ void concat_mla_q(
                   "ql_nope must have stride 1 in dim 2");
   STD_TORCH_CHECK(q_pe.stride(2) == 1, "q_pe must have stride 1 in dim 2");
   STD_TORCH_CHECK(q_out.stride(2) == 1, "q_out must have stride 1 in dim 2");
+  STD_TORCH_CHECK(
+      ql_nope.scalar_type() == torch::headeronly::ScalarType::Half ||
+          ql_nope.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "ql_nope must be float16 or bfloat16 dtype");
 
   if (num_tokens == 0) return;
 
@@ -1579,14 +1583,11 @@ void concat_mla_q(
       ql_nope.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-      ql_nope.scalar_type(), "concat_mla_q", [&] {
-        vllm::ConcatMLAQKernel<scalar_t, 512>
-            <<<grid_size, block_size, 0, stream>>>(
-                q_out.mutable_data_ptr<scalar_t>(),
-                ql_nope.const_data_ptr<scalar_t>(),
-                q_pe.const_data_ptr<scalar_t>(), num_tokens, num_heads,
-                q_out.stride(0), q_out.stride(1), ql_nope.stride(0),
-                ql_nope.stride(1), q_pe.stride(0), q_pe.stride(1));
-      });
+  VLLM_STABLE_DISPATCH_HALF_TYPES(ql_nope.scalar_type(), "concat_mla_q", [&] {
+    vllm::ConcatMLAQKernel<scalar_t, 512><<<grid_size, block_size, 0, stream>>>(
+        q_out.mutable_data_ptr<scalar_t>(), ql_nope.const_data_ptr<scalar_t>(),
+        q_pe.const_data_ptr<scalar_t>(), num_tokens, num_heads, q_out.stride(0),
+        q_out.stride(1), ql_nope.stride(0), ql_nope.stride(1), q_pe.stride(0),
+        q_pe.stride(1));
+  });
 }
