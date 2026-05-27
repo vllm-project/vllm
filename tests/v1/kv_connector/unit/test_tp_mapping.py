@@ -186,13 +186,15 @@ class TestMambaPlanSplitHandles:
         ssm_slices = {
             0: TPTransferSlice(
                 source_rank=0,
-                remote_shard=shard_mamba,
-                read_range=shard_mamba,
+                source_shard=shard_mamba,
+                local_shard=shard_mamba,
+                transfer_range=shard_mamba,
             ),
             1: TPTransferSlice(
                 source_rank=1,
-                remote_shard=shard_mamba,
-                read_range=shard_mamba,
+                source_shard=shard_mamba,
+                local_shard=shard_mamba,
+                transfer_range=shard_mamba,
             ),
         }
         source_ranks = _source_ranks_from_slices(fa_slices, ssm_slices)
@@ -215,14 +217,16 @@ class TestMambaPlanSplitHandles:
 
         assert len(splits) == 2  # 2 source ranks
 
-        # Rank 0 is in fa_slices -> uses read_range.start * chunk for FA offset
+        # Rank 0 is in fa_slices -> uses local_write_offset for FA offset
         fa_chunk = 200 // len(fa_slices)
         ssm_chunk = 400 // len(ssm_slices)
 
         # Rank 0 (source_idx=0):
-        # FA: chunk=200//1=200 (only 1 FA slice), offset = read_range.start * 200
+        # FA: chunk=200//1=200 (only 1 FA slice)
+        # offset = local_write_offset * local_block_len // len(local_shard)
         # SSM: chunk=400//2=200, offset = source_idx(0) * 200
-        fa_offset_r0 = fa_slices[0].read_range.start * fa_chunk
+        sl = fa_slices[0]
+        fa_offset_r0 = sl.local_write_offset * 200 // len(sl.local_shard)
         assert splits[0][0] == (1000 + fa_offset_r0, fa_chunk, 0)
         assert splits[0][1] == (2000 + fa_offset_r0, fa_chunk, 0)
         assert splits[0][2] == (3000 + 0 * ssm_chunk, ssm_chunk, 0)

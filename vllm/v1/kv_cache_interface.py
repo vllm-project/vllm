@@ -134,52 +134,51 @@ class ShardRange:
 
 @dataclass(frozen=True)
 class TPTransferSlice:
-    """One read from a remote rank along the sharding dimension.
+    """Describes what KV heads to read from one remote rank.
 
-    Two levels of context (both in global coordinates):
-      - remote_shard: what the source rank owns
-      - read_range: what to actually read (sub-range of remote_shard)
-
-    Derivable (one-liners):
-      - remote_read_offset: element offset into remote's tensor
-      - local_write_offset(local_shard): element offset into local tensor
-      - num_elements: how many elements to transfer
+    All ShardRanges are in global head coordinates (over total_num_kv_heads).
+    transfer_range is the intersection of source_shard and local_shard.
     """
 
     source_rank: int
-    remote_shard: ShardRange
-    read_range: ShardRange
+    source_shard: ShardRange
+    local_shard: ShardRange
+    transfer_range: ShardRange
 
     def __post_init__(self):
-        assert self.read_range.global_size == self.remote_shard.global_size, (
-            f"Dimension mismatch: read_range {self.read_range.global_size} "
-            f"vs remote_shard {self.remote_shard.global_size}"
+        assert self.transfer_range.global_size == self.source_shard.global_size, (
+            f"Dimension mismatch: transfer_range {self.transfer_range.global_size} "
+            f"vs source_shard {self.source_shard.global_size}"
         )
         assert (
-            self.read_range.start >= self.remote_shard.start
-            and self.read_range.stop <= self.remote_shard.stop
-        ), f"read_range {self.read_range} not within remote_shard {self.remote_shard}"
+            self.transfer_range.start >= self.source_shard.start
+            and self.transfer_range.stop <= self.source_shard.stop
+        ), (
+            f"transfer_range {self.transfer_range} "
+            f"not within source_shard {self.source_shard}"
+        )
 
     @property
     def remote_read_offset(self) -> int:
         """Element offset into remote rank's tensor to start reading."""
-        return self.read_range.offset_within(self.remote_shard)
+        return self.transfer_range.offset_within(self.source_shard)
+
+    @property
+    def local_write_offset(self) -> int:
+        """Element offset into local tensor to start writing."""
+        return self.transfer_range.offset_within(self.local_shard)
 
     @property
     def num_elements(self) -> int:
         """Number of elements to transfer."""
-        return len(self.read_range)
-
-    def local_write_offset(self, local_shard: ShardRange) -> int:
-        """Element offset into local tensor to start writing."""
-        return self.read_range.offset_within(local_shard)
+        return len(self.transfer_range)
 
     def __repr__(self) -> str:
         return (
             f"TPTransferSlice(rank={self.source_rank}, "
-            f"read={self.read_range}, "
-            f"from_remote={self.remote_shard}, "
-            f"remote_offset={self.remote_read_offset})"
+            f"transfer={self.transfer_range}, "
+            f"source={self.source_shard}, "
+            f"local={self.local_shard})"
         )
 
 
@@ -339,14 +338,17 @@ class AttentionSpec(KVCacheSpec):
             # D_TP >= P_TP: read from one remote rank.
             remote_rank = local_tp_rank * remote_tp_size // local_tp_size
             remote_shard = _shard_for_rank(remote_rank, remote_tp_size)
-            read_range = remote_shard.intersect(local_shard)
-            if read_range is None:
-                read_range = local_shard
+            transfer_range = remote_shard.intersect(local_shard)
+            assert transfer_range is not None, (
+                f"local_shard {local_shard} and remote_shard {remote_shard} "
+                f"are disjoint for rank {remote_rank}"
+            )
             return {
                 remote_rank: TPTransferSlice(
                     source_rank=remote_rank,
-                    remote_shard=remote_shard,
-                    read_range=read_range,
+                    source_shard=remote_shard,
+                    local_shard=local_shard,
+                    transfer_range=transfer_range,
                 )
             }
         else:
@@ -363,13 +365,16 @@ class AttentionSpec(KVCacheSpec):
                 seen_heads.add(head_start)
 
                 remote_shard = _shard_for_rank(r, remote_tp_size)
-                read_range = remote_shard.intersect(local_shard)
-                if read_range is None:
-                    read_range = remote_shard
+                transfer_range = remote_shard.intersect(local_shard)
+                assert transfer_range is not None, (
+                    f"local_shard {local_shard} and remote_shard {remote_shard} "
+                    f"are disjoint for rank {r}"
+                )
                 result[r] = TPTransferSlice(
                     source_rank=r,
-                    remote_shard=remote_shard,
-                    read_range=read_range,
+                    source_shard=remote_shard,
+                    local_shard=local_shard,
+                    transfer_range=transfer_range,
                 )
 
             return result
@@ -557,8 +562,9 @@ class MLAAttentionSpec(FullAttentionSpec):
         return {
             aligned_remote: TPTransferSlice(
                 source_rank=aligned_remote,
-                remote_shard=shard,
-                read_range=shard,
+                source_shard=shard,
+                local_shard=shard,
+                transfer_range=shard,
             )
         }
 
@@ -743,8 +749,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return {
             aligned_remote: TPTransferSlice(
                 source_rank=aligned_remote,
-                remote_shard=shard,
-                read_range=shard,
+                source_shard=shard,
+                local_shard=shard,
+                transfer_range=shard,
             )
         }
 
@@ -841,8 +848,9 @@ class MambaSpec(KVCacheSpec):
             return {
                 remote_rank: TPTransferSlice(
                     source_rank=remote_rank,
-                    remote_shard=shard,
-                    read_range=shard,
+                    source_shard=shard,
+                    local_shard=shard,
+                    transfer_range=shard,
                 )
             }
         else:
@@ -851,8 +859,9 @@ class MambaSpec(KVCacheSpec):
             return {
                 r: TPTransferSlice(
                     source_rank=r,
-                    remote_shard=shard,
-                    read_range=shard,
+                    source_shard=shard,
+                    local_shard=shard,
+                    transfer_range=shard,
                 )
                 for r in range(start, start + abs_tp)
             }

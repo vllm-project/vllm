@@ -200,13 +200,12 @@ class NixlConnectorWorker:
                 if j < num_fa_descs:
                     chunk = local_block_len // len(fa_slices)
                     if source_rank in fa_slices:
-                        handle.append(
-                            (
-                                addr + fa_slices[source_rank].read_range.start * chunk,
-                                chunk,
-                                dev,
-                            )
+                        fa_offset = (
+                            fa_slices[source_rank].local_write_offset
+                            * local_block_len
+                            // len(fa_slices[source_rank].local_shard)
                         )
+                        handle.append((addr + fa_offset, chunk, dev))
                     else:
                         # GQA-deduped rank: no FA transfer issued (empty
                         # block_ids at transfer time), but NIXL requires
@@ -1175,12 +1174,7 @@ class NixlConnectorWorker:
         fa_slices = self.tp_mappings[engine_id][fa_group_idx]
         num_attn_reads = len(fa_slices)
 
-        fa_spec = self._get_representative_spec(
-            self.kv_cache_config.kv_cache_groups[fa_group_idx]
-        )
-        assert isinstance(fa_spec, AttentionSpec)
-
-        # Head offset into remote rank's tensor (in head units).
+        # Head offset into remote rank's tensor.
         # D_TP >= P_TP: single slice with non-zero offset.
         # P_TP > D_TP: all slices read from offset 0.
         fa_slice = next(iter(fa_slices.values()))
@@ -1197,10 +1191,13 @@ class NixlConnectorWorker:
                 local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
+            remote_block_len = nixl_agent_meta.block_lens[i]
+            if self.transfer_topo.is_kv_layout_blocks_first:
+                remote_block_len //= 2
             rank_offset = (
                 fa_slice.remote_read_offset
-                * remote_kv_block_len
-                // fa_spec.num_kv_heads
+                * remote_block_len
+                // len(fa_slice.source_shard)
             )
 
             page_size = nixl_agent_meta.block_lens[i]
