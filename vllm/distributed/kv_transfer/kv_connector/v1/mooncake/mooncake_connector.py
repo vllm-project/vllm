@@ -270,9 +270,13 @@ def _align_transfer_regions(
     remote_by_id = {region.region_id: region for region in remote_regions}
     common_ids = sorted(local_by_id.keys() & remote_by_id.keys())
     if not common_ids:
-        return [], [], (
-            "Mooncake found no common KV transfer regions between producer "
-            f"{sorted(local_by_id)} and consumer {sorted(remote_by_id)}."
+        return (
+            [],
+            [],
+            (
+                "Mooncake found no common KV transfer regions between producer "
+                f"{sorted(local_by_id)} and consumer {sorted(remote_by_id)}."
+            ),
         )
 
     return (
