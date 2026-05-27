@@ -124,8 +124,10 @@ class RejectionSampler:
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
+            # Temperature was already applied in apply_sampling_params.
+            False,  # apply_temperature
             self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
+            use_fp64_gumbel=self.sampler.use_fp64_gumbel,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
@@ -139,6 +141,63 @@ class RejectionSampler:
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
+            num_nans=num_nans,
+            num_sampled=num_sampled,
+        )
+
+    def forward_fast(
+        self,
+        logits: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        logits_indices: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        draft_logits: torch.Tensor | None = None,
+        shard_vocab_start: int | None = None,
+    ) -> SamplerOutput:
+        # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
+        # that num_nans is computed before applying penalties and temperature.
+        num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
+
+        draft_sampled = input_ids[logits_indices]
+        draft_positions = positions[logits_indices]
+
+        # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
+        self.sampler.logit_bias_state.apply_logit_bias(
+            logits,
+            expanded_idx_mapping,
+            draft_positions,
+        )
+
+        # Apply min_p in place.
+        self.sampler.sampling_states.apply_min_p(logits, expanded_idx_mapping)
+
+        # Rejection sample.
+        sampled, num_sampled = rejection_sample(
+            logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            draft_positions,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            self.num_speculative_steps,
+            True,  # apply_temperature
+            self.synthetic_conditional_rates,
+            use_fp64_gumbel=self.sampler.use_fp64_gumbel,
+            shard_vocab_start=shard_vocab_start,
+        )
+
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            # Output logprobs are not supported during cudagraph capture.
+            logprobs_tensors=None,
             num_nans=num_nans,
             num_sampled=num_sampled,
         )

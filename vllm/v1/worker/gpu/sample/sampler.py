@@ -133,9 +133,8 @@ class Sampler:
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(
-            logits, expanded_idx_mapping, idx_mapping_np, pos
-        )
+        if self.logit_bias_state.needs_logit_bias(idx_mapping_np):
+            self.logit_bias_state.apply_logit_bias(logits, expanded_idx_mapping, pos)
 
         # Apply penalties in place.
         self.penalties_state.apply_penalties(
@@ -161,7 +160,8 @@ class Sampler:
         )
 
         # Apply min_p in place.
-        self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
+        if self.sampling_states.needs_min_p(idx_mapping_np):
+            self.sampling_states.apply_min_p(logits, expanded_idx_mapping)
 
         # Apply top_k and/or top_p. This might or might not return a new tensor.
         return self.sampling_states.apply_top_k_top_p(

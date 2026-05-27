@@ -74,15 +74,14 @@ class SamplingStates:
 
         apply_temperature(logits, expanded_idx_mapping, self.temperature.gpu)
 
+    def needs_min_p(self, idx_mapping_np: np.ndarray) -> bool:
+        return not bool(np.all(self.min_p.np[idx_mapping_np] == 0.0))
+
     def apply_min_p(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
     ) -> None:
-        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
-            # No request uses min_p. Skip the kernel launch.
-            return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
     def apply_top_k_top_p(

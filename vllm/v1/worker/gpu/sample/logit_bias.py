@@ -118,17 +118,15 @@ class LogitBiasState:
         self.num_stop_token_ids.copy_to_uva()
         self.stop_token_ids.apply_write()
 
+    def needs_logit_bias(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self.use_logit_bias[idx_mapping_np]))
+
     def apply_logit_bias(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> None:
-        if not np.any(self.use_logit_bias[idx_mapping_np]):
-            # No request uses logit bias. Skip the kernel launch.
-            return
-
         apply_logit_bias(
             logits,
             expanded_idx_mapping,
@@ -172,10 +170,15 @@ def _bias_kernel(
     token_idx = tl.program_id(0)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
 
+    num_allowed_token_ids = tl.load(num_allowed_token_ids_ptr + req_state_idx)
+    num_logit_bias = tl.load(num_logit_bias_ptr + req_state_idx)
+    num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
+    if num_allowed_token_ids == 0 and num_logit_bias == 0 and num_stop_token_ids == 0:
+        return
+
     block = tl.arange(0, BLOCK_SIZE)
 
     # Allowed token IDs.
-    num_allowed_token_ids = tl.load(num_allowed_token_ids_ptr + req_state_idx)
     if num_allowed_token_ids > 0:
         block = tl.arange(0, BLOCK_SIZE)
         mask = block < num_allowed_token_ids
@@ -206,7 +209,6 @@ def _bias_kernel(
         )
 
     # Logit bias.
-    num_logit_bias = tl.load(num_logit_bias_ptr + req_state_idx)
     if num_logit_bias > 0:
         mask = block < num_logit_bias
         token_ids = tl.load(
@@ -219,7 +221,6 @@ def _bias_kernel(
         tl.store(logits_ptr + token_idx * logits_stride + token_ids, logits, mask=mask)
 
     # Apply min tokens.
-    num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
     pos = tl.load(pos_ptr + token_idx)
     min_len = tl.load(min_lens_ptr + req_state_idx)
     if num_stop_token_ids > 0 and pos < min_len:

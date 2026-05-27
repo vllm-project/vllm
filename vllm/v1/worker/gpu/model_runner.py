@@ -93,10 +93,14 @@ from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sample_cudagraph_utils import (
+    RejectionSamplerCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
@@ -234,9 +238,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # For CUDA graphs, and will init cudagraph_manager after init_attn_backend.
+        # For CUDA graphs. cudagraph_manager and rejection_sampler_cudagraph_manager
+        # are initialized after init_attn_backend.
         self.decode_query_len = self.num_speculative_steps + 1
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.rejection_sampler_cudagraph_manager: (
+            RejectionSamplerCudaGraphManager | None
+        ) = None
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
@@ -427,6 +435,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
+        if self.rejection_sampler is not None:
+            self.rejection_sampler_cudagraph_manager = RejectionSamplerCudaGraphManager(
+                vllm_config=self.vllm_config,
+                device=self.device,
+                max_num_reqs=self.max_num_reqs,
+                num_speculative_steps=self.num_speculative_steps,
+            )
 
         check_attention_cp_compatibility(self.vllm_config)
         if self.speculator is not None:
@@ -652,6 +667,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture(captured_attn_states)
+            if self.rejection_sampler is not None:
+                self.capture_rejection_sampler(captured_attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -664,6 +681,86 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cuda_graph_size / (1 << 30),
         )
         return cuda_graph_size
+
+    def capture_rejection_sampler(
+        self,
+        captured_attn_states: dict[BatchExecutionDescriptor, Any],
+    ) -> None:
+        """Capture the rejection-sampler chain (compute_logits → sampling
+        params → rejection_sample → get_num_sampled_and_rejected) as one
+        FULL graph per uniform spec-decode batch descriptor.
+
+        Skipped when not on the last PP rank, when there's no speculator /
+        rejection sampler, or when the model has no FULL captures for us
+        to piggy-back on.
+        """
+        if self.rejection_sampler_cudagraph_manager is None:
+            return
+        assert self.rejection_sampler is not None
+        assert self.speculator is not None
+        assert self.cudagraph_manager is not None
+
+        hidden_states = self.cudagraph_manager.hidden_states
+        if hidden_states is None:
+            # No FULL model capture happened (e.g., PIECEWISE-only mode);
+            # we have nothing to chain onto.
+            return
+
+        def compute_logits_sharded(
+            hidden_states: torch.Tensor,
+        ) -> tuple[torch.Tensor, int | None]:
+            logits = self.model.logits_processor.get_local_logits(
+                self.model.lm_head, hidden_states
+            )
+            return logits, self.model.lm_head.shard_indices.org_vocab_start_index
+
+        def compute_logits_full(
+            hidden_states: torch.Tensor,
+        ) -> tuple[torch.Tensor, int | None]:
+            return self.model.compute_logits(hidden_states), None
+
+        # Capture for the same descriptors the model captured.
+        descs = list(captured_attn_states.keys())
+        self.rejection_sampler_cudagraph_manager.capture(
+            descs=descs,
+            compute_logits_fn=compute_logits_sharded
+            if self.parallel_config.tensor_parallel_size > 1
+            else compute_logits_full,
+            hidden_states=hidden_states,
+            rejection_sampler=self.rejection_sampler,
+            draft_logits=self.speculator.draft_logits,
+            input_buffers=self.input_buffers,
+            req_states=self.req_states,
+        )
+
+    def _can_use_fast_rejection_sampler(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> bool:
+        if (
+            self.rejection_sampler_cudagraph_manager is None
+            or not self.rejection_sampler_cudagraph_manager.has_graph(batch_desc)
+        ):
+            return False
+
+        assert self.sampler is not None
+        sampling_states = self.sampler.sampling_states
+        idx = input_batch.idx_mapping_np
+
+        # The below sampling params are skipped during fast rejection sampling
+        # to achieve optimal performance. We fall back to eager rejection sampling
+        # when any are requested.
+        return (
+            grammar_output is None
+            and sampling_states.max_num_logprobs(idx) == NO_LOGPROBS
+            and self.sampler.logprob_token_ids_state.max_num_token_ids(idx) == 0
+            and not np.any(sampling_states.top_k.np[idx] != sampling_states.vocab_size)
+            and not np.any(sampling_states.top_p.np[idx] != 1.0)
+            and not np.any(self.sampler.penalties_state.use_penalty[idx])
+            and self.sampler.bad_words_state.num_bad_words.np[idx].max() == 0
+        )
 
     def _remove_request(self, req_id: str) -> bool:
         if not self.req_states.remove_request(req_id):
@@ -938,7 +1035,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
+        batch_desc: BatchExecutionDescriptor,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        is_spec_decoding = input_batch.num_draft_tokens > 0
+        # Replay the captured rejection sampler graph when possible, which is faster
+        # than the eager path.
+        if is_spec_decoding and self._can_use_fast_rejection_sampler(
+            batch_desc, input_batch, grammar_output
+        ):
+            assert self.rejection_sampler_cudagraph_manager is not None
+            return self.rejection_sampler_cudagraph_manager.run(batch_desc, input_batch)
+
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
@@ -951,7 +1058,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        if input_batch.num_draft_tokens == 0:
+        if not is_spec_decoding:
             # No draft tokens (common case).
             assert self.sampler is not None
             sampler_output = self.sampler(logits, input_batch)
@@ -1215,6 +1322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             kv_connector_output=kv_connector_output,
+            batch_desc=batch_desc,
         )
 
         if not self.is_last_pp_rank:
@@ -1239,6 +1347,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         kv_connector_output = self.execute_model_state.kv_connector_output
+        batch_desc = self.execute_model_state.batch_desc
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1253,7 +1362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Last rank: sample tokens
         sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
+            hidden_states, input_batch, grammar_output, batch_desc
         )
 
         if self.use_pp:
@@ -1456,3 +1565,4 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
+    batch_desc: BatchExecutionDescriptor
