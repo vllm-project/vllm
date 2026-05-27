@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -9,6 +10,8 @@ use crate::error::ApiError;
 use crate::routes::openai::utils::types::Normalizable;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::{AppState, LoadLoRAError, UnloadLoRAError};
+
+const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
 #[derive(Debug, Deserialize, Validate)]
 pub(crate) struct LoadLoRAAdapterRequest {
@@ -31,6 +34,56 @@ pub(crate) struct UnloadLoRAAdapterRequest {
 
 impl Normalizable for UnloadLoRAAdapterRequest {}
 
+fn runtime_lora_allowed_path_prefixes() -> Option<Vec<PathBuf>> {
+    let prefixes = std::env::var_os(RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV)?;
+    let prefixes: Vec<_> = std::env::split_paths(&prefixes)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    (!prefixes.is_empty()).then_some(prefixes)
+}
+
+fn looks_like_local_lora_path(lora_path: &str) -> bool {
+    let path = Path::new(lora_path);
+    path.is_absolute() || lora_path.starts_with('~') || lora_path.starts_with('.')
+}
+
+fn validate_lora_path_access(
+    lora_path: &str,
+    allowed_prefixes: Option<&[PathBuf]>,
+) -> Result<(), ApiError> {
+    if !looks_like_local_lora_path(lora_path) {
+        return Ok(());
+    }
+
+    let path = Path::new(lora_path);
+    let Some(allowed_prefixes) = allowed_prefixes else {
+        return Err(ApiError::invalid_request(
+            format!(
+                "Local LoRA adapter paths require {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV} to be configured."
+            ),
+            Some("lora_path"),
+        ));
+    };
+
+    if !path.is_absolute() {
+        return Err(ApiError::invalid_request(
+            format!(
+                "Local LoRA adapter paths must be absolute and under one of the prefixes configured by {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV}."
+            ),
+            Some("lora_path"),
+        ));
+    }
+
+    if !allowed_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+        return Err(ApiError::invalid_request(
+            "Local LoRA adapter path is outside the configured allowed prefixes.".to_string(),
+            Some("lora_path"),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Dynamically load one LoRA adapter and expose it as an OpenAI model id.
 pub async fn load_lora_adapter(
     State(state): State<Arc<AppState>>,
@@ -42,6 +95,9 @@ pub async fn load_lora_adapter(
             None,
         ));
     }
+    let allowed_prefixes = runtime_lora_allowed_path_prefixes();
+    validate_lora_path_access(&request.lora_path, allowed_prefixes.as_deref())?;
+
     let lora_name = request.lora_name;
     state
         .load_lora(
@@ -109,4 +165,31 @@ pub async fn unload_lora_adapter(
         "Success: LoRA adapter '{}' removed successfully.",
         lora_request.lora_name
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::validate_lora_path_access;
+
+    #[test]
+    fn lora_path_allows_hf_repo_ids_without_prefixes() {
+        validate_lora_path_access("org/adapter-a", None).expect("hf repo id should be allowed");
+    }
+
+    #[test]
+    fn lora_path_rejects_local_paths_without_prefixes() {
+        assert!(validate_lora_path_access("/tmp/adapter-a", None).is_err());
+        assert!(validate_lora_path_access("./adapter-a", None).is_err());
+        assert!(validate_lora_path_access("~/adapter-a", None).is_err());
+    }
+
+    #[test]
+    fn lora_path_allows_absolute_paths_under_configured_prefixes() {
+        let prefixes = [PathBuf::from("/srv/vllm-loras")];
+        validate_lora_path_access("/srv/vllm-loras/adapter-a", Some(&prefixes))
+            .expect("path under configured prefix should be allowed");
+        assert!(validate_lora_path_access("/tmp/adapter-a", Some(&prefixes)).is_err());
+    }
 }

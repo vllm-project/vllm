@@ -1033,7 +1033,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
             let lora = args[0].as_array().expect("lora request tuple");
             assert_eq!(lora[0], Value::from("adapter-a"));
             assert_eq!(lora[1], Value::from(1));
-            assert_eq!(lora[2], Value::from("/tmp/adapter-a"));
+            assert_eq!(lora[2], Value::from("org/adapter-a"));
 
             send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
 
@@ -1045,7 +1045,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
                 request.lora_request.as_ref().and_then(Value::as_array).expect("lora request");
             assert_eq!(lora[0], Value::from("adapter-a"));
             assert_eq!(lora[1], Value::from(1));
-            assert_eq!(lora[2], Value::from("/tmp/adapter-a"));
+            assert_eq!(lora[2], Value::from("org/adapter-a"));
 
             send_outputs(
                 push,
@@ -1078,7 +1078,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
                 .body(Body::from(
                     json!({
                         "lora_name": "adapter-a",
-                        "lora_path": "/tmp/adapter-a"
+                        "lora_path": "org/adapter-a"
                     })
                     .to_string(),
                 ))
@@ -1173,7 +1173,7 @@ async fn load_lora_adapter_rejects_engine_false_result() {
                 .body(Body::from(
                     json!({
                         "lora_name": "adapter-a",
-                        "lora_path": "/tmp/adapter-a"
+                        "lora_path": "org/adapter-a"
                     })
                     .to_string(),
                 ))
@@ -1210,7 +1210,7 @@ async fn load_lora_adapter_rejects_base_model_name_collision() {
                 .body(Body::from(
                     json!({
                         "lora_name": "Qwen/Qwen1.5-0.5B-Chat",
-                        "lora_path": "/tmp/adapter-a"
+                        "lora_path": "org/adapter-a"
                     })
                     .to_string(),
                 ))
