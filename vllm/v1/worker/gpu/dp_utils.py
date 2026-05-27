@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
+
 import torch
 import torch.distributed as dist
 
@@ -21,6 +23,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -69,8 +72,16 @@ def sync_cudagraph_and_dp_padding(
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs
+    # Preserve the DP-wide downgrade when redispatching with synced padding.
+    synced_invalid_modes = invalid_modes
+    if synced_cg_mode != CUDAGraphMode.FULL:
+        synced_invalid_modes = set(synced_invalid_modes or ())
+        synced_invalid_modes.add(CUDAGraphMode.FULL)
     synced_desc = cudagraph_manager.dispatch(
-        num_reqs, synced_num_tokens, synced_uniform_token_count
+        num_reqs,
+        synced_num_tokens,
+        synced_uniform_token_count,
+        invalid_modes=synced_invalid_modes,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -87,6 +98,7 @@ def dispatch_cg_and_sync_dp(
     dp_size: int,
     dp_rank: int,
     need_eager: bool = False,
+    invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -100,7 +112,10 @@ def dispatch_cg_and_sync_dp(
             "where need_eager must be True"
         )
         batch_desc = cudagraph_manager.dispatch(
-            num_reqs, num_tokens, uniform_token_count
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            invalid_modes=invalid_modes,
         )
 
     if dp_size == 1:
@@ -114,4 +129,5 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
+        invalid_modes=invalid_modes,
     )

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -258,10 +259,16 @@ class CudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         uniform_token_count: int | None,
+        invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
     ) -> BatchExecutionDescriptor:
-        """Find matching cudagraph descriptor from priority-ordered candidates."""
+        """Find matching cudagraph descriptor from priority-ordered candidates.
+
+        invalid_modes optionally excludes runtime modes for the current batch.
+        """
         if self._graphs_captured and 0 < num_tokens < len(self._candidates):
             for desc in self._candidates[num_tokens]:
+                if invalid_modes and desc.cg_mode in invalid_modes:
+                    continue
                 if _is_compatible(desc, num_reqs, num_tokens, uniform_token_count):
                     return desc
         return BatchExecutionDescriptor(

@@ -533,6 +533,12 @@ class EagleSpeculator:
             input_batch.num_tokens,
             max_query_len,
         )
+        # EAGLE draft prefill FULL CUDA graph replay does not update per-batch
+        # multimodal embeddings/masks. For live multimodal batches, disable
+        # only FULL and fall back to PIECEWISE/eager, where mm_inputs are
+        # passed through self.prefill(...). Do not use self.supports_mm_inputs:
+        # MM-capable models may still serve text-only batches.
+        prefill_invalid_modes = _get_prefill_invalid_cudagraph_modes(mm_inputs)
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -541,6 +547,7 @@ class EagleSpeculator:
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            invalid_modes=prefill_invalid_modes,
         )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -596,6 +603,18 @@ class EagleSpeculator:
         )
 
         return self.draft_tokens[:num_reqs]
+
+
+def _has_live_mm_inputs(
+    mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+) -> bool:
+    return mm_inputs is not None and len(mm_inputs[0]) > 0
+
+
+def _get_prefill_invalid_cudagraph_modes(
+    mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+) -> set[CUDAGraphMode] | None:
+    return {CUDAGraphMode.FULL} if _has_live_mm_inputs(mm_inputs) else None
 
 
 @triton.jit
