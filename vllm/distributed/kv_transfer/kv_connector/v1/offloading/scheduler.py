@@ -92,6 +92,7 @@ class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     block_size_factor: int
     num_workers: int
+    offload_decode_blocks: bool
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
@@ -154,6 +155,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
             block_size_factor=spec.block_size_factor,
+            offload_decode_blocks=spec.offload_decode_blocks,
         )
 
 
@@ -683,6 +685,15 @@ class OffloadingConnectorScheduler:
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
             # with async scheduling, some tokens may be missing
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
+
+            # Skip decode-phase blocks: clamp to the prompt length so only
+            # prefill (prompt) blocks become eligible for store. next_stored_idx
+            # never advances past this boundary, so decode blocks are never
+            # queued in this or any later step.
+            if not self.config.offload_decode_blocks:
+                num_offloadable_tokens = min(
+                    num_offloadable_tokens, req.num_prompt_tokens
+                )
 
             # Filter out blocks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.

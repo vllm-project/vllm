@@ -343,6 +343,14 @@ class OffloadingSpec(ABC):
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
 
+        # When False, decode-phase blocks (KV generated after the prompt) are not
+        # offloaded GPU->CPU; only prompt (prefill) blocks are. Useful when prior
+        # turns' generated tokens are dropped before the next turn (e.g. reasoning
+        # models that strip thinking).
+        self.offload_decode_blocks: bool = bool(
+            self.extra_config.get("offload_decode_blocks", True)
+        )
+
         parallel_config = vllm_config.parallel_config
         context_parallel_factor = (
             parallel_config.decode_context_parallel_size
