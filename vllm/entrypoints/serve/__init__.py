@@ -34,6 +34,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_sleep_router(app)
 
+    from vllm.entrypoints.serve.flash_epscale.api_router import (
+        attach_router as attach_flash_epscale_router,
+    )
+
+    attach_flash_epscale_router(app)
+
     from vllm.entrypoints.serve.rpc.api_router import (
         attach_router as attach_rpc_router,
     )

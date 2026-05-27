@@ -51,10 +51,10 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
+    _map_new_expert_indices_with_rank_mapping,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
-
 logger = init_logger(__name__)
 
 
@@ -85,6 +85,16 @@ class EplbStats:
     """
     Number of GPUs.
     """
+
+@dataclass
+class EplbLogicalSleepState:
+    """Saved EPLB metadata while one or more suffix EP ranks are logically idle."""
+
+    rank_mapping: dict[int, int]
+    num_valid_physical_experts: int
+    saved_physical_to_logical_map: dict[str, torch.Tensor]
+    saved_logical_to_physical_map: dict[str, torch.Tensor]
+    saved_logical_replica_count: dict[str, torch.Tensor]
 
 
 @dataclass
@@ -278,6 +288,7 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
+        self.logical_sleep_state: EplbLogicalSleepState | None = None
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -654,10 +665,189 @@ class EplbState:
         for ls in layer_states:
             ls.should_record_tensor = self.should_record_tensor
 
+    @staticmethod
+    def build_logical_sleep_rank_mapping(
+        ep_size: int,
+        sleeping_ranks: Sequence[int],
+    ) -> dict[int, int]:
+        """Build a suffix-only rank mapping for logical sleep."""
+        if ep_size <= 0:
+            raise ValueError("ep_size must be positive")
+
+        unique_ranks = sorted({int(rank) for rank in sleeping_ranks})
+        if not unique_ranks:
+            raise ValueError("sleeping_ranks must not be empty")
+        if unique_ranks[0] < 0 or unique_ranks[-1] >= ep_size:
+            raise ValueError(
+                f"sleeping_ranks must be in [0, {ep_size}), got {unique_ranks}"
+            )
+        if len(unique_ranks) >= ep_size:
+            raise ValueError("logical sleep requires at least one active EP rank")
+
+        active_rank_count = ep_size - len(unique_ranks)
+        expected_suffix = list(range(active_rank_count, ep_size))
+        if unique_ranks != expected_suffix:
+            raise ValueError(
+                "Logical sleep without rebuilding groups only supports "
+                f"sleeping a suffix of EP ranks; expected {expected_suffix}, "
+                f"got {unique_ranks}"
+            )
+
+        return {
+            rank: rank if rank < active_rank_count else -1 for rank in range(ep_size)
+        }
+    def is_logical_sleep_active(self) -> bool:
+        return self.logical_sleep_state is not None
+    
+    def resize_logical_sleep(self, sleeping_ranks: Sequence[int]) -> None:
+        """Transition directly between logical-sleep suffix states.
+
+        This keeps the original pre-sleep snapshot intact for a later full
+        restore, but updates the current logical sleep mapping in-place.
+        """
+        torch.accelerator.synchronize()
+        if self.logical_sleep_state is None:
+            raise RuntimeError("logical sleep is not active")
+        if not self.model_states:
+            raise RuntimeError("logical sleep requires EPLB-managed MoE models")
+
+        ep_group = get_ep_group().device_group
+        target_rank_mapping = self.build_logical_sleep_rank_mapping(
+            ep_group.size(), sleeping_ranks
+        )
+
+        if target_rank_mapping == self.logical_sleep_state.rank_mapping:
+            return
+
+        active_physical_experts = self._validate_logical_sleep_capacity(
+            ep_group, target_rank_mapping
+        )
+        self._apply_logical_sleep_mapping(
+            target_rank_mapping, active_physical_experts
+        )
+        self.logical_sleep_state.rank_mapping = target_rank_mapping
+
+    def _validate_logical_sleep_capacity(
+        self,
+        ep_group: ProcessGroup,
+        rank_mapping: dict[int, int],
+    ) -> int:
+        active_rank_count = sum(new_rank != -1 for new_rank in rank_mapping.values())
+        model_state = next(iter(self.model_states.values()))
+        num_local_physical_experts = (
+            model_state.expert_load_pass.shape[1] // ep_group.size()
+        )
+        active_physical_experts = active_rank_count * num_local_physical_experts
+        num_logical_experts = model_state.logical_replica_count.shape[1]
+        if active_physical_experts < num_logical_experts:
+            raise ValueError(
+                "logical sleep would leave too few active physical expert slots: "
+                f"{active_physical_experts} active slots for "
+                f"{num_logical_experts} logical experts"
+            )
+        return active_physical_experts
+
+    def _apply_logical_sleep_mapping(
+        self,
+        rank_mapping: dict[int, int],
+        active_physical_experts: int,
+    ) -> None:
+        is_async_enabled = self.is_async
+        self.is_async = False
+        try:
+            self.rearrange(
+                rank_mapping=rank_mapping,
+                preserve_world_size=True,
+            )
+            self.num_valid_physical_experts = active_physical_experts
+            self.expert_rearrangement_step = 0
+            for state in self.model_states.values():
+                state.expert_load_pass[:, active_physical_experts:].zero_()
+                state.expert_load_window[:, :, active_physical_experts:].zero_()
+        finally:
+            self.is_async = is_async_enabled
+
+    def prepare_logical_sleep(self, sleeping_ranks: Sequence[int]) -> None:
+        """Move experts away from suffix EP ranks without rebuilding process groups."""
+        if self.logical_sleep_state is not None:
+            raise RuntimeError("logical sleep is already active")
+        if not self.model_states:
+            raise RuntimeError("logical sleep requires EPLB-managed MoE models")
+
+        ep_group = get_ep_group().device_group
+        rank_mapping = self.build_logical_sleep_rank_mapping(
+            ep_group.size(), sleeping_ranks
+        )
+        active_physical_experts = self._validate_logical_sleep_capacity(
+            ep_group, rank_mapping
+        )
+
+        self.logical_sleep_state = EplbLogicalSleepState(
+            rank_mapping=rank_mapping,
+            num_valid_physical_experts=self.num_valid_physical_experts,
+            saved_physical_to_logical_map={
+                model_hash: state.physical_to_logical_map.clone()
+                for model_hash, state in self.model_states.items()
+            },
+            saved_logical_to_physical_map={
+                model_hash: state.logical_to_physical_map.clone()
+                for model_hash, state in self.model_states.items()
+            },
+            saved_logical_replica_count={
+                model_hash: state.logical_replica_count.clone()
+                for model_hash, state in self.model_states.items()
+            },
+        )
+
+        try:
+            self._apply_logical_sleep_mapping(rank_mapping, active_physical_experts)
+        except Exception:
+            self.logical_sleep_state = None
+            raise
+
+    def restore_logical_sleep(self) -> None:
+        """Restore the pre-sleep EPLB mappings after logically sleeping ranks wake."""
+        if self.logical_sleep_state is None:
+            return
+
+        ep_group = get_ep_group().device_group
+        is_async_enabled = self.is_async
+        self.is_async = False
+        try:
+            for model_hash, state in self.model_states.items():
+                saved_physical_to_logical_map = (
+                    self.logical_sleep_state.saved_physical_to_logical_map[model_hash]
+                )
+                rearrange_expert_weights_inplace(
+                    state.physical_to_logical_map,
+                    saved_physical_to_logical_map,
+                    state.model.expert_weights,
+                    ep_group,
+                    state.communicator,
+                    False,
+                    None,
+                )
+                state.physical_to_logical_map.copy_(saved_physical_to_logical_map)
+                state.logical_to_physical_map.copy_(
+                    self.logical_sleep_state.saved_logical_to_physical_map[model_hash]
+                )
+                state.logical_replica_count.copy_(
+                    self.logical_sleep_state.saved_logical_replica_count[model_hash]
+                )
+
+            self.num_valid_physical_experts = (
+                self.logical_sleep_state.num_valid_physical_experts
+            )
+            self.expert_rearrangement_step = 0
+            self.logical_sleep_state = None
+        finally:
+            self.is_async = is_async_enabled
+
     def rearrange(
         self,
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
+        preserve_world_size: bool = False,
     ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
@@ -690,28 +880,46 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            expert_load_window_cpu = (
+                eplb_model_state.expert_load_window[
+                    :, :, : self.num_valid_physical_experts
+                ]
+                .detach()
+                .cpu()
+            )
+            physical_to_logical_map = (
+                eplb_model_state.physical_to_logical_map[
+                    :, : self.num_valid_physical_experts
+                ]
+                .detach()
+                .cpu()
+            )
+            valid_expert_mask = (
+                (physical_to_logical_map >= 0)
+                & (physical_to_logical_map < eplb_model_state.model.num_logical_experts)
+            )
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 eplb_model_state.model.num_logical_experts,
-                dtype=eplb_model_state.expert_load_window.dtype,
-                device=eplb_model_state.expert_load_window.device,
+                dtype=expert_load_window_cpu.dtype,
+                device="cpu",
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=physical_to_logical_map.clamp(
+                    min=0,
+                    max=eplb_model_state.model.num_logical_experts - 1,
+                )
                 .unsqueeze(0)
-                .expand_as(expert_load_window)
+                .expand_as(expert_load_window_cpu)
                 .long(),
-                src=expert_load_window,
+                src=expert_load_window_cpu * valid_expert_mask.unsqueeze(0),
             )
 
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            global_expert_load_window = logical_expert_load_window.sum(dim=0).to(
+                eplb_model_state.expert_load_window.device
+            )
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
@@ -727,9 +935,14 @@ class EplbState:
             # remaining GPUs, transfer the experts while we haven't shutdown
             # the GPUs to be released.
             coordinator = get_ep_group()
-            assert isinstance(coordinator, StatelessGroupCoordinator)
-            tcp_store_group = coordinator.tcp_store_group
-            num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
+            # assert isinstance(coordinator, StatelessGroupCoordinator)
+            # tcp_store_group = coordinator.tcp_store_group
+            # num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
+            if isinstance(coordinator, StatelessGroupCoordinator):
+                tcp_store_group = coordinator.tcp_store_group
+                num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
+            else:
+                num_nodes = get_node_count()
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
             num_replicas = (
                 num_replicas // ep_group.size() * num_gpus
@@ -761,6 +974,19 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map.cpu(),
                 )
 
+                stored_physical_to_logical_map = new_physical_to_logical_map
+                if (
+                    preserve_world_size
+                    and rank_mapping is not None
+                    and len(rank_mapping) == ep_group.size()
+                ):
+                    stored_physical_to_logical_map = (
+                        _map_new_expert_indices_with_rank_mapping(
+                            new_physical_to_logical_map,
+                            rank_mapping,
+                        )
+                    )
+
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
@@ -775,7 +1001,7 @@ class EplbState:
                 if not is_profile:
                     _commit_eplb_maps(
                         eplb_model_state,
-                        new_physical_to_logical_map=new_physical_to_logical_map,
+                        new_physical_to_logical_map=stored_physical_to_logical_map,
                     )
 
                 if is_main_rank:

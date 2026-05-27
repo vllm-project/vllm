@@ -45,6 +45,8 @@ logger = init_logger(__name__)
 ncclResult_t = ctypes.c_int
 ncclComm_t = ctypes.c_void_p
 ncclWindow_t = ctypes.c_void_p
+ncclConfig_t = ctypes.c_void_p
+NCCL_SPLIT_NOCOLOR = -1
 
 
 class ncclUniqueId(ctypes.Structure):
@@ -160,6 +162,32 @@ class NCCLLibrary:
             "ncclCommInitRank",
             ncclResult_t,
             [ctypes.POINTER(ncclComm_t), ctypes.c_int, ncclUniqueId, ctypes.c_int],
+        ),
+        # ncclResult_t ncclCommSplit(
+        #   ncclComm_t comm, int color, int key,
+        #   ncclComm_t* newcomm, ncclConfig_t* config);
+        Function(
+            "ncclCommSplit",
+            ncclResult_t,
+            [
+                ncclComm_t,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(ncclComm_t),
+                ncclConfig_t,
+            ],
+        ),
+        # ncclResult_t ncclCommCount(ncclComm_t comm, int* count);
+        Function(
+            "ncclCommCount",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ctypes.c_int)],
+        ),
+        # ncclResult_t ncclCommUserRank(ncclComm_t comm, int* rank);
+        Function(
+            "ncclCommUserRank",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ctypes.c_int)],
         ),
         # ncclResult_t  ncclAllReduce(
         #   const void* sendbuff, void* recvbuff, size_t count,
@@ -358,6 +386,14 @@ class NCCLLibrary:
                     f.argtypes = func.argtypes
                     _funcs[func.name] = f
                 except AttributeError:
+                    if func.name == "ncclCommSplit":
+                        logger.warning_once(
+                            "The symbol ncclCommSplit is not found in the NCCL "
+                            "library %s. PyNcclCommunicator.split() will be "
+                            "unavailable.",
+                            so_file,
+                        )
+                        continue
                     if func.name in [
                         "ncclCommWindowRegister",
                         "ncclCommWindowDeregister",
@@ -425,6 +461,29 @@ class NCCLLibrary:
             )
         )
         return comm
+
+    def ncclCommSplit(
+        self, comm: ncclComm_t, color: int, key: int
+    ) -> ncclComm_t | None:
+        if "ncclCommSplit" not in self._funcs:
+            raise RuntimeError("ncclCommSplit is not available in this NCCL library")
+        newcomm = ncclComm_t()
+        self.NCCL_CHECK(
+            self._funcs["ncclCommSplit"](
+                comm, color, key, ctypes.byref(newcomm), ncclConfig_t()
+            )
+        )
+        return newcomm if newcomm.value else None
+
+    def ncclCommCount(self, comm: ncclComm_t) -> int:
+        count = ctypes.c_int()
+        self.NCCL_CHECK(self._funcs["ncclCommCount"](comm, ctypes.byref(count)))
+        return count.value
+
+    def ncclCommUserRank(self, comm: ncclComm_t) -> int:
+        rank = ctypes.c_int()
+        self.NCCL_CHECK(self._funcs["ncclCommUserRank"](comm, ctypes.byref(rank)))
+        return rank.value
 
     def ncclAllReduce(
         self,
@@ -584,6 +643,7 @@ __all__ = [
     "ncclRedOpTypeEnum",
     "ncclUniqueId",
     "ncclComm_t",
+    "NCCL_SPLIT_NOCOLOR",
     "cudaStream_t",
     "buffer_type",
 ]

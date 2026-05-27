@@ -975,6 +975,16 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
+    def set_active_data_parallel_size(self, active_data_parallel_size: int) -> None:
+        self.engine_core.set_active_data_parallel_size(active_data_parallel_size)
+
+    async def wait_for_dp_ranks_to_drain(
+        self,
+        dp_ranks: list[int],
+        timeout: float = 300,
+    ) -> None:
+        await self.engine_core.wait_for_dp_ranks_to_drain(dp_ranks, timeout)
+
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()

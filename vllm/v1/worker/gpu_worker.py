@@ -154,7 +154,7 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1,tags: list[str] | None = None) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -166,8 +166,10 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
+        self.model_runner.skip_dummy_model_forward = True
+
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        allocator.sleep(offload_tags=tags if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -192,8 +194,15 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        self.model_runner.skip_dummy_model_forward = False
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        self.model_runner.resize_sleep_ep_ranks(sleeping_ep_ranks)
+
+    def get_ep_sleep_state(self) -> dict[str, object]:
+        return self.model_runner.get_ep_sleep_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if not self.vllm_config.model_config.enable_cumem_allocator:
@@ -340,6 +349,35 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+    def sleep_ep_ranks_by_tags(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return
+
+        selected_tags = tuple(dict.fromkeys(tags))
+        if not selected_tags:
+            raise ValueError("tags must not be empty")
+
+        self.sleep(
+            level=level,
+            tags = selected_tags
+        )
+
+    def wake_up_ep_ranks(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str] | None = None,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+        if get_ep_group().rank in sleeping_ep_ranks:
+            self.wake_up(tags=tags)
+            self._skip_dummy_batch = False
+            self._sync_only_sleep_active = False
 
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(

@@ -5,6 +5,7 @@ import time
 import weakref
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, TypeAlias
+from collections.abc import Sequence
 
 import torch.distributed
 

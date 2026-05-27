@@ -382,6 +382,33 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             active_ep_size=self.world_size,
         )
 
+    def set_masked_ranks(self, masked_ranks: list[int]) -> None:
+        """Update the shared NIXL shrink mask without changing process groups.
+
+        This is a control-plane operation for logical sleep / fast elasticity:
+        all ranks remain connected, but dispatch/combine skip the masked peers.
+        """
+        with NixlEPAll2AllManager._lock:
+            if NixlEPAll2AllManager._buffer is None:
+                raise RuntimeError("NIXL EP buffer is not initialized")
+
+            state = NixlEPAll2AllManager._buffer
+            masked = {int(rank) for rank in masked_ranks}
+            world_size = self.world_size
+            invalid = sorted(rank for rank in masked if rank < 0 or rank >= world_size)
+            if invalid:
+                raise ValueError(
+                    f"masked_ranks must be in [0, {world_size}), got {invalid}"
+                )
+
+            for rank in range(world_size):
+                state.buffer.update_mask_buffer(rank, rank in masked)
+            state.active_ep_size = world_size - len(masked)
+
+            # Control-plane operation: make the updated peer mask visible before
+            # the sleep / wake API returns and new requests enter the model path.
+            torch.cuda.current_stream().synchronize()
+
     def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
         assert NixlEPAll2AllManager._buffer is not None
         state = NixlEPAll2AllManager._buffer
