@@ -1151,6 +1151,77 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
+    def _is_glmga_model(processor: object) -> bool:
+        """Detect GLMGA variant via its Glmga sub-processors."""
+        for attr in ("image_processor", "video_processor"):
+            sub = getattr(processor, attr, None)
+            if sub and "Glmga" in type(sub).__name__:
+                return True
+        return False
+
+    def _get_video_second_idx_glmga(
+        self, metadata: dict[str, Any], total_frames: int
+    ) -> list[int]:
+        """Fixed fps=2 frame selection matching GlmgaVideoProcessor.sample_frames."""
+        video_processor = self.get_video_processor()
+
+        video_fps = metadata["fps"]
+        meta_frames = metadata.get("total_num_frames", total_frames)
+        max_frame_idx = meta_frames - 1
+        duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
+
+        do_sample_frames = metadata.get("do_sample_frames", True)
+        if not do_sample_frames:
+            frame_indices = metadata["frames_indices"]
+        else:
+            target_fps = 2
+            max_frames = getattr(video_processor, "max_frames", 640)
+            extract_t = int(duration * target_fps)
+            extract_t = min(extract_t, max_frames)
+
+            duration_per_frame = 1 / video_fps
+            timestamps = [i * duration_per_frame for i in range(meta_frames)]
+
+            if meta_frames < extract_t:
+                frame_indices = [
+                    math.floor(i * meta_frames / extract_t) for i in range(extract_t)
+                ]
+            else:
+                frame_indices = []
+                current_second = 0.0
+                inv_fps = 1 / target_fps
+                for frame_index in range(meta_frames):
+                    if timestamps[frame_index] >= current_second:
+                        current_second += inv_fps
+                        frame_indices.append(frame_index)
+                        if current_second >= duration - inv_fps:
+                            break
+
+            if len(frame_indices) < extract_t:
+                if len(frame_indices) == 0:
+                    start, end = 0, max(meta_frames - 1, 0)
+                else:
+                    start, end = frame_indices[0], frame_indices[-1]
+                frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+            elif len(frame_indices) > extract_t:
+                frame_indices = np.linspace(
+                    0, meta_frames - 1, extract_t, dtype=int
+                ).tolist()
+
+        seen, uniq = set(), []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        if len(uniq) & 1:
+            uniq.append(uniq[-1])
+
+        frame_indices = uniq
+        full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
+        timestamps_list = full_second_idxs[::2]
+        return list(timestamps_list)
+
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
@@ -1169,11 +1240,13 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         merge_length = image_processor.merge_size**2
 
         assert isinstance(grid_thw, torch.Tensor)
-        timestamps = (
-            self._get_video_second_idx_glm4v(metadata, len(video_array))
-            if isinstance(hf_processor, Glm4vProcessor)
-            else self._get_video_second_idx_glm46v(metadata, len(video_array))
-        )
+
+        if isinstance(hf_processor, Glm4vProcessor):
+            timestamps = self._get_video_second_idx_glm4v(metadata, len(video_array))
+        elif self._is_glmga_model(hf_processor):
+            timestamps = self._get_video_second_idx_glmga(metadata, len(video_array))
+        else:
+            timestamps = self._get_video_second_idx_glm46v(metadata, len(video_array))
 
         timestamp_format = (
             "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
