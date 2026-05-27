@@ -43,6 +43,12 @@ from typing import Iterable
 logger = logging.getLogger("vllm.apex")
 
 _ENABLED = os.environ.get("VLLM_APEX_HINTS", "0") == "1"
+# When VLLM_APEX_USE_CUSTOM_OP=1, route hint emission through a
+# ``torch.library.custom_op`` instead of calling ``_emit_next_layer_hint``
+# directly from the forward hook. The custom op is opaque to torch.compile,
+# which lets the hook body stay traceable in vLLM's fullgraph mode.
+# Default off so the green --enforce-eager path stays the safe default.
+_USE_CUSTOM_OP = os.environ.get("VLLM_APEX_USE_CUSTOM_OP", "0") == "1"
 _lib: ctypes.CDLL | None = None
 _init_lock = threading.Lock()
 _init_done = False
@@ -594,38 +600,44 @@ _emit_log_counter = [0]
 def _on_experts_forward(module, args, kwargs, output):
     """Forward hook fired AFTER ``module.forward`` returns.
 
-    Registered on each FusedMoE submodule (``self.experts``) inside a
-    DeepseekV2MoE. PyTorch invokes forward hooks from ``nn.Module.__call__``
-    *outside* the torch.compile'd graph — that's the whole point of using
-    a hook here instead of monkey-patching ``forward``: torch.compile in
-    vLLM's fullgraph mode can't trace through our ctypes-based emit code.
+    Two emission paths:
 
-    The hook reads ``router_logits`` from the call args/kwargs and emits
-    an ExpertPrefetch hint for the parent layer's *next* MoE layer.
+    * **Direct (default)** — call :func:`_emit_next_layer_hint` from
+      pure Python. Requires ``--enforce-eager`` because vLLM's fullgraph
+      ``torch.compile`` mode inlines this hook into the traced graph
+      and refuses ctypes calls.
+    * **Custom-op (`VLLM_APEX_USE_CUSTOM_OP=1`)** — dispatch through
+      ``torch.ops.apex.hint_experts_for_next_layer``, which Dynamo
+      treats as opaque so compile-mode runs don't blow up.
+
+    Either way the hook body itself is small and uses only attributes
+    stamped at init time, so it stays Dynamo-traceable.
     """
     if not enabled():
         return
-    parent_ref = getattr(module, "_apex_parent_moe_ref", None)
-    parent = parent_ref() if parent_ref is not None else None
-    if parent is None:
+    layer_idx = getattr(module, "_apex_layer_idx", -1)
+    top_k = getattr(module, "_apex_topk", 0)
+    n_experts = getattr(module, "_apex_n_routed_experts", 0)
+    if layer_idx < 0 or n_experts <= 0:
         return
-    try:
-        rl = kwargs.get("router_logits") if kwargs else None
-        if rl is None and len(args) >= 2:
-            rl = args[1]
-        if rl is None:
-            return
-        _emit_next_layer_hint(parent, rl)
-        if _emit_log_counter[0] < 1:
-            _emit_log_counter[0] += 1
-            logger.info(
-                "apex: DeepseekV2MoE experts forward-hook fired "
-                "(layer=%d, router_logits.shape=%s)",
-                getattr(parent, "_apex_layer_idx", -1),
-                tuple(rl.shape) if hasattr(rl, "shape") else "?",
-            )
-    except Exception:
-        _stats["errors"] += 1
+    rl = kwargs.get("router_logits") if kwargs else None
+    if rl is None and len(args) >= 2:
+        rl = args[1]
+    if rl is None:
+        return
+    # No try/except, no logger.info — both confuse Dynamo. Errors are
+    # caught & counted inside _do_emit_next_layer_hint / the custom op
+    # implementation. The "hook fired" debug message is emitted from
+    # _do_emit_next_layer_hint on its first call instead.
+    if _USE_CUSTOM_OP and _custom_op_registered:
+        import torch as _torch
+        _torch.ops.apex.hint_experts_for_next_layer(
+            rl, int(layer_idx), int(top_k), int(n_experts)
+        )
+    else:
+        _do_emit_next_layer_hint(
+            rl, int(layer_idx), int(top_k), int(n_experts)
+        )
 
 
 def _hook_deepseek_v2_moe() -> bool:
@@ -663,12 +675,16 @@ def _hook_deepseek_v2_moe() -> bool:
             )
             experts = getattr(self, "experts", None)
             if experts is not None:
-                # Use a weakref so we don't create a circular reference in
-                # nn.Module._modules. Storing the parent directly would cause
-                # nn.Module.__setattr__ to register it as a submodule, which
-                # makes ``model.children()`` / ``model.train()`` recurse
-                # infinitely (the parent owns experts, experts now point
-                # back at the parent → cycle → RecursionError on .eval()).
+                # Stamp the per-layer APEX metadata directly on the experts
+                # module. Plain ints / dead weakrefs don't trip
+                # ``nn.Module.__setattr__``'s submodule auto-registration,
+                # so we don't introduce a cycle in ``_modules`` (which would
+                # blow the stack on ``model.eval()`` → recursive ``.train()``).
+                experts._apex_layer_idx = self._apex_layer_idx
+                experts._apex_topk = self._apex_topk
+                experts._apex_n_routed_experts = self._apex_n_routed_experts
+                # Keep the weakref too in case external callers want to walk
+                # back from experts → parent MoE.
                 experts._apex_parent_moe_ref = weakref.ref(self)
                 try:
                     experts.register_forward_hook(
@@ -699,37 +715,127 @@ def _emit_next_layer_hint(self, router_logits) -> None:
     function never executes inside a compiled graph and is free to call
     into ctypes / Python heap allocations.
     """
+    topk_attr = int(getattr(self, "_apex_topk", 8) or 8)
+    n_experts = int(
+        getattr(self, "_apex_n_routed_experts", 0)
+        or getattr(self, "n_routed_experts", 0)
+        or 0
+    )
+    layer_idx = int(getattr(self, "_apex_layer_idx", 0) or 0)
+    _do_emit_next_layer_hint(router_logits, layer_idx, topk_attr, n_experts)
+
+
+def _do_emit_next_layer_hint(
+    router_logits, layer_idx: int, top_k: int, n_experts: int
+) -> None:
+    """Pure-function form of :func:`_emit_next_layer_hint` — takes the
+    per-instance metadata as explicit args so it can be wrapped by a
+    ``torch.library.custom_op`` (which only accepts plain tensors and
+    primitive types in its signature).
+    """
+    if _emit_log_counter[0] < 1:
+        _emit_log_counter[0] += 1
+        try:
+            logger.info(
+                "apex: experts forward-hook fired (layer=%d, top_k=%d, "
+                "n_experts=%d, custom_op=%s)",
+                int(layer_idx), int(top_k), int(n_experts),
+                bool(_USE_CUSTOM_OP and _custom_op_registered),
+            )
+        except Exception:
+            pass
     try:
         import torch
 
-        if router_logits is None or router_logits.dim() != 2:
+        if router_logits is None or router_logits.dim() != 2 or n_experts <= 0:
             return
         if router_logits.shape[0] > 32:
             router_logits = router_logits[-32:]
         avg_logits = router_logits.mean(dim=0)
-        topk_attr = int(getattr(self, "_apex_topk", 8) or 8)
-        k = min(topk_attr, avg_logits.numel())
+        k = min(top_k, avg_logits.numel())
         if k <= 0:
             return
         _, top_ids = torch.topk(avg_logits, k)
         local_ids = top_ids.tolist()
 
-        n_experts = int(
-            getattr(self, "_apex_n_routed_experts", 0)
-            or getattr(self, "n_routed_experts", 0)
-            or 0
-        )
-        if n_experts <= 0:
-            return
-        next_layer = int(getattr(self, "_apex_layer_idx", 0) or 0) + 1
+        next_layer = layer_idx + 1
         global_ids: list[int] = []
         for eid in local_ids:
             base = encode_expert_id(next_layer, int(eid), n_experts)
             global_ids.append(base)
             global_ids.append(base + 1)
-        prefetch_experts(global_ids, top_k=topk_attr)
-    except Exception:
+        prefetch_experts(global_ids, top_k=top_k)
+    except Exception as exc:
         _stats["errors"] += 1
+        if _stats["errors"] == 1:
+            try:
+                logger.warning("apex: first emit error (%s): %r", type(exc).__name__, exc)
+            except Exception:
+                pass
+
+
+# Lazy-registered ``torch.library`` custom op. Wraps the side-effect-only
+# emit path so torch.compile can see it as an opaque call (Dynamo never
+# tries to trace into a registered custom op). Enabled by
+# ``VLLM_APEX_USE_CUSTOM_OP=1``; otherwise we fall back to the direct
+# Python call which only works with ``--enforce-eager``.
+_custom_op_registered = False
+_apex_lib = None  # type: ignore[var-annotated]
+
+
+def _register_custom_op() -> bool:
+    """Register ``torch.ops.apex.hint_experts_for_next_layer`` if torch
+    is importable. Idempotent; safe to call before any forward."""
+    global _custom_op_registered, _apex_lib
+    if _custom_op_registered:
+        return True
+    try:
+        import torch
+        # Use the low-level Library API — it lets us declare a side-effect
+        # op with a void return type, which ``torch.library.custom_op`` (the
+        # high-level decorator) does not directly support.
+        _apex_lib = torch.library.Library("apex", "FRAGMENT")
+        # The (a!) annotation on router_logits declares "this op may mutate
+        # its first argument". The op doesn't actually mutate anything, but
+        # the declaration is what stops Inductor from dead-code-eliminating
+        # the call (a void-return op with no declared side effects is
+        # treated as pure and DCE'd, which would defeat the whole point).
+        _apex_lib.define(
+            "hint_experts_for_next_layer("
+            "Tensor(a!) router_logits, int layer_idx, int top_k, int n_experts"
+            ") -> ()"
+        )
+
+        def _impl(router_logits, layer_idx, top_k, n_experts):
+            _do_emit_next_layer_hint(
+                router_logits, int(layer_idx), int(top_k), int(n_experts)
+            )
+
+        def _meta_impl(router_logits, layer_idx, top_k, n_experts):
+            # FakeTensor / meta-device pass executed by Dynamo during
+            # tracing. We must NOT call .tolist() / .topk() on the input
+            # here because it carries no data. The op has no return value,
+            # so doing nothing is correct.
+            return
+
+        # Real impl: runs on CUDA *and* CPU. We don't bother with a CUDA
+        # kernel — the .tolist() inside _do_emit_next_layer_hint moves
+        # data to CPU explicitly.
+        _apex_lib.impl(
+            "hint_experts_for_next_layer", _impl, "CUDA"
+        )
+        _apex_lib.impl(
+            "hint_experts_for_next_layer", _impl, "CPU"
+        )
+        _apex_lib.impl(
+            "hint_experts_for_next_layer", _meta_impl, "Meta"
+        )
+        _custom_op_registered = True
+        logger.info("apex: torch.ops.apex.hint_experts_for_next_layer registered")
+        return True
+    except Exception as exc:
+        logger.warning("apex: custom op registration failed (%s)", exc)
+        return False
 
 
 def install_hooks() -> bool:
@@ -747,6 +853,9 @@ def install_hooks() -> bool:
         # skip the hook installation in that case so vanilla vLLM is
         # bit-for-bit identical to upstream.
         return False
+
+    if _USE_CUSTOM_OP:
+        _register_custom_op()
 
     any_installed = False
     try:
