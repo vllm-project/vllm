@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -1880,10 +1880,8 @@ class GPUModelRunner(
         for weight_group in model.expert_weights:
             for weight in weight_group:
                 expert_ptrs.add(weight.data_ptr())
-                try:
+                with suppress(RuntimeError):
                     expert_ptrs.add(weight.untyped_storage().data_ptr())
-                except RuntimeError:
-                    pass
 
         allocator.retag_allocations_by_ptrs(expert_ptrs, "expert_weights")
 
@@ -5471,22 +5469,31 @@ class GPUModelRunner(
             self._sync_device()
 
         return prompt_logprobs_dict
-    
+
     def _update_nixl_ep_sleep_mask(self, sleeping_ep_ranks: Sequence[int]) -> None:
         from vllm.distributed.parallel_state import get_ep_group
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
+
+        device_communicator = get_ep_group().device_communicator
+        if device_communicator is None:
+            return
+        all2all_manager = device_communicator.all2all_manager
         if all2all_manager is None or not hasattr(all2all_manager, "set_masked_ranks"):
             return
         all2all_manager.set_masked_ranks(list(sleeping_ep_ranks))
 
-    def get_ep_sleep_state(self) -> dict[str, object]:
+    def get_ep_sleep_state(self) -> dict[str, Any]:
         from vllm.distributed.parallel_state import get_ep_group
+
         ep_world_size = get_ep_group().world_size
         sleeping_ep_ranks: list[int] = []
-        if self.eplb_state is not None and self.eplb_state.logical_sleep_state is not None:
+        if (
+            self.eplb_state is not None
+            and self.eplb_state.logical_sleep_state is not None
+        ):
+            sleep_state = self.eplb_state.logical_sleep_state
             sleeping_ep_ranks = sorted(
                 rank
-                for rank, new_rank in self.eplb_state.logical_sleep_state.rank_mapping.items()
+                for rank, new_rank in sleep_state.rank_mapping.items()
                 if new_rank == -1
             )
         active_ep_size = ep_world_size - len(sleeping_ep_ranks)
@@ -5600,7 +5607,7 @@ class GPUModelRunner(
                 pin_memory=self.pin_memory,
             )
         )
-    
+
     def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
         assert self.parallel_config.enable_eplb, (
             "Logical EP sleep requires EPLB to manage expert mappings."
@@ -5922,7 +5929,6 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                
                 # outputs = self.model(
                 #     input_ids=input_ids,
                 #     positions=positions,
@@ -5953,10 +5959,14 @@ class GPUModelRunner(
             else:
                 hidden_states = None
 
-            if not _sleep_skip_forward and self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                not _sleep_skip_forward
+                and self.speculative_config
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,

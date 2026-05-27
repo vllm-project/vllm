@@ -173,12 +173,10 @@ class CuMemAllocator:
             ptr,
         )
         return data.handle
-    
+
     def rename_tag(self, old_tag: str, new_tag: str) -> int:
         """Rename all tracked allocations that currently use ``old_tag``."""
         changed = 0
-        all_tags = set(data.tag for data in self.pointer_to_data.values())
-        #print(f" Current tags: {all_tags}")
         for data in self.pointer_to_data.values():
             if data.tag == old_tag:
                 data.tag = new_tag
@@ -193,7 +191,7 @@ class CuMemAllocator:
                 data.tag = tag
                 changed += 1
         return changed
-    
+
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.

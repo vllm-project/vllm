@@ -55,6 +55,7 @@ from .rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
+
 logger = init_logger(__name__)
 
 
@@ -85,6 +86,7 @@ class EplbStats:
     """
     Number of GPUs.
     """
+
 
 @dataclass
 class EplbLogicalSleepState:
@@ -696,9 +698,10 @@ class EplbState:
         return {
             rank: rank if rank < active_rank_count else -1 for rank in range(ep_size)
         }
+
     def is_logical_sleep_active(self) -> bool:
         return self.logical_sleep_state is not None
-    
+
     def resize_logical_sleep(self, sleeping_ranks: Sequence[int]) -> None:
         """Transition directly between logical-sleep suffix states.
 
@@ -722,9 +725,7 @@ class EplbState:
         active_physical_experts = self._validate_logical_sleep_capacity(
             ep_group, target_rank_mapping
         )
-        self._apply_logical_sleep_mapping(
-            target_rank_mapping, active_physical_experts
-        )
+        self._apply_logical_sleep_mapping(target_rank_mapping, active_physical_experts)
         self.logical_sleep_state.rank_mapping = target_rank_mapping
 
     def _validate_logical_sleep_capacity(
@@ -894,9 +895,8 @@ class EplbState:
                 .detach()
                 .cpu()
             )
-            valid_expert_mask = (
-                (physical_to_logical_map >= 0)
-                & (physical_to_logical_map < eplb_model_state.model.num_logical_experts)
+            valid_expert_mask = (physical_to_logical_map >= 0) & (
+                physical_to_logical_map < eplb_model_state.model.num_logical_experts
             )
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,

@@ -57,6 +57,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        # Set by from_existing_pynccl when this communicator wraps a split
+        # NCCL group; in that path symmetric ops are not registered.
+        self.disable_pynccl_symmetric_ops: bool = False
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (

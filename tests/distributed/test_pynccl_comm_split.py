@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import multiprocessing as mp
+import os
 import time
 
 try:
@@ -107,8 +107,8 @@ def _comm_split_worker(env):
         gathered = torch.empty(pair_comm.world_size, dtype=torch.float32, device=device)
         pair_comm.all_gather(gathered, data)
         torch.accelerator.synchronize()
-        expected = [1.0, 2.0] if rank < 2 else [3.0, 4.0]
-        assert gathered.cpu().tolist() == expected
+        expected_gather = [1.0, 2.0] if rank < 2 else [3.0, 4.0]
+        assert gathered.cpu().tolist() == expected_gather
 
         data = torch.tensor(
             [10 * rank + 1, 10 * rank + 2], dtype=torch.float32, device=device

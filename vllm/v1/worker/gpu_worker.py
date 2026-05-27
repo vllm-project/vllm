@@ -154,7 +154,7 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1,tags: list[str] | None = None) -> None:
+    def sleep(self, level: int = 1, tags: list[str] | None = None) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -169,7 +169,8 @@ class Worker(WorkerBase):
         self.model_runner.skip_dummy_model_forward = True
 
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=tags if level == 1 else tuple())
+        offload_tags = tuple(tags) if (level == 1 and tags) else tuple()
+        allocator.sleep(offload_tags=offload_tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -349,6 +350,7 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
     def sleep_ep_ranks_by_tags(
         self,
         sleeping_ep_ranks: list[int],
@@ -356,17 +358,15 @@ class Worker(WorkerBase):
         level: int = 1,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
+
         if get_ep_group().rank not in sleeping_ep_ranks:
             return
 
-        selected_tags = tuple(dict.fromkeys(tags))
+        selected_tags = list(dict.fromkeys(tags))
         if not selected_tags:
             raise ValueError("tags must not be empty")
 
-        self.sleep(
-            level=level,
-            tags = selected_tags
-        )
+        self.sleep(level=level, tags=selected_tags)
 
     def wake_up_ep_ranks(
         self,
@@ -374,6 +374,7 @@ class Worker(WorkerBase):
         tags: list[str] | None = None,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
+
         if get_ep_group().rank in sleeping_ep_ranks:
             self.wake_up(tags=tags)
             self._skip_dummy_batch = False

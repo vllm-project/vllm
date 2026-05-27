@@ -5,7 +5,7 @@ import os
 import socket
 import time
 import warnings
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import Any
 
@@ -980,7 +980,7 @@ class AsyncLLM(EngineClient):
 
     async def wait_for_dp_ranks_to_drain(
         self,
-        dp_ranks: list[int],
+        dp_ranks: Sequence[int],
         timeout: float = 300,
     ) -> None:
         await self.engine_core.wait_for_dp_ranks_to_drain(dp_ranks, timeout)

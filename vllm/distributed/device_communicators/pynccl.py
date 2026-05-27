@@ -493,8 +493,7 @@ class PyNcclSplitCommunicator:
     def resize(self, group_size: int) -> PyNcclCommunicator | None:
         if not 0 < group_size <= self.root.world_size:
             raise ValueError(
-                f"group_size must be in [1, {self.root.world_size}], "
-                f"got {group_size}"
+                f"group_size must be in [1, {self.root.world_size}], got {group_size}"
             )
 
         new_comm = self.root.split(

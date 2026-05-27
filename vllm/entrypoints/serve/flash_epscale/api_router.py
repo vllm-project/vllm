@@ -5,6 +5,7 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -42,7 +43,7 @@ def _flash_epscale_lock(request: Request) -> asyncio.Lock:
     return lock
 
 
-async def _query_ep_state(client: EngineClient) -> dict[str, object]:
+async def _query_ep_state(client: EngineClient) -> dict[str, Any]:
     states = await client.collective_rpc("get_ep_sleep_state")
     if not states:
         raise HTTPException(status_code=500, detail="failed to query EP sleep state")

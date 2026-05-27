@@ -17,9 +17,15 @@ import vllm.envs as envs
 from vllm.entrypoints.serve.flash_epscale.api_router import attach_router
 
 
-def _build_client(monkeypatch, *, ep_world_size=4, active_ep_size=4,
-                  current_sleeping=None, post_resize_active=None,
-                  post_resize_sleeping=None):
+def _build_client(
+    monkeypatch,
+    *,
+    ep_world_size=4,
+    active_ep_size=4,
+    current_sleeping=None,
+    post_resize_active=None,
+    post_resize_sleeping=None,
+):
     """Build a TestClient whose engine_client is mocked.
 
     The mock returns a stable EP state from get_ep_sleep_state until
@@ -194,9 +200,7 @@ def test_scale_up_opens_routing_after_resume(monkeypatch):
 def test_resume_runs_even_when_inner_step_fails(monkeypatch):
     """If a collective_rpc inside the pause window raises, the engine must
     still be resumed before the HTTP error is returned."""
-    client, engine, _ = _build_client(
-        monkeypatch, ep_world_size=4, active_ep_size=4
-    )
+    client, engine, _ = _build_client(monkeypatch, ep_world_size=4, active_ep_size=4)
     # FastAPI TestClient re-raises unhandled server exceptions by default;
     # disable so the wrapped HTTP 500 propagates through the response.
     client = TestClient(client.app, raise_server_exceptions=False)
@@ -262,11 +266,14 @@ def test_router_not_attached_outside_dev_mode(monkeypatch):
     assert "/flash_epscale" not in paths
 
 
-@pytest.mark.parametrize("body, expected_msg", [
-    ({}, "ep_size must be an integer"),
-    ({"ep_size": 1.5}, "ep_size must be an integer"),
-    ({"ep_size": 0}, "must be in [1,"),
-])
+@pytest.mark.parametrize(
+    "body, expected_msg",
+    [
+        ({}, "ep_size must be an integer"),
+        ({"ep_size": 1.5}, "ep_size must be an integer"),
+        ({"ep_size": 0}, "must be in [1,"),
+    ],
+)
 def test_param_validation_messages(monkeypatch, body, expected_msg):
     client, _, _ = _build_client(monkeypatch)
     resp = client.post("/flash_epscale", json=body)

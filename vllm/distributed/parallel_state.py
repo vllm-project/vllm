@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from unittest.mock import patch
 
 import torch
@@ -1316,7 +1316,7 @@ def _make_split_dp_group(
     child.device = parent.device
     child.use_device_communicator = parent.use_device_communicator
     child.device_communicator = CudaCommunicator.from_existing_pynccl(
-        parent=parent.device_communicator,
+        parent=cast(CudaCommunicator, parent.device_communicator),
         pynccl_comm=pynccl_comm,
         unique_name=child.unique_name,
         global_ranks=child.ranks,
@@ -1340,14 +1340,13 @@ def get_dp_group(new_comm_size: int | None = None) -> GroupCoordinator:
 
     if _DP_MAX is None:
         _DP_MAX = _DP
-    if _DP_SPLIT_SIZE == new_comm_size:
+    if new_comm_size == _DP_SPLIT_SIZE:
         return _DP
 
     parent = _DP_MAX
     if not 0 < new_comm_size <= parent.world_size:
         raise ValueError(
-            f"new_comm_size must be in [1, {parent.world_size}], "
-            f"got {new_comm_size}"
+            f"new_comm_size must be in [1, {parent.world_size}], got {new_comm_size}"
         )
 
     if new_comm_size == parent.world_size:

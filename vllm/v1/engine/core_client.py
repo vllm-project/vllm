@@ -204,13 +204,15 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    def set_active_data_parallel_size(self, active_data_parallel_size: int) -> None:
+    def set_active_data_parallel_size(  # noqa: B027
+        self, active_data_parallel_size: int
+    ) -> None:
         """Restrict request routing to the active DP rank prefix.
 
         Utility and collective RPCs still target all engine cores.
         """
 
-    async def wait_for_dp_ranks_to_drain(
+    async def wait_for_dp_ranks_to_drain(  # noqa: B027
         self,
         dp_ranks: Sequence[int],
         timeout: float = 300,
@@ -1325,9 +1327,8 @@ class DPAsyncMPClient(AsyncMPClient):
         self._ensure_output_queue_task()
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
-        if (
-            request.data_parallel_rank is not None
-            and not self._is_active_dp_rank(request.data_parallel_rank)
+        if request.data_parallel_rank is not None and not self._is_active_dp_rank(
+            request.data_parallel_rank
         ):
             logger.warning(
                 "Request %s targeted sleeping DP rank %s; routing to active "
