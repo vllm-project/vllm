@@ -321,16 +321,17 @@ class AttentionSpec(KVCacheSpec):
         Returns rank -> TPTransferSlice mapping. Logic mirrors the old
         compute_tp_mapping attention-rank selection on main.
         """
-        total = total_num_kv_heads
 
         def _shard_for_rank(rank: int, tp_size: int) -> ShardRange:
-            s = rank * total // tp_size
-            e = (rank + 1) * total // tp_size
+            s = rank * total_num_kv_heads // tp_size
+            e = (rank + 1) * total_num_kv_heads // tp_size
             if s == e:
                 # Replicated: this rank holds same head as a neighbor.
                 # Express as size-1 shard for the head it actually holds.
-                return ShardRange(s, s + max(1, total // tp_size), total)
-            return ShardRange(s, e, total)
+                return ShardRange(
+                    s, s + max(1, total_num_kv_heads // tp_size), total_num_kv_heads
+                )
+            return ShardRange(s, e, total_num_kv_heads)
 
         local_shard = _shard_for_rank(local_tp_rank, local_tp_size)
 
@@ -356,7 +357,7 @@ class AttentionSpec(KVCacheSpec):
             result: dict[int, TPTransferSlice] = {}
             seen_heads: set[int] = set()
             for r in range(start, start + abs_tp):
-                head_start = r * total // remote_tp_size
+                head_start = r * total_num_kv_heads // remote_tp_size
                 if head_start in seen_heads:
                     continue
                 seen_heads.add(head_start)
