@@ -30,17 +30,22 @@ elif current_platform.is_xpu():
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
+    # On ROCm we use AITER's Triton flash-attention; the upstream flash-attn
+    # package is not installed/available. (Same source as aiter_triton_mla.py.)
     try:
-        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+        from aiter.ops.triton.mha import (  # type: ignore[no-redef]
+            flash_attn_varlen_func,
+        )
 
-        # Mark that upstream flash-attn is available on ROCm
+        # A working flash_attn_varlen_func is available on ROCm (via AITER).
         _ROCM_FLASH_ATTN_AVAILABLE = True
     except ImportError:
 
         def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
             raise ImportError(
-                "ROCm platform requires upstream flash-attn "
-                "to be installed. Please install flash-attn first."
+                "ROCm platform requires AITER's Triton MHA "
+                "(aiter.ops.triton.mha.flash_attn_varlen_func). "
+                "Please install aiter."
             )
 
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
@@ -231,7 +236,7 @@ def is_flash_attn_varlen_func_available() -> bool:
     Platform-specific sources:
     - CUDA: vllm.vllm_flash_attn.flash_attn_varlen_func
     - XPU: xpu_ops.flash_attn_varlen_func
-    - ROCm: upstream flash_attn.flash_attn_varlen_func (if available)
+    - ROCm: aiter.ops.triton.mha.flash_attn_varlen_func (if AITER available)
 
     Note: This is separate from the AITER flash attention backend (rocm_aiter_fa.py)
     which uses rocm_aiter_ops.flash_attn_varlen_func. The condition to use AITER is
