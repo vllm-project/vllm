@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -108,7 +109,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncMPClient":
@@ -491,7 +492,7 @@ class MPClient(EngineCoreClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
     ):
         self.vllm_config = vllm_config
 
@@ -522,7 +523,7 @@ class MPClient(EngineCoreClient):
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
-                tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
+                tensor_queue = client_addresses.get("tensor_queue")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
@@ -533,6 +534,28 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
                 )
+
+                # Report bound endpoints back so the parent can forward
+                # them to engines (mirrors the DPCoordinator pattern).
+                actual_address_pipe: Connection | None = client_addresses.get(
+                    "actual_address_pipe"
+                )
+                if actual_address_pipe is not None:
+                    try:
+                        actual_input = self.input_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                        actual_output = self.resources.output_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                        actual_address_pipe.send(
+                            {
+                                "input_address": actual_input,
+                                "output_address": actual_output,
+                            }
+                        )
+                    finally:
+                        actual_address_pipe.close()
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
@@ -546,6 +569,15 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
+
+                # Resolve ``tcp://host:0`` placeholders to bound endpoints
+                # before engines DEALER-connect. No-op for IPC.
+                addresses.inputs[0] = self.input_socket.getsockopt(
+                    zmq.LAST_ENDPOINT
+                ).decode()
+                addresses.outputs[0] = self.resources.output_socket.getsockopt(
+                    zmq.LAST_ENDPOINT
+                ).decode()
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
@@ -908,7 +940,7 @@ class AsyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1158,7 +1190,7 @@ class DPAsyncMPClient(AsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1395,7 +1427,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
