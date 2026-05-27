@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     SinkMLAAttentionSpec,
     SinkMLASlidingWindowSpec,
     SlidingWindowMLASpec,
+    SlidingWindowMomeSpec,
     SlidingWindowSpec,
     TQFullAttentionSpec,
 )
@@ -1255,6 +1256,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     HiddenStateCacheSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     SlidingWindowMLASpec: SlidingWindowManager,
+    SlidingWindowMomeSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
     MomeSpec: MomeManager,

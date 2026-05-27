@@ -17,7 +17,11 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MambaSpec,
+    SlidingWindowMomeSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -893,7 +897,7 @@ def mamba_get_block_table_tensor(
     if mamba_cache_mode in ("all", "none"):
         return block_table
     else:
-        assert isinstance(kv_cache_spec, MambaSpec)
+        assert isinstance(kv_cache_spec, (MambaSpec, SlidingWindowMomeSpec))
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
         start_indices = torch.clamp(
