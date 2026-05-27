@@ -343,7 +343,7 @@ def _get_cpu_binding(
 
 
 def _get_numactl_worker_args(
-    parallel_config, local_rank: int, dp_local_rank: int | None, process_kind: str
+    parallel_config, local_rank: int, dp_local_rank: int | None = None
 ) -> str:
     """Compute the numactl args for a single TP/PP worker subprocess."""
     gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
@@ -352,8 +352,7 @@ def _get_numactl_worker_args(
 
     if cpu_binding is not None:
         logger.info(
-            "Binding %s subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
-            process_kind,
+            "Binding worker subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
             local_rank,
             gpu_index,
             cpu_binding,
@@ -362,8 +361,7 @@ def _get_numactl_worker_args(
         return f"--physcpubind={cpu_binding} --membind={numa_node}"
 
     logger.info(
-        "Binding %s subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
-        process_kind,
+        "Binding worker subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
         local_rank,
         gpu_index,
         numa_node,
@@ -407,7 +405,7 @@ def _get_enginecore_numa_nodes(
 
 
 def _get_numactl_enginecore_args(
-    parallel_config, local_rank: int, dp_local_rank: int | None
+    parallel_config, local_rank: int, dp_local_rank: int | None = None
 ) -> str:
     """Compute the numactl args for an EngineCore subprocess.
 
@@ -448,23 +446,6 @@ def _get_numactl_enginecore_args(
     return f"--cpunodebind={membind_arg} --membind={membind_arg}"
 
 
-def _get_numactl_args(
-    vllm_config: "VllmConfig",
-    local_rank: int,
-    dp_local_rank: int | None = None,
-    process_kind: str = "worker",
-) -> str | None:
-    parallel_config = vllm_config.parallel_config
-    if not parallel_config.numa_bind:
-        return None
-
-    if process_kind == "EngineCore":
-        return _get_numactl_enginecore_args(parallel_config, local_rank, dp_local_rank)
-    return _get_numactl_worker_args(
-        parallel_config, local_rank, dp_local_rank, process_kind
-    )
-
-
 def _log_numactl_show(label: str) -> bool:
     try:
         result = subprocess.run(
@@ -500,12 +481,19 @@ def configure_subprocess(
     process_kind: str = "worker",
 ):
     """Temporarily replace the multiprocessing executable with a numactl wrapper."""
-    numactl_args = _get_numactl_args(
-        vllm_config, local_rank, dp_local_rank, process_kind
-    )
-    if numactl_args is None:
+    parallel_config = vllm_config.parallel_config
+    if not parallel_config.numa_bind:
         yield
         return
+
+    if process_kind == "EngineCore":
+        numactl_args = _get_numactl_enginecore_args(
+            parallel_config, local_rank, dp_local_rank
+        )
+    else:
+        numactl_args = _get_numactl_worker_args(
+            parallel_config, local_rank, dp_local_rank
+        )
 
     executable, debug_str = _get_numactl_executable()
     python_executable = os.fsdecode(multiprocessing.spawn.get_executable())

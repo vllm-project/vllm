@@ -58,7 +58,7 @@ def _make_config(**parallel_kwargs):
 def test_get_numactl_args_with_node_binding():
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 1])
     assert (
-        numa_utils._get_numactl_args(vllm_config, local_rank=1)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
         == "--cpunodebind=1 --membind=1"
     )
 
@@ -70,7 +70,7 @@ def test_get_numactl_args_with_cpu_binding():
         numa_bind_cpus=["0-3", "4-7"],
     )
     assert (
-        numa_utils._get_numactl_args(vllm_config, local_rank=1)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
         == "--physcpubind=4-7 --membind=1"
     )
 
@@ -208,7 +208,7 @@ def test_get_numactl_args_uses_pct_when_user_did_not_specify_cpus(monkeypatch):
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46)
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 1])
     assert (
-        numa_utils._get_numactl_args(vllm_config, local_rank=1)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
         == "--physcpubind=0,1,16,17,64,65,80,81 --membind=1"
     )
 
@@ -217,8 +217,8 @@ def test_get_numactl_args_engine_core_baseline_single_node_shard():
     """Baseline (no PCT): single-NUMA shard -> single-node bind."""
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 1])
     assert (
-        numa_utils._get_numactl_args(
-            vllm_config, local_rank=0, process_kind="EngineCore"
+        numa_utils._get_numactl_enginecore_args(
+            vllm_config.parallel_config, local_rank=0
         )
         == "--cpunodebind=0 --membind=0"
     )
@@ -232,8 +232,8 @@ def test_get_numactl_args_engine_core_baseline_spans_shard_numa_nodes():
         tensor_parallel_size=4,
     )
     assert (
-        numa_utils._get_numactl_args(
-            vllm_config, local_rank=0, process_kind="EngineCore"
+        numa_utils._get_numactl_enginecore_args(
+            vllm_config.parallel_config, local_rank=0
         )
         == "--cpunodebind=0,1 --membind=0,1"
     )
@@ -254,8 +254,8 @@ def test_get_numactl_args_engine_core_pct_spans_shard_numa_nodes(monkeypatch):
         numa_bind_nodes=[0, 0, 1, 1],
         tensor_parallel_size=4,
     )
-    assert numa_utils._get_numactl_args(
-        vllm_config, local_rank=0, process_kind="EngineCore"
+    assert numa_utils._get_numactl_enginecore_args(
+        vllm_config.parallel_config, local_rank=0
     ) == (
         "--physcpubind="
         "0,1,16,17,64,65,80,81,128,129,144,145,192,193,208,209"
@@ -279,8 +279,8 @@ def test_get_numactl_args_engine_core_pct_dp_shard_picks_local_nodes(monkeypatch
     )
     # Shard 1 owns gpu_indices 2 and 3 -> nodes [1, 1] -> {1}.
     assert (
-        numa_utils._get_numactl_args(
-            vllm_config, local_rank=0, process_kind="EngineCore"
+        numa_utils._get_numactl_enginecore_args(
+            vllm_config.parallel_config, local_rank=0
         )
         == "--physcpubind=64,65,80,81,192,193,208,209 --membind=1"
     )
@@ -305,8 +305,8 @@ def test_get_numactl_args_engine_core_pct_external_launcher_spans_local_nodes(
         distributed_executor_backend="external_launcher",
         tensor_parallel_size=8,
     )
-    assert numa_utils._get_numactl_args(
-        vllm_config, local_rank=0, process_kind="EngineCore"
+    assert numa_utils._get_numactl_enginecore_args(
+        vllm_config.parallel_config, local_rank=0
     ) == (
         "--physcpubind="
         "0,1,16,17,64,65,80,81,128,129,144,145,192,193,208,209"
@@ -324,8 +324,8 @@ def test_get_numactl_args_engine_core_baseline_multi_node_within_dp_spans_locals
         tensor_parallel_size=8,
     )
     assert (
-        numa_utils._get_numactl_args(
-            vllm_config, local_rank=0, process_kind="EngineCore"
+        numa_utils._get_numactl_enginecore_args(
+            vllm_config.parallel_config, local_rank=0
         )
         == "--cpunodebind=0,1 --membind=0,1"
     )
@@ -348,8 +348,8 @@ def test_get_numactl_args_engine_core_skips_user_cpu_list(monkeypatch):
         tensor_parallel_size=4,
     )
     assert (
-        numa_utils._get_numactl_args(
-            vllm_config, local_rank=0, process_kind="EngineCore"
+        numa_utils._get_numactl_enginecore_args(
+            vllm_config.parallel_config, local_rank=0
         )
         == "--cpunodebind=0,1 --membind=0,1"
     )
@@ -363,7 +363,7 @@ def test_get_numactl_args_user_cpus_override_pct(monkeypatch):
         numa_bind_cpus=["0-3", "4-7"],
     )
     assert (
-        numa_utils._get_numactl_args(vllm_config, local_rank=1)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
         == "--physcpubind=4-7 --membind=1"
     )
 
@@ -377,7 +377,7 @@ def test_get_numactl_args_uses_dp_offset():
         tensor_parallel_size=2,
     )
     assert (
-        numa_utils._get_numactl_args(vllm_config, local_rank=1)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=1)
         == "--cpunodebind=1 --membind=1"
     )
 
@@ -386,7 +386,7 @@ def test_get_numactl_args_requires_detectable_nodes(monkeypatch):
     vllm_config = _make_config(numa_bind=True)
     monkeypatch.setattr(numa_utils, "get_auto_numa_nodes", lambda: None)
     with pytest.raises(RuntimeError):
-        numa_utils._get_numactl_args(vllm_config, local_rank=0)
+        numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=0)
 
 
 def test_log_numactl_show(monkeypatch):
