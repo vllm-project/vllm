@@ -314,8 +314,6 @@ set(VLLM_EXT_SRC
   "csrc/sampler.cu"
   "csrc/topk.cu"
   "csrc/cuda_view.cu"
-  "csrc/quantization/gptq/q_gemm_rdna3.cu"
-  "csrc/quantization/gptq/q_gemm_rdna3_wmma.cu"
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -1278,7 +1276,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/attention.cu")
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/q_gemm_rdna3.cu"
+    "csrc/rocm/q_gemm_rdna3_wmma.cu")
 
   define_extension_target(
     _rocm_C

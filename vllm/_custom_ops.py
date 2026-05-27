@@ -650,8 +650,6 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
-# RDNA3-tuned W4A16 GPTQ GEMM (fp16 + bf16). Weights must be pre-shuffled
-# with gptq_shuffle. See csrc/quantization/gptq/q_gemm_rdna3.cu.
 def gptq_gemm_rdna3(
     a: torch.Tensor,
     b_q_weight: torch.Tensor,
@@ -660,14 +658,15 @@ def gptq_gemm_rdna3(
     b_g_idx: torch.Tensor,
     use_v2_format: bool,
 ) -> torch.Tensor:
-    return torch.ops._C.gptq_gemm_rdna3(
+    return torch.ops._rocm_C.gptq_gemm_rdna3(
         a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
     )
 
 
-if hasattr(torch.ops._C, "gptq_gemm_rdna3"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                              "gptq_gemm_rdna3"):
 
-    @register_fake("_C::gptq_gemm_rdna3")
+    @register_fake("_rocm_C::gptq_gemm_rdna3")
     def _gptq_gemm_rdna3_fake(
         a: torch.Tensor,
         b_q_weight: torch.Tensor,
@@ -681,13 +680,10 @@ if hasattr(torch.ops._C, "gptq_gemm_rdna3"):
         )
 
 
-# WMMA prefill op for RDNA3. Auto-dispatched from gptq_gemm_rdna3 in C++
-# for bf16 with M >= 16; remains directly callable for fp16 (e.g. for kernel
-# microbenches or future dispatch tuning). The fake registration here is
-# what lets it be traced under torch.compile.
-if hasattr(torch.ops._C, "gptq_gemm_rdna3_wmma"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
+                                              "gptq_gemm_rdna3_wmma"):
 
-    @register_fake("_C::gptq_gemm_rdna3_wmma")
+    @register_fake("_rocm_C::gptq_gemm_rdna3_wmma")
     def _gptq_gemm_rdna3_wmma_fake(
         a: torch.Tensor,
         b_q_weight: torch.Tensor,

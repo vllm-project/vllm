@@ -3,8 +3,8 @@
 """W4A16 GPTQ kernel for AMD RDNA3 (gfx1100) — fp16 + bf16.
 
 Drop-in replacement for ExllamaLinearKernel on RDNA3 that adds native bf16
-support. The HIP kernel lives in ``csrc/quantization/gptq/q_gemm_rdna3.cu``
-and is exposed via ``torch.ops._C.gptq_gemm_rdna3``.
+support. The HIP kernel lives in ``csrc/rocm/q_gemm_rdna3.cu``
+and is exposed via ``torch.ops._rocm_C.gptq_gemm_rdna3``.
 
 Registered ahead of TritonW4A16LinearKernel for the ROCm-RDNA3 path; falls
 through to the Triton kernel on non-RDNA3 ROCm devices (e.g. CDNA/MI300).
@@ -44,10 +44,12 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         # The HIP op is registered by the C++ extension; if a user is running
         # against a vLLM build that doesn't include it (e.g. partial rebuild),
         # fall through gracefully to the next kernel in the registry.
-        if not hasattr(torch.ops._C, "gptq_gemm_rdna3"):
+        if not (hasattr(torch.ops, "_rocm_C")
+                and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3")):
             return (
                 False,
-                "torch.ops._C.gptq_gemm_rdna3 missing — rebuild C++ extension",
+                "torch.ops._rocm_C.gptq_gemm_rdna3 missing — "
+                "rebuild C++ extension",
             )
 
         if c.act_type not in (torch.float16, torch.bfloat16):

@@ -38,19 +38,11 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#if defined(USE_ROCM)
-  #include <hip/hip_runtime.h>
-  #include <hip/hip_bf16.h>
-  #include <hip/hip_fp16.h>
-#else
-  #include <cuda_runtime.h>
-  #include <cuda_bf16.h>
-  #include <cuda_fp16.h>
-#endif
+#include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
 
 #include "qdq_4_rdna3.cuh"
-
-#if defined(USE_ROCM)
 
 namespace vllm {
 namespace gptq_rdna3 {
@@ -671,8 +663,6 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 }  // namespace gptq_rdna3
 }  // namespace vllm
 
-#endif  // USE_ROCM
-
 // ---------------------------------------------------------------------------
 // Public entry point.
 // ---------------------------------------------------------------------------
@@ -688,20 +678,14 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 // Output:
 //   c         [M, N]            same dtype as a
 
-#if defined(USE_ROCM)
-// Forward declaration of the WMMA prefill entry. Defined in
-// q_gemm_rdna3_wmma.cu (separate TU so the WMMA builtins are kept localised;
-// cross-TU call resolved at link time, no codegen interaction).
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales,
                                    torch::Tensor b_g_idx, bool use_v2_format);
-#endif
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               torch::Tensor b_g_idx, bool use_v2_format) {
-#if defined(USE_ROCM)
   if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
       b_q_weight.size(1) % 16 == 0 &&
       ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
@@ -764,8 +748,4 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   }
 
   return c;
-#else
-  TORCH_CHECK(false, "gptq_gemm_rdna3 is only available on ROCm (gfx11)");
-  return a;
-#endif
 }

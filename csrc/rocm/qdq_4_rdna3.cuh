@@ -20,24 +20,14 @@
 
 #include <cstdint>
 
-#if defined(USE_ROCM)
-  #include <hip/hip_bf16.h>
-  #include <hip/hip_fp16.h>
-#else
-  #include <cuda_bf16.h>
-  #include <cuda_fp16.h>
-#endif
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
 
 namespace vllm {
 namespace gptq_rdna3 {
 
-#if defined(USE_ROCM)
 using bf16_t = __hip_bfloat16;
 using bf162_t = __hip_bfloat162;
-#else
-using bf16_t = __nv_bfloat16;
-using bf162_t = __nv_bfloat162;
-#endif
 
 // Bit-shuffle for an int32 holding 8 sequential 4-bit weights q[0..7]:
 //   in:  q[7] q[6] q[5] q[4] q[3] q[2] q[1] q[0]   (LSB first)

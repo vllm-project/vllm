@@ -38,22 +38,14 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#if defined(USE_ROCM)
-  #include <hip/hip_runtime.h>
-  #include <hip/hip_bf16.h>
-  #include <hip/hip_fp16.h>
-#else
-  #include <cuda_runtime.h>
-  #include <cuda_bf16.h>
-  #include <cuda_fp16.h>
-#endif
+#include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
 
 #include "qdq_4_rdna3.cuh"
 
 namespace vllm {
 namespace gptq_rdna3_wmma {
-
-#if defined(USE_ROCM)
 
 // Pull dequant types from the sibling namespace.
 using vllm::gptq_rdna3::bf162_t;
@@ -1987,8 +1979,6 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
       zero_offset, b_q_perm);
 }
 
-#endif  // USE_ROCM
-
 }  // namespace gptq_rdna3_wmma
 }  // namespace vllm
 
@@ -2067,7 +2057,6 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   //   M >= 64 && N <  32 → 64x16_4w (4 waves)
   //   32 <= M < 64       → 32x16_2w (2 waves)
   //   M < 32             → 16x16_1w (1 wave)
-#if defined(USE_ROCM)
   if (a.scalar_type() == torch::kHalf) {
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
@@ -2084,9 +2073,6 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
         (vllm::gptq_rdna3_wmma::bf16_t*)c.data_ptr(), size_m, size_n, size_k,
         groups, zero_offset, stream);
   }
-#else
-  TORCH_CHECK(false, "gptq_gemm_rdna3_wmma is only available on ROCm (gfx11)");
-#endif
 
   return c;
 }
