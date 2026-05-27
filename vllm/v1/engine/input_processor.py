@@ -49,6 +49,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -105,14 +106,14 @@ class InputProcessor:
                 ):
                     raise ValueError(
                         "thinking_token_budget is set but reasoning_config is "
-                        "not configured. Please set --reasoning-config to use "
-                        "thinking_token_budget."
+                        "not configured. Please set --reasoning-parser "
+                        "and/or --reasoning-config to use thinking_token_budget."
                     )
-                if self.vllm_config.use_v2_model_runner:
+                if self.use_v2_model_runner:
                     raise ValueError(
                         "thinking_token_budget is not yet supported by the V2 "
-                        "model runner. To use it, run vLLM with "
-                        "VLLM_USE_V2_MODEL_RUNNER=0."
+                        "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
+                        "to use thinking_token_budget."
                     )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
