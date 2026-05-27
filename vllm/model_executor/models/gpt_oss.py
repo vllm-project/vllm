@@ -384,6 +384,14 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            # Skip checkpoint weights for layers dropped by an hf_overrides
+            # `num_hidden_layers` prune: the model only builds params for the
+            # layers it keeps, so extra-layer weights have no destination param.
+            if "layers." in name:
+                idx_str = name.split("layers.", 1)[1].split(".", 1)[0]
+                if idx_str.isdigit() and int(idx_str) >= self.config.num_hidden_layers:
+                    continue
+
             if ".w13_weight_scale" in name:
                 # Handle MLP gate and up projection weights scale
                 if use_ep:
@@ -605,6 +613,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
         for name, loaded_weight in weights:
             if is_pp_missing_parameter(name, self):
                 continue
+
+            # Skip checkpoint weights for layers dropped by an hf_overrides
+            # `num_hidden_layers` prune (mirrors _load_weights_mxfp4).
+            if "layers." in name:
+                idx_str = name.split("layers.", 1)[1].split(".", 1)[0]
+                if idx_str.isdigit() and int(idx_str) >= self.config.num_hidden_layers:
+                    continue
 
             layer_id, expert_id, fused_name = None, None, None
             moe_quant_method = None
