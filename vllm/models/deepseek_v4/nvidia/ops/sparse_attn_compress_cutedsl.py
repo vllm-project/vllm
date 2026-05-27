@@ -1279,7 +1279,7 @@ def compress_norm_rope_store_cutedsl(
             cos_sin_cache,
             kv_cache,
             k_cache_metadata.slot_mapping,
-            kv_cache.shape[1],  # paged KV cache block size
+            kv_cache.shape[2],  # paged KV cache block size
             kv_cache.stride(0),
             head_size=head_dim,
             state_width=state_width,
@@ -1320,7 +1320,7 @@ def compress_norm_rope_store_cutedsl(
             cos_sin_cache,
             kv_cache,
             k_cache_metadata.slot_mapping,
-            kv_cache.shape[1],  # paged KV cache block size
+            kv_cache.shape[2],  # paged KV cache block size
             kv_cache.stride(0),
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
