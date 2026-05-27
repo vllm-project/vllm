@@ -9,6 +9,23 @@ import torch
 
 
 @dataclass
+class EncoderItemSpec:
+    """Description of a single encoder input item.
+
+    Returned by ``get_encoder_cudagraph_item_specs()`` to describe each
+    image or video in a batch without the manager needing to understand
+    model-specific input formats.
+    """
+
+    input_size: int
+    """Number of input patches/rows for this item."""
+
+    output_tokens: int
+    """Number of output tokens after encoder processing (e.g. after
+    spatial merge)."""
+
+
+@dataclass
 class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
@@ -33,6 +50,11 @@ class EncoderCudaGraphConfig:
     out_hidden_size: int
     """Output hidden dim of the vision encoder.
     Used for DP gather buffer allocation."""
+
+    max_frames_per_video: int = 1
+    """Maximum number of frames per video.
+    Only relevant when "video" is in ``modalities``.
+    Image-only models can use the default of 1."""
 
 
 @dataclass
