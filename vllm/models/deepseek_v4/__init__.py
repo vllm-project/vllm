@@ -19,9 +19,12 @@ from .quant_config import DeepseekV4FP8Config
 if TYPE_CHECKING or current_platform.is_cuda():
     from .nvidia.model import DeepseekV4ForCausalLM
     from .nvidia.mtp import DeepSeekV4MTP
-else:
+elif current_platform.is_rocm():
     from .amd.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .amd.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+else:
+    DeepseekV4ForCausalLM = object  # type: ignore[assignment]
+    DeepSeekV4MTP = object  # type: ignore[assignment]
 
 __all__ = [
     "DeepSeekV4MTP",
