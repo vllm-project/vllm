@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-
+from tests.tool_parsers.utils import run_tool_extraction
 
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
@@ -55,6 +57,7 @@ class TestQwen3xmlToolParser(ToolParserTests):
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers - Qwen3XML has systematic streaming issues
+            # xfail markers - Qwen3XML has systematic streaming issues
             xfail_streaming={
                 "test_single_tool_call_simple_args": (
                     "Qwen3XML streaming has systematic issues"
@@ -67,6 +70,164 @@ class TestQwen3xmlToolParser(ToolParserTests):
                 "test_streaming_reconstruction": (
                     "Qwen3XML streaming reconstruction has known issues"
                 ),
+                "test_multiple_functions_in_one_tool_call": (
+                    "Qwen3XML streaming has systematic issues"
+                ),
+                "test_multiple_empty_functions_in_one_tool_call": (
+                    "Qwen3XML streaming has systematic issues"
+                ),
+                "test_three_functions_in_one_tool_call": (
+                    "Qwen3XML streaming has systematic issues"
+                ),
+                "test_multi_function_state_resets_between_tool_calls": (
+                    "Qwen3XML streaming has systematic issues"
+                ),
             },
             supports_typed_arguments=False,
         )
+
+    def test_multiple_functions_in_one_tool_call(
+        self,
+        request: pytest.FixtureRequest,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+        streaming: bool,
+    ):
+        """Multiple <function=...> in one <tool_call> -> distinct slots."""
+        self.apply_xfail_mark(
+            request,
+            test_config,
+            "test_multiple_functions_in_one_tool_call",
+            streaming,
+        )
+        model_output = (
+            "<tool_call>\n"
+            "<function=read>\n<parameter=path>README.md</parameter>\n</function>\n"
+            "<function=read>\n<parameter=path>AGENTS.md</parameter>\n</function>\n"
+            "</tool_call>"
+        )
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+
+        assert len(tool_calls) == 2, (
+            f"Expected 2 tool calls (one per <function=...>), got {len(tool_calls)}"
+        )
+        for i, tc in enumerate(tool_calls):
+            assert tc.function.name == "read", (
+                f"tool_calls[{i}].name expected 'read', got {tc.function.name!r}"
+            )
+            json.loads(tc.function.arguments)  # must be valid JSON
+        assert json.loads(tool_calls[0].function.arguments) == {"path": "README.md"}
+        assert json.loads(tool_calls[1].function.arguments) == {"path": "AGENTS.md"}
+
+    def test_multiple_empty_functions_in_one_tool_call(
+        self,
+        request: pytest.FixtureRequest,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+        streaming: bool,
+    ):
+        """Empty-args variant: pre-fix produced `{}{}` (or `{}{}{}` for N=3)."""
+        self.apply_xfail_mark(
+            request,
+            test_config,
+            "test_multiple_empty_functions_in_one_tool_call",
+            streaming,
+        )
+        model_output = (
+            "<tool_call>\n"
+            "<function=ping>\n</function>\n"
+            "<function=ping>\n</function>\n"
+            "</tool_call>"
+        )
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+
+        assert len(tool_calls) == 2, (
+            f"Expected 2 tool calls, got {len(tool_calls)}"
+        )
+        for tc in tool_calls:
+            assert tc.function.name == "ping"
+            # Empty args render as "{}" or "" depending on path; never `{}{}`.
+            assert tc.function.arguments in ("{}", ""), (
+                f"Expected empty args, got {tc.function.arguments!r}"
+            )
+
+    def test_three_functions_in_one_tool_call(
+        self,
+        request: pytest.FixtureRequest,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+        streaming: bool,
+    ):
+        """Guards against an off-by-one that would only break for N>2."""
+        self.apply_xfail_mark(
+            request,
+            test_config,
+            "test_three_functions_in_one_tool_call",
+            streaming,
+        )
+        model_output = (
+            "<tool_call>\n"
+            "<function=read>\n<parameter=path>A</parameter>\n</function>\n"
+            "<function=read>\n<parameter=path>B</parameter>\n</function>\n"
+            "<function=read>\n<parameter=path>C</parameter>\n</function>\n"
+            "</tool_call>"
+        )
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+        assert [tc.function.name for tc in tool_calls] == ["read", "read", "read"]
+        assert [json.loads(tc.function.arguments) for tc in tool_calls] == [
+            {"path": "A"},
+            {"path": "B"},
+            {"path": "C"},
+        ]
+
+    def test_multi_function_state_resets_between_tool_calls(
+        self,
+        request: pytest.FixtureRequest,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+        streaming: bool,
+    ):
+        """Per-<tool_call> function counter must reset on a new <tool_call>."""
+        self.apply_xfail_mark(
+            request,
+            test_config,
+            "test_multi_function_state_resets_between_tool_calls",
+            streaming,
+        )
+        model_output = (
+            "<tool_call>\n"
+            "<function=read>\n<parameter=path>A</parameter>\n</function>\n"
+            "<function=read>\n<parameter=path>B</parameter>\n</function>\n"
+            "</tool_call>\n"
+            "<tool_call>\n"
+            "<function=read>\n<parameter=path>C</parameter>\n</function>\n"
+            "<function=read>\n<parameter=path>D</parameter>\n</function>\n"
+            "</tool_call>"
+        )
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+        assert [json.loads(tc.function.arguments) for tc in tool_calls] == [
+            {"path": "A"},
+            {"path": "B"},
+            {"path": "C"},
+            {"path": "D"},
+        ]
+
+    def test_malformed_function_close_without_open_does_not_crash(
+        self, tool_parser
+    ):
+        """Out-of-scope contract: parser may return garbage, must not raise."""
+        model_output = (
+            "<tool_call>\n"
+            "<parameter=q>x</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        run_tool_extraction(tool_parser, model_output, streaming=False)

@@ -59,6 +59,9 @@ class StreamingXMLToolCallParser:
         self.last_completed_call_id = None
         self.current_function_name = None
         self.current_function_open = False
+        # Per-<tool_call> counter; each <function=...> maps to one OpenAI
+        # tool_call slot, so the 2nd+ function mints a fresh slot.
+        self.functions_in_tool_call = 0
         self.parameters = {}
         self.current_param_name = None
         self.current_param_value = ""
@@ -633,10 +636,18 @@ class StreamingXMLToolCallParser:
             self.current_call_id = make_tool_call_id()
             self.current_param_is_first = True
             self.tool_call_index += 1
+            self.functions_in_tool_call = 0
         elif name.startswith("function") or (name == "function"):
             # If missing tool_call, manually complete
             if not self.current_call_id:
                 self._start_element("tool_call", {})
+            # First function reuses <tool_call>'s slot; rest mint fresh.
+            self.functions_in_tool_call += 1
+            if self.functions_in_tool_call > 1:
+                self.parameters = {}
+                self.current_call_id = make_tool_call_id()
+                self.current_param_is_first = True
+                self.tool_call_index += 1
             # Before opening new function,
             # automatically complete previous unclosed tags (parameter/function)
             self._auto_close_open_parameter_if_needed("function")
@@ -898,6 +909,13 @@ class StreamingXMLToolCallParser:
             self.start_quote_emitted = False
 
         elif name.startswith("function") or name == "function":
+            # Skip duplicate closes (auto-close paths, `</function></function>`).
+            # Out of scope: `</function>` without a matching `<function=...>`
+            # open -- the resulting tool_call has no name and is
+            # undispatchable; not worth extra state to balance its JSON.
+            # See test_malformed_function_close_without_open_does_not_crash.
+            if not self.current_function_open:
+                return
             # if there are parameters, close JSON object
             if self.parameters:
                 delta = DeltaMessage(
@@ -925,6 +943,10 @@ class StreamingXMLToolCallParser:
                 )
                 self._emit_delta(delta)
             self.current_function_open = False
+            # Clear so next <function=...> starts clean and the
+            # current_function_name-driven auto-close path no-ops.
+            self.parameters = {}
+            self.current_function_name = None
 
         elif name == "tool_call":
             # Before ending tool_call,
@@ -1128,6 +1150,7 @@ class StreamingXMLToolCallParser:
         self.current_call_id = None
         self.current_function_name = None
         self.current_function_open = False
+        self.functions_in_tool_call = 0
         self.parameters = {}
         self.current_param_name = None
         self.current_param_value = ""
