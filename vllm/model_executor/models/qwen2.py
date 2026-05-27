@@ -428,7 +428,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states,
             residual,
             self.norm,
-            consumer=None,
+            consumer_linear=None,
             do_allreduce=(self.tp_size > 1),
         )
 

@@ -230,7 +230,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.input_layernorm,
-            self.self_attn.qkv_proj,
+            consumer_linear=self.self_attn.qkv_proj,
             do_allreduce=(residual is not None and self.tp_size > 1),
         )
         hidden_states = self.self_attn(
@@ -241,7 +241,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.post_attention_layernorm,
-            self.mlp.gate_up_proj,
+            consumer_linear=self.mlp.gate_up_proj,
             do_allreduce=(self.tp_size > 1),
         )
         hidden_states = self.mlp(hidden_states)

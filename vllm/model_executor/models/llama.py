@@ -330,7 +330,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.input_layernorm,
-            self.self_attn.qkv_proj,
+            consumer_linear=self.self_attn.qkv_proj,
             # residual is None only at layer 0 of the first PP rank
             do_allreduce=(residual is not None and self.tp_size > 1),
         )
@@ -341,7 +341,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.post_attention_layernorm,
-            self.mlp.gate_up_proj,
+            consumer_linear=self.mlp.gate_up_proj,
             do_allreduce=(self.tp_size > 1),
         )
         hidden_states = self.mlp(hidden_states)
@@ -449,7 +449,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states,
             residual,
             self.norm,
-            consumer=None,
+            consumer_linear=None,
             do_allreduce=(self.tp_size > 1),
         )
 
