@@ -21,7 +21,6 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
-    GateLinearWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -74,7 +73,9 @@ def get_lora_id():
     return _GLOBAL_LORA_ID
 
 
-_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
+# Order matters here: more specific wrappers must be checked before generic
+# merged/column-parallel wrappers in from_layer().
+_all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -82,7 +83,6 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
-    GateLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
@@ -92,7 +92,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
     FusedMoE3DWithLoRA,
-}
+)
 
 
 def is_moe_model(model: nn.Module) -> bool:
@@ -260,6 +260,7 @@ def is_supported_lora_module(
 def is_in_target_modules(
     module_name: str,
     target_modules: list[str] | None,
+    packed_modules_mapping: dict[str, list[str]] | None = None,
 ) -> bool:
     """Check if a module passes the deployment-time target_modules filter.
 
@@ -270,14 +271,33 @@ def is_in_target_modules(
         module_name: Full dot-separated module name.
         target_modules: Optional deployment-time restriction list from
             LoRAConfig.target_modules.
+        packed_modules_mapping: Optional model-defined mapping from packed
+            runtime module names to their adapter-visible submodule names
+            (e.g. ``{"gate_up_proj": ["gate_proj", "up_proj"]}``).
 
     Returns:
         True if the module passes the filter, False otherwise.
     """
     if target_modules is None:
         return True
+    target_module_set = set(target_modules)
     module_suffix = module_name.split(".")[-1]
-    return module_suffix in set(target_modules)
+    if module_suffix in target_module_set or module_name in target_module_set:
+        return True
+
+    if not packed_modules_mapping:
+        return False
+
+    # Runtime packed parent matched by deployment-time child targets.
+    packed_children = packed_modules_mapping.get(module_suffix)
+    if packed_children and any(child in target_module_set for child in packed_children):
+        return True
+
+    # Adapter-visible packed child matched by deployment-time parent target.
+    return any(
+        module_suffix in children and packed_parent in target_module_set
+        for packed_parent, children in packed_modules_mapping.items()
+    )
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:
@@ -335,7 +355,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     return local_snapshot_path
 
 
-def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+def process_packed_modules_mapping(
+    model: nn.Module, force_2d_moe: bool = False
+) -> dict[str, list[str]]:
     if is_moe_model(model):
         if moe_packed_mapping := get_moe_expert_mapping(model):
             # This method generates and returns a dictionary mapping packed module
@@ -344,8 +366,11 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-            if not model.is_3d_moe_weight:
-                # 3D MoE LoRA does not need `packed_modules_mapping`
+            # The 2D mapping is needed when the model itself is 2D, or when
+            # the engine forces the universal 2D wrapper via
+            # enable_mixed_moe_lora_format (so 3D models can also load 2D
+            # adapters through FusedMoEWithLoRA).
+            if (not model.is_3d_moe_weight) or force_2d_moe:
                 # Filter out malformed entries: non-gated MoE has empty
                 # ckpt_up_proj_name which results in weight_name containing ".."
                 # (e.g., "experts.0.." instead of "experts.0.layer_name.")

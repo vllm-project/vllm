@@ -9,9 +9,10 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, config
+from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
+    _expand_json_human_readable_numbers,
     contains_type,
     get_kwargs,
     get_type,
@@ -115,6 +116,10 @@ class DummyConfig:
     """Regular bool with default True"""
     optional_bool: bool | None = None
     """Optional bool with default None"""
+
+    optional_bool_or_str: bool | str | None = None
+    """Optional bool-or-str with default None"""
+
     optional_literal: Literal["x", "y"] | None = None
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = Field(default_factory=lambda: (1, 2, 3))
@@ -169,6 +174,11 @@ def test_get_kwargs():
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
+    # optional bool-or-str should accept an optional string value
+    assert kwargs["optional_bool_or_str"]["type"] is str
+    assert kwargs["optional_bool_or_str"]["nargs"] == "?"
+    assert kwargs["optional_bool_or_str"]["const"] is True
+    assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
     assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
     # tuples should have the correct nargs
@@ -194,6 +204,32 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+
+
+def test_hf_token_get_kwargs():
+    kwargs = get_kwargs(ModelConfig)["hf_token"]
+
+    assert kwargs["type"] is str
+    assert kwargs["nargs"] == "?"
+    assert kwargs["const"] is True
+    assert "action" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [
+        ([], None),
+        (["--hf-token"], True),
+        (["--hf-token", "hf_secret"], "hf_secret"),
+        (["--hf-token", "None"], "None"),
+    ],
+)
+def test_hf_token_cli_arg(cli_args, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(cli_args)
+
+    assert args.hf_token == expected
 
 
 @pytest.mark.parametrize(
@@ -332,13 +368,7 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
-            "--attention-config.use_cudnn_prefill",
-            "true",
-            "--attention-config.use_trtllm_ragged_deepseek_prefill",
-            "true",
             "--attention-config.use_trtllm_attention",
-            "true",
-            "--attention-config.disable_flashinfer_prefill",
             "true",
             "--attention-config.disable_flashinfer_q_quantization",
             "true",
@@ -351,10 +381,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert engine_args.attention_config.use_cudnn_prefill is True
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
-    assert engine_args.attention_config.disable_flashinfer_prefill is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
 
     # set to string form of a dict with all fields
@@ -364,10 +391,7 @@ def test_attention_config():
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
             '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_cudnn_prefill": false, '
-            '"use_trtllm_ragged_deepseek_prefill": false, '
             '"use_trtllm_attention": false, '
-            '"disable_flashinfer_prefill": false, '
             '"disable_flashinfer_q_quantization": false}',
         ]
     )
@@ -378,10 +402,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 2
     assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
-    assert engine_args.attention_config.use_cudnn_prefill is False
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
     assert engine_args.attention_config.use_trtllm_attention is False
-    assert engine_args.attention_config.disable_flashinfer_prefill is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
 
     # test --attention-backend flows into VllmConfig.attention_config
@@ -523,3 +544,72 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_numa_bind_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--numa-bind",
+            "--numa-bind-nodes",
+            "0",
+            "0",
+            "1",
+            "1",
+            "--numa-bind-cpus",
+            "0-3",
+            "4-7",
+            "8-11",
+            "12-15",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.numa_bind is True
+    assert engine_args.numa_bind_nodes == [0, 0, 1, 1]
+    assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
+
+
+def test_ir_op_priority():
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    cfg1 = EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    cfg2 = EngineArgs(
+        kernel_config=KernelConfig(ir_op_priority=ir_op_priority)
+    ).create_engine_config()
+    assert cfg1.kernel_config.ir_op_priority == cfg2.kernel_config.ir_op_priority
+
+    with pytest.raises(ValueError, match="rms_norm"):
+        _ = EngineArgs(
+            ir_op_priority=ir_op_priority,
+            kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
+        ).create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("input_json", "expected_json"),
+    [
+        # Decimal suffixes (lowercase)
+        ('{"x": 80g}', '{"x": 80000000000}'),
+        ('{"x": 1k}', '{"x": 1000}'),
+        ('{"x": 5m}', '{"x": 5000000}'),
+        ('{"x": 2t}', '{"x": 2000000000000}'),
+        # Binary suffixes (uppercase)
+        ('{"x": 1K}', f'{{"x": {2**10}}}'),
+        ('{"x": 1G}', f'{{"x": {2**30}}}'),
+        # Decimal values
+        ('{"x": 1.5g}', '{"x": 1500000000}'),
+        # Quoted strings must NOT be modified
+        ('{"my_key": 80g}', '{"my_key": 80000000000}'),
+        ('{"name": "80g"}', '{"name": "80g"}'),
+        ('{"model_name": "foo_bar"}', '{"model_name": "foo_bar"}'),
+        # Multiple values
+        ('{"a": 1k, "b": 2m}', '{"a": 1000, "b": 2000000}'),
+        # Plain numbers are untouched
+        ('{"x": 42}', '{"x": 42}'),
+        # Nested JSON
+        ('{"outer": {"inner": 10g}}', '{"outer": {"inner": 10000000000}}'),
+    ],
+)
+def test_expand_json_human_readable_numbers(input_json, expected_json):
+    assert _expand_json_human_readable_numbers(input_json) == expected_json
