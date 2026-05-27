@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
@@ -492,11 +491,9 @@ class DeepseekV4MoE(nn.Module):
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
-        token_shard_enabled = os.getenv("DSV4_MEGAMOE_PCP_TOKEN_SHARD", "1") != "0"
         self.use_mega_moe_pcp_token_shard = (
             self.use_mega_moe
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
-            and token_shard_enabled
         )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
