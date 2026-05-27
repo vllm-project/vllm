@@ -1197,6 +1197,35 @@ async fn load_lora_adapter_rejects_engine_false_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn load_lora_adapter_rejects_base_model_name_collision() {
+    let (mut app, engine_task) =
+        test_admin_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "Qwen/Qwen1.5-0.5B-Chat",
+                        "lora_path": "/tmp/adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    drop(app);
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn http_metrics_record_list_models_requests() {
     let mut app = test_app().await;
     let before = METRICS.render().unwrap();

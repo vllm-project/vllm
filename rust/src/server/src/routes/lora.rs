@@ -58,6 +58,10 @@ pub async fn load_lora_adapter(
                 ),
                 Some("lora_name"),
             ),
+            LoadLoRAError::BaseModelName { lora_name } => ApiError::invalid_request(
+                format!("The lora adapter name '{lora_name}' conflicts with a served base model."),
+                Some("lora_name"),
+            ),
             LoadLoRAError::Engine(error) => ApiError::server_error(format!(
                 "failed to load LoRA adapter '{lora_name}': {}",
                 error.to_report_string()

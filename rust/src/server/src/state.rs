@@ -33,6 +33,7 @@ pub struct AppState {
 #[derive(Debug)]
 pub(crate) enum LoadLoRAError {
     AlreadyLoaded { lora_name: String },
+    BaseModelName { lora_name: String },
     Engine(vllm_engine_core_client::Error),
     NotLoaded { lora_name: String },
 }
@@ -108,6 +109,9 @@ impl AppState {
         is_3d_lora_weight: bool,
     ) -> Result<LoRARequest, LoadLoRAError> {
         let _guard = self.lora_update_lock.lock().await;
+        if self.served_model_names.iter().any(|name| name == &lora_name) {
+            return Err(LoadLoRAError::BaseModelName { lora_name });
+        }
         if !load_inplace && self.lora_requests.read().await.contains_key(&lora_name) {
             return Err(LoadLoRAError::AlreadyLoaded { lora_name });
         }
