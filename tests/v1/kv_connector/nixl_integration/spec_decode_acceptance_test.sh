@@ -26,7 +26,10 @@
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
-set -x
+#   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
+#   ENABLE_HMA_FLAG     - set to 1 to enable hybrid KV cache manager
+#   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
+set -ex
 
 # ── Model & spec decode config ──────────────────────────────────────────
 
@@ -81,6 +84,20 @@ if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
   fi
 fi
 echo "Using attention backend: ${ATTENTION_BACKEND}"
+
+# ── HMA & extra serve args ────────────────────────────────────────────
+
+ENABLE_HMA_VAR=""
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
+  echo "HMA (Hybrid KV Cache Manager) enabled"
+fi
+
+EXTRA_SERVE_ARGS=()
+if [[ -n "${VLLM_SERVE_EXTRA_ARGS:-}" ]]; then
+  IFS=',' read -r -a EXTRA_SERVE_ARGS <<< "$VLLM_SERVE_EXTRA_ARGS"
+  echo "Extra serve args: ${EXTRA_SERVE_ARGS[*]}"
+fi
 
 cleanup_instances() {
   echo ""
@@ -228,6 +245,7 @@ run_test_for_device() {
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
+    ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
     VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
@@ -239,7 +257,9 @@ run_test_for_device() {
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend $ATTENTION_BACKEND \
+      ${ENABLE_HMA_VAR} \
+      ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
     PREFILL_HOSTS+=("$SERVER_HOST")
@@ -265,6 +285,7 @@ run_test_for_device() {
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
+    ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
     VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
@@ -276,7 +297,9 @@ run_test_for_device() {
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND &
+      --attention-backend $ATTENTION_BACKEND \
+      ${ENABLE_HMA_VAR} \
+      ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
     DECODE_HOSTS+=("$SERVER_HOST")
@@ -303,6 +326,7 @@ run_test_for_device() {
   DECODE_PORT=${DECODE_PORTS[0]} \
   SERVER_HOST=$SERVER_HOST \
   TEST_MODEL=$MODEL_NAME \
+  SD_METHOD=$SD_METHOD \
   python3 -m pytest -s -x "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py"
 
   # Tear down before next iteration
