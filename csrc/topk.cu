@@ -57,9 +57,9 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   // TODO (roberto): TMA (cp.aync.bulk) requires the source address to be 16-byte aligned
   // instead of exiting otherwise, we can either fallback to persistent topk v1, add padding 
   // to the logits tensor, or use FilteredTopKRaggedTransform (probably not recommended)
-  TORCH_CHECK(num_rows <= 1 || stride % 4 == 0,
+  TORCH_CHECK(stride % 4 == 0,
               "cooperative_topk: stride must be multiple of 4 for TMA "
-              "alignment with bs>1, got stride (max_model_len)=", stride);
+              "alignment, got stride (max_model_len)=", stride);
 
   TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
   TORCH_CHECK(workspace.dtype() == torch::kUInt8, "workspace must be uint8");
