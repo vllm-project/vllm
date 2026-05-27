@@ -16,6 +16,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _compress_kv_sparse_attn_cutedsl,
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
+    _fused_kv_compress_norm_rope_insert_sparse_attn,
     _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
     _norm_rope_insert_sparse_attn_cutedsl,
 )
@@ -242,13 +243,24 @@ class DeepseekCompressor(nn.Module):
             assert not use_fp4_cache, (
                 "MXFP4 cache is only supported for indexer (head=128)"
             )
-            self._use_cutedsl_sparse_compressor = True
-            self._use_cutedsl_fused_sparse_compressor = self.compress_ratio == 4
-            self._compress_kernel = _compress_kv_sparse_attn_cutedsl
-            self._norm_rope_store_kernel = _norm_rope_insert_sparse_attn_cutedsl
-            self._fused_sparse_kernel = (
-                _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl
-            )
+            # The CuTeDSL (CUTLASS) compressor kernels are NVIDIA-only (`import
+            # cutlass`). On ROCm/gfx1250 use the equivalent pure-Triton fused kernel
+            # (`_fused_kv_compress_norm_rope_insert_sparse_attn`, head=512 / nope=448
+            # FP8 + rope=64 bf16), which shares the same call signature as the indexer
+            # Triton path below.
+            if current_platform.is_rocm():
+                self._use_cutedsl_sparse_compressor = False
+                self._fused_kernel = (
+                    _fused_kv_compress_norm_rope_insert_sparse_attn
+                )
+            else:
+                self._use_cutedsl_sparse_compressor = True
+                self._use_cutedsl_fused_sparse_compressor = self.compress_ratio == 4
+                self._compress_kernel = _compress_kv_sparse_attn_cutedsl
+                self._norm_rope_store_kernel = _norm_rope_insert_sparse_attn_cutedsl
+                self._fused_sparse_kernel = (
+                    _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl
+                )
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
