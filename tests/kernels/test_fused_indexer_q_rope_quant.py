@@ -23,10 +23,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.utils.import_utils import has_cutedsl
-from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
-    fused_indexer_q_rope_quant,
-)
 
 HEAD_DIM = 128
 ROPE_DIM = 64
@@ -156,7 +154,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
     # by patching the dispatcher's has_cutedsl() binding to return False.
     cutedsl_patch = (
         mock.patch(
-            "vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q.has_cutedsl",
+            "vllm.models.deepseek_v4.common.ops.fused_indexer_q.has_cutedsl",
             return_value=False,
         )
         if not use_cutedsl

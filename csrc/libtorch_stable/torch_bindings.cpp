@@ -266,6 +266,109 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Hadamard transforms
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+
+  // Activation ops
+  // Activation function used in SwiGLU.
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
+
+  // SwiGLU activation with input clamping.
+  ops.def(
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
+      "-> ()");
+
+  // Activation function used in GeGLU with `none` approximation.
+  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
+
+  // Activation function used in GeGLU with `tanh` approximation.
+  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
+
+  // FATReLU implementation.
+  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
+
+  ops.def(
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
+      "limit=7.0) "
+      "-> ()");
+
+  // GELU implementation used in GPT-2.
+  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
+
+  // Approximate GELU implementation.
+  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
+
+  // Quick GELU implementation.
+  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+
+  // Compute int8 quantized tensor for given scaling factor.
+  ops.def(
+      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
+      "Tensor? azp) -> ()");
+
+  // Compute int8 quantized tensor and scaling factor
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> ()");
+
+  // Compute FP8 quantized tensor for given scaling factor.
+  // Supports per-tensor, per-channel, per-token, and arbitrary 2D group
+  // scaling. Optional group_m/group_n specify the group shape explicitly;
+  // required for 1D scales to disambiguate per-channel vs per-token.
+  ops.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
+      "-> "
+      "()");
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> "
+      "()");
+
+  // Quantized GEMM for GPTQ.
+  // Note: even though the C++ inferred schema is correct for this op, it seems
+  // to prevent the meta function registry.
+  ops.def(
+      "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "use_v2_format, int bit) "
+      "-> Tensor");
+
+  // Post processing for GPTQ.
+  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
+
+  // Dequantization for GGML.
+  ops.def(
+      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
+      "dtype) -> Tensor");
+
+  // mmvq kernel for GGML.
+  ops.def(
+      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
+      "-> Tensor");
+
+  // mmq kernel for GGML.
+  ops.def(
+      "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
+
+  // moe kernel for GGML.
+  ops.def(
+      "ggml_moe_a8(Tensor X, Tensor W, "
+      "Tensor sorted_token_ids, Tensor expert_ids, Tensor "
+      "num_tokens_post_padded, "
+      "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
+
+  ops.def(
+      "ggml_moe_a8_vec(Tensor X, Tensor W, "
+      "Tensor topk_ids, int top_k, "
+      "int type, SymInt row, SymInt tokens) -> Tensor");
+
+  ops.def("ggml_moe_get_block_size(int type) -> int");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -312,6 +415,39 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // AllSpark ops: conditionally compiled so impl registrations are in source
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
+
+  // Activation kernels (shared CUDA/ROCm)
+  ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
+  ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
+  ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));
+  ops.impl("gelu_tanh_and_mul", TORCH_BOX(&gelu_tanh_and_mul));
+  ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
+  ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
+  ops.impl("gelu_new", TORCH_BOX(&gelu_new));
+  ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
+  ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+  ops.impl("silu_and_mul_with_clamp", TORCH_BOX(&silu_and_mul_clamp));
+
+  // INT8 quantization kernels
+  ops.impl("static_scaled_int8_quant", TORCH_BOX(&static_scaled_int8_quant));
+  ops.impl("dynamic_scaled_int8_quant", TORCH_BOX(&dynamic_scaled_int8_quant));
+
+  // FP8 quantization kernels
+  ops.impl("static_scaled_fp8_quant", TORCH_BOX(&static_scaled_fp8_quant));
+  ops.impl("dynamic_scaled_fp8_quant", TORCH_BOX(&dynamic_scaled_fp8_quant));
+  ops.impl("dynamic_per_token_scaled_fp8_quant",
+           TORCH_BOX(&dynamic_per_token_scaled_fp8_quant));
+
+  // GPTQ kernels
+  ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
+  ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
+
+  // GGML kernels
+  ops.impl("ggml_dequantize", TORCH_BOX(&ggml_dequantize));
+  ops.impl("ggml_mul_mat_vec_a8", TORCH_BOX(&ggml_mul_mat_vec_a8));
+  ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
+  ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
+  ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
@@ -329,6 +465,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
 #endif
+
+  // GGML block size lookup (no tensor args)
+  ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
 }
 
 REGISTER_EXTENSION(_C_stable_libtorch)

@@ -88,7 +88,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
 - label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs)
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus

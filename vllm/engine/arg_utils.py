@@ -456,6 +456,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    cpu_distributed_timeout_seconds: int | None = (
+        ParallelConfig.cpu_distributed_timeout_seconds
+    )
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
@@ -655,6 +658,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -839,6 +843,9 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
+        model_group.add_argument(
+            "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
+        )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
             "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
@@ -946,6 +953,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument(
+            "--cpu-distributed-timeout-seconds",
+            **parallel_kwargs["cpu_distributed_timeout_seconds"],
         )
         parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
         parallel_group.add_argument(
@@ -1590,6 +1601,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
@@ -1945,6 +1957,7 @@ class EngineArgs:
             nnodes=self.nnodes,
             node_rank=self.node_rank,
             distributed_timeout_seconds=self.distributed_timeout_seconds,
+            cpu_distributed_timeout_seconds=self.cpu_distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,

@@ -203,6 +203,12 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
+    def get_cuda_runtime_major(cls) -> int:
+        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        major = (torch.version.cuda or "0").split(".", 1)[0]
+        return int(major) if major.isdigit() else 0
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         raise NotImplementedError
 

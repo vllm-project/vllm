@@ -29,7 +29,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 _CTX = ReqContext(req_id="test")
-_MOCK_VLLM_CONFIG = MagicMock()
+_MOCK_OFFLOADING_SPEC = MagicMock()
 
 
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
@@ -68,7 +68,7 @@ class TestExampleSecondaryTierManager:
         """Test basic store and lookup operations."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
             custom_param=67,
@@ -105,12 +105,12 @@ class TestTieringOffloadingManager:
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
         )
         self.secondary_tier2 = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
         )
