@@ -18,7 +18,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.topk_quant_kernels import (
-    minimax_moe_topk_sigmoid_quant_dispatch,
+    minimax_moe_topk_sigmoid_quant,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -30,7 +30,6 @@ from vllm.utils.torch_utils import set_random_seed
 
 
 AccuracyResult = tuple[int | None, float | None, float | None, float | None]
-MAX_FUSED_TOKENS = 128
 
 
 @dataclass
@@ -98,23 +97,6 @@ def _baseline_topk_quant(
     return topk_weights, topk_ids, a1q, a1q_scale
 
 
-def _dispatch_topk_quant(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    e_score_correction_bias: torch.Tensor,
-    top_k: int,
-    block_k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return minimax_moe_topk_sigmoid_quant_dispatch(
-        hidden_states,
-        router_logits,
-        e_score_correction_bias,
-        top_k,
-        block_k,
-        MAX_FUSED_TOKENS,
-    )
-
-
 def _bench_us(
     fn: Callable[[], object],
     mode: str,
@@ -150,7 +132,7 @@ def _check_correctness(
         top_k,
         block_k,
     )
-    topk_weights, topk_ids, a1q, a1q_scale = _dispatch_topk_quant(
+    topk_weights, topk_ids, a1q, a1q_scale = minimax_moe_topk_sigmoid_quant(
         hidden_states,
         router_logits,
         e_score_correction_bias,
@@ -237,7 +219,7 @@ def _run_one(
         quantiles,
     )
     fused_us = _bench_us(
-        lambda: _dispatch_topk_quant(
+        lambda: minimax_moe_topk_sigmoid_quant(
             hidden_states,
             router_logits,
             e_score_correction_bias,
