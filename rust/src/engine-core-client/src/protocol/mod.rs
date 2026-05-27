@@ -48,6 +48,7 @@ mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
+pub mod lora;
 pub mod multimodal;
 pub mod stats;
 pub mod tensor;

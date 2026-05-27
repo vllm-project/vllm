@@ -43,7 +43,7 @@ use vllm_text::{Prompt, TextBackend};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode};
+use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
@@ -808,11 +808,12 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_dev_mode(
+        build_router_with_dev_mode_and_lora(
             Arc::new(AppState::new(
                 vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
                 chat,
             )),
+            true,
             true,
         ),
         engine_task,
@@ -1013,6 +1014,136 @@ async fn version_returns_engine_vllm_version() {
             "rust_frontend_version": env!("CARGO_PKG_VERSION"),
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+
+            let args = array[3].as_array().expect("utility args");
+            let lora = args[0].as_array().expect("lora request tuple");
+            assert_eq!(lora[0], Value::from("adapter-a"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/tmp/adapter-a"));
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+
+            let add = recv_engine_message(dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            let lora =
+                request.lora_request.as_ref().and_then(Value::as_array).expect("lora request");
+            assert_eq!(lora[0], Value::from("adapter-a"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/tmp/adapter-a"));
+
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("remove_lora"));
+
+            let args = array[3].as_array().expect("utility args");
+            assert_eq!(args[0], Value::from(1));
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_path": "/tmp/adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "adapter-a");
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "adapter-a",
+                        "prompt": "hello",
+                        "max_tokens": 2
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"].as_array().expect("model data").len(), 1);
+
+    drop(app);
+    engine_task.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

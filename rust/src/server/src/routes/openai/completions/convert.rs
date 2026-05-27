@@ -104,6 +104,7 @@ pub(crate) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        lora_request: None,
     };
 
     Ok(PreparedRequest {

@@ -189,6 +189,7 @@ impl ChatLlm {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            lora_request: request.lora_request,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::lora::LoRARequest;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
 pub use vllm_tool_parser::Tool as ChatTool;
@@ -426,6 +427,9 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// LoRA adapter selected for this request.
+    #[serde(default)]
+    pub lora_request: Option<LoRARequest>,
 }
 
 impl ChatRequest {
@@ -445,6 +449,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            lora_request: None,
         }
     }
 

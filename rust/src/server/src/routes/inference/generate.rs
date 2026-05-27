@@ -32,11 +32,16 @@ pub async fn generate(
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let prepared = match prepare_generate_request(body, state.served_model_names(), request_context)
-    {
+    let model_names = state.served_model_names_with_loras().await;
+    let lora_request = match body.model.as_deref() {
+        Some(model) => state.resolve_lora_request(model).await,
+        None => None,
+    };
+    let mut prepared = match prepare_generate_request(body, &model_names, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    prepared.text_request.lora_request = lora_request;
     let request_span = tracing::info_span!(
         "generate",
         request_id = %prepared.request_id,

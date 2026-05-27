@@ -87,6 +87,17 @@ fn serve_args_auto_forward_python_flags_without_separator() {
 }
 
 #[test]
+fn serve_args_auto_forward_enable_lora_to_python() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--enable-lora"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
+}
+
+#[test]
 fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "-tp", "2"]).unwrap();
 
@@ -342,6 +353,28 @@ fn frontend_args_json_accepts_noop_fields() {
         "ipc:///tmp/output.sock",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+}
+
+#[test]
+fn frontend_args_json_accepts_enable_lora_engine_field() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_lora":true}"#,
     ])
     .unwrap();
 

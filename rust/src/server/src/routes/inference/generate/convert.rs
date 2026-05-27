@@ -42,6 +42,7 @@ pub fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        lora_request: None,
     };
 
     Ok(PreparedRequest {

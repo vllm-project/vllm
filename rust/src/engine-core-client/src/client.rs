@@ -10,6 +10,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
+use crate::protocol::lora::LoRARequest;
 use crate::protocol::utility::EngineCoreUtilityRequest;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
@@ -657,6 +658,24 @@ impl EngineCoreClient {
             });
         }
         Ok(results.into_iter().all(|ok| ok))
+    }
+
+    /// Load or refresh one LoRA adapter on every connected engine.
+    pub async fn add_lora(&self, lora_request: &LoRARequest) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("add_lora", (lora_request,))
+            .await?
+            .into_iter()
+            .all(|loaded| loaded))
+    }
+
+    /// Remove one LoRA adapter from every connected engine.
+    pub async fn remove_lora(&self, lora_id: u64) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("remove_lora", (lora_id,))
+            .await?
+            .into_iter()
+            .all(|removed| removed))
     }
 
     /// Put the engine to sleep.
