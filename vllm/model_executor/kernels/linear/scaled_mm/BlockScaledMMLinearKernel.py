@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 
 from ..base import (
@@ -69,10 +68,6 @@ class Fp8BlockScaledMMLinearKernel(
             )
 
         return True, None
-
-    def input_quant_key(self) -> QuantKey | None:
-        # Dynamic per-group quant; nothing to hoist.
-        return None
 
     def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:
         return FP8BlockParams.from_layer(layer)

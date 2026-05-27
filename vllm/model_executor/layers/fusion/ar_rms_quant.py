@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import PassConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -31,6 +31,26 @@ if current_platform.is_cuda():
             flashinfer_trtllm_fused_allreduce_norm,
         )
 
+# Workspace size table -> per-world-size MB cap for flashinfer fused AR.
+# Resolved at import time (the lookup pulls in lazy imports that dynamo can't
+# trace) so the per-call sizing math stays a pure int op dynamo can handle.
+_FI_AR_MAX_SIZE_MB: dict[int, float] = (
+    PassConfig.default_fi_allreduce_fusion_max_size_mb()
+    if flashinfer_trtllm_fused_allreduce_norm is not None
+    else {}
+)
+
+
+def _max_token_num_for(x: torch.Tensor, world_size: int) -> int:
+    """Workspace-derived upper bound on tokens for the flashinfer fused AR
+    kernel; mirrors the math in ``FlashInferAllReduce._ensure_workspace``.
+    Returns 0 when flashinfer fused AR isn't supported for this world size.
+    """
+    max_size_mb = _FI_AR_MAX_SIZE_MB.get(world_size)
+    if not max_size_mb:
+        return 0
+    return int(max_size_mb * 1024 * 1024) // (x.shape[-1] * x.element_size())
+
 
 def _allreduce_rms_norm_fp8_static_tensor(
     norm: torch.nn.Module,
@@ -47,6 +67,7 @@ def _allreduce_rms_norm_fp8_static_tensor(
         and needs_ar
         and residual is not None
         and x.ndim == 2
+        and max_token_num > 0
     ):
         flashinfer_trtllm_fused_allreduce_norm(
             allreduce_in=x,
@@ -104,6 +125,7 @@ def _allreduce_rms_norm_nvfp4(
         and needs_ar
         and residual is not None
         and x.ndim == 2
+        and max_token_num > 0
     ):
         m, n = x.shape
         out_q, scale_out = create_fp4_output_tensors(
@@ -149,7 +171,12 @@ def _allreduce_rms_norm(
     needs_ar: bool,
     max_token_num: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if flashinfer_trtllm_fused_allreduce_norm is not None and needs_ar and x.ndim == 2:
+    if (
+        flashinfer_trtllm_fused_allreduce_norm is not None
+        and needs_ar
+        and x.ndim == 2
+        and max_token_num > 0
+    ):
         if residual is not None:
             # AR + add + RMSNorm: x is mutated to the norm result.
             flashinfer_trtllm_fused_allreduce_norm(
@@ -266,7 +293,7 @@ def fused_ar_rms_norm_quant(
         else _allreduce_rms_norm
     )
     max_token_num = (
-        get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        _max_token_num_for(hidden_states, get_tensor_model_parallel_world_size())
         if do_allreduce
         else 0
     )

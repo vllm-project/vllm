@@ -74,6 +74,16 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         self.config = c
         self.layer_param_names = layer_param_names
 
+    def input_quant_key(self) -> QuantKey | None:
+        """The activation quant key this kernel can consume pre-quantized.
+
+        Manual fusion uses this to decide whether to hoist activation quant
+        out of ``apply_weights`` into a fused [some operations] + quant kernel.
+        Return ``None`` when the kernel needs in-kernel quantization (custom
+        padding/swizzling, dynamic scales, etc.).
+        """
+        return None
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
@@ -108,16 +118,6 @@ class FP8ScaledMMLinearKernel(
         self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
 
-    def input_quant_key(self) -> QuantKey | None:
-        """Activation quant key this kernel can consume pre-quantized.
-
-        Manual fusion uses this to decide whether to hoist activation quant
-        out of ``apply_weights`` into a fused (AR +) RMSNorm + quant kernel.
-        Return ``None`` when the kernel needs in-kernel quantization (custom
-        padding/swizzling, dynamic scales, etc.).
-        """
-        return None
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
@@ -143,6 +143,7 @@ class FP8ScaledMMLinearKernel(
         if isinstance(x, QuantizedActivation):
             x_data, x_s = x.data, x.scale
             orig_shape, orig_dtype = x.orig_shape, x.orig_dtype
+            assert x_data.dtype == fp8_dtype
         else:
             x_data = x
             orig_shape, orig_dtype = x.shape, x.dtype

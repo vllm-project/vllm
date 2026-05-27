@@ -174,6 +174,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
+        """Only static per-tensor activation quantization is supported for external
+        quantization."""
         if self.config.activation_quant_key == kFp8StaticTensorSym:
             return kFp8StaticTensorSym
         return None
