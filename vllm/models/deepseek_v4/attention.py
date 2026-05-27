@@ -327,7 +327,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        # Block-FP8 layers are renamed weight_scale -> weight_scale_inv
+        # by MarlinFP8.process_weights_after_loading. Non-Marlin kernels
+        # (TritonFp8BlockScaledMM, DeepGemm, Cutlass, FlashInfer) leave
+        # the on-disk name. Accept either; math is identical.
+        wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
+        if wo_a_scale is None:
+            wo_a_scale = self.wo_a.weight_scale
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
