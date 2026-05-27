@@ -36,6 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.common.ops import fused_mtp_input_rmsnorm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -130,16 +131,22 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-
         # Target stashes pre-hc_head residual as flat (T, hc_mult * D);
-        # reshape to (T, hc_mult, D) — the training-time layout.
+        # reshape to (T, hc_mult, D) — the training-time layout — before
+        # the fused norm pass so both inputs are 3D-friendly.
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
-        previous_hidden_states = self.hnorm(previous_hidden_states)
+        # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
+        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+            inputs_embeds,
+            positions,
+            previous_hidden_states,
+            self.enorm.weight.data,
+            self.hnorm.weight.data,
+            self.enorm.variance_epsilon,
+            self.hc_mult,
+        )
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)

@@ -211,7 +211,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
         # Register in the static forward context so the custom-op wrapper
-        # can look up this module by name at forward time.
+        # can look up this module by name from within a torch.compile graph.
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
