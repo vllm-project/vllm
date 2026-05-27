@@ -26,15 +26,18 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once(
-            "Using CPU all reduce to synchronize DP padding between ranks.",
-        )
-        device = "cpu"
-        group = dp_group.cpu_group
-        if dist.get_world_size(group) != dp_group.world_size:
-            raise RuntimeError(
-                "CPU DP synchronization does not support NCCL-split DP groups"
+        cpu_group = dp_group.cpu_group
+        if dist.get_world_size(cpu_group) != dp_group.world_size:
+            logger.warning_once(
+                "cpu_group out of sync with dp_group after NCCL split; "
+                "falling back to NCCL DP synchronization."
             )
+        else:
+            logger.info_once(
+                "Using CPU all reduce to synchronize DP padding between ranks.",
+            )
+            device = "cpu"
+            group = cpu_group
     return device, group
 
 
