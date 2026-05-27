@@ -1157,7 +1157,6 @@ def make_fake_moe_layer(
             quant_config=quant_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
