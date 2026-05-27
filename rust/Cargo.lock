@@ -5599,7 +5599,6 @@ dependencies = [
  "asynk-strim-attr",
  "bytes",
  "clap",
- "criterion",
  "easy-ext",
  "expect-test",
  "futures",
