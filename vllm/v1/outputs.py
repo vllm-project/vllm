@@ -283,13 +283,11 @@ class ModelRunnerOutput:
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
-    ) -> "ModelRunnerOutput | None":
+    ) -> "ModelRunnerOutput":
         """Return ModelRunnerOutput containing the provided KVConnectorOutput,
         otherwise empty. Returns None if kv_connector_output is passed as None.
         """
-        if kv_connector_output is None:
-            return None
-        if kv_connector_output.is_empty():
+        if kv_connector_output is None or kv_connector_output.is_empty():
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output

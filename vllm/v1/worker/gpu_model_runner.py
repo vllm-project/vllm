@@ -4327,7 +4327,7 @@ class GPUModelRunner(
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             # In case of PP with kv transfer, we need to pass through the
             # kv_connector_output
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)  # type: ignore[return-value]
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Unpack ephemeral state.
         (

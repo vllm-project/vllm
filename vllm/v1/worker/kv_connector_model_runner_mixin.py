@@ -45,7 +45,7 @@ class KVConnectorModelRunnerMixin:
         ):
             pass
 
-        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)  # type: ignore[return-value]
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     @staticmethod
     def maybe_get_kv_connector_output(
