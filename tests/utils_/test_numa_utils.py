@@ -140,7 +140,7 @@ def _patch_pct_gates(
 
 def test_pct_binding_filters_cpus(monkeypatch):
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46)
-    assert numa_utils._maybe_get_pct_cpu_binding([0]) == "0,1,16,17,64,65,80,81"
+    assert numa_utils._maybe_get_pct_cpu_binding([0]) == [0, 1, 16, 17, 64, 65, 80, 81]
 
 
 @pytest.mark.parametrize(
@@ -148,11 +148,11 @@ def test_pct_binding_filters_cpus(monkeypatch):
     [
         # 64-core SKUs (stride 16): cpus from "0-31,64-95" with cpu_id % 16
         # in (0, 1) -> 0, 1, 16, 17, 64, 65, 80, 81.
-        ("6776P", "0,1,16,17,64,65,80,81"),
-        ("6774P", "0,1,16,17,64,65,80,81"),
+        ("6776P", [0, 1, 16, 17, 64, 65, 80, 81]),
+        ("6774P", [0, 1, 16, 17, 64, 65, 80, 81]),
         # 72-core SKU (stride 18): cpus from "0-31,64-95" with cpu_id % 18
         # in (0, 1) -> 0, 1, 18, 19, 72, 73, 90, 91.
-        ("6962P", "0,1,18,19,72,73,90,91"),
+        ("6962P", [0, 1, 18, 19, 72, 73, 90, 91]),
     ],
 )
 def test_pct_binding_fires_on_every_capable_sku(monkeypatch, sku, expected_cpus):

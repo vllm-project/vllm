@@ -267,7 +267,7 @@ def _get_numa_node(parallel_config, gpu_index: int) -> int:
     return numa_nodes[gpu_index]
 
 
-def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
+def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> list[int] | None:
     """Return the union of PCT priority cores across ``numa_nodes`` (or None).
 
     PCT (Priority Core Turbo) lets a subset of cores boost above the rest;
@@ -280,6 +280,10 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
     SKUs in ``_PCT_CAPABLE_SKUS`` with the expected CPPC ``highest_perf``
     signal; on any other host it returns None and the caller falls back to
     the default NUMA-node bind.
+
+    Returns the sorted CPU ids as a ``list[int]``; the caller is expected
+    to format them for the chosen tool (e.g. comma-joined for
+    ``numactl --physcpubind``).
     """
     sku = _pct_sku_config()
     if sku is None:
@@ -316,7 +320,7 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> str | None:
 
     if not union_cpus:
         return None
-    return ",".join(str(c) for c in sorted(union_cpus))
+    return sorted(union_cpus)
 
 
 def _get_cpu_binding(
@@ -325,7 +329,10 @@ def _get_cpu_binding(
     """Return the CPU list a process should be pinned to (or None)."""
     cpu_bindings = parallel_config.numa_bind_cpus
     if cpu_bindings is None:
-        return _maybe_get_pct_cpu_binding(numa_nodes)
+        pct_cpus = _maybe_get_pct_cpu_binding(numa_nodes)
+        if pct_cpus is None:
+            return None
+        return ",".join(str(c) for c in pct_cpus)
 
     if gpu_index >= len(cpu_bindings):
         raise ValueError(
@@ -416,13 +423,14 @@ def _get_numactl_enginecore_args(
     shard_nodes = _get_enginecore_numa_nodes(parallel_config, dp_local_rank)
     membind_arg = ",".join(str(n) for n in shard_nodes)
 
-    cpu_binding = (
+    pct_cpus = (
         None
         if parallel_config.numa_bind_cpus is not None
         else _maybe_get_pct_cpu_binding(shard_nodes)
     )
 
-    if cpu_binding is not None:
+    if pct_cpus is not None:
+        cpu_binding = ",".join(str(c) for c in pct_cpus)
         logger.info(
             "Binding EngineCore subprocess (local_rank=%s) to CPUs %s "
             "and NUMA nodes %s",
