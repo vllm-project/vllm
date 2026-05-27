@@ -1,5 +1,5 @@
 /*
- * Persistent TopK Scheduler for DSA Indexer
+ * Cooperative TopK kernel for DSA Indexer
  */
 
 #ifndef COOPERATIVE_TOPK_CUH_
