@@ -119,6 +119,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.config.quest import QuestConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
@@ -656,6 +657,11 @@ class EngineArgs:
 
     ec_transfer_config: ECTransferConfig | None = None
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
+
+    enable_quest_sparse_offload: bool = False
+    quest_top_k: int | None = None
+    quest_cpu_cache_blocks: int | None = None
+    quest_config: str | None = None  # path to JSON file
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -1468,6 +1474,36 @@ class EngineArgs:
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
+        vllm_group.add_argument(
+            "--enable-quest-sparse-offload",
+            action="store_true",
+            default=EngineArgs.enable_quest_sparse_offload,
+            help="Enable the Quest sparse + KV-offload attention backend. "
+            "When set, vLLM uses the QuestSparseOffloadBackend for "
+            "attention. Requires a Llama-family model (Llama, Mistral, "
+            "Qwen2/Qwen2.5). See QuestConfig for tuning knobs.",
+        )
+        vllm_group.add_argument(
+            "--quest-top-k",
+            type=int,
+            default=EngineArgs.quest_top_k,
+            help="(Quest) Number of KV blocks selected per decode step. "
+            "Has no effect unless --enable-quest-sparse-offload is set.",
+        )
+        vllm_group.add_argument(
+            "--quest-cpu-cache-blocks",
+            type=int,
+            default=EngineArgs.quest_cpu_cache_blocks,
+            help="(Quest) Capacity of the pinned CPU KV pool, in blocks. "
+            "Has no effect unless --enable-quest-sparse-offload is set.",
+        )
+        vllm_group.add_argument(
+            "--quest-config",
+            type=str,
+            default=EngineArgs.quest_config,
+            help="(Quest) Path to a JSON file overriding any QuestConfig "
+            "fields. CLI flags above take precedence over the file.",
+        )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
@@ -2248,6 +2284,7 @@ class EngineArgs:
             weight_transfer_config=self.weight_transfer_config,
             shutdown_timeout=self.shutdown_timeout,
         )
+        config.quest_config = _quest_config_from_args(self)
 
         return config
 
@@ -2599,3 +2636,32 @@ def _raise_unsupported_error(feature_name: str):
         f"remove {feature_name} from your config."
     )
     raise NotImplementedError(msg)
+
+
+def _quest_config_from_args(args: "EngineArgs") -> "QuestConfig | None":
+    """Translate EngineArgs into a QuestConfig instance.
+
+    Returns None when Quest is not enabled (gate is off and no config file).
+    """
+    from vllm.config.quest import QuestConfig
+
+    enabled = bool(getattr(args, "enable_quest_sparse_offload", False))
+    config_path = getattr(args, "quest_config", None)
+    if not enabled and not config_path:
+        return None
+
+    if config_path:
+        import json
+        with open(config_path) as f:
+            data = json.load(f)
+        cfg = QuestConfig.from_dict(data)
+    else:
+        cfg = QuestConfig()
+
+    cfg.enabled = cfg.enabled or enabled
+    if getattr(args, "quest_top_k", None) is not None:
+        cfg.top_k = args.quest_top_k
+    if getattr(args, "quest_cpu_cache_blocks", None) is not None:
+        cfg.cpu_cache_blocks = args.quest_cpu_cache_blocks
+    cfg.validate()
+    return cfg
