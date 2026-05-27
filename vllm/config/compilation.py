@@ -140,6 +140,8 @@ class PassConfig:
     backward compatibility and has no effect; it will be removed in v0.23."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
+    """Fuse the QK rope (+ Q quant) + KV cache ops."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
@@ -148,11 +150,9 @@ class PassConfig:
     """Fuse the custom RMSNorm + padding ops."""
     fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
-    """Fuse the QK rope + KV cache ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
-    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    """The threshold for RoPE(+Q quant)+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     """
 
@@ -284,10 +284,10 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_mla_dual_rms_norm = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
-                "The fusion will be disabled."
+                "KV cache fusion enabled but the current platform is not "
+                "CUDA or ROCm. The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
@@ -1128,6 +1128,20 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+
+                # Flashinfer fuse_rope_kvcache op needs to be a splitting op in
+                # piecewise cudagraph since it needs to access attn_metadata.
+                from vllm.utils.flashinfer import has_flashinfer
+
+                if (
+                    current_platform.is_cuda()
+                    and has_flashinfer()
+                    and self.use_inductor_graph_partition
+                    and self.pass_config.fuse_rope_kvcache
+                ):
+                    self.splitting_ops.append(
+                        "vllm::fused_rope_and_unified_kv_cache_update"
+                    )
 
                 # unified_kv_cache_update has a string param that prevents Inductor
                 # from reusing piecewise graphs. Remove it from the compiled graph.
