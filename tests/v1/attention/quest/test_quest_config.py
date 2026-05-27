@@ -77,3 +77,22 @@ def test_quest_config_to_dict_round_trip():
     assert d["top_k"] == 128
     restored = QuestConfig.from_dict(d)
     assert restored == original
+
+
+def test_vllm_config_has_quest_config_field_default_none():
+    from vllm.config import VllmConfig
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(VllmConfig)}
+    assert "quest_config" in fields, (
+        "VllmConfig must declare a quest_config field. "
+        "Found fields: " + ", ".join(sorted(fields))
+    )
+
+
+def test_quest_config_re_exported_from_vllm_config():
+    # End-users import via top-level vllm.config — keep that path stable.
+    from vllm.config import QuestConfig as ReExported
+    from vllm.config.quest import QuestConfig as Direct
+
+    assert ReExported is Direct

@@ -34,6 +34,7 @@ from vllm.config.offload import (
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.quest import QuestConfig
 from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
@@ -118,6 +119,8 @@ __all__ = [
     "StructuredOutputsConfig",
     # From vllm.config.profiler
     "ProfilerConfig",
+    # From vllm.config.quest
+    "QuestConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",

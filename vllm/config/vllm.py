@@ -45,6 +45,7 @@ from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
+from .quest import QuestConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
@@ -335,6 +336,10 @@ class VllmConfig:
     """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
+    quest_config: QuestConfig | None = None
+    """Configuration for the Quest sparse offload attention backend. None
+    disables it (default). Populated by `EngineArgs` when the user sets
+    --enable-quest-sparse-offload."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
