@@ -179,8 +179,13 @@ class SchedulerConfig:
         # finalized and we can maintain support for scheduler classes that
         # implement it
         logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is "
-            "not public and compatibility may not be maintained.",
+            "Using custom scheduler class %s. The scheduler interface is not "
+            "public and compatibility is not guaranteed. Custom schedulers "
+            "should extend `AsyncScheduler` (not `Scheduler`) to match the "
+            "default async pipeline behavior — subclassing `Scheduler` "
+            "directly disables async scheduling overlap and can cause "
+            "significant latency regression. See "
+            "https://github.com/vllm-project/vllm/issues/42185 for context.",
             self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):

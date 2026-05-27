@@ -63,6 +63,16 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    """Synchronous V1 scheduler implementation.
+
+    Note: This is the synchronous base scheduler. Most custom scheduler
+    plugins should extend ``AsyncScheduler`` instead, not this class —
+    subclassing ``Scheduler`` directly disables async scheduling overlap
+    with GPU execution and can cause significant latency regression on
+    production workloads. See RFC #42185 for measurement details:
+    https://github.com/vllm-project/vllm/issues/42185
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
