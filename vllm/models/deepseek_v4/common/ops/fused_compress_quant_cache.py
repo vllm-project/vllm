@@ -67,6 +67,9 @@ def compress_norm_rope_store_triton(
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
         num_warps = 1
 
+    # (B, H=1, N, C) -> (B, N, C)
+    kv_cache = kv_cache.squeeze(1)
+
     kernel[(num_actual,)](
         # state cache
         state_cache,
@@ -88,7 +91,7 @@ def compress_norm_rope_store_triton(
         # KV cache
         kv_cache,
         k_cache_metadata.slot_mapping,
-        kv_cache.shape[2],  # paged KV cache block size (tokens per block)
+        kv_cache.shape[1],  # paged KV cache block size (tokens per block)
         # constexprs
         HEAD_SIZE=head_dim,
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),

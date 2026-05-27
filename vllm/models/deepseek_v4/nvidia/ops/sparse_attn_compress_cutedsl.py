@@ -1265,6 +1265,8 @@ def compress_norm_rope_store_cutedsl(
     token_stride: int,
     scale_dim: int,
 ) -> None:
+    # (B, H=1, N, C) -> (B, N, C)
+    kv_cache = kv_cache.squeeze(1)
     if compress_ratio == 4:
         # For C4A, the single fused kernel is faster than the two-kernel version.
         fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
@@ -1279,7 +1281,7 @@ def compress_norm_rope_store_cutedsl(
             cos_sin_cache,
             kv_cache,
             k_cache_metadata.slot_mapping,
-            kv_cache.shape[2],  # paged KV cache block size
+            kv_cache.shape[1],  # paged KV cache block size
             kv_cache.stride(0),
             head_size=head_dim,
             state_width=state_width,
@@ -1320,7 +1322,7 @@ def compress_norm_rope_store_cutedsl(
             cos_sin_cache,
             kv_cache,
             k_cache_metadata.slot_mapping,
-            kv_cache.shape[2],  # paged KV cache block size
+            kv_cache.shape[1],  # paged KV cache block size
             kv_cache.stride(0),
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
