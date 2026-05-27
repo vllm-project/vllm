@@ -19,7 +19,6 @@ from vllm.config import (
     KernelConfig,
     ModelConfig,
     ParallelConfig,
-    PassConfig,
     PoolerConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -34,7 +33,6 @@ from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
-from vllm.model_executor.models.config import GptOssForCausalLMConfig
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -50,32 +48,6 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
-
-
-@pytest.mark.parametrize(
-    ("initial_limit", "expected_limit"),
-    [
-        (256, 16384),
-        (2048, 2048),
-    ],
-)
-def test_gpt_oss_rope_kvcache_fusion_limit(initial_limit, expected_limit):
-    pass_config = PassConfig(
-        fuse_rope_kvcache=True,
-        rope_kvcache_fusion_max_token_num=initial_limit,
-    )
-    config = SimpleNamespace(
-        compilation_config=SimpleNamespace(
-            pass_config=pass_config,
-            cudagraph_capture_sizes=None,
-            max_cudagraph_capture_size=None,
-        ),
-        structured_outputs_config=SimpleNamespace(reasoning_parser=""),
-    )
-
-    GptOssForCausalLMConfig.verify_and_update_config(config)
-
-    assert pass_config.rope_kvcache_fusion_max_token_num == expected_limit
 
 
 @pytest.mark.parametrize(

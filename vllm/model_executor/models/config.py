@@ -170,18 +170,6 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )
 
-        pass_config = compilation_config.pass_config
-        if (
-            pass_config.fuse_rope_kvcache
-            and pass_config.rope_kvcache_fusion_max_token_num == 256
-        ):
-            pass_config.rope_kvcache_fusion_max_token_num = 16384
-            logger.info(
-                "Using RoPE+KV cache fusion for GPT-OSS compile ranges up to %d "
-                "tokens.",
-                pass_config.rope_kvcache_fusion_max_token_num,
-            )
-
 
 class GteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
