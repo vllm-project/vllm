@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1250, on_gfx1x, on_gfx9, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -172,6 +172,9 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
+        # gfx1250 excludes the skinny-GEMM kernels (wvSplitK/LLMM1) from the
+        # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
+        and not on_gfx1250()
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )

@@ -126,6 +126,20 @@ def rocm_platform_plugin() -> str | None:
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
 
+    # Fallback: amdsmi queries the kernel driver/sysfs, which does not see GPUs
+    # exposed only through the HSA layer (e.g. the FFM pre-silicon simulator).
+    # Trust torch's HIP runtime detection in that case.
+    if not is_rocm:
+        try:
+            import torch
+
+            if torch.version.hip is not None and torch.cuda.device_count() > 0:
+                is_rocm = True
+                logger.debug("ROCm platform detected via torch.version.hip "
+                             "(amdsmi unavailable).")
+        except Exception as e:
+            logger.debug("torch HIP ROCm fallback failed: %s", str(e))
+
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
