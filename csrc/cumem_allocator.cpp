@@ -48,31 +48,36 @@ static inline unsigned long long my_min(unsigned long long a,
 
 static CUresult reserve_rocm_address(CUdeviceptr* d_mem, ssize_t size,
                                      size_t alignment) {
-  CUresult status = cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+  CUresult status = cuMemAddressReserve(d_mem, size, 0, 0, 0);
   if (status == CUresult(0) || alignment == 0) {
     return status;
   }
 
-  // Some ROCm stacks can report OOM while reserving VA with an explicit
-  // alignment even when physical VRAM is free. Let HIP choose the default
-  // alignment before surfacing the failure.
-  return cuMemAddressReserve(d_mem, size, 0, 0, 0);
+  return cuMemAddressReserve(d_mem, size, alignment, 0, 0);
 }
 
 static CUresult reserve_rocm_address_at(CUdeviceptr d_mem, ssize_t size) {
-  CUdeviceptr d_mem_new = 0;
-  CUresult status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
-  if (status != CUresult(0)) {
-    return status;
-  }
-  if (d_mem_new == d_mem) {
-    return CUresult(0);
+  CUresult status = hipErrorInvalidValue;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    CUdeviceptr d_mem_new = 0;
+    status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+    if (status != CUresult(0)) {
+      if (d_mem_new != 0) {
+        cuMemAddressFree(d_mem_new, size);
+      }
+      continue;
+    }
+    if (d_mem_new == d_mem) {
+      return CUresult(0);
+    }
+
+    cuMemAddressFree(d_mem_new, size);
+    status = hipErrorInvalidValue;
   }
 
-  cuMemAddressFree(d_mem_new, size);
-  std::cerr << "ROCm: VA re-reserve got " << (void*)d_mem_new << " instead of "
-            << (void*)d_mem << std::endl;
-  return hipErrorInvalidValue;
+  std::cerr << "ROCm: failed to re-reserve VA at " << (void*)d_mem
+            << " after retrying" << std::endl;
+  return status;
 }
 
 static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {

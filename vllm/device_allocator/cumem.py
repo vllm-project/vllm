@@ -77,6 +77,15 @@ def get_pluggable_allocator(
     return new_alloc
 
 
+def _rocm_synchronize(device: int | None = None) -> None:
+    if not current_platform.is_rocm():
+        return
+    if device is None:
+        torch.cuda.synchronize()
+    else:
+        torch.cuda.synchronize(device)
+
+
 @contextmanager
 def use_rocm_memory_pool(
     mem_pool: torch.cuda.memory.MemPool,
@@ -107,13 +116,13 @@ def use_memory_pool_with_allocator(
 ]:
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
-    if not current_platform.is_rocm():
-        with torch.cuda.memory.use_mem_pool(mem_pool):
-            yield mem_pool, new_alloc
+    if current_platform.is_rocm():
+        with use_rocm_memory_pool(mem_pool, new_alloc) as data:
+            yield data
         return
 
-    with use_rocm_memory_pool(mem_pool, new_alloc) as data:
-        yield data
+    with torch.cuda.memory.use_mem_pool(mem_pool):
+        yield mem_pool, new_alloc
 
 
 class CuMemAllocator:
@@ -208,8 +217,8 @@ class CuMemAllocator:
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
         # (e.g. quant helpers' transient tensors during weight loading)
-        # races the unmap and surfaces as CUDA_ERROR_ILLEGAL_ADDRESS.
-        torch.cuda.synchronize(data.handle[0])
+        # races the unmap on ROCm and surfaces as CUDA_ERROR_ILLEGAL_ADDRESS.
+        _rocm_synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
             data.handle[1],
@@ -236,7 +245,7 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
-        torch.cuda.synchronize()
+        _rocm_synchronize()
 
         total_bytes = 0
         backup_bytes = 0
@@ -268,10 +277,10 @@ class CuMemAllocator:
             (total_bytes - backup_bytes) / 1024**3,
         )
 
-        torch.cuda.synchronize()
+        _rocm_synchronize()
         gc.collect()
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        _rocm_synchronize()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -283,7 +292,7 @@ class CuMemAllocator:
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
-        torch.cuda.synchronize()
+        _rocm_synchronize()
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
@@ -298,7 +307,7 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
-        torch.cuda.synchronize()
+        _rocm_synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
