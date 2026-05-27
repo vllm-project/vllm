@@ -477,12 +477,13 @@ class TestTieringOffloadingManager:
         assert result is not None
         assert set(result.keys_to_store) == set(new_blocks)
 
-        # Only tier1 (request-level) should get the existing blocks
+        # Only tier1 (request-level) should get existing blocks cascaded now.
+        # New blocks are cascaded to ALL tiers later via complete_store().
         self.secondary_tier1.submit_store.assert_called_once()
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert set(job_metadata.keys) == set(existing_blocks)
 
-        # tier2 (block-level) should NOT get the cascade
+        # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
 
 
