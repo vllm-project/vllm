@@ -61,13 +61,54 @@ vllm serve Qwen/Qwen3-8B \
     --kv_transfer_config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
 ```
 
-## Configuration
+## Per-Request Options
 
-The `kv_connector_extra_config` dict accepts these options:
+Both offline and online modes support per-request options via `kv_transfer_params`:
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `shared_storage_path` | `/tmp` | Directory where hidden state files are saved |
+| `hidden_states_path` | Auto-generated | Custom file path for saving hidden states. If not set, files are saved to `<shared_storage_path>/<request_id>.safetensors`. |
+| `include_output_tokens` | `False` | When `True`, save hidden states for both prompt and generated output tokens. When `False`, only prompt token hidden states are saved. |
+
+### Offline usage
+
+Pass per-request options via `extra_args` on `SamplingParams`:
+
+```python
+SamplingParams(
+    max_tokens=32,
+    extra_args={
+        "kv_transfer_params": {
+            "hidden_states_path": "/tmp/my_output.safetensors",
+            "include_output_tokens": True,
+        }
+    },
+)
+```
+
+### Online usage
+
+Pass `kv_transfer_params` as a top-level field in the API request:
+
+```json
+{
+    "model": "Qwen/Qwen3-8B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 32,
+    "kv_transfer_params": {
+        "hidden_states_path": "/tmp/my_output.safetensors",
+        "include_output_tokens": true
+    }
+}
+```
+
+## Configuration
+
+The `kv_connector_extra_config` dict accepts these server-level options:
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `shared_storage_path` | `/tmp` | Directory where hidden state files are saved (used when `hidden_states_path` is not set per-request) |
 | `num_writer_threads` | `8` | Thread pool size for async disk writes |
 | `use_synchronization_lock` | `True` | Use file locks so concurrent readers block until writes complete. Can be disabled for batch generation where synchronization is not needed. |
 

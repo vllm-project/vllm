@@ -9,6 +9,9 @@ import torch
 from safetensors import safe_open
 
 from vllm import LLM, ModelRegistry, SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector,
+)
 
 
 def get_and_check_output(output, expected_shape):
@@ -120,7 +123,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         },
         max_model_len=128,
         enforce_eager=True,
-        enable_chunked_prefill=False,
         trust_remote_code=True,
         load_format="dummy",  # Don't try to load real weights
     )
@@ -162,6 +164,97 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             )
 
 
+def test_extract_hidden_states_per_request_options(
+    predictable_llama_config_path, tmp_path, monkeypatch
+):
+    """Test per-request kv_transfer_params: include_output_tokens and
+    hidden_states_path."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
+    layer_ids = [2, 5, 10]
+    num_layers = len(layer_ids)
+
+    llm = LLM(
+        model=predictable_llama_config_path,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
+        },
+        max_model_len=128,
+        enforce_eager=True,
+        trust_remote_code=True,
+        load_format="dummy",
+    )
+
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+    max_tokens = 5
+    custom_path = os.path.join(tmp_path, "subdir", "custom.safetensors")
+
+    sampling_params_list = [
+        # Default: prompt-only, auto-generated path
+        SamplingParams(max_tokens=max_tokens, temperature=0.0),
+        # Custom path + include output tokens
+        SamplingParams(
+            max_tokens=max_tokens,
+            temperature=0.0,
+            extra_args={
+                "kv_transfer_params": {
+                    "hidden_states_path": custom_path,
+                    "include_output_tokens": True,
+                }
+            },
+        ),
+    ]
+    prompts = ["Short", "Medium length"]
+    outputs = llm.generate(prompts, sampling_params_list)
+    del llm
+    gc.collect()
+
+    # First output: prompt-only hidden states, default path
+    out0 = outputs[0]
+    path0 = out0.kv_transfer_params["hidden_states_path"]
+    assert path0 != custom_path
+    obj0 = example_hidden_states_connector.load_hidden_states(path0)
+    assert torch.equal(obj0["token_ids"], torch.tensor(out0.prompt_token_ids))
+    assert obj0["hidden_states"].shape == (
+        len(out0.prompt_token_ids),
+        num_layers,
+        hidden_size,
+    )
+    example_hidden_states_connector.cleanup_hidden_states(path0)
+
+    # Second output: prompt + output tokens, custom path
+    out1 = outputs[1]
+    assert out1.kv_transfer_params["hidden_states_path"] == custom_path
+    assert os.path.exists(custom_path)
+    obj1 = example_hidden_states_connector.load_hidden_states(custom_path)
+    token_ids = obj1["token_ids"]
+    hidden_states = obj1["hidden_states"]
+    # The final output token was never an input to the model, so its hidden
+    # state is not in the cache — hence the -1.
+    total_tokens = len(out1.prompt_token_ids) + len(out1.outputs[0].token_ids) - 1
+    assert token_ids.shape[0] == total_tokens
+    assert hidden_states.shape == (total_tokens, num_layers, hidden_size)
+
+    # Verify predictable layer values hold for all tokens (prompt + output)
+    for idx, layer_id in enumerate(layer_ids):
+        layer_hidden = hidden_states[:, idx, :]
+        assert torch.allclose(
+            layer_hidden,
+            torch.full_like(layer_hidden, layer_id),
+            atol=1e-5,
+        )
+    example_hidden_states_connector.cleanup_hidden_states(custom_path)
+
+
 def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
     """Smoke test for Qwen3.5 hybrid (mamba + full-attention) models.
     Uses load_format="dummy" to just check shape/plumbing.
@@ -185,7 +278,6 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         },
         max_model_len=256,
         enforce_eager=True,
-        enable_chunked_prefill=False,
         gpu_memory_utilization=0.4,
         load_format="dummy",
     )

@@ -444,13 +444,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         filename = self._request_filenames.pop(req_id)
         kv_params = request.kv_transfer_params or {}
         if kv_params.get("include_output_tokens", False):
-            token_ids = torch.tensor(list(request.all_token_ids))
+            # Exclude the final token — it was the model's output, never an
+            # input to a forward pass, so its hidden state is not in the cache.
+            token_ids = torch.tensor(list(request.all_token_ids)[:-1])
         elif request.prompt_token_ids is not None:
             token_ids = torch.tensor(request.prompt_token_ids)
         else:
             logger.warning(
                 "Request %s has no prompt_token_ids (prompt_embeds only). "
-                "Saved token_ids will be empty.", req_id,
+                "Saved token_ids will be empty.",
+                req_id,
             )
             token_ids = torch.tensor([], dtype=torch.long)
         self._pending_saves[req_id] = PendingSave(
