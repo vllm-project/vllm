@@ -85,6 +85,15 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _raise_if_k_norm_called_on_kv_shared_layer(
+    _module: nn.Module, _args: tuple[object, ...]
+) -> None:
+    raise AssertionError(
+        "k_norm must not execute on KV-shared layers; "
+        "k_norm.weight may be 1.0 (SFT checkpoint fallback)"
+    )
+
+
 def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
@@ -487,6 +496,15 @@ class Gemma4Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         # V norm: no learnable scale (pure normalization only)
         self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+
+        if self.is_kv_shared_layer:
+            # k_norm is never executed in forward() for KV-shared layers;
+            # they borrow K/V from an earlier layer. Register a hook so any
+            # future code path that accidentally calls k_norm here raises
+            # immediately rather than silently using wrong weights.
+            self.k_norm.register_forward_pre_hook(
+                _raise_if_k_norm_called_on_kv_shared_layer
+            )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -1509,7 +1527,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             if isinstance(mod, Gemma4Attention) and mod.is_kv_shared_layer:
                 k_norm_key = f"{mod_name}.k_norm.weight"
                 if k_norm_key in params_dict and k_norm_key not in loaded_params:
-                    params_dict[k_norm_key].fill_(1.0)
+                    params_dict[k_norm_key].data.fill_(1.0)
                     loaded_params.add(k_norm_key)
 
         return loaded_params
