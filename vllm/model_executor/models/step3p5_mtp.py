@@ -7,7 +7,6 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -19,9 +18,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .step3p5 import Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import maybe_prefix
-
-logger = init_logger(__name__)
+from .utils import maybe_prefix, validate_num_mtp_layers
 
 
 class SharedHead(nn.Module):
@@ -64,7 +61,6 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         inputs_embeds = self.enorm(inputs_embeds)
@@ -81,6 +77,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
 class Step3p5AMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
         config = vllm_config.model_config.hf_config
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -88,6 +85,9 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         )
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
+
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
@@ -120,7 +120,6 @@ class Step3p5AMultiTokenPredictor(nn.Module):
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
     def compute_logits(

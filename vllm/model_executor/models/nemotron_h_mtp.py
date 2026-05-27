@@ -23,10 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (
-    make_empty_intermediate_tensors_factory,
-    maybe_prefix,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
@@ -34,6 +30,11 @@ from .interfaces import SupportsPP
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
+)
+from .utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+    validate_num_mtp_layers,
 )
 
 
@@ -224,8 +225,11 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
-        assert self.num_mtp_layers == 1, (
-            "Only one MTP layer is supported for NemotronH-MTP"
+
+        validate_num_mtp_layers(
+            vllm_config,
+            self.num_mtp_layers,
+            max_speculative_tokens=1,
         )
 
         self.pattern_str = config.mtp_hybrid_override_pattern
@@ -293,13 +297,18 @@ class NemotronHMultiTokenPredictor(nn.Module):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         residual = None
+        current_step_idx = spec_step_idx % self.num_mtp_layers
 
-        for i in range(self.pattern_len):
+        start_layer_idx = current_step_idx * self.pattern_len
+        end_layer_idx = start_layer_idx + self.pattern_len
+
+        for i in range(start_layer_idx, end_layer_idx):
             hidden_states, residual = self.layers[str(i)](
                 inputs_embeds=inputs_embeds,
                 positions=positions,
@@ -365,6 +374,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
@@ -374,6 +384,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
             hidden_states,
             intermediate_tensors,
             inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 

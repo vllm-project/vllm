@@ -50,7 +50,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 from .hy_v3 import HYV3DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import is_pp_missing_parameter, maybe_prefix, validate_num_mtp_layers
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -115,7 +115,6 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -139,9 +138,12 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
 class HYV3MultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
 
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
@@ -183,7 +185,6 @@ class HYV3MultiTokenPredictor(nn.Module):
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
     def compute_logits(

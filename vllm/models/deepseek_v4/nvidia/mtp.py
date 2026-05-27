@@ -36,7 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, validate_num_mtp_layers
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -128,7 +128,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -164,6 +163,8 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.device = current_platform.device_type
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
@@ -222,7 +223,6 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
     def compute_logits(

@@ -40,7 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .llama import LlamaDecoderLayer
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import is_pp_missing_parameter, maybe_prefix, validate_num_mtp_layers
 
 
 class ErnieMultiTokenPredictorLayer(nn.Module):
@@ -64,7 +64,6 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
         inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -92,6 +91,13 @@ class ErnieMultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(
+            vllm_config,
+            self.num_mtp_layers,
+            max_speculative_tokens=1,
+        )
+
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
@@ -124,11 +130,11 @@ class ErnieMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             inputs_embeds,
             positions,
             previous_hidden_states,
-            spec_step_idx,
         )
 
     def compute_logits(
@@ -137,7 +143,6 @@ class ErnieMultiTokenPredictor(nn.Module):
         lm_head: ParallelLMHead,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        self.layers[str(self.mtp_start_layer_idx + spec_step_idx)]
         logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
@@ -171,7 +176,6 @@ class ErnieMTP(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        assert spec_step_idx == 0, "ernie_mtp only support predict one token"
         hidden_states = self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )

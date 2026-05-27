@@ -47,10 +47,7 @@ from .glm4_moe_lite_mtp import (
     SharedHead,
 )
 from .interfaces import SupportsPP
-from .utils import (
-    is_pp_missing_parameter,
-    maybe_prefix,
-)
+from .utils import is_pp_missing_parameter, maybe_prefix, validate_num_mtp_layers
 
 
 class GlmOcrMultiTokenPredictorLayer(nn.Module):
@@ -79,7 +76,6 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -102,9 +98,13 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
 class GlmOcrMultiTokenPredictor(Glm4MoeLiteMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+
         config = vllm_config.model_config.hf_config.text_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
+
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): GlmOcrMultiTokenPredictorLayer(

@@ -38,7 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .utils import maybe_prefix
+from .utils import maybe_prefix, validate_num_mtp_layers
 
 
 class MiMoMultiTokenPredictorLayer(nn.Module):
@@ -70,7 +70,6 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -96,6 +95,12 @@ class MiMoMultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(
+            vllm_config,
+            self.num_mtp_layers,
+            max_speculative_tokens=1,
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -133,11 +138,11 @@ class MiMoMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        return self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)](
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        return self.mtp_layers[str(self.mtp_start_layer_idx + current_step_idx)](
             inputs_embeds,
             positions,
             previous_hidden_states,
-            spec_step_idx,
         )
 
     def compute_logits(
@@ -146,7 +151,6 @@ class MiMoMultiTokenPredictor(nn.Module):
         lm_head: ParallelLMHead,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)]
         logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
@@ -176,7 +180,6 @@ class MiMoMTP(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        assert spec_step_idx == 0, "mimo_mtp only support predict one token now"
         hidden_states = self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )

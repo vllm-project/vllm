@@ -40,6 +40,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    validate_num_mtp_layers,
 )
 
 logger = init_logger(__name__)
@@ -71,6 +72,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
@@ -422,10 +425,16 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 

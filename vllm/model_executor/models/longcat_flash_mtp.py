@@ -20,11 +20,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
-from .utils import maybe_prefix
+from .longcat_flash import FlashConfig
+from .utils import maybe_prefix, validate_num_mtp_layers
 
 
 class LongCatMultiTokenPredictorLayer(nn.Module):
@@ -54,7 +54,6 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         inputs_embeds = self.enorm(inputs_embeds)
@@ -80,10 +79,18 @@ class LongCatMultiTokenPredictor(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         vllm_config.model_config.hf_config.intermediate_size = config.intermediate_size
         self.mtp_start_layer_idx = config.num_hidden_layers * 2
         self.num_mtp_layers = 1
+
+        validate_num_mtp_layers(
+            vllm_config,
+            self.num_mtp_layers,
+            max_speculative_tokens=1,
+        )
+
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): LongCatMultiTokenPredictorLayer(
@@ -119,7 +126,6 @@ class LongCatMultiTokenPredictor(nn.Module):
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
 

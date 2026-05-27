@@ -735,6 +735,41 @@ def get_draft_quant_config(
     )
 
 
+def validate_num_mtp_layers(
+    vllm_config: VllmConfig,
+    num_mtp_layers: int,
+    *,
+    max_speculative_tokens: int | None = None,
+) -> None:
+    spec_cfg = vllm_config.speculative_config
+    if spec_cfg is None:
+        return
+
+    if (
+        max_speculative_tokens is not None
+        and spec_cfg.num_speculative_tokens > max_speculative_tokens
+    ):
+        raise ValueError(
+            f"This model supports at most "
+            f"num_speculative_tokens={max_speculative_tokens}"
+        )
+
+    if (
+        # Don't emit the warning for num_mtp_layers=1 because some models
+        # (like Qwen3.5 MTP) officially support multiple speculative tokens
+        # using a single MTP layer
+        num_mtp_layers > 1 and spec_cfg.num_speculative_tokens > 1
+        # The check should be: spec_cfg.num_speculative_tokens > num_mtp_layers
+        # but since spec_step_idx is not passed, effectively we have num_mtp_layers=1
+        # during model inference
+    ):
+        logger.warning_once(
+            "Enabling num_speculative_tokens > 1 will run "
+            "multiple times of forward on same MTP layer, "
+            "which may result in lower acceptance rate."
+        )
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """
     Extract the layer index from the module name.
