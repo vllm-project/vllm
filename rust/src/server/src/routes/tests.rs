@@ -43,7 +43,7 @@ use vllm_text::{Prompt, TextBackend};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode};
+use super::{build_router, build_router_with_dev_mode, build_router_with_extension};
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
@@ -821,6 +821,37 @@ where
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
     test_app_with_stream_output_specs(default_stream_output_specs()).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_extension_can_mount_same_port_route() {
+    let (_base_app, state, engine_task) =
+        test_health_app_with_engine_script(|_| boxed_test_future(async {})).await;
+    let app = build_router_with_extension(state, |router| {
+        router.merge(axum::Router::new().route(
+            "/extension/health",
+            axum::routing::get(|| async { "extension-ok" }),
+        ))
+    });
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/extension/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(&body[..], b"extension-ok");
+
+    drop(app);
+    engine_task.finish().await;
 }
 
 async fn test_app_with_stream_output_specs(

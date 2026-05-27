@@ -26,10 +26,30 @@ fn server_dev_mode_enabled() -> bool {
 
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    build_router_with_dev_mode(state, server_dev_mode_enabled())
+    build_router_with_extension(state, |router| router)
+}
+
+/// Build the minimal OpenAI-compatible router, then let the caller compose
+/// additional same-port routes without exposing internal application state.
+pub fn build_router_with_extension<F>(state: Arc<AppState>, extend_router: F) -> Router
+where
+    F: FnOnce(Router) -> Router,
+{
+    build_router_with_dev_mode_and_extension(state, server_dev_mode_enabled(), extend_router)
 }
 
 fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> Router {
+    build_router_with_dev_mode_and_extension(state, dev_mode_enabled, |router| router)
+}
+
+fn build_router_with_dev_mode_and_extension<F>(
+    state: Arc<AppState>,
+    dev_mode_enabled: bool,
+    extend_router: F,
+) -> Router
+where
+    F: FnOnce(Router) -> Router,
+{
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
@@ -54,11 +74,13 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
             .route("/is_sleeping", get(sleep::is_sleeping))
     }
 
-    router
+    let router = router
         .with_state(state.clone())
         .layer(from_fn_with_state(state, middleware::track_server_load))
         .layer(from_fn(middleware::track_http_metrics))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+
+    extend_router(router)
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ mod utils;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
+use axum::Router;
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
@@ -28,7 +29,7 @@ use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
 use crate::listener::Listener;
-use crate::routes::build_router;
+use crate::routes::build_router_with_extension;
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine
@@ -95,6 +96,35 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 /// The server owns one `vllm-chat` facade, which in turn owns the lower
 /// `vllm-text` and `vllm-llm` layers, and shuts them down before returning.
 pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
+    serve_with_router_extension(config, shutdown, std::convert::identity).await
+}
+
+/// Run the OpenAI-compatible HTTP server with additional same-port routes.
+///
+/// The supplied router is merged into the finalized vLLM router after the
+/// built-in routes, middleware, and state have been configured. This is intended
+/// for endpoint composition; it does not expose the internal [`AppState`].
+pub async fn serve_with_routes(
+    config: Config,
+    shutdown: CancellationToken,
+    extra_routes: Router,
+) -> Result<()> {
+    serve_with_router_extension(config, shutdown, move |router| router.merge(extra_routes)).await
+}
+
+/// Run the OpenAI-compatible HTTP server with a router extension hook.
+///
+/// The extension receives the finalized vLLM router and may merge additional
+/// routes or apply downstream-specific layers. The default [`serve`] path uses
+/// an identity extension and is unchanged.
+pub async fn serve_with_router_extension<F>(
+    config: Config,
+    shutdown: CancellationToken,
+    extend_router: F,
+) -> Result<()>
+where
+    F: FnOnce(Router) -> Router,
+{
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Also check shutdown during the (potentially long) startup handshake.
@@ -107,7 +137,7 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
     let model = state.primary_model_name().to_owned();
-    let app = build_router(state.clone());
+    let app = build_router_with_extension(state.clone(), extend_router);
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
