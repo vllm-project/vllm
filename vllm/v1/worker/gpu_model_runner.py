@@ -21,6 +21,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm import _apex as apex
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -5140,6 +5141,10 @@ class GPUModelRunner(
                 drafter_model := getattr(drafter, "model", None)
             ):
                 prepare_communication_buffer_for_model(drafter_model)
+            # APEX (ROCm-CPU): register MoE expert weight regions with apexd.
+            # No-op unless VLLM_APEX_HINTS=1 and libapex_hints.so loads.
+            if apex.enabled():
+                self._apex_register_moe_experts()
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -6847,6 +6852,91 @@ class GPUModelRunner(
             f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
         )
 
+    def _apex_register_moe_experts(self) -> None:
+        """Walk every FusedMoE module in the loaded model and register each
+        expert's (w13, w2) regions with apexd via apex_hint_register_expert.
+
+        Uses the encoding from :func:`vllm._apex.encode_expert_id`:
+            base = (layer_idx * num_experts + expert_idx) * 2
+            base   → w13 slice (gate+up)
+            base+1 → w2  slice (down proj)
+
+        Called exactly once at the end of :meth:`load_model`.
+        Costs O(num_layers * num_experts) Unix-socket round trips — for
+        Kimi K2 (61 MoE layers × 384 experts × 2 = ~47k registrations)
+        this is ~5-10s wall-clock at startup.
+
+        No-op unless ``VLLM_APEX_HINTS=1`` and libapex_hints.so loads.
+        """
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+        # Find any MoE module to determine n_experts_per_layer.
+        moe_modules: list[tuple[int, FusedMoE]] = []
+        for _name, module in self.model.named_modules():
+            if isinstance(module, FusedMoE):
+                # Try to extract a stable layer index from the prefix.
+                idx = self._apex_extract_layer_index(_name)
+                moe_modules.append((idx, module))
+
+        if not moe_modules:
+            logger.info("apex: no FusedMoE modules found — nothing to register")
+            return
+
+        # Determine a consistent num_experts_per_layer across all MoE layers.
+        n_experts_per_layer = max(
+            getattr(m, "logical_num_experts", 0) or getattr(m, "global_num_experts", 0)
+            for _, m in moe_modules
+        )
+        if n_experts_per_layer <= 0:
+            logger.warning("apex: cannot determine num_experts; skipping registration")
+            return
+
+        total = 0
+        for layer_idx, moe in moe_modules:
+            w13 = getattr(moe, "w13_weight", None)
+            w2 = getattr(moe, "w2_weight", None)
+            if w13 is None or w2 is None:
+                continue
+            local_n = min(w13.shape[0], w2.shape[0])
+            for eid in range(local_n):
+                # Slicing yields a view; data_ptr+size suffices.
+                w13_slice = w13[eid]
+                w2_slice = w2[eid]
+                base = apex.encode_expert_id(layer_idx, eid, n_experts_per_layer)
+                if apex.register_expert(
+                    base,
+                    int(w13_slice.data_ptr()),
+                    int(w13_slice.nelement() * w13_slice.element_size()),
+                ):
+                    total += 1
+                if apex.register_expert(
+                    base + 1,
+                    int(w2_slice.data_ptr()),
+                    int(w2_slice.nelement() * w2_slice.element_size()),
+                ):
+                    total += 1
+
+        logger.info(
+            "apex: registered %d expert regions across %d FusedMoE modules "
+            "(n_experts_per_layer=%d)",
+            total,
+            len(moe_modules),
+            n_experts_per_layer,
+        )
+
+    @staticmethod
+    def _apex_extract_layer_index(qualified_name: str) -> int:
+        """Best-effort: pull the integer right after `.layers.` in a module
+        path like 'model.layers.17.mlp'. Returns 0 if not found."""
+        marker = ".layers."
+        if marker not in qualified_name:
+            return 0
+        try:
+            rest = qualified_name.split(marker, 1)[1]
+            return int(rest.split(".", 1)[0])
+        except (ValueError, IndexError):
+            return 0
+
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
     ) -> dict[str, torch.Tensor]:
@@ -6877,7 +6967,55 @@ class GPUModelRunner(
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
             "Some layers are not correctly initialized"
         )
+
+        # APEX: register each layer's KV cache tensor as a contiguous region
+        # so subsequent KvBlockPrefetch hints can resolve block_ids → addrs.
+        # No-op unless VLLM_APEX_HINTS=1.
+        if apex.enabled():
+            self._apex_register_kv_cache_tensors(kv_cache_raw_tensors, kv_cache_config)
+
         return kv_cache_raw_tensors
+
+    def _apex_register_kv_cache_tensors(
+        self,
+        kv_cache_raw_tensors: dict[str, torch.Tensor],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Register each layer's raw KV cache tensor with apexd, broken into
+        page-sized blocks. Each block_id is encoded as:
+            global_block_id = layer_id * 1_000_000 + local_block_idx
+
+        Use the kv_cache_group's page_size_bytes for the block granularity.
+        """
+        # Build a map: layer_name → page_size_bytes from the kv_cache_groups.
+        layer_to_page: dict[str, int] = {}
+        for group in kv_cache_config.kv_cache_groups:
+            page = getattr(group.kv_cache_spec, "page_size_bytes", 0)
+            if page <= 0:
+                continue
+            for layer_name in group.layer_names:
+                layer_to_page[layer_name] = int(page)
+
+        # Use enumeration order as the stable layer_id since layer names
+        # are sorted by index in vLLM's kv_cache_config groups.
+        already_done: set[int] = set()
+        for layer_idx, (layer_name, tensor) in enumerate(
+            sorted(kv_cache_raw_tensors.items())
+        ):
+            page = layer_to_page.get(layer_name)
+            if page is None or page <= 0:
+                continue
+            tensor_id = int(tensor.data_ptr())
+            if tensor_id in already_done:
+                # Shared / cross-layer tensors: register only once.
+                continue
+            already_done.add(tensor_id)
+            apex.register_kv_cache_tensor(
+                tensor,
+                block_size_bytes=page,
+                layer_id=layer_idx,
+                num_layers=len(kv_cache_raw_tensors),
+            )
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)

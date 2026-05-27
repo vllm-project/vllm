@@ -87,6 +87,7 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     sequence_parallel_chunk,
 )
+from vllm import _apex as apex
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -262,6 +263,18 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
+        # APEX: parse layer index from the qualified prefix
+        # ('model.layers.17.mlp' -> 17) so we can emit ExpertPrefetch
+        # hints keyed by global (layer, expert) id.
+        self._apex_layer_idx = 0
+        marker = ".layers."
+        if marker in prefix:
+            try:
+                self._apex_layer_idx = int(prefix.split(marker, 1)[1].split(".", 1)[0])
+            except (ValueError, IndexError):
+                self._apex_layer_idx = 0
+        self._apex_topk = getattr(config, "num_experts_per_tok", 8)
+
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         if config.hidden_act != "silu":
@@ -374,11 +387,26 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
+            router_logits_for_apex: torch.Tensor | None = None
         else:
             router_logits, _ = self.gate(hidden_states)
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
+            router_logits_for_apex = router_logits
+
+        # APEX (ROCm-CPU): emit an ExpertPrefetch hint with the *next* layer's
+        # predicted top-K experts, using the cheap proxy that adjacent MoE
+        # layers exhibit ~85% expert-id correlation in DeepSeek-V3 / Kimi-K2.
+        # apexd's InferencePolicy augments this with its own hot-expert
+        # speculative top-3 on top.
+        # No-op unless VLLM_APEX_HINTS=1.
+        if (
+            apex.enabled()
+            and router_logits_for_apex is not None
+            and not self.experts.is_internal_router
+        ):
+            self._apex_emit_next_layer_hint(router_logits_for_apex)
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -387,6 +415,40 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+    @torch.no_grad()
+    def _apex_emit_next_layer_hint(self, router_logits: torch.Tensor) -> None:
+        """Compute top-K predicted experts and emit an APEX ExpertPrefetch
+        hint targeted at the next MoE layer.
+
+        Always wrapped in a try/except — never crash inference for a
+        prefetch failure.
+        """
+        try:
+            if router_logits.dim() != 2:
+                return
+            # Average across tokens to get a per-expert score for the batch.
+            # Use the last few tokens for decode-heavy batches (more recent
+            # context dominates).
+            seq_len = router_logits.shape[0]
+            if seq_len > 32:
+                router_logits = router_logits[-32:]
+            avg_logits = router_logits.mean(dim=0)
+            k = min(self._apex_topk, avg_logits.numel())
+            _, top_ids = torch.topk(avg_logits, k)
+            local_ids = top_ids.tolist()
+
+            n_experts = self.n_routed_experts
+            next_layer = self._apex_layer_idx + 1
+            global_ids: list[int] = []
+            for eid in local_ids:
+                base = apex.encode_expert_id(next_layer, int(eid), n_experts)
+                global_ids.append(base)        # w13
+                global_ids.append(base + 1)    # w2
+            apex.prefetch_experts(global_ids, top_k=self._apex_topk)
+        except Exception:
+            # Best-effort: don't take down inference if the hint path errors.
+            pass
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
