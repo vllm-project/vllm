@@ -1,0 +1,4 @@
+Phase A regression baseline.
+- All existing tests under tests/v1/attention/ (excluding tests/v1/attention/quest/)
+  pass with VLLM_ATTENTION_BACKEND unset.
+- Recorded by Task 10 of phase A implementation plan.
