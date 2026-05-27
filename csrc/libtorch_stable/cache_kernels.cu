@@ -779,9 +779,10 @@ void reshape_and_cache_flash(
                                      slot_mapping, k_scale, v_scale);
     return;
 #else
-    TORCH_CHECK(false,
-                "NVFP4 KV cache requires SM100+ (Blackwell). "
-                "Please rebuild vllm with a Blackwell-compatible CUDA target.");
+    STD_TORCH_CHECK(
+        false,
+        "NVFP4 KV cache requires SM100+ (Blackwell). "
+        "Please rebuild vllm with a Blackwell-compatible CUDA target.");
 #endif
   }
 
