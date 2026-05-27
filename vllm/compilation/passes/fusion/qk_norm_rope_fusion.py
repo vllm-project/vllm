@@ -11,7 +11,6 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -64,7 +63,6 @@ class QkNormRopePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
-        match_rocm_aiter_rope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -74,13 +72,15 @@ class QkNormRopePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
+        # match_rocm_aiter is auto-detected by MatcherRotaryEmbedding via
+        # rocm_aiter_ops.is_triton_rotary_embed_enabled(), so no need to
+        # enumerate AITER variants here.
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_dim,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             use_flashinfer=self.rope_flashinfer,
-            match_rocm_aiter=match_rocm_aiter_rope if match_rocm_aiter_rope else None,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -235,38 +235,30 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        # RMS norm variants are no longer iterated: after the vLLM IR
-        # migration (#33825), the pattern calls `vllm.ir.ops.rms_norm`
-        # directly, which resolves to the same backend (native / vllm_c /
-        # aiter / oink / ...) that the model's RMSNorm layer picks. The
-        # pattern graph tracks the target graph automatically.
-        aiter_rope_variants = [False]
-        if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-            aiter_rope_variants.append(True)
-
-        for aiter_rope in aiter_rope_variants:
-            for epsilon in [1e-5, 1e-6]:
-                for neox in [True, False]:
-                    if RotaryEmbedding.enabled():
-                        for rope_flashinfer in [False, True]:
-                            QkNormRopePattern(
-                                head_dim=layer.head_size,
-                                num_heads=layer.num_heads,
-                                num_kv_heads=layer.num_kv_heads,
-                                eps=epsilon,
-                                is_neox=neox,
-                                rope_flashinfer=rope_flashinfer,
-                                match_rocm_aiter_rope=aiter_rope,
-                            ).register(self.patterns)
-                    else:
+        # RMS norm variants are no longer iterated: after the vLLM IR migration (#33825)
+        # AITER rope variants are also not iterated: `MatcherRotaryEmbedding`
+        # auto-detects via `rocm_aiter_ops.is_triton_rotary_embed_enabled()`
+        # and selects the right rotary op.
+        for epsilon in [1e-5, 1e-6]:
+            for neox in [True, False]:
+                if RotaryEmbedding.enabled():
+                    for rope_flashinfer in [False, True]:
                         QkNormRopePattern(
                             head_dim=layer.head_size,
                             num_heads=layer.num_heads,
                             num_kv_heads=layer.num_kv_heads,
                             eps=epsilon,
                             is_neox=neox,
-                            match_rocm_aiter_rope=aiter_rope,
+                            rope_flashinfer=rope_flashinfer,
                         ).register(self.patterns)
+                else:
+                    QkNormRopePattern(
+                        head_dim=layer.head_size,
+                        num_heads=layer.num_heads,
+                        num_kv_heads=layer.num_kv_heads,
+                        eps=epsilon,
+                        is_neox=neox,
+                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

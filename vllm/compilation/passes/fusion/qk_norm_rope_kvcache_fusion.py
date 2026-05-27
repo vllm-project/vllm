@@ -9,7 +9,6 @@ from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -23,7 +22,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherRotaryEmbedding
-from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
+from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
 
@@ -121,8 +120,6 @@ class QkNormRopeKvCachePattern:
         layer: Attention,
         eps: float,
         is_neox: bool,
-        rope_flashinfer: bool = False,
-        match_rocm_aiter_rope: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -131,19 +128,23 @@ class QkNormRopeKvCachePattern:
         self.head_size_v = layer.head_size_v
         self.eps = eps
         self.is_neox = is_neox
-        self.rope_flashinfer = rope_flashinfer
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
+        # match_rocm_aiter is auto-detected by MatcherRotaryEmbedding via
+        # rocm_aiter_ops.is_triton_rotary_embed_enabled(), so no need to
+        # enumerate AITER variants here.
+        # flashinfer rotary is also not enumerated: standard RotaryEmbedding
+        # hard-codes use_flashinfer=False, and the only class that toggles
+        # it (DeepseekScalingRotaryEmbedding, MLA-only) isn't handled by
+        # this pass, so the flashinfer variant would never match anything.
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
-            use_flashinfer=rope_flashinfer,
-            match_rocm_aiter=match_rocm_aiter_rope if match_rocm_aiter_rope else None,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -153,10 +154,7 @@ class QkNormRopeKvCachePattern:
         positions = empty_i64(T)
         q_weight = empty_bf16(1, self.head_size)
         k_weight = empty_bf16(1, self.head_size)
-        if self.rope_flashinfer:
-            cos_sin_cache = empty_fp32(L, self.head_size)
-        else:
-            cos_sin_cache = empty_bf16(L, self.head_size)
+        cos_sin_cache = empty_bf16(L, self.head_size)
         return [qkv, positions, q_weight, k_weight, cos_sin_cache]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -285,63 +283,22 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             rms_custom_enabled,
         )
 
-        # RMS norm variants are no longer iterated: after the vLLM IR
-        # migration (#33825), the pattern calls `vllm.ir.ops.rms_norm`
-        # directly, which resolves to the same backend (native / vllm_c /
-        # aiter / oink / ...) that the model's RMSNorm layer picks. The
-        # pattern graph tracks the target graph automatically.
-        aiter_rope_variants = [False]
-        if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-            aiter_rope_variants.append(True)
-
+        # RMS norm variants are no longer iterated: after the vLLM IR migration (#33825)
+        # AITER rope variants are also not iterated: `MatcherRotaryEmbedding`
+        # auto-detects via `rocm_aiter_ops.is_triton_rotary_embed_enabled()`
+        # and selects the right rotary op. flashinfer rotary is also not
+        # iterated since the standard RotaryEmbedding never enables it.
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
                 continue
             layer.impl.set_fused_kv_cache_layout()
-            for aiter_rope in aiter_rope_variants:
-                for epsilon in [1e-5, 1e-6]:
-                    for neox in [True, False]:
-                        if RotaryEmbedding.enabled():
-                            for rope_flashinfer in [False, True]:
-                                try:
-                                    QkNormRopeKvCachePattern(
-                                        layer=layer,
-                                        eps=epsilon,
-                                        is_neox=neox,
-                                        rope_flashinfer=rope_flashinfer,
-                                        match_rocm_aiter_rope=aiter_rope,
-                                    ).register(self.patterns)
-                                except RuntimeError as e:
-                                    if "Duplicate pattern" in str(e):
-                                        logger.debug(
-                                            "Skipping duplicate pattern: "
-                                            "aiter_rope=%s eps=%s neox=%s fi=%s",
-                                            aiter_rope,
-                                            epsilon,
-                                            neox,
-                                            rope_flashinfer,
-                                        )
-                                    else:
-                                        raise
-                        else:
-                            try:
-                                QkNormRopeKvCachePattern(
-                                    layer=layer,
-                                    eps=epsilon,
-                                    is_neox=neox,
-                                    match_rocm_aiter_rope=aiter_rope,
-                                ).register(self.patterns)
-                            except RuntimeError as e:
-                                if "Duplicate pattern" in str(e):
-                                    logger.debug(
-                                        "Skipping duplicate pattern: "
-                                        "aiter_rope=%s eps=%s neox=%s fi=N/A",
-                                        aiter_rope,
-                                        epsilon,
-                                        neox,
-                                    )
-                                else:
-                                    raise
+            for epsilon in [1e-5, 1e-6]:
+                for neox in [True, False]:
+                    QkNormRopeKvCachePattern(
+                        layer=layer,
+                        eps=epsilon,
+                        is_neox=neox,
+                    ).register(self.patterns)
 
         # Backends that set _use_interleaved_v_cache (e.g. ROCM_ATTN)
         # require a consistent V-cache layout across ALL compile ranges.

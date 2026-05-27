@@ -209,12 +209,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        # Note: RMSNorm is no longer asserted here.  After the vLLM IR
-        # migration (#33825), `RMSNorm` dispatches through `ir.ops.rms_norm`
-        # which resolves via `IrOpPriorityConfig`.  The op that actually
-        # appears in the pre-pass graph depends on the platform's priority
-        # (native / vllm_c / aiter / oink / ...) and is outside the scope of
-        # this fusion test.
         ops: list[torch._ops.OpOverload] = []
         # RoPE is not yet IR-migrated, so its custom op still surfaces
         # directly in the graph based on `enable_rope_custom_op`.
@@ -434,87 +428,3 @@ def test_qk_norm_rope_kvcache_fusion(
                 atol=cache_atol,
                 rtol=cache_rtol,
             )
-
-
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
-)
-def test_qk_norm_rope_kvcache_pattern_match_smoke(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Minimal smoke test for the QK-norm+RoPE+KVCache pattern matcher.
-
-    Verifies that the fusion pass finds and replaces the unfused pattern
-    exactly once.  Skips the full accuracy + KV cache comparison done by
-    ``test_qk_norm_rope_kvcache_fusion`` so it runs in a few seconds and
-    is suitable for iterating on the matcher itself.
-    """
-    device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
-    dtype = torch.bfloat16
-    torch.set_default_device(device)
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(0)
-
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
-        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rotary_embedding", "+rms_norm"],
-            pass_config=PassConfig(
-                fuse_qk_norm_rope_kvcache=True,
-                eliminate_noops=True,
-            ),
-        ),
-    )
-
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        m.setenv("VLLM_ROCM_USE_AITER", "1")
-        m.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
-        rocm_aiter_ops.refresh_env_variables()
-
-        model = QKNormRoPEKVCacheTestModel(
-            vllm_config=vllm_config,
-            attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-            num_heads=64,
-            num_kv_heads=8,
-            head_size=64,
-            is_neox=True,
-            rms_norm_eps=1e-5,
-            dtype=dtype,
-            device=torch.get_default_device(),
-        )
-
-        fusion_pass = QkNormRopeKvCacheFusionPass(vllm_config)
-        backend = TestBackend(
-            NoOpEliminationPass(vllm_config),
-            SplitCoalescingPass(vllm_config),
-            ScatterSplitReplacementPass(vllm_config),
-            fusion_pass,
-            PostCleanupPass(vllm_config),
-        )
-
-        T = 5
-        qkv = torch.randn(T, 64 * 64 + 2 * 8 * 64, dtype=dtype)
-        pos = torch.arange(T, dtype=torch.long)
-        torch._dynamo.mark_dynamic(qkv, 0)
-        torch._dynamo.mark_dynamic(pos, 0)
-
-        with set_forward_context(None, vllm_config):
-            forward_context = get_forward_context()
-            attn_metadata = model.build_attn_metadata(T)
-            forward_context.slot_mapping = {
-                model.layer_name: attn_metadata.slot_mapping
-            }
-            model_fused = torch.compile(model, backend=backend)
-            model_fused(qkv, pos)
-
-        assert fusion_pass.matched_count == 1, (
-            f"Expected matched_count == 1, got {fusion_pass.matched_count}"
-        )
-        # Verify the fused op ended up in the post-pass graph.  We skip
-        # `check_before_ops` here because the pre-pass RMS-norm impl depends
-        # on `IrOpPriorityConfig` (native / vllm_c / aiter / ...), which is
-        # orthogonal to what this smoke test is validating.
-        backend.check_after_ops(model.ops_in_model_after())
