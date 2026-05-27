@@ -124,7 +124,7 @@ logger = init_logger(__name__)
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
 
-_TRANSFORMERS_ABOVE_55 = Version(transformers.__version__) > Version("5.5.0")
+TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
 
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
@@ -1267,7 +1267,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         # Glm4vProcessor uses video_token_id.
         frame_embed_token_id = (
             hf_processor.video_token_id
-            if isinstance(hf_processor, Glm4vProcessor)
+            if isinstance(hf_processor, Glm4vProcessor) or not TRANSFORMERS_WITH_GA
             else hf_processor.image_token_id
         )
         for frame_idx in frames_idx_token:
@@ -1434,7 +1434,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         # placeholder.  The direct path requires transformers >= 5.5.0
         # (Glm46VProcessor / GlmgaVideoProcessor support).
         use_direct_path = (
-            not isinstance(processor, Glm4vProcessor) and _TRANSFORMERS_ABOVE_55
+            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
         )
         if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
@@ -1574,7 +1574,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 target="<|begin_of_video|><|video|><|end_of_video|>",
                 replacement=(
                     get_video_replacement_glm46v
-                    if is_glm46v
+                    if is_glm46v and TRANSFORMERS_WITH_GA
                     else get_video_replacement_glm4v
                 ),
             ),
