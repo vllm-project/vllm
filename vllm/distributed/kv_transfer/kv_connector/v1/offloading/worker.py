@@ -76,41 +76,34 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
-                if isinstance(layer_kv_cache_spec, AttentionSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert isinstance(layer_kv_cache, torch.Tensor)
+                layer_kv_cache = kv_caches[layer_name]
+                # AttentionSpec yields a single tensor; MambaSpec yields a
+                # list of typed state tensors that share one underlying
+                # buffer. Either way, the first tensor's storage_offset
+                # marks the start of this layer's region.
+                ref = (
+                    layer_kv_cache[0]
+                    if isinstance(layer_kv_cache, list)
+                    else layer_kv_cache
+                )
+                page = layer_kv_cache_spec.page_size_bytes
+                offset = ref.storage_offset() * ref.element_size()
+                tensors_per_block[layer_name] = (
+                    torch.tensor([], dtype=torch.int8, device=ref.device)
+                    .set_(ref.untyped_storage())
+                    .view(-1)[offset : offset + num_blocks * page]
+                    .view(num_blocks, page),
+                )
+                page_size_bytes[layer_name] = page
 
-                    storage = layer_kv_cache.untyped_storage()
-                    offset = (
-                        layer_kv_cache.storage_offset() * layer_kv_cache.element_size()
-                    )
-                    page = layer_kv_cache_spec.page_size_bytes
-                    tensors_per_block[layer_name] = (
-                        torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=layer_kv_cache.device,
-                        )
-                        .set_(storage)
-                        .view(-1)[offset : offset + num_blocks * page]
-                        .view(num_blocks, page),
-                    )
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                if isinstance(layer_kv_cache_spec, AttentionSpec):
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.real_page_size_bytes
                     )
-
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    raw = kv_caches[layer_name]
-                    assert isinstance(raw, torch.Tensor)
-                    page = layer_kv_cache_spec.page_size_bytes
-                    tensors_per_block[layer_name] = (raw.view(num_blocks, page),)
-
-                    page_size_bytes[layer_name] = page
                     unpadded_page_size_bytes[layer_name] = replace(
                         layer_kv_cache_spec, page_size_padded=None
                     ).page_size_bytes
-
                 else:
                     raise NotImplementedError
 

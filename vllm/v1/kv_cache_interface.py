@@ -263,12 +263,6 @@ def reshape_kv_cache(
     ``MambaSpec.shapes``/``dtypes``); the legacy ``gpu_model_runner.py``
     path builds those typed views directly via ``torch.as_strided`` and
     bypasses this function.
-
-    TODO(RFC #42082, part 2 — vllm-project/vllm#43151): extend this
-    path to produce the same typed per-state tensors that the legacy
-    path builds, so the new ``gpu/attn_utils.py`` allocation path can
-    serve Mamba layers without each backend having to reinterpret the
-    raw buffer itself.
     """
     if not isinstance(spec, AttentionSpec):
         slot_size = raw.numel() // num_layer_slots

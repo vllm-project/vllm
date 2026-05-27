@@ -6959,11 +6959,15 @@ class GPUModelRunner(
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
                         assert storage_offset_bytes % dtype_size == 0
+                        typed_raw = raw_tensor.view(dtype)
                         tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
+                            typed_raw,
                             size=target_shape,
                             stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
+                            storage_offset=(
+                                typed_raw.storage_offset()
+                                + storage_offset_bytes // dtype_size
+                            ),
                         )
                         state_tensors.append(tensor)
                         storage_offset_bytes += stride[0] * dtype_size
