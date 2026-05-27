@@ -55,6 +55,10 @@ def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "Error: --data-parallel-multi-port-external-lb does not support --uds"
         )
+    if bool(args.ssl_keyfile) != bool(args.ssl_certfile):
+        raise ValueError(
+            "Error: --ssl-keyfile and --ssl-certfile must be provided together"
+        )
     if args.api_server_count not in (None, 1):
         raise ValueError(
             "Error: --data-parallel-multi-port-external-lb currently requires "
