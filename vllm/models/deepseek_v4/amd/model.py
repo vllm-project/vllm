@@ -794,6 +794,16 @@ class DeepseekV4Model(nn.Module):
         expert_mapping = self.get_expert_mapping()
 
         for name, loaded_weight in weights:
+            # Skip checkpoint weights for transformer layers pruned by a
+            # num_hidden_layers hf_override (keeps load + run tractable on the
+            # FFM simulator). Names here are already vLLM-mapped ("layers.N.").
+            if "layers." in name:
+                try:
+                    _li = int(name.split("layers.", 1)[1].split(".", 1)[0])
+                    if _li >= self.config.num_hidden_layers:
+                        continue
+                except (IndexError, ValueError):
+                    pass
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -850,6 +860,10 @@ class DeepseekV4Model(nn.Module):
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if name not in params_dict:
+                        # Layer pruned via a num_hidden_layers hf_override; skip
+                        # its checkpoint weights instead of KeyError-ing.
+                        continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
                     n = narrow_weight.shape[0]
                     params_dict[name][:n].copy_(narrow_weight)
@@ -857,6 +871,9 @@ class DeepseekV4Model(nn.Module):
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
+                        # Layer pruned via a num_hidden_layers hf_override; skip.
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(

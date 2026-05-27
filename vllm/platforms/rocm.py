@@ -35,8 +35,14 @@ try:
         amdsmi_topo_get_link_type,
         amdsmi_topo_get_numa_node_number,
     )
+
+    _AMDSMI_AVAILABLE = True
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
+    # amdsmi is unavailable on the FFM pre-silicon simulator (and would report
+    # the host's real GPUs, not the sim). amdsmi-decorated methods fall back to
+    # torch when this is False.
+    _AMDSMI_AVAILABLE = False
 
 try:
     import vllm._C  # noqa: F401
@@ -143,6 +149,10 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if not _AMDSMI_AVAILABLE:
+            # amdsmi unavailable (e.g. FFM simulator): skip init/shutdown and let
+            # the wrapped function use its own non-amdsmi (torch) fallback.
+            return fn(*args, **kwargs)
         amdsmi_init()
         try:
             return fn(*args, **kwargs)
@@ -679,6 +689,9 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
+        if not _AMDSMI_AVAILABLE:
+            # FFM simulator: amdsmi can't see the simulated GPU; use torch.
+            return torch.cuda.get_device_name(device_id)
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
