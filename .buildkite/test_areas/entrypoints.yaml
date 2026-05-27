@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Entrypoints Unit Tests
+  device: h200_35gb
   key: entrypoints-unit-tests
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
@@ -14,6 +15,7 @@ steps:
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text
 
 - label: Entrypoints Integration (LLM)
+  device: h200_35gb
   key: entrypoints-integration-llm
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
@@ -34,6 +36,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 1)
+  device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-1
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
@@ -53,6 +56,7 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 2)
+  device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-2
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
@@ -126,6 +130,7 @@ steps:
   - pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (Pooling)
+  device: h200_35gb
   key: entrypoints-integration-pooling
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
@@ -137,6 +142,7 @@ steps:
   - pytest -v -s entrypoints/pooling
 
 - label: Entrypoints Integration (Responses API)
+  device: h200_35gb
   key: entrypoints-integration-responses-api
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"

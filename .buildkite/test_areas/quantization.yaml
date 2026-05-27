@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Quantization
+  device: h200_35gb
   key: quantization
   timeout_in_minutes: 90
   source_file_dependencies:
@@ -40,6 +41,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Quantized Models Test
+  device: h200_35gb
   key: quantized-models-test
   timeout_in_minutes: 60
   source_file_dependencies:
