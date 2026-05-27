@@ -2591,6 +2591,7 @@ version = "2.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "328251e58ad8e415be6198888fc207502727dc77945806421ab34f35bf012e7d"
 dependencies = [
+ "indexmap 2.13.0",
  "memo-map",
  "serde",
  "serde_json",
@@ -5608,6 +5609,7 @@ dependencies = [
  "minijinja",
  "minijinja-contrib",
  "openai-harmony",
+ "paste",
  "reqwest",
  "rmp-serde",
  "serde",
@@ -5810,6 +5812,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
  "thiserror-ext",
