@@ -1458,6 +1458,22 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 embed_token_id=hf_processor.video_token_id,
             )
 
+        def get_video_replacement_glm46v(item_idx: int):
+            out_item = out_mm_kwargs["video"][item_idx]
+            grid_thw = out_item["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+
+            _, metadata = mm_items["video"][item_idx]
+            placeholder = self.info._construct_video_placeholder_glm46v(
+                metadata, grid_thw
+            )
+            return PromptUpdateDetails.select_token_id(
+                placeholder,
+                embed_token_id=hf_processor.image_token_id,
+            )
+
+        is_glm46v = not isinstance(hf_processor, Glm4vProcessor)
+
         return [
             PromptReplacement(
                 modality="image",
@@ -1467,7 +1483,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             PromptReplacement(
                 modality="video",
                 target="<|begin_of_video|><|video|><|end_of_video|>",
-                replacement=get_video_replacement_glm4v,
+                replacement=(
+                    get_video_replacement_glm46v
+                    if is_glm46v
+                    else get_video_replacement_glm4v
+                ),
             ),
         ]
 
