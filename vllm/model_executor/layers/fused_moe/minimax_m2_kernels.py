@@ -170,8 +170,6 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
-    num_warps: int = 1,
-    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
 
@@ -213,8 +211,8 @@ def _minimax_moe_topk_sigmoid_quant_triton_impl(
         NUM_GROUPS=num_groups,
         BLOCK_E=triton.next_power_of_2(num_experts),
         BLOCK_H=triton.next_power_of_2(block_k),
-        num_warps=num_warps,
-        num_stages=num_stages,
+        num_warps=1,
+        num_stages=2,
     )
 
     return topk_weights, topk_ids, a1q, a1q_scale
@@ -226,8 +224,6 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
-    num_warps: int = 1,
-    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return _minimax_moe_topk_sigmoid_quant_triton_impl(
         hidden_states,
@@ -235,8 +231,6 @@ def _minimax_moe_topk_sigmoid_quant_impl(
         e_score_correction_bias,
         top_k,
         block_k,
-        num_warps=num_warps,
-        num_stages=num_stages,
     )
 
 
@@ -279,8 +273,6 @@ def minimax_moe_topk_sigmoid_quant(
     e_score_correction_bias: torch.Tensor,
     top_k: int,
     block_k: int,
-    num_warps: int = 1,
-    num_stages: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.minimax_moe_topk_sigmoid_quant(
         hidden_states,
@@ -288,6 +280,4 @@ def minimax_moe_topk_sigmoid_quant(
         e_score_correction_bias,
         top_k,
         block_k,
-        num_warps=num_warps,
-        num_stages=num_stages,
     )
