@@ -230,9 +230,8 @@ def _reshape_kv_cache(
                     # MambaSpec handling in gpu_model_runner.py.
                     # NOTE: This assumes kv_cache_shape[0] == num_blocks
                     # (i.e. the first physical dimension is the block
-                    # index), which holds for MLA backends but NOT for
-                    # standard attention backends whose shape starts with
-                    # a K/V dimension of size 2.
+                    # index), which holds for all current backends
+                    # (MLA, FlashAttention, TritonAttention, etc.).
                     dtype_size = get_dtype_size(dtype)
                     page_stride = kv_cache_spec.page_size_bytes // dtype_size
                     strides = list(torch.empty(kv_cache_shape).stride())
