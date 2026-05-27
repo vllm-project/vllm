@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
@@ -11,6 +12,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -490,6 +492,12 @@ class DeepseekV4MoE(nn.Module):
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
+        token_shard_enabled = os.getenv("DSV4_MEGAMOE_PCP_TOKEN_SHARD", "1") != "0"
+        self.use_mega_moe_pcp_token_shard = (
+            self.use_mega_moe
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and token_shard_enabled
+        )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -665,6 +673,14 @@ class DeepseekV4MoE(nn.Module):
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
+        if self.use_mega_moe_pcp_token_shard:
+            return self._forward_mega_moe_pcp_token_shard(hidden_states, input_ids)
+
+        return self._forward_mega_moe(hidden_states, input_ids)
+
+    def _forward_mega_moe(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
         org_shape = hidden_states.shape
         router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
@@ -696,6 +712,43 @@ class DeepseekV4MoE(nn.Module):
             final_hidden_states += shared_output
 
         return final_hidden_states.view(org_shape)
+
+    def _forward_mega_moe_pcp_token_shard(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert hidden_states.dim() == 2
+        org_shape = hidden_states.shape
+        pcp_group = get_pcp_group()
+        pcp_size = pcp_group.world_size
+        if pcp_size == 1:
+            return self._forward_mega_moe(hidden_states, input_ids)
+
+        num_tokens = hidden_states.shape[0]
+        shard_size = (num_tokens + pcp_size - 1) // pcp_size
+        padded_tokens = shard_size * pcp_size
+        if padded_tokens != num_tokens:
+            hidden_padding = hidden_states.new_zeros(
+                (padded_tokens - num_tokens, hidden_states.shape[1])
+            )
+            hidden_states = torch.cat((hidden_states, hidden_padding), dim=0)
+            if input_ids is not None:
+                input_padding = input_ids.new_zeros(
+                    (padded_tokens - num_tokens, *input_ids.shape[1:])
+                )
+                input_ids = torch.cat((input_ids, input_padding), dim=0)
+
+        pcp_rank = pcp_group.rank_in_group
+        start = pcp_rank * shard_size
+        end = start + shard_size
+        local_hidden_states = hidden_states[start:end].contiguous()
+        local_input_ids = (
+            input_ids[start:end].contiguous() if input_ids is not None else None
+        )
+        local_output = self._forward_mega_moe(local_hidden_states, local_input_ids)
+        output = pcp_group.all_gather(local_output, dim=0)
+        return output[:num_tokens].view(org_shape)
 
     def _forward_fused_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
