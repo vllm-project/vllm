@@ -32,7 +32,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
 ]
-MambaDType = Literal["auto", "float32", "float16"]
+MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
