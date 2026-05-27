@@ -244,6 +244,9 @@ class FlashAttentionMetadata:
     # For GQA DCP
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
+    num_dcp_context_reqs: int = 0
+    num_dcp_context_tokens: int = 0
+    max_dcp_context_query_len: int = 0
 
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
@@ -513,6 +516,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
+        num_dcp_context_reqs = 0
+        num_dcp_context_tokens = 0
+        max_dcp_context_query_len = 0
 
         cu_prefix_query_lens = None
         prefix_kv_lens = None
@@ -521,7 +527,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         if self.dcp_world_size > 1:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            context_kv_lens = seq_lens - query_lens
+            context_kv_lens = seq_lens[:num_reqs] - query_lens
             local_context_kv_lens = get_dcp_local_seq_lens(
                 context_kv_lens,
                 self.dcp_world_size,
@@ -532,23 +538,52 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self._dcp_context_kv_lens[num_reqs:] = 0
             dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
 
-            # After DCP distribution, the maximum number of tokens for any rank is
-            # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
-            # and I is cp_kv_cache_interleave_size.
-            # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
-            num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
-            max_dcp_context_kv_len = (
-                (max_seq_len + num_partitions - 1) // num_partitions
-            ) * self.cp_kv_cache_interleave_size
+            # Use a graph-stable global max over DCP ranks. Computing this in
+            # metadata avoids a runtime all-reduce and host sync in the
+            # attention forward path, which is not CUDA graph capture safe.
+            query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+            seq_lens_cpu_for_max = common_attn_metadata._seq_lens_cpu
+            if seq_lens_cpu_for_max is None:
+                assert not self.vllm_config.scheduler_config.async_scheduling, (
+                    "Async scheduling requires CPU seq_lens metadata to avoid "
+                    "device-to-host sync in attention metadata build."
+                )
+                seq_lens_cpu_for_max = common_attn_metadata.seq_lens_cpu
+            context_kv_lens_for_max = seq_lens_cpu_for_max[:num_reqs] - query_lens_cpu
+            has_context = context_kv_lens_for_max > 0
+            if torch.any(has_context):
+                first_no_context = torch.nonzero(~has_context, as_tuple=False)
+                if first_no_context.numel() == 0:
+                    num_dcp_context_reqs = num_reqs
+                else:
+                    num_dcp_context_reqs = int(first_no_context[0].item())
+                    assert not torch.any(has_context[num_dcp_context_reqs:]), (
+                        "DCP expects requests with cached context to precede prefills"
+                    )
+                num_dcp_context_tokens = int(
+                    common_attn_metadata.query_start_loc_cpu[
+                        num_dcp_context_reqs
+                    ].item()
+                )
+                max_dcp_context_query_len = int(
+                    query_lens_cpu[:num_dcp_context_reqs].max().item()
+                )
 
-            scheduler_metadata = schedule(
-                batch_size=num_reqs,
-                cu_query_lens=query_start_loc,
-                max_query_len=max_query_len,
-                seqlens=dcp_context_kv_lens,
-                max_seq_len=max_dcp_context_kv_len,
-                causal=False,
+            dcp_context_kv_lens_for_max = [
+                get_dcp_local_seq_lens(
+                    context_kv_lens_for_max,
+                    self.dcp_world_size,
+                    dcp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
+                for dcp_rank in range(self.dcp_world_size)
+            ]
+            max_dcp_context_kv_len = max(
+                int(local_lens.max().item())
+                for local_lens in dcp_context_kv_lens_for_max
             )
+
+            scheduler_metadata = None
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -614,6 +649,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
+            num_dcp_context_reqs=num_dcp_context_reqs,
+            num_dcp_context_tokens=num_dcp_context_tokens,
+            max_dcp_context_query_len=max_dcp_context_query_len,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             scheduler_metadata=scheduler_metadata,
@@ -1063,39 +1101,75 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        n = query_across_dcp.shape[0]
+        max_dcp_context_kv_len = attn_metadata.max_dcp_context_kv_len
+        assert max_dcp_context_kv_len is not None
+
+        if max_dcp_context_kv_len == 0:
+            flash_attn_varlen_func(
+                q=query,
+                k=key,
+                v=value,
+                out=output,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                cu_seqlens_k=cu_seqlens_q,
+                max_seqlen_k=max_seqlen_q,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                num_splits=attn_metadata.max_num_splits,
+                s_aux=self.sinks,
+            )
+            return output
+
+        num_dcp_context_reqs = attn_metadata.num_dcp_context_reqs
+        num_dcp_context_tokens = attn_metadata.num_dcp_context_tokens
+        max_dcp_context_query_len = attn_metadata.max_dcp_context_query_len
+        assert attn_metadata.dcp_context_kv_lens is not None
+
+        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        context_query_across_dcp = query_across_dcp[:num_dcp_context_tokens]
         (dcp_context_out,) = current_workspace_manager().get_simultaneous(
             (
-                (n, self.num_heads * self.dcp_world_size, self.head_size),
-                self._dcp_dtype,
+                (
+                    context_query_across_dcp.shape[0],
+                    *context_query_across_dcp.shape[1:],
+                ),
+                query.dtype,
             ),
         )
         context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
+            q=context_query_across_dcp,
             k=key_cache,
             v=value_cache,
             out=dcp_context_out,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=attn_metadata.dcp_context_kv_lens,
-            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+            cu_seqlens_q=cu_seqlens_q[: num_dcp_context_reqs + 1],
+            max_seqlen_q=max_dcp_context_query_len,
+            seqused_k=attn_metadata.dcp_context_kv_lens[:num_dcp_context_reqs],
+            max_seqlen_k=max_dcp_context_kv_len,
             softmax_scale=self.scale,
             causal=False,
             alibi_slopes=self.alibi_slopes,
             window_size=sliding_window_size,
-            block_table=block_table,
+            block_table=block_table[:num_dcp_context_reqs],
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
-            scheduler_metadata=attn_metadata.scheduler_metadata,
+            scheduler_metadata=None,
             fa_version=self.vllm_flash_attn_version,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
+            s_aux=self.sinks,
         )
         # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
@@ -1106,14 +1180,11 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
-        (dcp_query_out,) = current_workspace_manager().get_simultaneous(
-            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype),
-        )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
-            out=dcp_query_out,
+            out=None,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -1129,16 +1200,35 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
+            s_aux=self.sinks,
         )
-        assert context_attn_out_cor.shape == query_attn_out.shape
-        assert context_lse_cor.shape == query_lse.shape
-        merge_attn_states(
-            output,
-            context_attn_out_cor,
-            context_lse_cor,
-            query_attn_out,
-            query_lse,
-        )
+        if num_dcp_context_tokens == query_attn_out.shape[0]:
+            assert context_attn_out_cor.shape == query_attn_out.shape
+            assert context_lse_cor.shape == query_lse.shape
+            merge_attn_states(
+                output,
+                context_attn_out_cor,
+                context_lse_cor,
+                query_attn_out,
+                query_lse,
+            )
+        else:
+            assert (
+                context_attn_out_cor.shape
+                == query_attn_out[:num_dcp_context_tokens].shape
+            )
+            assert context_lse_cor.shape == query_lse[:, :num_dcp_context_tokens].shape
+            merge_attn_states(
+                output[:num_dcp_context_tokens],
+                context_attn_out_cor,
+                context_lse_cor,
+                query_attn_out[:num_dcp_context_tokens],
+                query_lse[:, :num_dcp_context_tokens].contiguous(),
+            )
+            output[num_dcp_context_tokens:].copy_(
+                query_attn_out[num_dcp_context_tokens:]
+            )
+        return output
 
     def _forward_encoder_attention(
         self,

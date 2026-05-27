@@ -595,15 +595,35 @@ def split_decodes_and_prefills(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
+    is_prefilling = None
+    if (
+        not treat_short_extends_as_decodes
+        and common_attn_metadata.is_prefilling is not None
+    ):
+        is_prefilling = common_attn_metadata.is_prefilling[:num_reqs].to(
+            dtype=torch.bool
+        )
 
     if (
-        max_query_len <= decode_threshold
+        is_prefilling is None
+        and max_query_len <= decode_threshold
         and (not require_uniform or decode_threshold <= 1)
-        and treat_short_extends_as_decodes
     ):
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    if is_prefilling is not None:
+        is_prefill = is_prefilling | (query_lens > decode_threshold)
+        if not torch.any(is_prefill):
+            return num_reqs, 0, num_tokens, 0
+        first_prefill = is_prefill.int().argmax(dim=-1).item()
+        assert torch.all(~is_prefill[:first_prefill])
+        num_decodes = first_prefill
+        num_prefills = num_reqs - num_decodes
+        num_decode_tokens = query_start_loc[first_prefill].item()
+        num_prefill_tokens = num_tokens - num_decode_tokens
+        return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
     if query_lens[0].item() > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
@@ -617,10 +637,6 @@ def split_decodes_and_prefills(
         is_prefill = query_lens != query_lens[0]
     else:
         is_prefill = query_lens > decode_threshold
-
-    if not treat_short_extends_as_decodes:
-        assert common_attn_metadata.is_prefilling is not None
-        is_prefill |= common_attn_metadata.is_prefilling
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

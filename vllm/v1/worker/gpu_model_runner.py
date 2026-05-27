@@ -219,7 +219,7 @@ from vllm.v1.worker.ubatch_utils import (
     split_attn_metadata,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.worker.workspace import current_workspace_manager, lock_workspace
 
 from .utils import (
     AttentionGroup,
@@ -5789,18 +5789,36 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
+        mixed_prefill_tokens_list: list[int] | None = None
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
-            # first half decode tokens, second half one prefill
+            # first half decode tokens, second half one or more prefills.
+            # Split synthetic prefill requests so each stays within the
+            # per-request max_model_len capacity.
+            max_prefill_tokens_per_req = max(1, self.max_model_len - 1)
             num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
-            num_prefill_tokens = num_tokens - num_decode_tokens
-            num_reqs = num_decode_tokens + 1
+            while True:
+                num_prefill_tokens = num_tokens - num_decode_tokens
+                num_prefill_reqs = cdiv(num_prefill_tokens, max_prefill_tokens_per_req)
+                if num_decode_tokens + num_prefill_reqs <= max_num_reqs:
+                    break
+                assert num_decode_tokens > 0
+                num_decode_tokens -= 1
 
-            # Create decode requests (1 token each) followed by prefill request
-            num_scheduled_tokens_list = [1] * num_decode_tokens + [num_prefill_tokens]
-            # Note: Overriding max_query_len to be the prefill tokens
-            max_query_len = num_prefill_tokens
+            prefill_tokens_per_req = num_prefill_tokens // num_prefill_reqs
+            mixed_prefill_tokens_list = [prefill_tokens_per_req] * num_prefill_reqs
+            for req_idx in range(num_prefill_tokens % num_prefill_reqs):
+                mixed_prefill_tokens_list[req_idx] += 1
+
+            num_reqs = num_decode_tokens + num_prefill_reqs
+
+            # Create decode requests (1 token each) followed by prefill
+            # requests that collectively keep the mixed warmup shape.
+            num_scheduled_tokens_list = [
+                1
+            ] * num_decode_tokens + mixed_prefill_tokens_list
+            max_query_len = max(mixed_prefill_tokens_list)
         elif uniform_decode:
             assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
@@ -5857,6 +5875,16 @@ class GPUModelRunner(
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
+        dcp_dummy_context_len = 0
+        needs_dcp_dummy_metadata = (
+            self.dcp_world_size > 1
+            and hasattr(self, "kv_cache_config")
+            and (create_mixed_batch or (is_graph_capturing and uniform_decode))
+        )
+        if needs_dcp_dummy_metadata:
+            dcp_dummy_context_len = (
+                self.dcp_world_size * self.parallel_config.cp_kv_cache_interleave_size
+            )
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch,
             num_scheduled_tokens,
@@ -5899,10 +5927,25 @@ class GPUModelRunner(
                     # In the mixed batch mode (used for FI warmup), we use
                     # shorter sequence lengths to run faster.
                     # TODO(luka) better system for describing dummy batches
-                    seq_lens = torch.tensor(  # type: ignore[assignment]
-                        [1] * num_decode_tokens + [num_prefill_tokens + 1],
-                        dtype=torch.int,
-                    )
+                    assert mixed_prefill_tokens_list is not None
+                    if dcp_dummy_context_len > 0:
+                        seq_lens = [  # type: ignore[assignment]
+                            1 + dcp_dummy_context_len
+                        ] * num_decode_tokens + [
+                            num_prefill_tokens + dcp_dummy_context_len
+                            for num_prefill_tokens in mixed_prefill_tokens_list
+                        ]
+                    else:
+                        seq_lens = torch.tensor(  # type: ignore[assignment]
+                            [1] * num_decode_tokens
+                            + [
+                                num_prefill_tokens + 1
+                                for num_prefill_tokens in mixed_prefill_tokens_list
+                            ],
+                            dtype=torch.int,
+                        )
+                elif dcp_dummy_context_len > 0:
+                    seq_lens = max_query_len + dcp_dummy_context_len  # type: ignore[assignment]
                 else:
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
@@ -5917,6 +5960,30 @@ class GPUModelRunner(
                     cum_num_tokens[-1]
                 )
                 self.query_start_loc.copy_to_gpu()
+
+                if needs_dcp_dummy_metadata:
+                    # Fill every KV cache group with valid dummy block IDs.
+                    # DCP graph warmup may exercise context attention, so
+                    # block-table entries must point at allocated KV blocks.
+                    for blk_table in self.input_batch.block_table.block_tables:
+                        num_alloc_blocks = (
+                            blk_table.max_num_blocks_per_req
+                            // blk_table.blocks_per_kv_block
+                        )
+                        block_ids = list(range(1, num_alloc_blocks + 1))
+                        for req_idx in range(num_reqs):
+                            blk_table.add_row(block_ids, req_idx)
+                        blk_table.commit_block_table(num_reqs)
+
+                    self.query_pos.copy_to_gpu(num_tokens_unpadded)
+                    self.positions[:num_tokens_unpadded] = (
+                        self.query_pos.gpu[:num_tokens_unpadded] + dcp_dummy_context_len
+                    )
+                    self.input_batch.block_table.compute_slot_mapping(
+                        num_reqs,
+                        self.query_start_loc.gpu[: num_reqs + 1],
+                        self.positions[:num_tokens_unpadded],
+                    )
 
                 # Sync block table CPU->GPU so cleared rows from
                 # remove_request() are visible to the attention metadata
@@ -6661,6 +6728,7 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
+        self._reserve_dcp_attention_workspace()
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6708,6 +6776,37 @@ class GPUModelRunner(
             cuda_graph_size / (1 << 30),
         )
         return cuda_graph_size
+
+    def _reserve_dcp_attention_workspace(self) -> None:
+        if self.dcp_world_size <= 1 or not hasattr(self, "kv_cache_config"):
+            return
+
+        head_size = 0
+        for kv_cache_group in self.kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, FullAttentionSpec):
+                head_size = max(head_size, kv_cache_spec.head_size)
+            elif isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                head_size = max(
+                    head_size,
+                    *(
+                        spec.head_size
+                        for spec in kv_cache_spec.kv_cache_specs.values()
+                        if isinstance(spec, FullAttentionSpec)
+                    ),
+                    0,
+                )
+
+        if head_size == 0:
+            return
+
+        num_heads = (
+            self.model_config.get_num_attention_heads(self.parallel_config)
+            * self.dcp_world_size
+        )
+        current_workspace_manager().get_simultaneous(
+            ((self.max_num_tokens, num_heads, head_size), self.model_config.dtype),
+        )
 
     def _warmup_and_capture(
         self,
@@ -7028,21 +7127,26 @@ class GPUModelRunner(
         """
         block_sizes = []
         max_num_blocks = []
+        use_dcp_list = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
             block_sizes.append(block_size)
-            max_num_blocks_per_req = cdiv(
-                max_model_len, block_size * get_total_cp_world_size()
-            )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                use_dcp_list.append(False)
+                max_num_blocks_per_req = cdiv(max_model_len, block_size)
                 max_num_blocks_per_req = (
                     max_num_blocks_per_req
                     if self.cache_config.enable_prefix_caching
                     else 1
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+            else:
+                use_dcp_list.append(True)
+                max_num_blocks_per_req = cdiv(
+                    max_model_len, block_size * get_total_cp_world_size()
+                )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (
@@ -7064,7 +7168,9 @@ class GPUModelRunner(
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
+                use_dcp_list=use_dcp_list,
             )
 
         assert self._init_block_sizes == block_sizes, (

@@ -2192,6 +2192,10 @@ class VllmConfig:
 
         # DCP interleave-size compatibility
         if self.parallel_config.decode_context_parallel_size > 1:
+            assert self.speculative_config is None, (
+                "DCP does not support speculative decoding yet. Please disable "
+                "speculative decoding or set decode_context_parallel_size=1."
+            )
             if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
                 self.parallel_config.cp_kv_cache_interleave_size
                 != self.parallel_config.dcp_kv_cache_interleave_size

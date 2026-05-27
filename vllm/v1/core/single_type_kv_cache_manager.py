@@ -1031,6 +1031,10 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
+        # Mamba layers use TP instead of DCP, so each rank holds the full
+        # recurrent state. Undo the DCP/PCP block_size scaling that the base
+        # class applies for attention groups whose KV cache is partitioned.
+        self.block_size = kv_cache_spec.block_size
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
