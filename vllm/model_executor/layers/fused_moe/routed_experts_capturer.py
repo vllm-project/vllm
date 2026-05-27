@@ -169,6 +169,11 @@ class RoutedExpertsCapturer:
                 start_loc = 0
                 end_loc = token_num_per_dp
             elif n == total_with_padding:
+                # NOTE(Ronald1995): When all DP ranks have equal token counts,
+                # total == total_with_padding, so the first branch (n == total)
+                # fires instead. This overlap is intentional since both branches
+                # produce equivalent results in that case.
+
                 # Padded all-gather path: tokens are padded to max_tokens before
                 # all-gather across DP group. Each DP rank occupies a contiguous
                 # block of size max_tokens. Extract only the actual tokens for
@@ -176,6 +181,7 @@ class RoutedExpertsCapturer:
                 # Example: dp_rank=0, max_tokens=7, token_num_per_dp=5.
                 # start_loc = 0 * 7 = 0
                 # end_loc = 0 + 5 = 5 (only first 5 tokens are valid)
+
                 start_loc = self.dp_rank * max_tokens
                 end_loc = start_loc + token_num_per_dp
             elif (
@@ -210,8 +216,8 @@ class RoutedExpertsCapturer:
                 raise AssertionError(
                     "RoutedExpertsCapturer: unexpected topk_ids batch "
                     f"dim {n} (expected {total}, {token_num_per_dp}, "
-                    f"or {sp_expected} for dp_rank={self.dp_rank}, "
-                    f"tp_size={self.tp_size})"
+                    f"{total_with_padding}, or {sp_expected} for "
+                    f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
                 )
 
         # Defensive: model may expose more layers than the capture buffer
