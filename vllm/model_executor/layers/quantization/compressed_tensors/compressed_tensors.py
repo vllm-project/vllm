@@ -333,7 +333,10 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @staticmethod
     def _check_scheme_supported(
-        min_capability: int, error: bool = True, match_exact: bool = False
+        min_capability: int,
+        error: bool = True,
+        match_exact: bool = False,
+        weight_strategy: "QuantizationStrategy | None" = None,
     ) -> bool:
         capability_tuple = current_platform.get_device_capability()
 
@@ -357,6 +360,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
             return supported
         else:
+            # XPU supports FP8 block-scaled W8A8 via
+            # TritonFp8BlockScaledMMKernel; per-tensor/channel falls
+            # back to W8A16Fp8.
+            if current_platform.is_xpu() and weight_strategy is not None:
+                return weight_strategy == QuantizationStrategy.BLOCK
             return False
 
     @staticmethod
@@ -656,11 +664,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                is_fp8_w8a8_supported = (
-                    self._check_scheme_supported(
-                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
-                    )
-                    or current_platform.is_xpu()
+                is_fp8_w8a8_supported = self._check_scheme_supported(
+                    CompressedTensorsW8A8Fp8.get_min_capability(),
+                    error=False,
+                    weight_strategy=weight_quant.strategy,
                 )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(

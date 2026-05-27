@@ -353,7 +353,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.block_shape == [128, 128]
             and lora_context is None
             and not is_deep_gemm_e8m0_used()
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
