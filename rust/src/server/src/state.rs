@@ -34,6 +34,7 @@ pub struct AppState {
 pub(crate) enum LoadLoRAError {
     AlreadyLoaded { lora_name: String },
     Engine(vllm_engine_core_client::Error),
+    NotLoaded { lora_name: String },
 }
 
 #[derive(Debug)]
@@ -126,10 +127,14 @@ impl AppState {
             is_3d_lora_weight,
         );
 
-        self.engine_core_client()
+        let loaded = self
+            .engine_core_client()
             .add_lora(&lora_request)
             .await
             .map_err(LoadLoRAError::Engine)?;
+        if !loaded {
+            return Err(LoadLoRAError::NotLoaded { lora_name });
+        }
         self.lora_requests.write().await.insert(lora_name, lora_request.clone());
         Ok(lora_request)
     }

@@ -62,6 +62,9 @@ pub async fn load_lora_adapter(
                 "failed to load LoRA adapter '{lora_name}': {}",
                 error.to_report_string()
             )),
+            LoadLoRAError::NotLoaded { lora_name } => ApiError::server_error(format!(
+                "failed to load LoRA adapter '{lora_name}': engine rejected the adapter"
+            )),
         })?;
 
     Ok(format!(
