@@ -191,6 +191,22 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class MiniMaxM2ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        endpoints = vllm_config.compilation_config.compile_ranges_endpoints
+        if endpoints is None:
+            endpoints = []
+            vllm_config.compilation_config.compile_ranges_endpoints = endpoints
+
+        # MiniMax-M2 prepared MoE uses a Python shape gate for its small-token
+        # topk+quant fusion. Keep 128 as a compile range boundary so a larger
+        # symbolic range cannot specialize the whole small-token graph to the
+        # unfused branch.
+        if 128 not in endpoints:
+            endpoints.append(128)
+
+
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -610,6 +626,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MiniMaxM2ForCausalLM": MiniMaxM2ForCausalLMConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
