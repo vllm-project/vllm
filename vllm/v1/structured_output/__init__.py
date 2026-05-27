@@ -371,8 +371,9 @@ class StructuredOutputManager:
 
     def _find_reasoning_end_in_tokens(
         self,
+        reasoner: "ReasoningParser",
         token_ids: list[int],
-        prior_token_ids: list[int] | None = None,
+        prior_token_ids: list[int],
     ) -> int | None:
         """Return the index in ``token_ids`` at which the reasoning-end
         marker completes, or ``None`` if it does not complete inside this
@@ -383,18 +384,18 @@ class StructuredOutputManager:
         (e.g. gpt-oss's ``<|channel|>final<|message|>``) which can
         straddle the prior-context / current-batch line are still
         detected. ``prior_token_ids`` are tokens already committed to
-        the request, supplied so the scanner sees the full cumulative
-        prefix at each position.
+        the request (passed by the caller from ``request.all_token_ids``).
+
+        Reasoners are request-scoped (see :meth:`_get_reasoner`) so we
+        take one as an argument rather than reading from ``self``.
         """
-        if self.enable_in_reasoning:
-            return None
-        reasoner = self.reasoner
-        if reasoner is None:
-            return None
-        prior = list(prior_token_ids or [])
+        # Mutate a single growing buffer instead of rebuilding the prefix
+        # list each iteration: avoids O(L * N) allocation for long prior
+        # contexts and large speculative batches.
+        buf = list(prior_token_ids)
         for i, token in enumerate(token_ids):
-            full_prefix = prior + token_ids[: i + 1]
-            if reasoner.is_reasoning_end_streaming(full_prefix, [token]):
+            buf.append(token)
+            if reasoner.is_reasoning_end_streaming(buf, [token]):
                 return i
         return None
 
@@ -456,7 +457,7 @@ class StructuredOutputManager:
         # all_token_ids IS the prior context.
         prior_token_ids = list(request.all_token_ids or [])
         split_idx = self._find_reasoning_end_in_tokens(
-            new_token_ids, prior_token_ids
+            reasoner, new_token_ids, prior_token_ids
         )
         if split_idx is None:
             return new_token_ids, 0
@@ -470,7 +471,19 @@ class StructuredOutputManager:
         validated = grammar.validate_tokens(post_boundary)
         num_rejected = len(post_boundary) - len(validated)
 
-        if validated:
+        # NOTE: for STRUCTURAL_TAG requests with speculative decoding,
+        # should_advance already returns True on the boundary step (see the
+        # same-step exception in should_advance), so update_from_output will
+        # call accept_tokens on the post-filter new_token_ids in the same
+        # step. Calling accept_tokens here would double-advance the matcher.
+        # Skip the accept for that case; we still report num_rejected so the
+        # caller truncates the response stream.
+        is_structural_tag_spec = (
+            self.vllm_config.speculative_config is not None
+            and structured_req.structured_output_key[0]
+            == StructuredOutputOptions.STRUCTURAL_TAG
+        )
+        if validated and not is_structural_tag_spec:
             ok = grammar.accept_tokens(request.request_id, validated)
             if not ok:
                 # validate_tokens said yes; accept_tokens said no.
