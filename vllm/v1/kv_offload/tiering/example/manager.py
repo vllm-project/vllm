@@ -13,7 +13,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -131,6 +131,11 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
+
+    def get_request_offloading_context(
+        self, req_context: ReqContext
+    ) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

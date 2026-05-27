@@ -163,6 +163,7 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    @abstractmethod
     def get_request_offloading_context(
         self, req_context: ReqContext
     ) -> RequestOffloadingContext:
@@ -175,7 +176,7 @@ class SecondaryTierManager(ABC):
         Args:
             req_context: Per-request context.
         """
-        return RequestOffloadingContext()
+        pass
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         """
