@@ -105,6 +105,7 @@ def _make_connector_with_fake_worker(
             host="localhost",
             port=1234,
             remote_tp_size=1,
+            remote_pp_size=1,
             expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
         )
         worker._remote_agents[FakeNixlConnectorWorker.REMOTE_ENGINE_ID] = remote_agents

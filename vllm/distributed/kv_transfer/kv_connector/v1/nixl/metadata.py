@@ -34,8 +34,13 @@ GET_META_MSG = b"get_meta_msg"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add pipeline-parallel producer metadata (pp_rank, pp_size,
+#      start_layer, end_layer, registered_layer_indices,
+#      registered_layer_names) and per-request pp_size. NIXL regions are
+#      advertised per layer-name so HMA pool composition may differ across PP
+#      producer shards and the decode consumer.
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -51,6 +56,12 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    pp_rank: int
+    pp_size: int
+    start_layer: int
+    end_layer: int
+    registered_layer_indices: list[int]
+    registered_layer_names: list[str]
 
 
 @dataclass
@@ -142,6 +153,7 @@ class HeartbeatInfo:
     host: str
     port: int
     tp_size: int
+    pp_size: int
 
 
 @dataclass
@@ -159,6 +171,7 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    pp_size: int = 1
     remote: RemoteMeta | None = None
 
 
@@ -182,6 +195,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            pp_size=kv_transfer_params.get("pp_size", 1),
         )
 
     def add_new_req_to_save(
