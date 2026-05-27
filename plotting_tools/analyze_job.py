@@ -23,6 +23,14 @@ from plotting_tools.classify_report import (  # noqa: E402
     merge_reports,
     write_plotting_log,
 )
+from plotting_tools.nccl_logs import (  # noqa: E402
+    build_nccl_channel_matrix,
+    build_nccl_log_rank_matrices,
+    infer_nccl_world_size,
+    nccl_rank_summary,
+    parse_nccl_logs,
+    summarize_nccl_log_ops,
+)
 from plotting_tools.plots import (  # noqa: E402
     PLOT_EXT,
     analyze_idle_gaps,
@@ -37,6 +45,7 @@ from plotting_tools.plots import (  # noqa: E402
     plot_active_segments_timeline,
     plot_active_window_detection,
     plot_average_duty_pct,
+    plot_batch_tokens_per_iteration,
     plot_classification_histogram,
     plot_classic_timeline,
     plot_collective_ops_breakdown_stats,
@@ -57,6 +66,7 @@ from plotting_tools.plots import (  # noqa: E402
     plot_message_stats,
     plot_multi_node_decomposed,
     plot_multi_window_cdf,
+    plot_nccl_log_ops_breakdown,
     plot_request_timeline,
     plot_time_breakdown_bar,
     plot_single_layer_breakdown,
@@ -93,6 +103,7 @@ from plotting_tools.trace_io import (  # noqa: E402
     pp_sendrecv_duration_us,
     sync_capture_t0,
     tag_phase,
+    trim_events_to_window,
     trim_events_to_windows,
     trace_t0_us,
 )
@@ -235,6 +246,8 @@ def _active_segments_summary(
 def _matrix_locality_summary(
     matrix: np.ndarray,
     rank_node_names: dict[int, str] | None,
+    *,
+    metric: str = "rank traffic matrix bytes-or-duration proxy",
 ) -> dict[str, Any]:
     """Summarize inferred rank traffic as intra-node vs inter-node proxy."""
     if matrix.size == 0:
@@ -257,7 +270,7 @@ def _matrix_locality_summary(
                 inter += val
     total = intra + inter + unknown
     return {
-        "metric": "rank traffic matrix bytes-or-duration proxy",
+        "metric": metric,
         "intra_node": intra,
         "inter_node": inter,
         "unknown_node": unknown,
@@ -311,6 +324,11 @@ def _traffic_class_rows(
 ) -> list[dict[str, Any]]:
     fabric = summary_meta.get("merged_fabric_comm_ops", {})
     movement = summary_meta.get("merged_data_movement_ops", {})
+    nccl_log_ops = (summary_meta.get("nccl_log") or {}).get("ops", {})
+    nccl_logical_bytes = sum(
+        int((nccl_log_ops.get(op) or {}).get("logical_bytes", 0))
+        for op in ("all_reduce", "all_gather", "reduce_scatter", "all_to_all")
+    )
     avg_duty = quality.get("avg_duty_pct", {})
     tp_count = sum(
         int((fabric.get(op) or {}).get("count", 0))
@@ -327,9 +345,13 @@ def _traffic_class_rows(
             "traffic_class": "TP collective",
             "frequency": f"{tp_count} events",
             "message_size": (
-                "logical bytes unavailable"
-                if quality.get("nccl_bytes_total", 0) == 0
-                else "CUPTI bytes available"
+                "CUPTI bytes available"
+                if quality.get("nccl_bytes_total", 0) > 0
+                else (
+                    "NCCL log op-size bytes available"
+                    if nccl_logical_bytes > 0
+                    else "logical bytes unavailable"
+                )
             ),
             "synchronization_sensitivity": "high",
             "locality": "TP rank group",
@@ -340,6 +362,7 @@ def _traffic_class_rows(
                 "network_collective_duty_pct": (
                     avg_duty.get("network_collective")
                 ),
+                "nccl_logical_bytes": nccl_logical_bytes,
             },
         },
         {
@@ -388,12 +411,15 @@ def _missing_data_report(
     pp = int(job_meta.get("pipeline_parallel", 1))
     return [
         {
-            "item": "NCCL bytes unavailable",
+            "item": "CUPTI NCCL bytes unavailable",
             "status": (
                 "missing" if quality.get("nccl_bytes_total", 0) == 0
                 else "available"
             ),
-            "impact": "Use NVTX logical bytes or theoretical estimates.",
+            "impact": (
+                "Use NVTX logical bytes, NCCL log op sizes, or theoretical "
+                "estimates."
+            ),
         },
         {
             "item": "Comm NVTX logical bytes",
@@ -519,6 +545,16 @@ def _find_traces(job_dir: Path) -> list[Path]:
     return found
 
 
+def _find_nccl_logs(job_dir: Path) -> list[Path]:
+    root = job_dir / "nccl_logs"
+    if not root.is_dir():
+        return []
+    return sorted(
+        p for p in root.glob("*.log")
+        if p.is_file() and p.stat().st_size > 0
+    )
+
+
 def _find_worker_traces(job_dir: Path) -> list[Path]:
     root = job_dir / "ray_worker_nsight"
     if not root.is_dir():
@@ -567,6 +603,155 @@ def _build_rank_node_names(
             if stage < len(order):
                 names[r] = order[stage]
     return names
+
+
+def build_nccl_log_summary_plots(
+    job_dir: Path,
+    summary_dir: Path,
+    *,
+    job_meta: dict[str, Any],
+    n_ranks: int,
+    rank_node_names: dict[int, str],
+    job_label: str,
+) -> dict[str, Any]:
+    """Build NCCL INFO log derived summaries next to Nsight summaries."""
+    log_paths = _find_nccl_logs(job_dir)
+    if not log_paths:
+        return {}
+
+    parsed = parse_nccl_logs(log_paths)
+    world_size = max(infer_nccl_world_size(parsed, fallback=n_ranks), n_ranks, 2)
+    tp = int(job_meta.get("tensor_parallel", 1))
+    pp = int(job_meta.get("pipeline_parallel", 1))
+    op_summary = summarize_nccl_log_ops(parsed)
+    matrices = build_nccl_log_rank_matrices(parsed, n_ranks=world_size)
+    channel_matrix, channel_payload = build_nccl_channel_matrix(
+        parsed, n_ranks=world_size
+    )
+    rank_meta = nccl_rank_summary(parsed)
+
+    plot_nccl_log_ops_breakdown(
+        op_summary.get("ops", {}),
+        summary_dir / f"nccl_log_ops_breakdown{PLOT_EXT}",
+        title=f"{job_label}: NCCL INFO operation sizes",
+    )
+
+    logical_matrix = matrices["logical_bytes"]
+    algorithmic_matrix = matrices["algorithmic_bytes_estimated"]
+    plot_traffic_heatmap(
+        algorithmic_matrix,
+        summary_dir / f"nccl_log_rank_traffic_heatmap{PLOT_EXT}",
+        title=f"{job_label}: NCCL-log rank traffic estimate",
+        xlabel="Destination rank",
+        ylabel="Source rank",
+        colorbar_label="Estimated algorithmic bytes from NCCL log op sizes",
+        tp=tp,
+        pp=pp,
+        rank_node_names=rank_node_names,
+    )
+    plot_traffic_heatmap(
+        logical_matrix,
+        summary_dir / f"nccl_logical_rank_traffic_heatmap{PLOT_EXT}",
+        title=f"{job_label}: NCCL-log logical op bytes",
+        xlabel="Destination rank",
+        ylabel="Source rank",
+        colorbar_label="Logical op bytes from NCCL log, evenly split across peers",
+        tp=tp,
+        pp=pp,
+        rank_node_names=rank_node_names,
+    )
+    plot_traffic_heatmap(
+        channel_matrix,
+        summary_dir / f"nccl_log_topology_heatmap{PLOT_EXT}",
+        title=f"{job_label}: NCCL channel setup links",
+        xlabel="Destination rank",
+        ylabel="Source rank",
+        colorbar_label="NCCL channel setup link count",
+        tp=tp,
+        pp=pp,
+        rank_node_names=rank_node_names,
+    )
+
+    locality = _matrix_locality_summary(
+        algorithmic_matrix,
+        rank_node_names,
+        metric="NCCL log algorithmic byte estimate",
+    )
+    if locality:
+        write_summary_json(
+            summary_dir / "nccl_log_intra_vs_inter_node_comm.json",
+            locality,
+        )
+        plot_key_value_table(
+            [
+                ("metric", locality.get("metric")),
+                ("intra_node", round(locality.get("intra_node", 0.0), 3)),
+                ("inter_node", round(locality.get("inter_node", 0.0), 3)),
+                ("unknown_node", round(locality.get("unknown_node", 0.0), 3)),
+                (
+                    "inter_node_fraction",
+                    round(locality.get("inter_node_fraction", 0.0), 6),
+                ),
+            ],
+            summary_dir / f"nccl_log_intra_vs_inter_node_comm{PLOT_EXT}",
+            title=f"{job_label}: NCCL-log intra-node vs inter-node estimate",
+        )
+
+    rank_payload = {
+        "metric": "NCCL log derived rank traffic",
+        "notes": [
+            (
+                "logical_bytes uses NCCL INFO 'N Bytes' operation sizes, "
+                "distributed evenly across collective peers."
+            ),
+            (
+                "algorithmic_bytes_estimated applies collective-specific "
+                "rank transfer factors; it is not measured per-link wire bytes."
+            ),
+            (
+                "channel_topology_count counts NCCL channel setup links and "
+                "does not represent runtime byte volume."
+            ),
+        ],
+        "world_size": world_size,
+        "rank_meta": rank_meta,
+        "locality": locality,
+        "logical_bytes_matrix": logical_matrix.tolist(),
+        "algorithmic_bytes_estimated_matrix": algorithmic_matrix.tolist(),
+    }
+    topology_payload = {
+        "metric": "NCCL channel setup link count",
+        "matrix": channel_payload["matrix"].tolist(),
+        "ring_matrix": channel_payload["ring_matrix"].tolist(),
+        "meta": channel_payload["meta"],
+    }
+    write_summary_json(
+        summary_dir / "nccl_log_ops_breakdown.json",
+        {
+            "scope": "nccl_info_log",
+            "ops": op_summary.get("ops", {}),
+            "per_rank_ops": op_summary.get("per_rank_ops", {}),
+        },
+    )
+    write_summary_json(summary_dir / "nccl_log_rank_traffic.json", rank_payload)
+    write_summary_json(summary_dir / "nccl_log_topology.json", topology_payload)
+
+    out = {
+        "log_files": [str(p.relative_to(job_dir)) for p in log_paths],
+        "world_size": world_size,
+        "rank_meta": rank_meta,
+        "ops": op_summary.get("ops", {}),
+        "rank_traffic": {
+            "matrix_sum_algorithmic_bytes_estimated": float(
+                algorithmic_matrix.sum()
+            ),
+            "matrix_sum_logical_bytes": float(logical_matrix.sum()),
+            "locality": locality,
+        },
+        "topology": topology_payload["meta"],
+    }
+    write_summary_json(summary_dir / "nccl_log_summary.json", out)
+    return out
 
 
 def _load_trace_events(
@@ -1759,17 +1944,71 @@ def main() -> None:
             max_plot_ms=args.max_plot_ms,
             global_t0_us=global_t0_us,
         )
+        nccl_log_meta = build_nccl_log_summary_plots(
+            job_dir,
+            summary_dir,
+            job_meta=job_meta,
+            n_ranks=n_ranks_default,
+            rank_node_names=rank_node_names,
+            job_label=job_dir.name,
+        )
+        if nccl_log_meta:
+            summary_meta["nccl_log"] = nccl_log_meta
         all_summaries["summary_plots"] = summary_meta
 
     write_summary_json(out_dir / "job_summary.json", all_summaries)
 
-    # Request arrival timeline (parsed from EngineCore iteration log)
+    # Request arrival and scheduler-token timelines (EngineCore iteration log)
+    iteration_token_summary: dict[str, Any] = {}
     iterations = parse_iteration_log(slurm)
     if iterations:
         plot_request_timeline(
             iterations,
             out_dir / f"request_timeline{PLOT_EXT}",
             title=f"{job_dir.name}: request arrival & active batch",
+        )
+        max_batched = job_meta.get("max_num_batched_tokens")
+        iteration_token_summary = plot_batch_tokens_per_iteration(
+            iterations,
+            out_dir / f"batch_tokens_per_iteration{PLOT_EXT}",
+            title=f"{job_dir.name}: tokens per scheduler iteration",
+            max_num_batched_tokens=(
+                int(max_batched) if max_batched is not None else None
+            ),
+        )
+        write_summary_json(
+            out_dir / "batch_tokens_per_iteration.json",
+            {
+                "summary": iteration_token_summary,
+                "iterations": [
+                    {
+                        **it,
+                        "prefill_tokens": int(it.get("context_tokens", 0)),
+                        "decode_tokens": int(it.get("generation_tokens", 0)),
+                        "total_tokens": (
+                            int(it.get("context_tokens", 0))
+                            + int(it.get("generation_tokens", 0))
+                        ),
+                        "phase": (
+                            "mixed"
+                            if (
+                                int(it.get("context_tokens", 0)) > 0
+                                and int(it.get("generation_tokens", 0)) > 0
+                            )
+                            else (
+                                "prefill"
+                                if int(it.get("context_tokens", 0)) > 0
+                                else (
+                                    "decode"
+                                    if int(it.get("generation_tokens", 0)) > 0
+                                    else "idle"
+                                )
+                            )
+                        ),
+                    }
+                    for it in iterations
+                ],
+            },
         )
 
     # Time breakdown stacked bar (like the parallelism decomposition figure)
@@ -2005,11 +2244,23 @@ def main() -> None:
         "traffic_class_summary",
         "missing_data_report",
     ]
+    if summary_meta.get("nccl_log"):
+        generated.extend([
+            "nccl_log_ops_breakdown",
+            "nccl_log_rank_traffic_heatmap",
+            "nccl_logical_rank_traffic_heatmap",
+            "nccl_log_topology_heatmap",
+            "nccl_log_intra_vs_inter_node_comm",
+        ])
+    if iteration_token_summary:
+        generated.append("batch_tokens_per_iteration")
     write_summary_json(
         out_dir / "communication_signature_suite.json",
         {
             "schema_version": 1,
             "generated_targets": generated,
+            "nccl_log": summary_meta.get("nccl_log"),
+            "iteration_tokens": iteration_token_summary,
             "active_window": active_window_summary,
             "traffic_class_summary": traffic_rows,
             "topology_implications": implications,

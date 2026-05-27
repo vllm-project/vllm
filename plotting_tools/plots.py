@@ -1790,6 +1790,57 @@ def plot_comm_breakdown_stats(
     save_figure(fig, out_path)
 
 
+def plot_nccl_log_ops_breakdown(
+    stats: dict[str, dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+) -> None:
+    """NCCL INFO log op count and byte-size breakdown."""
+    if not stats:
+        return
+    ops = sorted(
+        stats.keys(),
+        key=lambda k: float(stats[k].get("algorithmic_rank_bytes_estimated", 0.0)),
+        reverse=True,
+    )
+    labels = [comm_operation_label(o) for o in ops]
+    counts = [int(stats[o].get("count", 0)) for o in ops]
+    logical_mb = [float(stats[o].get("logical_bytes", 0.0)) / 1e6 for o in ops]
+    algo_mb = [
+        float(stats[o].get("algorithmic_rank_bytes_estimated", 0.0)) / 1e6
+        for o in ops
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    x = np.arange(len(ops))
+    axes[0].bar(x, counts, color="#e45756")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(labels, rotation=35, ha="right")
+    axes[0].set_ylabel("NCCL log op records")
+    axes[0].set_title("Count by NCCL op")
+    axes[0].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    width = 0.38
+    axes[1].bar(x - width / 2, logical_mb, width, label="logical op MB")
+    axes[1].bar(
+        x + width / 2,
+        algo_mb,
+        width,
+        label="algorithmic rank MB estimate",
+    )
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(labels, rotation=35, ha="right")
+    axes[1].set_ylabel("MB")
+    axes[1].set_title("Bytes from NCCL INFO lines")
+    axes[1].legend(fontsize=8)
+    axes[1].grid(True, axis="y", linestyle="--", alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, y=1.02)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
 def plot_collective_ops_breakdown_stats(
     stats: dict[str, dict[str, float | int]],
     out_path: Path,
@@ -2003,6 +2054,89 @@ def plot_classic_timeline(
     save_figure(fig, out_path)
 
 
+def plot_layer_slice_compute_comm_idle(
+    events: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Layer-slice timeline",
+    time_origin_us: int | None = None,
+) -> None:
+    """Three-band timeline for a small slice: compute / comm / idle.
+
+    - Top band: compute kernels
+    - Middle band: communication kernels/transfers
+    - Bottom band: idle gaps between compute+comm activity
+    """
+    if not events:
+        return
+
+    t0 = _plot_t0(events, time_origin_us=time_origin_us)
+    t_start = min(e["ts"] for e in events)
+    t_end = max(e["end"] for e in events)
+
+    compute_intervals: list[tuple[float, float]] = []
+    comm_intervals: list[tuple[float, float]] = []
+    active_us: list[tuple[int, int]] = []
+
+    for e in events:
+        if e["kind"] == "compute":
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                compute_intervals.append(iv)
+                active_us.append((e["ts"], e["end"]))
+        elif e["kind"] == "comm":
+            iv = _timeline_interval_ms(e, t0)
+            if iv is not None:
+                comm_intervals.append(iv)
+                active_us.append((e["ts"], e["end"]))
+
+    merged_active = merge_intervals(active_us)
+    idle_intervals_ms: list[tuple[float, float]] = []
+    cur = t_start
+    for s, e in merged_active:
+        if cur < s:
+            idle_intervals_ms.append(((cur - t0) / 1000.0, (s - cur) / 1000.0))
+        cur = max(cur, e)
+    if cur < t_end:
+        idle_intervals_ms.append(((cur - t0) / 1000.0, (t_end - cur) / 1000.0))
+
+    fig, ax = plt.subplots(figsize=(14, 3.2))
+    if compute_intervals:
+        ax.broken_barh(
+            compute_intervals,
+            (2.0, 0.75),
+            facecolors="#4c78a8",
+            edgecolors="none",
+            label="Compute",
+        )
+    if comm_intervals:
+        ax.broken_barh(
+            comm_intervals,
+            (1.0, 0.75),
+            facecolors="#f58518",
+            edgecolors="none",
+            label="Comm",
+        )
+    if idle_intervals_ms:
+        ax.broken_barh(
+            idle_intervals_ms,
+            (0.0, 0.75),
+            facecolors="#b8b8b8",
+            edgecolors="none",
+            label="Idle",
+        )
+
+    ax.set_yticks([0.375, 1.375, 2.375])
+    ax.set_yticklabels(["Idle", "Comm", "Compute"])
+    ax.set_xlabel("Time (ms)")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    ax.set_xlim(left=0)
+    ax.legend(loc="upper right", ncol=3, frameon=False)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
 def plot_classification_histogram(
     counts: dict[str, int],
     out_path: Path,
@@ -2091,6 +2225,284 @@ def plot_request_timeline(
 
     plt.tight_layout()
     save_figure(fig, out_path)
+
+
+def plot_iteration_token_timeline(
+    iterations: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Tokens per iteration",
+    max_iters: int | None = None,
+) -> None:
+    """Plot prefill vs decode tokens per iteration (from EngineCore logs).
+
+    Produces a single-panel plot with stacked filled regions:
+      - Prefill tokens (context_tokens)
+      - Decode tokens (generation_tokens)
+    """
+    if not iterations:
+        return
+
+    iters = iterations[:max_iters] if max_iters is not None else iterations
+    xs = [it["iteration"] for it in iters]
+    prefill = np.array([it["context_tokens"] for it in iters], dtype=float)
+    decode = np.array([it["generation_tokens"] for it in iters], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.fill_between(xs, 0, prefill, color="#7aa6d8", alpha=0.75, label="Prefill Tokens")
+    ax.fill_between(
+        xs,
+        prefill,
+        prefill + decode,
+        color="#e07a7a",
+        alpha=0.75,
+        label="Decode Tokens",
+    )
+
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("# Tokens")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(loc="upper center", ncol=2, frameon=False)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def plot_prefill_zoom_panel(
+    iterations: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Prefill-focused zoom",
+    context_iters: int = 30,
+) -> None:
+    """Plot a zoomed token timeline around prefill-active iterations."""
+    if not iterations:
+        return
+
+    x = np.array([int(it["iteration"]) for it in iterations], dtype=np.int64)
+    ctx = np.array([int(it.get("context_tokens", 0)) for it in iterations], dtype=np.float64)
+    gen = np.array(
+        [int(it.get("generation_tokens", 0)) for it in iterations], dtype=np.float64
+    )
+
+    prefill_idx = np.where(ctx > 0)[0]
+    if prefill_idx.size == 0:
+        lo = 0
+        hi = min(len(x), 300)
+    else:
+        lo = max(0, int(prefill_idx.min()) - context_iters)
+        hi = min(len(x), int(prefill_idx.max()) + context_iters + 1)
+
+    xz = x[lo:hi]
+    ctxz = ctx[lo:hi]
+    genz = gen[lo:hi]
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.fill_between(
+        xz,
+        0,
+        genz,
+        step="mid",
+        alpha=0.55,
+        color="#e07a7a",
+        label="Decode Tokens",
+    )
+    ax.fill_between(
+        xz,
+        genz,
+        genz + ctxz,
+        step="mid",
+        alpha=0.80,
+        color="#7aa6d8",
+        label="Prefill Tokens",
+    )
+    nz = np.where(ctxz > 0)[0]
+    if nz.size > 0:
+        ax.scatter(
+            xz[nz],
+            (genz + ctxz)[nz],
+            s=9,
+            color="#2f5f91",
+            alpha=0.9,
+            zorder=5,
+            label="Prefill-active iters",
+        )
+
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("# Tokens")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.legend(loc="upper center", ncol=3, frameon=False)
+    plt.tight_layout()
+    save_figure(fig, out_path)
+
+
+def summarize_iteration_tokens(
+    iterations: list[dict[str, Any]],
+    *,
+    max_num_batched_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Summarize token counts processed per scheduler iteration."""
+    if not iterations:
+        return {}
+    total_tokens = np.array([
+        int(it.get("context_tokens", 0)) + int(it.get("generation_tokens", 0))
+        for it in iterations
+    ], dtype=np.float64)
+    context_tokens = np.array([
+        int(it.get("context_tokens", 0)) for it in iterations
+    ], dtype=np.float64)
+    generation_tokens = np.array([
+        int(it.get("generation_tokens", 0)) for it in iterations
+    ], dtype=np.float64)
+    positive = total_tokens[total_tokens > 0]
+    observed_max = float(total_tokens.max()) if total_tokens.size else 0.0
+    observed_min = float(total_tokens.min()) if total_tokens.size else 0.0
+    capacity = max_num_batched_tokens or int(observed_max)
+    low_threshold = max(1.0, 0.25 * capacity) if capacity else 1.0
+    low_mask = (total_tokens > 0) & (total_tokens < low_threshold)
+    prefill_mask = context_tokens > 0
+    decode_mask = generation_tokens > 0
+    return {
+        "iterations": len(iterations),
+        "max_num_batched_tokens": max_num_batched_tokens,
+        "total_tokens": {
+            "min": observed_min,
+            "median_positive": (
+                float(np.median(positive)) if positive.size else 0.0
+            ),
+            "mean": float(total_tokens.mean()) if total_tokens.size else 0.0,
+            "p95": (
+                float(np.percentile(total_tokens, 95))
+                if total_tokens.size else 0.0
+            ),
+            "max": observed_max,
+        },
+        "prefill_tokens_total": int(context_tokens.sum()),
+        "decode_tokens_total": int(generation_tokens.sum()),
+        "context_tokens_total": int(context_tokens.sum()),
+        "generation_tokens_total": int(generation_tokens.sum()),
+        "prefill_iterations": int(prefill_mask.sum()),
+        "decode_iterations": int(decode_mask.sum()),
+        "mixed_prefill_decode_iterations": int((prefill_mask & decode_mask).sum()),
+        "low_token_threshold": float(low_threshold),
+        "low_token_iterations": int(low_mask.sum()),
+        "low_token_iteration_fraction": (
+            float(low_mask.sum() / len(iterations)) if iterations else 0.0
+        ),
+    }
+
+
+def plot_batch_tokens_per_iteration(
+    iterations: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str = "Tokens processed per scheduler iteration",
+    max_num_batched_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Plot total/context/generation tokens per vLLM scheduler iteration."""
+    if not iterations:
+        return {}
+
+    x = np.array([int(it["iteration"]) for it in iterations], dtype=np.int64)
+    ctx = np.array([
+        int(it.get("context_tokens", 0)) for it in iterations
+    ], dtype=np.float64)
+    gen = np.array([
+        int(it.get("generation_tokens", 0)) for it in iterations
+    ], dtype=np.float64)
+    total = ctx + gen
+    summary = summarize_iteration_tokens(
+        iterations,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(14, 7),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.2]},
+    )
+
+    threshold = float(summary.get("low_token_threshold", 0.0))
+    if threshold > 0:
+        ax1.axhspan(
+            0,
+            threshold,
+            color="#f2d7d5",
+            alpha=0.28,
+            zorder=0,
+            label=f"<25% capacity ({threshold:.0f})",
+        )
+    ax1.fill_between(
+        x,
+        0,
+        gen,
+        step="mid",
+        alpha=0.70,
+        color="#2ca02c",
+        zorder=2,
+        label="decode / generation tokens",
+    )
+    ax1.fill_between(
+        x,
+        gen,
+        total,
+        step="mid",
+        alpha=0.75,
+        color="#ff7f0e",
+        zorder=2,
+        label="prefill / context tokens",
+    )
+    ax1.plot(
+        x,
+        total,
+        color="#2f4858",
+        linewidth=1.0,
+        zorder=3,
+        label="total tokens",
+    )
+    if max_num_batched_tokens:
+        ax1.axhline(
+            max_num_batched_tokens,
+            color="#8c8c8c",
+            linestyle="--",
+            linewidth=1.0,
+            zorder=3,
+            label=f"max batched tokens={max_num_batched_tokens}",
+        )
+    ax1.set_ylabel("Tokens / iteration")
+    ax1.set_title(title)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper right", fontsize=8)
+
+    ax2.fill_between(
+        x,
+        0,
+        gen,
+        step="mid",
+        alpha=0.65,
+        color="#2ca02c",
+        label="decode / generation tokens",
+    )
+    ax2.fill_between(
+        x,
+        gen,
+        gen + ctx,
+        step="mid",
+        alpha=0.65,
+        color="#ff7f0e",
+        label="prefill / context tokens",
+    )
+    ax2.set_xlabel("Scheduler iteration")
+    ax2.set_ylabel("Token split")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+    save_figure(fig, out_path)
+    return summary
 
 
 VERBOSE_BAR_CATEGORIES = [
