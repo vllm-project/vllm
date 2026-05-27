@@ -797,6 +797,9 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
     # the newly computed block), not just the 3 new ones.
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2, 3, 4, 5))
 
+    # All stores completed before request_finished -> fence index empty.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
 
 # ---------------------------------------------------------------------------
 # Tests for the per-job-store-completion design and fence invariants.
