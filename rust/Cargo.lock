@@ -5850,6 +5850,7 @@ name = "vllm-tool-parser"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "easy-ext",
  "expect-test",
  "futures",
  "openai-protocol",
