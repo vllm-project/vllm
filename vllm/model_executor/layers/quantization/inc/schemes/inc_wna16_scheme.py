@@ -57,7 +57,7 @@ class INCWna16Scheme(INCScheme):
 
         if current_platform.is_cpu() and layer_config.is_gptq:
             if layer_config.bits == 4 and layer_config.sym:
-                from .wna16_linear import INCWNA16LinearScheme
+                from .inc_wna16_linear import INCWNA16LinearScheme
                 from .xpu_w4a16_linear import INCARKLinearMethod, get_ark_state
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
@@ -73,7 +73,7 @@ class INCWna16Scheme(INCScheme):
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 
-        from .wna16_linear import INCWNA16LinearScheme
+        from .inc_wna16_linear import INCWNA16LinearScheme
 
         return INCLinearMethod(INCWNA16LinearScheme(layer_config))
 

@@ -23,12 +23,12 @@ from vllm.model_executor.layers.quantization.inc.schemes import (
 from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
     INCLinearScheme,
 )
-from vllm.model_executor.layers.quantization.inc.schemes.wna16 import (
+from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import (
+    INCWNA16LinearScheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_scheme import (
     _resolve_awq_moe,
     _resolve_gptq_moe,
-)
-from vllm.model_executor.layers.quantization.inc.schemes.wna16_linear import (
-    INCWNA16LinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear import (
     INCARKLinearMethod,
@@ -391,7 +391,7 @@ def test_wna16_cpu_gptq_raises_when_ark_and_marlin_unavailable(
         lambda: (False, "missing", None, None),
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.wna16_linear.check_marlin_supported",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.check_marlin_supported",
         lambda *args, **kwargs: False,
     )
 
@@ -412,7 +412,7 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
             captured["cfg"] = cfg
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.wna16_linear."
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear."
         "check_marlin_supported",
         lambda *args, **kwargs: True,
     )

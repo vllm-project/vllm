@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
-    from .wna16 import INCWna16Scheme
+    from .inc_wna16_scheme import INCWna16Scheme
 
     scheme_list: list[type[INCScheme]] = [
         INCWna16Scheme,
