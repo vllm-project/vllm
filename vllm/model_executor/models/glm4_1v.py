@@ -36,7 +36,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import transformers
 from einops import rearrange
+from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.models.glm4v.configuration_glm4v import (
     Glm4vTextConfig,
@@ -121,6 +123,8 @@ logger = init_logger(__name__)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
+
+_TRANSFORMERS_ABOVE_55 = Version(transformers.__version__) > Version("5.5.0")
 
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
@@ -1424,10 +1428,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         processor = self.info.get_hf_processor(**mm_kwargs)
 
-        # Glm46VProcessor and GLMGA handle image/video placeholders
-        # together; only Glm4vProcessor (GLM-4.1V) needs the split-video
-        # path because it uses image_token_id as the video placeholder.
-        if not isinstance(processor, Glm4vProcessor):
+        # Glm46VProcessor and GLMGA handle image/video placeholders together
+        # via the direct path. Only Glm4vProcessor (GLM-4.1V) needs the
+        # split-video path because it uses image_token_id as the video
+        # placeholder.  The direct path requires transformers >= 5.5.0
+        # (Glm46VProcessor / GlmgaVideoProcessor support).
+        use_direct_path = (
+            not isinstance(processor, Glm4vProcessor) and _TRANSFORMERS_ABOVE_55
+        )
+        if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
                 mm_data, mm_kwargs
             )
