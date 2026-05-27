@@ -78,6 +78,27 @@ def get_pluggable_allocator(
 
 
 @contextmanager
+def use_rocm_memory_pool(
+    mem_pool: torch.cuda.memory.MemPool,
+    new_alloc: torch.cuda.memory.CUDAPluggableAllocator,
+) -> Iterator[
+    tuple[torch.cuda.memory.MemPool, torch.cuda.memory.CUDAPluggableAllocator]
+]:
+    # On ROCm, torch.cuda.memory.use_mem_pool() calls _cuda_releasePool()
+    # when leaving the context. PyTorch's HIP MemPool destructor can later
+    # abort after that release because the pool has already been removed from
+    # graph_pools. Use the same begin/end routing without eagerly releasing
+    # the pool; the MemPool object is kept alive by CuMemAllocator and can
+    # then tear down normally.
+    device = torch.cuda.current_device()
+    torch.cuda.memory._cuda_beginAllocateCurrentThreadToPool(device, mem_pool.id)
+    try:
+        yield mem_pool, new_alloc
+    finally:
+        torch.cuda.memory._cuda_endAllocateToPool(device, mem_pool.id)
+
+
+@contextmanager
 def use_memory_pool_with_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType | None],
@@ -91,18 +112,8 @@ def use_memory_pool_with_allocator(
             yield mem_pool, new_alloc
         return
 
-    # On ROCm, torch.cuda.memory.use_mem_pool() calls _cuda_releasePool()
-    # when leaving the context. PyTorch's HIP MemPool destructor can later
-    # abort after that release because the pool has already been removed from
-    # graph_pools. Use the same begin/end routing without eagerly releasing
-    # the pool; the MemPool object is kept alive by CuMemAllocator and can
-    # then tear down normally.
-    device = torch.cuda.current_device()
-    torch.cuda.memory._cuda_beginAllocateCurrentThreadToPool(device, mem_pool.id)
-    try:
-        yield mem_pool, new_alloc
-    finally:
-        torch.cuda.memory._cuda_endAllocateToPool(device, mem_pool.id)
+    with use_rocm_memory_pool(mem_pool, new_alloc) as data:
+        yield data
 
 
 class CuMemAllocator:
@@ -157,7 +168,7 @@ class CuMemAllocator:
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
         if current_platform.is_rocm():
-            atexit.register(self.shutdown)
+            atexit.register(self._shutdown_rocm)
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -183,12 +194,10 @@ class CuMemAllocator:
         if data is None:
             if ptr in self.released_unmapped_pointers:
                 self.released_unmapped_pointers.remove(ptr)
-                log = globals().get("logger")
-                if log is not None:
-                    log.debug(
-                        "Freed VA-only allocation for address %s from cumem allocator",
-                        ptr,
-                    )
+                logger.debug(
+                    "Freed VA-only allocation for address %s from cumem allocator",
+                    ptr,
+                )
                 return None
             raise KeyError(ptr)
         if data.cpu_backup_tensor is not None:
@@ -353,14 +362,15 @@ class CuMemAllocator:
             if expandable_was_enabled:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
-    def shutdown(self) -> None:
-        """Release retained MemPool state before Python finalization.
+    def _shutdown_rocm(self) -> None:
+        """Release retained ROCm MemPool state before Python finalization.
 
         PyTorch keeps inactive blocks inside ``MemPool`` even after tensors are
-        gone. We may have already unmapped/released those blocks to emulate
-        empty_cache for the pluggable allocator, so a later MemPool destructor
-        should only release the VA reservation. Draining that state while Python
-        is still alive avoids invoking Python callbacks from native teardown.
+        gone. On ROCm, we may have already unmapped/released those blocks to
+        emulate empty_cache for the pluggable allocator, so a later MemPool
+        destructor should only release the VA reservation. Draining that state
+        while Python is still alive avoids invoking Python callbacks from native
+        teardown.
         """
         if self._shutdown:
             return

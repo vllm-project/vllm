@@ -86,14 +86,10 @@ static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {
 
   status = reserve_rocm_address_at(d_mem, size);
   if (status != CUresult(0)) {
-    CUresult restore_status = reserve_rocm_address_at(d_mem, size);
-    if (restore_status != CUresult(0)) {
-      std::cerr << "ROCm: failed to restore VA reservation at " << (void*)d_mem
-                << " after cycling it; aborting to avoid dangling GPU pointers"
-                << std::endl;
-      std::abort();
-    }
-    return status;
+    std::cerr << "ROCm: failed to re-reserve VA at " << (void*)d_mem
+              << " after cycling it; aborting to avoid dangling GPU pointers"
+              << std::endl;
+    std::abort();
   }
 
   return CUresult(0);
