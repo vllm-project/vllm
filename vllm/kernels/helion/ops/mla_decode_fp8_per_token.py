@@ -7,6 +7,7 @@ import helion
 import helion.language as hl
 import regex as re
 import torch
+from helion._utils import cdiv
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
@@ -104,16 +105,18 @@ def pick_mla_decode_kv_split_config(
 @helion.kernel
 def mla_decode_kv_split(
     q_absorbed: torch.Tensor,  # query (batch, heads, d_model)
-    latent_kv: torch.Tensor,  # latent kv vector (batch,seq_len,latent_dim+rope_dim)
+    latent_kv: torch.Tensor,  # latent kv vector (num_pages, page_size, latent+rope)
     attn_out: torch.Tensor,  # output (batch, heads, d_model)
     kv_dequant: torch.Tensor,  # scale to dequant fp8 latent kv cache
-    scale: torch.Tensor,  # normalising scale for attention product
+    sm_scale: torch.Tensor,  # normalising scale for attention product
     B_seq_len: torch.Tensor,  # seq_len of each request (batch,)
-    Req_to_Tokens: torch.Tensor,  # page table
+    Req_to_Tokens: torch.Tensor,  # page table mapping
     NUM_KV_SPLITS: int,  # no. of splits of kv_cache; determines -1 dim of launch grid
     PAGE_SIZE: int,  # page size: 16
+    BLOCK_KV: int,  # kv cache to be processed in one iteration
     latent_dim: int,  # 512
     rope_dim: int,  # 64
+    logit_cap: float,
 ):
     assert q_absorbed.ndim == 3
     assert latent_kv.ndim == 3 and latent_kv.dtype == torch.float8_e4m3fn
@@ -122,7 +125,74 @@ def mla_decode_kv_split(
 
     grid = (batch, heads, NUM_KV_SPLITS)
 
-    for seq, head, split in hl.tile(grid, block_size=[1, 1, None]):
-        # q = q_absorbed[seq, head, :latent_dim]
-        # q_rope = q_absorbed[seq, head, latent_dim:rope_dim]
-        pass
+    for seq, head, kv_split in hl.tile(grid, block_size=[1, 1, None]):
+        q = q_absorbed[seq, head, :]
+        if rope_dim > 0:
+            q_latent = q[:, :, :latent_dim]
+            q_rope = q[:, :, latent_dim:rope_dim]
+        else:
+            q_latent = q
+
+        cur_batch_seq_len = B_seq_len[seq]
+        kv_len_per_split = cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
+
+        split_kv_start = kv_len_per_split * kv_split
+        split_kv_end = torch.min(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+
+        e_max = hl.zeros([], dtype=torch.float32) - float("inf")
+        e_sum = hl.zeros([], dtype=torch.float32)
+        acc = hl.zeros([latent_dim], dtype=torch.float32)
+
+        if split_kv_end > split_kv_start:
+            for start in range(split_kv_start, split_kv_end, BLOCK_KV):
+                offs_n = start + hl.arange(0, BLOCK_KV)
+                log_page_offs = offs_n // PAGE_SIZE
+                kv_page_number = hl.load(
+                    Req_to_Tokens,
+                    [batch, log_page_offs],
+                    extra_mask=offs_n < split_kv_end,
+                )
+
+                page_offs = offs_n % PAGE_SIZE
+                latent_slice = slice(None, latent_dim)
+
+                k_latent = hl.load(
+                    latent_kv,
+                    [kv_page_number, page_offs, latent_slice],
+                    extra_mask=offs_n < split_kv_end,
+                )
+
+                qk = hl.dot(q_latent, k_latent)
+
+                if rope_dim > 0:
+                    pos_slice = slice(latent_dim, rope_dim)
+                    k_rope = hl.load(
+                        latent_kv,
+                        [
+                            kv_page_number,
+                            page_offs,
+                            pos_slice,
+                        ],
+                        extra_mask=offs_n < split_kv_end,
+                    )
+
+                    if k_rope.dtype == torch.float8_e4m3fn:
+                        k_rope = (k_rope.to(torch.float32) * kv_dequant).to(q.dtype)
+
+                    qk = hl.dot(q_rope, k_rope, qk)
+
+                qk *= sm_scale
+                if logit_cap > 0:
+                    qk = logit_cap * torch.tanh(qk / logit_cap)
+                qk = torch.where(offs_n < split_kv_end, qk, float("-inf"))
+
+                v = torch.transpose(k_latent)
+
+                n_e_max = torch.max(torch.max(qk), e_max)
+                re_scale = torch.exp(e_max - n_e_max)
+                p = torch.exp(qk - n_e_max)
+                acc *= re_scale
+                acc += hl.dot(p.to(v.dtype), v)
+
+                e_sum = e_sum * re_scale + torch.sum(p)
+                e_max = n_e_max
