@@ -36,7 +36,7 @@ def _use_rocm_multistream(
         pass
 
     class _Wrapper:
-        aux_stream_list = [object(), object(), object(), object(), object()]
+        aux_stream_list = [object()]
 
     forward_context = _ForwardContext()
     forward_context.cudagraph_runtime_mode = cudagraph_runtime_mode
@@ -72,27 +72,26 @@ def test_deepseek_v4_rocm_multistream_decode_policy():
 
 def test_deepseek_v4_rocm_post_rmsnorm_stream_mapping(monkeypatch):
     calls = []
-    streams = [object(), object(), object(), object(), object()]
+    streams = [object()]
 
-    def fake_execute_in_parallel(
+    def fake_maybe_execute_in_parallel(
         default_fn,
-        aux_fns,
+        aux_fn,
         start_event,
-        done_events,
-        aux_streams,
-        enable=False,
+        done_event,
+        aux_stream=None,
     ):
-        assert enable is True
-        assert aux_streams == [streams[2], streams[1]]
-        assert len(aux_fns) == 2
-        assert aux_fns[0] is None
-        assert aux_fns[1] is not None
+        assert aux_stream is streams[0]
 
         q = default_fn()
-        compressor_result = aux_fns[1]()
-        return q, [None, compressor_result]
+        compressor_result = aux_fn()
+        return q, compressor_result
 
-    monkeypatch.setattr(dsv4_attention, "execute_in_parallel", fake_execute_in_parallel)
+    monkeypatch.setattr(
+        dsv4_attention,
+        "maybe_execute_in_parallel",
+        fake_maybe_execute_in_parallel,
+    )
 
     class _WqB:
         def __call__(self, qr):

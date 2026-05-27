@@ -401,7 +401,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             return False
         if self.aux_stream_list is None:
             return False
-        if len(self.aux_stream_list) < 5:
+        if not self.aux_stream_list:
             return False
 
         if not _is_decode_only_deepseek_v4_step(attn_metadata):
@@ -568,16 +568,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             and post_aux_streams is not None
             and rocm_csa_multistream
         )
-        if (
-            rocm_ms_active
-            and post_aux_streams is not None
-            and len(post_aux_streams) >= 5
-        ):
-            # ROCm keeps q+kv fused on default and only overlaps the
-            # compressor on aux[1]. aux[2] stays reserved for the top-level
-            # indexer branch, which is intentionally not launched by default.
-            outer_post_aux_streams = [post_aux_streams[2], post_aux_streams[1]]
-        elif post_aux_streams is not None:
+        if post_aux_streams is not None and not rocm_ms_active:
             outer_post_aux_streams = [post_aux_streams[0], post_aux_streams[1]]
         else:
             outer_post_aux_streams = None
@@ -625,39 +616,27 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer_fn: Callable[[], Any] | None = run_indexer
             compressor_fn: Callable[[], Any] | None = run_compressor
             if rocm_ms_active:
-                indexer_fn = None
-
-            q, (indexer_result, compressor_result) = execute_in_parallel(
-                wq_b_kv_insert,
-                [indexer_fn, compressor_fn],
-                self.ln_events[0],
-                [self.ln_events[1], self.ln_events[2]],
-                outer_post_aux_streams,
-                enable=post_aux_streams is not None,
-            )
-            if rocm_ms_active:
-                if indexer_result is None and indexer_fn is None:
-                    run_indexer()
-                if compressor_result is None and compressor_fn is None:
-                    run_compressor()
+                assert post_aux_streams is not None
+                q, _ = maybe_execute_in_parallel(
+                    wq_b_kv_insert,
+                    run_compressor,
+                    self.ln_events[0],
+                    self.ln_events[1],
+                    post_aux_streams[0],
+                )
+                run_indexer()
+            else:
+                q, _ = execute_in_parallel(
+                    wq_b_kv_insert,
+                    [indexer_fn, compressor_fn],
+                    self.ln_events[0],
+                    [self.ln_events[1], self.ln_events[2]],
+                    outer_post_aux_streams,
+                    enable=post_aux_streams is not None,
+                )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
-            aux_stream = (
-                (
-                    (
-                        post_aux_streams[1]
-                        if len(post_aux_streams) >= 5
-                        else post_aux_streams[0]
-                    )
-                    if current_platform.is_rocm() and post_aux_streams is not None
-                    else outer_post_aux_streams[0]
-                )
-                if (
-                    (current_platform.is_rocm() and post_aux_streams is not None)
-                    or outer_post_aux_streams is not None
-                )
-                else None
-            )
+            aux_stream = post_aux_streams[0] if post_aux_streams is not None else None
             compressor = self.compressor
 
             def wq_b_kv_insert() -> torch.Tensor:

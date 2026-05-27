@@ -616,7 +616,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        aux_stream_list = [torch.cuda.Stream(priority=-1) for _ in range(5)]
+        aux_stream_list = [torch.cuda.Stream(priority=-1)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
