@@ -186,7 +186,10 @@ def test_extract_hidden_states_per_request_options(
         kv_transfer_config={
             "kv_connector": "ExampleHiddenStatesConnector",
             "kv_role": "kv_producer",
-            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
+            "kv_connector_extra_config": {
+                "shared_storage_path": tmp_path,
+                "allow_custom_save_path": True,
+            },
         },
         max_model_len=128,
         enforce_eager=True,

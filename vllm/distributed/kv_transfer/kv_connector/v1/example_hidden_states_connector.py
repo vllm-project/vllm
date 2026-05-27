@@ -164,6 +164,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Whether to use a filesystem lock when writing files to shared storage.
         # This is necessary for online transfer clients to avoid incomplete reads,
         # but can be disabled for offline tasks that run tasks in batches to completion
+        self.allow_custom_save_path = self._kv_transfer_config.get_from_extra_config(
+            "allow_custom_save_path", False
+        )
+        if self.allow_custom_save_path:
+            logger.warning(
+                "allow_custom_save_path is enabled. API clients can write "
+                "hidden states to arbitrary paths on the server filesystem. "
+                "Only enable this with trusted clients."
+            )
         self.use_lock = self._kv_transfer_config.get_from_extra_config(
             "use_synchronization_lock", True
         )
@@ -414,15 +423,24 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Resolve save paths for new requests and tell the worker so it can
         # pre-create lock files before the client receives the output path.
         for new_req in scheduler_output.scheduled_new_reqs:
+            default_path = os.path.join(
+                self._storage_path, f"{new_req.req_id}.safetensors"
+            )
             kv_params = (
                 new_req.sampling_params.extra_args.get("kv_transfer_params")
                 if new_req.sampling_params and new_req.sampling_params.extra_args
                 else None
             ) or {}
-            filename = kv_params.get(
-                "hidden_states_path",
-                os.path.join(self._storage_path, f"{new_req.req_id}.safetensors"),
-            )
+            custom_path = kv_params.get("hidden_states_path")
+            if custom_path is not None and not self.allow_custom_save_path:
+                logger.warning(
+                    "Request %s provided hidden_states_path but "
+                    "allow_custom_save_path is disabled. Ignoring "
+                    "custom path and using default.",
+                    new_req.req_id,
+                )
+                custom_path = None
+            filename = custom_path or default_path
             self._request_filenames[new_req.req_id] = filename
             meta.new_req_filenames[new_req.req_id] = filename
 

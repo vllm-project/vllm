@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory() as tmpdirname:
             kv_role="kv_producer",
             kv_connector_extra_config={
                 "shared_storage_path": tmpdirname,
+                "allow_custom_save_path": True,
             },
         ),
     )

@@ -67,7 +67,7 @@ Both offline and online modes support per-request options via `kv_transfer_param
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `hidden_states_path` | Auto-generated | Custom file path for saving hidden states. If not set, files are saved to `<shared_storage_path>/<request_id>.safetensors`. |
+| `hidden_states_path` | Auto-generated | Custom file path for saving hidden states. If not set, files are saved to `<shared_storage_path>/<request_id>.safetensors`. Requires `allow_custom_save_path` to be enabled in the server config. |
 | `include_output_tokens` | `False` | When `True`, save hidden states for both prompt and generated output tokens. When `False`, only prompt token hidden states are saved. |
 
 ### Offline usage
@@ -109,6 +109,7 @@ The `kv_connector_extra_config` dict accepts these server-level options:
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `shared_storage_path` | `/tmp` | Directory where hidden state files are saved (used when `hidden_states_path` is not set per-request) |
+| `allow_custom_save_path` | `False` | Allow API clients to specify custom file paths via `hidden_states_path`. When disabled, client-provided paths are ignored with a warning. Enable only with trusted clients — custom paths can write to arbitrary locations on the server. |
 | `num_writer_threads` | `8` | Thread pool size for async disk writes |
 | `use_synchronization_lock` | `True` | Use file locks so concurrent readers block until writes complete. Can be disabled for batch generation where synchronization is not needed. |
 
