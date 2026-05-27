@@ -55,6 +55,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.utils import resolve_tool_dicts
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
@@ -236,6 +237,7 @@ class OpenAIServingRender:
             tool_dicts = None
         else:
             tool_dicts = [tool.model_dump() for tool in request.tools]
+            tool_dicts = resolve_tool_dicts(tool_dicts)
 
         if not self.use_harmony:
             # Common case.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import copy
 import json
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -198,6 +199,144 @@ def _get_tool_schema_defs(
                 )
             all_defs[def_name] = def_schema
     return all_defs
+
+
+# ---------------------------------------------------------------------------
+# Pre-template schema resolution ($ref dereferencing + anyOf flattening)
+# ---------------------------------------------------------------------------
+
+_MAX_REF_DEPTH = 50
+
+
+def _resolve_refs(
+    obj: Any,
+    defs: dict[str, Any],
+    depth: int = 0,
+) -> Any:
+    """Recursively replace local ``$ref`` pointers with their definitions.
+
+    Only ``#/$defs/<name>`` references are resolved. Remote URIs and
+    ``#/definitions/`` are intentionally rejected to avoid SSRF and to keep
+    the scope tight (Pydantic v2 uses ``$defs``).
+    """
+    if depth > _MAX_REF_DEPTH:
+        logger.warning(
+            "Tool schema $ref recursion depth exceeded %d — "
+            "possible circular reference; returning schema as-is",
+            _MAX_REF_DEPTH,
+        )
+        return obj
+
+    if isinstance(obj, list):
+        return [_resolve_refs(item, defs, depth) for item in obj]
+
+    if not isinstance(obj, dict):
+        return obj
+
+    if "$ref" in obj:
+        ref_path: str = obj["$ref"]
+        if not ref_path.startswith("#/$defs/"):
+            logger.warning(
+                "Unsupported $ref '%s' in tool schema — "
+                "only local #/$defs/ references are resolved",
+                ref_path,
+            )
+            return obj
+        def_key = ref_path.split("/")[-1]
+        if def_key not in defs:
+            logger.warning(
+                "$ref '%s' not found in $defs — leaving unresolved",
+                ref_path,
+            )
+            return obj
+        resolved = copy.deepcopy(defs[def_key])
+        remaining = {k: v for k, v in obj.items() if k != "$ref"}
+        if remaining:
+            resolved.update(remaining)
+        return _resolve_refs(resolved, defs, depth + 1)
+
+    return {k: _resolve_refs(v, defs, depth) for k, v in obj.items()}
+
+
+def _flatten_any_of(obj: Any) -> Any:
+    """Simplify nullable ``anyOf``/``oneOf`` patterns produced by Pydantic v2.
+
+    Patterns like ``{"anyOf": [{"type": "integer"}, {"type": "null"}]}``
+    are flattened to ``{"type": "integer"}`` because nullability is already
+    expressed by the ``required`` field in the parent object schema.
+
+    Complex variants (more than one non-null type, or variants carrying
+    extra constraints like ``enum``) are left untouched.
+    """
+    if isinstance(obj, list):
+        return [_flatten_any_of(item) for item in obj]
+
+    if not isinstance(obj, dict):
+        return obj
+
+    result = {k: _flatten_any_of(v) for k, v in obj.items()}
+
+    for keyword in ("anyOf", "oneOf"):
+        variants = result.get(keyword)
+        if not isinstance(variants, list):
+            continue
+
+        non_null = [v for v in variants if v.get("type") != "null"]
+        null_count = len(variants) - len(non_null)
+
+        if null_count == 0:
+            continue
+
+        if len(non_null) == 1 and set(non_null[0].keys()) <= {
+            "type",
+            "title",
+            "default",
+        }:
+            merged = {k: v for k, v in result.items() if k != keyword}
+            merged.update(non_null[0])
+            return merged
+
+    return result
+
+
+def resolve_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Dereference ``$ref`` and flatten nullable ``anyOf``/``oneOf`` in a
+    tool's ``parameters`` schema so that Jinja chat templates see the full
+    property tree.
+
+    This is intentionally conservative:
+    * Only local ``#/$defs/<name>`` refs are resolved (no remote URIs).
+    * Recursion is depth-limited to guard against circular schemas.
+    * The original schema dict is not mutated; a new dict is returned.
+    """
+    schema = copy.deepcopy(schema)
+
+    defs = schema.pop("$defs", None) or schema.pop("definitions", None) or {}
+
+    if defs:
+        schema = _resolve_refs(schema, defs)
+
+    schema = _flatten_any_of(schema)
+
+    return schema
+
+
+def resolve_tool_dicts(
+    tool_dicts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve ``$ref`` and flatten ``anyOf`` in every tool's parameters.
+
+    Operates on the serialized tool dicts (from ``tool.model_dump()``)
+    used in the chat-template rendering path.
+    """
+    resolved: list[dict[str, Any]] = []
+    for td in tool_dicts:
+        td = copy.deepcopy(td)
+        func = td.get("function")
+        if isinstance(func, dict) and "parameters" in func:
+            func["parameters"] = resolve_tool_schema(func["parameters"])
+        resolved.append(td)
+    return resolved
 
 
 def _get_json_schema_from_tools(
