@@ -244,8 +244,9 @@ class NCCLWeightTransferEngine(
             update_info.num_updates_list,
         ):
             dtype = getattr(torch, dtype_name)
-            indices = torch.empty(num_updates, dtype=torch.int32, device="cuda")
-            values = torch.empty(num_updates, dtype=dtype, device="cuda")
+            device = torch.accelerator.current_device_index()
+            indices = torch.empty(num_updates, dtype=torch.int32, device=device)
+            values = torch.empty(num_updates, dtype=dtype, device=device)
             self.model_update_group.broadcast(
                 indices, src=0, stream=torch.cuda.current_stream()
             )

@@ -111,6 +111,16 @@ class TestNCCLWeightTransferUpdateInfoValidation:
                 update_kind="sparse_flat",
             )
 
+    def test_sparse_update_rejects_empty_num_updates_list(self):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            NCCLWeightTransferUpdateInfo(
+                names=[],
+                dtype_names=[],
+                shapes=[],
+                num_updates_list=[],
+                update_kind="sparse_flat",
+            )
+
     def test_sparse_update_rejects_packed(self):
         with pytest.raises(ValueError, match="cannot be combined with `packed=True`"):
             NCCLWeightTransferUpdateInfo(

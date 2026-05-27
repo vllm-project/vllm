@@ -1034,52 +1034,61 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
-        # Parse dict into backend-specific typed dataclass
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        update_succeeded = False
+        try:
+            # Parse dict into backend-specific typed dataclass
+            typed_update_info = self.weight_transfer_engine.parse_update_info(
+                update_info
+            )
 
-        if self._is_checkpoint_format:
-            if typed_update_info.update_kind != "dense":
-                raise ValueError(
-                    "Sparse weight updates require "
-                    "`start_weight_update(is_checkpoint_format=False)`."
-                )
-
-            model = self.model_runner.model
-
-            # Use layerwise reload pattern for checkpoint format weights
             with torch.device(self.device):
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-        elif typed_update_info.update_kind == "sparse_flat":
-            if self.parallel_config.world_size != 1:
-                raise NotImplementedError(
-                    "Sparse weight updates currently require TP=1 and PP=1"
-                )
-            self.weight_transfer_engine.receive_sparse_weights(
-                typed_update_info,
-                apply_patches=self.model_runner.apply_sparse_weight_patches,
-            )
-        else:
-            model = self.model_runner.model
+                if self._is_checkpoint_format:
+                    if typed_update_info.update_kind != "dense":
+                        raise ValueError(
+                            "Sparse weight updates require "
+                            "`start_weight_update(is_checkpoint_format=False)`."
+                        )
 
-            # Weights are already in kernel format, copy directly.
-            def load_weights_direct(
-                weights: list[tuple[str, torch.Tensor]],
-            ) -> None:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
+                    model = self.model_runner.model
 
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=load_weights_direct,
-            )
+                    # Use layerwise reload pattern for checkpoint format weights
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=model.load_weights,
+                    )
+                elif typed_update_info.update_kind == "sparse_flat":
+                    if self.parallel_config.world_size != 1:
+                        raise NotImplementedError(
+                            "Sparse weight updates currently require TP=1 and PP=1"
+                        )
+                    self.weight_transfer_engine.receive_sparse_weights(
+                        typed_update_info,
+                        apply_patches=self.model_runner.apply_sparse_weight_patches,
+                    )
+                else:
+                    model = self.model_runner.model
 
-        # NCCL broadcast/packed path are asynchronous.
-        # Sync here so the next step uses the new weights.
-        torch.accelerator.synchronize()
+                    # Weights are already in kernel format, copy directly.
+                    def load_weights_direct(
+                        weights: list[tuple[str, torch.Tensor]],
+                    ) -> None:
+                        for name, weight in weights:
+                            param = model.get_parameter(name)
+                            param.copy_(weight)
+
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=load_weights_direct,
+                    )
+
+            # NCCL broadcast/packed path are asynchronous.
+            # Sync here so the next step uses the new weights.
+            torch.accelerator.synchronize()
+            update_succeeded = True
+        finally:
+            if not update_succeeded:
+                self._weight_update_active = False
+                self._is_checkpoint_format = True
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""

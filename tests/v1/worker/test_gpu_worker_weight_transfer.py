@@ -31,6 +31,7 @@ def test_update_weights_sparse_dispatches_to_sparse_receive(monkeypatch):
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
     worker = object.__new__(Worker)
+    worker.device = "cpu"
     worker.parallel_config = SimpleNamespace(world_size=1)
     worker.weight_transfer_engine = _make_nccl_engine()
     worker._weight_update_active = True
@@ -81,6 +82,7 @@ def test_update_weights_sparse_rejects_tp_or_pp(monkeypatch):
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
     worker = object.__new__(Worker)
+    worker.device = "cpu"
     worker.parallel_config = SimpleNamespace(world_size=2)
     worker.weight_transfer_engine = _make_nccl_engine()
     worker._weight_update_active = True
@@ -98,12 +100,15 @@ def test_update_weights_sparse_rejects_tp_or_pp(monkeypatch):
                 "update_kind": "sparse_flat",
             },
         )
+    assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True
 
 
 def test_update_weights_sparse_rejects_checkpoint_format(monkeypatch):
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
     worker = object.__new__(Worker)
+    worker.device = "cpu"
     worker.parallel_config = SimpleNamespace(world_size=1)
     worker.weight_transfer_engine = _make_nccl_engine()
     worker._weight_update_active = True
@@ -121,3 +126,30 @@ def test_update_weights_sparse_rejects_checkpoint_format(monkeypatch):
                 "update_kind": "sparse_flat",
             },
         )
+    assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True
+
+
+def test_update_weights_resets_state_when_update_info_is_invalid(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    worker = object.__new__(Worker)
+    worker.device = "cpu"
+    worker.parallel_config = SimpleNamespace(world_size=1)
+    worker.weight_transfer_engine = _make_nccl_engine()
+    worker._weight_update_active = True
+    worker._is_checkpoint_format = False
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        Worker.update_weights(
+            worker,
+            {
+                "names": [],
+                "dtype_names": [],
+                "shapes": [],
+                "num_updates_list": [],
+                "update_kind": "sparse_flat",
+            },
+        )
+    assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True

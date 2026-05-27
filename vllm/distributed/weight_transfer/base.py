@@ -46,6 +46,8 @@ class WeightTransferUpdateInfo(ABC):  # noqa: B024
 
         if self.num_updates_list is None:
             raise ValueError("`num_updates_list` is required for sparse updates")
+        if len(self.num_updates_list) == 0:
+            raise ValueError("`num_updates_list` cannot be empty for sparse updates")
         if any(num_updates < 0 for num_updates in self.num_updates_list):
             raise ValueError("Sparse `num_updates_list` entries must be non-negative")
 
@@ -187,8 +189,8 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     def receive_sparse_weights(
         self,
-        _update_info: TUpdateInfo,
-        _apply_patches: Callable[[list[SparseWeightPatch]], None],
+        update_info: TUpdateInfo,
+        apply_patches: Callable[[list[SparseWeightPatch]], None],
     ) -> None:
         """Receive sparse weight patches from the trainer."""
         raise NotImplementedError(

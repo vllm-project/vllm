@@ -3217,7 +3217,7 @@ class GPUModelRunner(
             flat_param.index_copy_(
                 0,
                 patch.indices.to(device=flat_param.device, dtype=torch.long),
-                patch.values,
+                patch.values.to(device=flat_param.device),
             )
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
