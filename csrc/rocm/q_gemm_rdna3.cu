@@ -449,8 +449,9 @@ __global__ void gemm_q4_kernel_rdna3(
         pack4 a_pack;
         {
           const uint32_t* a_words =
-              b_q_perm ? reinterpret_cast<const uint32_t*>(&block_a[0][a_off])
-                       : reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
+              b_q_perm
+                  ? reinterpret_cast<const uint32_t*>(&block_a[0][a_off])
+                  : reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
           a_pack.u[0] = a_words[0];
           a_pack.u[1] = a_words[1];
           a_pack.u[2] = a_words[2];
