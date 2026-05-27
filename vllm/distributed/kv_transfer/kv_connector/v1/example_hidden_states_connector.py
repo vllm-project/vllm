@@ -164,9 +164,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Whether to use a filesystem lock when writing files to shared storage.
         # This is necessary for online transfer clients to avoid incomplete reads,
         # but can be disabled for offline tasks that run tasks in batches to completion
-        self.include_output_tokens = self._kv_transfer_config.get_from_extra_config(
-            "include_output_tokens", False
-        )
         self.use_lock = self._kv_transfer_config.get_from_extra_config(
             "use_synchronization_lock", True
         )
@@ -445,10 +442,17 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """
         req_id = request.request_id
         filename = self._request_filenames.pop(req_id)
-        if self.include_output_tokens:
+        kv_params = request.kv_transfer_params or {}
+        if kv_params.get("include_output_tokens", False):
             token_ids = torch.tensor(list(request.all_token_ids))
+        elif request.prompt_token_ids is not None:
+            token_ids = torch.tensor(request.prompt_token_ids)
         else:
-            token_ids = torch.tensor(request.prompt_token_ids or [])
+            logger.warning(
+                "Request %s has no prompt_token_ids (prompt_embeds only). "
+                "Saved token_ids will be empty.", req_id,
+            )
+            token_ids = torch.tensor([], dtype=torch.long)
         self._pending_saves[req_id] = PendingSave(
             req_id=req_id,
             filename=filename,

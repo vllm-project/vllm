@@ -44,16 +44,18 @@ with tempfile.TemporaryDirectory() as tmpdirname:
 
     prompts = ["Generate a sentence with hidden states", "Write a python function"]
 
-    # One request uses the default path, the other uses a custom path
+    # One request uses defaults, the other uses a custom save path and
+    # includes output token hidden states via per-request kv_transfer_params.
     sampling_params_list = [
         SamplingParams(max_tokens=1),
         SamplingParams(
-            max_tokens=1,
+            max_tokens=10,
             extra_args={
                 "kv_transfer_params": {
                     "hidden_states_path": os.path.join(
                         tmpdirname, "custom_output.safetensors"
                     ),
+                    "include_output_tokens": True,
                 }
             },
         ),
