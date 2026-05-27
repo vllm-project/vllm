@@ -513,7 +513,7 @@ class PanguIndexer(nn.Module):
         k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
         q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+        k = torch.cat([k_pe.reshape(-1, self.rope_dim), k_nope], dim=-1)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * self.softmax_scale * self.n_head**-0.5
