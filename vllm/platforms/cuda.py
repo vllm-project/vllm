@@ -226,6 +226,23 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
+        # Prefill Context Parallelism is incompatible with full CUDA graphs:
+        # the cross-rank all-gather in attention cannot be captured as a graph
+        # node. Force PIECEWISE mode when PCP is enabled.
+        from vllm.config import CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            logger.warning_once(
+                "Prefill context parallel (PCP) is enabled, which is "
+                "incompatible with full CUDA graphs. "
+                "Overriding cudagraph_mode to PIECEWISE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (
