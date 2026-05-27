@@ -3,8 +3,8 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.kv_offload.abstract import OffloadKey
-from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class LRUCachePolicy(CachePolicy):
@@ -27,6 +27,9 @@ class LRUCachePolicy(CachePolicy):
         for key in reversed(list(keys)):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
+
+    def clear(self) -> None:
+        self.blocks.clear()
 
     def evict(
         self, n: int, protected: set[OffloadKey]

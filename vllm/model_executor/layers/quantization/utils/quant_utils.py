@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
+INT4_DTYPE = scalar_types.uint4b8
+INT8_DTYPE = scalar_types.uint8b128
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -169,6 +171,40 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
+
+# TODO: convert this to use SCALAR_TYPE. This is not right.
+kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
+kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
+kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
+kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
+
+kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+
+# INT4 W4A8 quantization keys
+
+# For group-wise quantization (e.g., group_size=128)
+# Note: group_size will be specified at runtime, this is a generic group scale
+kInt4W4A8StaticGroupScale128 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 128))
+kInt4W4A8StaticGroup128Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale128, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale64 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 64))
+kInt4W4A8StaticGroup64Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale64, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale32 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 32))
+kInt4W4A8StaticGroup32Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale32, symmetric=True
+)
+
+# Generic group-wise with flexible group size (per-token groups)
+kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
+kInt4W4A8StaticGroupSym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
 
 
 def create_fp8_quant_key(
@@ -355,6 +391,12 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    # LoRA linear wrappers store quantization metadata on `base_layer`.
+    # Unwrap here so callers can pass either a raw linear layer or its LoRA
+    # wrapper without special-casing.
+    while hasattr(layer, "base_layer") and hasattr(layer.base_layer, "quant_method"):
+        layer = layer.base_layer
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 

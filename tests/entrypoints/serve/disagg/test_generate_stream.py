@@ -12,7 +12,10 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.entrypoints.serve.disagg.protocol import (
+    GenerateRequest,
+    GenerateResponse,
+)
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logprobs import Logprob
@@ -67,9 +70,15 @@ class MockParallelConfig:
 
 
 @dataclass
+class MockSchedulerConfig:
+    max_num_seqs: int = 128
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -146,6 +155,9 @@ def _mock_engine() -> MagicMock:
     engine = MagicMock(spec=AsyncLLM)
     engine.errored = False
     engine.model_config = MockModelConfig()
+    engine.vllm_config = MockVllmConfig(
+        engine.model_config, parallel_config=MockParallelConfig()
+    )
     engine.input_processor = MagicMock()
     engine.renderer = _build_renderer(engine.model_config)
     return engine
@@ -162,6 +174,36 @@ def _parse_sse_chunks(chunks: list[str]) -> list[Any]:
         else:
             parsed.append(json.loads(payload))
     return parsed
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    assert (
+        serving.openai_serving_render.preprocess_completion.call_args.kwargs[
+            "skip_mm_cache"
+        ]
+        is True
+    )
 
 
 @pytest.mark.asyncio

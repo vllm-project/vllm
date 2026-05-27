@@ -61,6 +61,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -81,8 +82,24 @@ from .utils import (
 logger = init_logger(__name__)
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
+_SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _get_max_soft_tokens(
+    merged_kwargs: Mapping[str, object],
+) -> tuple[object | None, bool]:
+    """Return configured image max_soft_tokens and whether it is top-level."""
+    val = merged_kwargs.get("max_soft_tokens")
+    if val is not None:
+        return val, True
+
+    images_kwargs = merged_kwargs.get("images_kwargs")
+    if isinstance(images_kwargs, Mapping):
+        return images_kwargs.get("max_soft_tokens"), False
+
+    return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +125,12 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", "pp"),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", "pp", dynamic_dims={"np"}),
     ]
     pixel_position_ids: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", 2),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
 
 
@@ -216,17 +233,29 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         config = self.get_hf_config()
-        # Upper bound: the pooler outputs default_output_length slots
-        # per image (280).  After padding is stripped the actual count
-        # is ≤ this value, but vLLM needs the max for memory planning.
+        # Upper bound: the pooler outputs max_soft_tokens slots per image.
+        # After padding is stripped the actual count is ≤ this value, but
+        # vLLM needs the max for memory planning.
         tokens_per_image = config.vision_config.default_output_length
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
         if config.audio_config is not None:
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
         # Video: each frame ≤ 70 soft tokens + boi + eoi + ~6 ts tokens.
-        tokens["video"] = _VIDEO_MAX_FRAMES * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
+        num_frames = _VIDEO_MAX_FRAMES
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        video_opts = mm_config.limit_per_prompt.get("video")
+        if (
+            isinstance(video_opts, VideoDummyOptions)
+            and video_opts.num_frames is not None
+        ):
+            num_frames = min(num_frames, video_opts.num_frames)
+        tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
@@ -265,7 +294,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
         target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
         num_patches = (target_h // patch_size) * (target_w // patch_size)
-        return num_patches // (pooling_kernel_size**2)
+        # Clamp to ``max_soft_tokens``: extreme aspect ratios (e.g. 3x900)
+        # cause the floor() above to round one dim up to ``unit`` while the
+        # other scales freely, which over-shoots ``max_patches``. The HF
+        # Gemma 4 image processor caps its vision-tower output at
+        # ``max_soft_tokens``, so without this clamp the prompt-side
+        # placeholder count exceeds the encoder output and
+        # ``_merge_multimodal_embeddings`` crashes.
+        return min(num_patches // (pooling_kernel_size**2), max_soft_tokens)
 
     def get_image_repl(
         self,
@@ -485,13 +521,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Validate max_soft_tokens early and exit cleanly on bad values.
-        _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
-        val = merged_kwargs.get("max_soft_tokens")
-        if val is None:
-            val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
+        val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
@@ -638,7 +669,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
         patched_mm_kwargs = dict(mm_kwargs)
-        if val is not None:
+        if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
         processed_outputs = super()._call_hf_processor(
@@ -748,7 +779,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
                     hf_processor_mm_kwargs,
                 )
-                max_soft_tokens = merged_kwargs.get("max_soft_tokens")
+                val, _ = _get_max_soft_tokens(merged_kwargs)
+                max_soft_tokens = (
+                    val
+                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS
+                    else None
+                )
                 return self.info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
@@ -969,6 +1005,16 @@ class Gemma4ForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        # --- Precompute full-attention layer indices for bidi clearing ---
+        self._full_attn_layer_idxs: frozenset[int] = frozenset()
+        text_config = config.text_config
+        if getattr(text_config, "use_bidirectional_attention", None) == "vision":
+            layer_types = getattr(text_config, "layer_types", None)
+            if layer_types:
+                self._full_attn_layer_idxs = frozenset(
+                    i for i, lt in enumerate(layer_types) if lt != "sliding_attention"
+                )
+
         # --- MixtureOfExperts delegation to language_model ---
         self.expert_weights = self.language_model.expert_weights
         self.moe_layers = self.language_model.moe_layers
@@ -1055,6 +1101,37 @@ class Gemma4ForConditionalGeneration(
                 )
         return mm_input_by_modality
 
+    @staticmethod
+    def _encoder_chunk(
+        patches_per_item: int,
+        free_bytes: int,
+        total_bytes: int,
+        position_embedding_size: int,
+    ) -> int:
+        """Max chunk size whose F.one_hot transient fits in the budget.
+
+        The dominant transient inside HF's ``Gemma4VisionPatchEmbedder.
+        _position_embeddings`` is
+        ``F.one_hot(clamped_positions, num_classes=position_embedding_size)``
+        with shape ``(chunk, patches, 2, position_embedding_size)``,
+        int64, plus its simultaneous cast to the position embedding
+        table dtype. That, not the encoder residual stream, sets peak
+        memory.
+        """
+        if patches_per_item <= 0:
+            return 1
+        # Half of currently-free, capped at 10% of total so we leave room
+        # for the rest of profile_run / the subsequent encoder + pooler.
+        budget = min(free_bytes // 2, total_bytes // 10)
+        if budget <= 0:
+            return 1
+        # F.one_hot allocates (chunk, patches, 2, pos_emb_size) int64
+        # (the inner 2 is the (x, y) coordinate axis, 8 is sizeof(int64)).
+        # Outer 2x covers the int64 buffer and its concurrent bf16 cast
+        # plus the matmul output that live alongside it at peak.
+        cost = patches_per_item * 4 * position_embedding_size * 8
+        return max(1, budget // cost) if cost > 0 else 1
+
     # ------------------------------------------------------------------ #
     # Image processing
     # ------------------------------------------------------------------ #
@@ -1063,68 +1140,112 @@ class Gemma4ForConditionalGeneration(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
+        """Batch-encode images through the vision tower.
+
+        Groups images by patch count (resolution bucket) so each
+        encoder call processes a uniform-shape batch with no
+        cross-resolution padding.  Pooling and projection are then
+        applied over a single concatenated tensor for all images.
+        """
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
 
-        # The HF image processor now outputs pre-patchified data:
-        #   pixel_values:       (num_images, max_patches, patch_pixels)
-        #   pixel_position_ids: (num_images, max_patches, 2)
-        # We call the vision tower's forward() directly, which handles
-        # patch embedding, encoding, pooling, padding removal, and
-        # optional standardization internally.
         vt = self.vision_tower
-        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        vision_cfg = self.config.vision_config
+        pooling_k2 = vision_cfg.pooling_kernel_size**2
 
-        # TODO: Move this per-image loop into the input processor to
-        # reduce dynamism at the model runner / engine core. This
-        # requires spatially padding all images to uniform (H_max,
-        # W_max) in _call_hf_processor() so they arrive as a single
-        # stacked tensor, tracking padded regions via image_sizes
-        # metadata, and validating numerical equivalence with the
-        # current per-image path.
-        #
-        # Process each image individually through the vision tower.
-        # The vision tower's forward() strips padding and returns a
-        # flat tensor of valid tokens. We process per-image to get
-        # variable-length outputs matching the dynamic token count
-        # from get_image_repl.
-        per_image_features = []
-        for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
-            pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
+        # Concurrent requests with different image resolutions may
+        # arrive as a list of per-image tensors, while same-resolution
+        # batches may arrive as a stacked tensor.
+        buckets: dict[int, list[tuple[int, torch.Tensor, torch.Tensor]]] = {}
+        total_images = (
+            len(pixel_values)
+            if isinstance(pixel_values, list)
+            else pixel_values.shape[0]
+        )
 
-            # Derive the pooler's output_length from the total patch
-            # count (including padding).  The vision tower encoder
-            # processes ALL patches — padding patches get zero hidden
-            # states but still occupy sequence positions.  The pooler's
-            # _avg_pool_by_positions requires:
-            #     input_seq_len / output_length == k²
-            # where k == pooling_kernel_size.  The image processor
-            # allocates max_patches = max_soft_tokens * k² total slots,
-            # so output_length = max_patches / k² == max_soft_tokens.
-            # Without this, the pooler falls back to
-            # config.image_seq_length (e.g. 280), which fails when a
-            # different max_soft_tokens was used at preprocessing time.
-            max_patches = pv.shape[1]
-            output_length = max_patches // pooling_k2
+        for idx in range(total_images):
+            pv = pixel_values[idx]
+            pp = pixel_position_ids[idx]
+            buckets.setdefault(pv.shape[0], []).append((idx, pv, pp))
 
-            vt_output = vt(pv, pp, output_length=output_length)
-            # last_hidden_state: (num_valid_tokens, hidden_size)
-            # — already flat with padding stripped by the vision tower
-            per_image_features.append(vt_output.last_hidden_state)
-
-        # Project each image's features into LM embedding space.
-        # Per-image loop is required because images have variable
-        # token counts after padding removal.
-        # Cast to match the projection layer's dtype (model may be
-        # bf16 while the vision tower outputs fp32).
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        return [
-            self.embed_vision(inputs_embeds=img.unsqueeze(0).to(target_dtype)).squeeze(
-                0
+        # Encode each resolution bucket in memory-safe chunks. Re-read
+        # free memory per bucket because the previous bucket's encoder
+        # pass has already allocated activations we should account for.
+        last_hidden_states_map: dict[int, torch.Tensor] = {}
+        for patches, items in buckets.items():
+            free, total = current_platform.mem_get_info()
+            max_batch_size = min(
+                len(items),
+                self._encoder_chunk(
+                    patches, free, total, vision_cfg.position_embedding_size
+                ),
             )
-            for img in per_image_features
-        ]
+
+            for chunk_idx in range(0, len(items), max_batch_size):
+                chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
+
+                pv_tensor = torch.cat(
+                    [item[1].unsqueeze(0) for item in chunk_items], dim=0
+                )
+                pp_tensor = torch.cat(
+                    [item[2].unsqueeze(0) for item in chunk_items], dim=0
+                )
+                pad_tensor = (pp_tensor == -1).all(dim=-1)
+
+                inputs_embeds = vt.patch_embedder(pv_tensor, pp_tensor, pad_tensor)
+                encoder_outputs = vt.encoder(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=~pad_tensor,
+                    pixel_position_ids=pp_tensor,
+                )
+                hidden_states = encoder_outputs.last_hidden_state
+
+                for i, (orig_idx, _, _) in enumerate(chunk_items):
+                    last_hidden_states_map[orig_idx] = hidden_states[i]
+
+        # Pool per image to strip padding and reduce spatial resolution.
+        all_valid_states: list[torch.Tensor] = [None] * total_images  # type: ignore[list-item]
+        valid_lens = [0] * total_images
+
+        for orig_idx in range(total_images):
+            chunk_hidden = last_hidden_states_map[orig_idx]
+            output_length = chunk_hidden.shape[0] // pooling_k2
+
+            single_hidden = chunk_hidden.unsqueeze(0)
+            single_pos_ids = pixel_position_ids[orig_idx].unsqueeze(0)
+            padding_positions = (single_pos_ids == -1).all(dim=-1)
+
+            pooled_states, valid_mask = vt.pooler(
+                hidden_states=single_hidden,
+                pixel_position_ids=single_pos_ids,
+                padding_positions=padding_positions,
+                output_length=output_length,
+            )
+            valid_states = pooled_states[valid_mask]
+
+            if getattr(vt.config, "standardize", False):
+                valid_states = (valid_states - vt.std_bias) * vt.std_scale
+
+            all_valid_states[orig_idx] = valid_states
+            valid_lens[orig_idx] = valid_states.shape[0]
+
+        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+
+        # Project all images in a single batched call.
+        flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
+        flat_proj_embs = self.embed_vision(
+            inputs_embeds=flat_valid_states.unsqueeze(0)
+        ).squeeze(0)
+
+        # Split back into per-image tensors (slicing returns views).
+        per_image_embeddings: list[torch.Tensor] = []
+        offset = 0
+        for length in valid_lens:
+            per_image_embeddings.append(flat_proj_embs[offset : offset + length])
+            offset += length
+
+        return per_image_embeddings
 
     # ------------------------------------------------------------------ #
     # Video processing (frames through vision tower)
@@ -1134,54 +1255,101 @@ class Gemma4ForConditionalGeneration(
         self,
         video_input: dict[str, torch.Tensor],
     ) -> list[torch.Tensor]:
-        """Process video frames through the vision tower.
+        """Batch-encode video frames through the vision tower.
 
-        Reuses the image processing pipeline — Gemma4 has no separate
-        video tower; video frames are just images at lower resolution
-        (max_soft_tokens=70).
+        Gemma4 has no separate video tower; video frames are images at
+        lower resolution (max_soft_tokens=70).  All frames across all
+        videos in the batch are encoded together in chunks, then pooled
+        and projected in a single batched call.
 
         Returns one concatenated embedding tensor per video (not per
-        frame), because vLLM treats one video as one multimodal item.
-        The flat_from_sizes field config groups all frames of a video
-        together, so embed_multimodal must return one tensor per video.
+        frame), matching the flat_from_sizes grouping that vLLM expects
+        for embed_multimodal.
         """
         pixel_values = video_input["pixel_values_videos"]
         pixel_position_ids = video_input["pixel_position_ids_videos"]
         frame_counts = video_input["video_frame_counts"]
 
         vt = self.vision_tower
-        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        vision_cfg = self.config.vision_config
+        pooling_k2 = vision_cfg.pooling_kernel_size**2
         target_dtype = self.embed_vision.embedding_projection.weight.dtype
 
-        # Split flat tensors into per-video chunks
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
         else:
             fc_list = list(frame_counts)
 
-        pv_per_video = torch.split(pixel_values, fc_list, dim=0)
-        pp_per_video = torch.split(pixel_position_ids, fc_list, dim=0)
+        total_frames = pixel_values.shape[0]
+        free, total = current_platform.mem_get_info()
+        max_batch_size = min(
+            total_frames,
+            self._encoder_chunk(
+                pixel_values.shape[1],
+                free,
+                total,
+                vision_cfg.position_embedding_size,
+            ),
+        )
 
-        per_video_embeddings = []
-        for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
-            frame_embs = []
-            for i in range(pv_chunk.shape[0]):
-                pv = pv_chunk[i].unsqueeze(0)
-                pp = pp_chunk[i].unsqueeze(0)
+        padding_positions = (pixel_position_ids == -1).all(dim=-1)
 
-                max_patches = pv.shape[1]
-                output_length = max_patches // pooling_k2
+        # Encode frames in chunks bounded by _encoder_chunk.
+        last_hidden_states_list: list[torch.Tensor] = []
+        for i in range(0, total_frames, max_batch_size):
+            pv_chunk = pixel_values[i : i + max_batch_size]
+            pp_chunk = pixel_position_ids[i : i + max_batch_size]
+            pad_chunk = padding_positions[i : i + max_batch_size]
 
-                vt_output = vt(pv, pp, output_length=output_length)
-                frame_emb = self.embed_vision(
-                    inputs_embeds=(
-                        vt_output.last_hidden_state.unsqueeze(0).to(target_dtype)
-                    )
-                ).squeeze(0)
-                frame_embs.append(frame_emb)
+            inputs_embeds = vt.patch_embedder(pv_chunk, pp_chunk, pad_chunk)
+            encoder_outputs = vt.encoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=~pad_chunk,
+                pixel_position_ids=pp_chunk,
+            )
+            last_hidden_states_list.append(encoder_outputs.last_hidden_state)
 
-            # Concatenate all frames of this video into one tensor.
-            per_video_embeddings.append(torch.cat(frame_embs, dim=0))
+        last_hidden_states = torch.cat(last_hidden_states_list, dim=0)
+
+        # Pool per frame to strip padding and reduce spatial resolution.
+        output_length = pixel_values.shape[1] // pooling_k2
+        all_frame_valid_states: list[torch.Tensor] = []
+        frame_valid_lens: list[int] = []
+
+        for i in range(total_frames):
+            single_hidden = last_hidden_states[i].unsqueeze(0)
+            single_pos_ids = pixel_position_ids[i].unsqueeze(0)
+            single_pad_pos = padding_positions[i].unsqueeze(0)
+
+            pooled_states, valid_mask = vt.pooler(
+                hidden_states=single_hidden,
+                pixel_position_ids=single_pos_ids,
+                padding_positions=single_pad_pos,
+                output_length=output_length,
+            )
+            valid_states = pooled_states[valid_mask]
+
+            if getattr(vt.config, "standardize", False):
+                valid_states = (valid_states - vt.std_bias) * vt.std_scale
+
+            all_frame_valid_states.append(valid_states)
+            frame_valid_lens.append(valid_states.shape[0])
+
+        # Project all frames in a single batched call.
+        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(target_dtype)
+        flat_proj_embs = self.embed_vision(
+            inputs_embeds=flat_valid_states.unsqueeze(0)
+        ).squeeze(0)
+
+        # Regroup into per-video tensors (slicing returns views).
+        per_video_embeddings: list[torch.Tensor] = []
+        frame_idx = 0
+        offset = 0
+        for count in fc_list:
+            video_tokens = sum(frame_valid_lens[frame_idx : frame_idx + count])
+            per_video_embeddings.append(flat_proj_embs[offset : offset + video_tokens])
+            offset += video_tokens
+            frame_idx += count
 
         return per_video_embeddings
 
@@ -1310,6 +1478,12 @@ class Gemma4ForConditionalGeneration(
             else None
         )
 
+        # Gemma4 bidi: clear mm_prefix_range for full_attention layers.
+        # Must run here (outside @support_torch_compile boundary) because
+        # _run_decoder_layers is inside a compiled graph where Python
+        # side effects are eliminated.
+        self._clear_mm_prefix_for_full_attn_layers()
+
         hidden_states = self.language_model.model(
             input_ids,
             positions,
@@ -1326,6 +1500,49 @@ class Gemma4ForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    # ------------------------------------------------------------------ #
+    # Bidirectional attention helpers
+    # ------------------------------------------------------------------ #
+
+    def _clear_mm_prefix_for_full_attn_layers(self) -> None:
+        """Clear mm_prefix_range for non-sliding layers.
+
+        Gemma4 with use_bidirectional_attention='vision' applies
+        bidirectional attention only to sliding_attention layers.
+        Full attention layers use plain causal masking.
+
+        Uses _full_attn_layer_idxs (precomputed in __init__) for O(1)
+        lookup instead of per-call regex parsing.
+        """
+        if not self._full_attn_layer_idxs:
+            return
+
+        from vllm.forward_context import get_forward_context
+
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is None:
+            return
+
+        def _process(metadata_dict: dict) -> None:
+            for layer_name, metadata in metadata_dict.items():
+                if ".layers." not in layer_name:
+                    continue
+                try:
+                    layer_idx = int(layer_name.split(".layers.")[1].split(".")[0])
+                except (ValueError, IndexError):
+                    continue
+                if layer_idx in self._full_attn_layer_idxs:
+                    if hasattr(metadata, "mm_prefix_range"):
+                        metadata.mm_prefix_range = None
+                    if hasattr(metadata, "mm_prefix_range_tensor"):
+                        metadata.mm_prefix_range_tensor = None
+
+        if isinstance(attn_metadata, list):
+            for ub_metadata in attn_metadata:
+                _process(ub_metadata)
+        elif isinstance(attn_metadata, dict):
+            _process(attn_metadata)
 
     # ------------------------------------------------------------------ #
     # Weight loading

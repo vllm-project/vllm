@@ -881,13 +881,20 @@ class FunASRForConditionalGeneration(
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language
+        hotwords = stt_params.hotwords
 
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the funasr prompt"
             )
 
-        funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+        if hotwords is not None:
+            funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n热词列表：[{}]\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n".format(  # noqa: E501
+                hotwords
+            )
+        else:
+            funasr_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：<|AUDIO|><|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+
         prompt = {
             "prompt": funasr_prompt,
             "multi_modal_data": {
