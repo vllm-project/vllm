@@ -146,6 +146,15 @@ class RoutedExpertsCapturer:
             total = int(num_tokens_dp.sum().item())
             n = topk_ids.shape[0]
 
+            # Calculate total with padding for all-gather scenario.
+            # When tokens are padded to max_tokens before all-gather across DP group,
+            # the total size becomes max_tokens * dp_size.
+            # Example: DP0 has 5 tokens, DP1 has 7 tokens, max_tokens=7.
+            # After padding: DP0 has 7 tokens, DP1 has 7 tokens.
+            # After all-gather: total_with_padding = 7 * 2 = 14.
+            max_tokens = int(num_tokens_dp.max().item())
+            total_with_padding = max_tokens * len(num_tokens_dp)
+
             if n == total:
                 # Naive dispatch: all DP ranks' tokens concatenated
                 # before routing. This rank owns tokens
@@ -159,6 +168,16 @@ class RoutedExpertsCapturer:
                 # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
+            elif n == total_with_padding:
+                # Padded all-gather path: tokens are padded to max_tokens before
+                # all-gather across DP group. Each DP rank occupies a contiguous
+                # block of size max_tokens. Extract only the actual tokens for
+                # this rank (skip padding).
+                # Example: dp_rank=0, max_tokens=7, token_num_per_dp=5.
+                # start_loc = 0 * 7 = 0
+                # end_loc = 0 + 5 = 5 (only first 5 tokens are valid)
+                start_loc = self.dp_rank * max_tokens
+                end_loc = start_loc + token_num_per_dp
             elif (
                 self.tp_size > 1
                 and n != token_num_per_dp
