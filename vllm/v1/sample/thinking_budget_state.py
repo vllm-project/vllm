@@ -229,6 +229,7 @@ class ThinkingBudgetStateHolder:
             "in_spec_mode": False,
             "bonus_token_forced": False,
             "continue_thinking": continue_thinking,
+            "scan_offset": 0,
         }
 
     def _update_think_state(self, state: dict[str, Any]) -> None:
@@ -241,14 +242,29 @@ class ThinkingBudgetStateHolder:
             return
 
         if state["start_thinking"] == -1:
+            scan_offset = state.get("scan_offset", 0)
+            output_slice = state.get("output_tok_ids", [])[scan_offset:]
             start_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_start_token_ids
+                output_slice, self.think_start_token_ids
             )
+            if start_thinking >= 0:
+                start_thinking += scan_offset
+                if scan_offset > 0:
+                    state["start_thinking"] = start_thinking
+                    state["in_think"] = False
+                    state["in_end"] = True
+                    state["end_count"] = 0
+                    state["force_index"] = [0]
+                    return
             state["start_thinking"] = start_thinking
         if state["end_thinking"] == -1:
+            scan_offset = state.get("scan_offset", 0)
+            output_slice = state.get("output_tok_ids", [])[scan_offset:]
             end_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_end_token_ids
+                output_slice, self.think_end_token_ids
             )
+            if end_thinking >= 0:
+                end_thinking += scan_offset
             state["end_thinking"] = end_thinking
 
         if state["start_thinking"] == -1:
@@ -433,6 +449,11 @@ class ThinkingBudgetStateHolder:
                         "in_end": False,
                         "end_count": 0,
                         "check_count_down": state["thinking_token_budget"],
+                        "start_thinking": -1,
+                        "end_thinking": -1,
+                        "think_count": 0,
+                        "continue_thinking": False,
+                        "scan_offset": len(state.get("output_tok_ids", [])),
                     }
                 )
 
