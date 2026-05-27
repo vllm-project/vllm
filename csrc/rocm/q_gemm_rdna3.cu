@@ -306,6 +306,14 @@ __global__ void gemm_q4_kernel_rdna3(
     // the LDS load above — but here all THREADS_X (=256) threads always do,
     // regardless of whether their `n` is in bounds.
     __syncthreads();
+  } else if (b_q_perm) {
+    // bf16 M=1 fast path skips LDS, but its global read below is sequential
+    // and cannot apply act-order. When a permutation is present, stage the
+    // single A row through LDS (as fp16 / M>1 do) so the read picks it up.
+    // b_q_perm is block-uniform, so the __syncthreads is non-divergent.
+    if (offset_k + t < end_k)
+      block_a[0][t] = a[offset_m * size_k + b_q_perm[offset_k + t]];
+    __syncthreads();
   }
   if (n >= size_n) return;
 
@@ -436,11 +444,13 @@ __global__ void gemm_q4_kernel_rdna3(
         // fp32-aliased union. Storing as uint32 keeps the IR-level type
         // opaque so the inner v_dot2 cannot be folded to fp32 widening.
         //
-        // A is read direct from global (no LDS staging — see USE_LDS_A above).
+        // A is read direct from global (no LDS staging — see USE_LDS_A above),
+        // except under act-order, where it comes from the permuted LDS copy.
         pack4 a_pack;
         {
           const uint32_t* a_words =
-              reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
+              b_q_perm ? reinterpret_cast<const uint32_t*>(&block_a[0][a_off])
+                       : reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
           a_pack.u[0] = a_words[0];
           a_pack.u[1] = a_words[1];
           a_pack.u[2] = a_words[2];
