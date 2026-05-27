@@ -3,6 +3,8 @@
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <array>
+#include <bit>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -109,11 +111,6 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   } else {
     static_assert(sizeof(WideT) % sizeof(T) == 0);
     constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
-    // TODO: it's UB
-    union {
-      WideT scalar;
-      T array[items_per_scalar];
-    } wide;
 
     int skip_cnt =
         (reinterpret_cast<size_t>(in) % sizeof(WideT))
@@ -127,11 +124,11 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
     const idxT len_cast = (len - skip_cnt) / items_per_scalar;
 
     for (idxT i = thread_rank; i < len_cast; i += num_threads) {
-      wide.scalar = in_cast[i];
+      auto items = std::bit_cast<std::array<T, items_per_scalar>>(in_cast[i]);
       const idxT real_i = skip_cnt + i * items_per_scalar;
 #pragma unroll
       for (int j = 0; j < items_per_scalar; ++j) {
-        f(wide.array[j], real_i + j);
+        f(items[j], real_i + j);
       }
     }
 
