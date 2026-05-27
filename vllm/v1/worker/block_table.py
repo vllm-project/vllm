@@ -4,13 +4,12 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
 
@@ -83,13 +82,9 @@ class BlockTable:
         else:
             self._kernel_block_arange = None
 
-        try:
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group
-        except AssertionError:
-            # PCP might not be initialized in testing
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
+        # Only DCP shards the KV cache. With PCP, Q tokens are partitioned
+        # but K/V are all-gathered inside the attention kernel, so each rank
+        # inserts the FULL sequence into its cache.
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -145,8 +140,6 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
@@ -156,8 +149,8 @@ class BlockTable:
             self.block_table.gpu.stride(0),
             self.block_size,
             self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
+            TOTAL_CP_WORLD_SIZE=self.dcp_world_size,
+            TOTAL_CP_RANK=self.dcp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
@@ -244,10 +237,15 @@ class MultiGroupBlockTable:
             # Note(hc): each dcp rank only store
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
-            # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
+            # must be multiplied by dcp_world_size. Under PCP-real we do NOT
+            # shard the KV cache across PCP — Q is partitioned but K/V are
+            # all-gathered before the kernel — so use dcp_world_size only.
+            try:
+                dcp_world_size = get_dcp_group().world_size
+            except AssertionError:
+                dcp_world_size = 1
             max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
+                cdiv(max_model_len, block_size * dcp_world_size)
                 for block_size in block_sizes
             ]
 

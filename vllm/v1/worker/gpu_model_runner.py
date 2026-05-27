@@ -6734,8 +6734,13 @@ class GPUModelRunner(
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
             block_sizes.append(block_size)
+            # Only DCP shards the KV cache under PCP-real.
+            try:
+                _kv_cache_shards = get_dcp_group().world_size
+            except AssertionError:
+                _kv_cache_shards = 1
             max_num_blocks_per_req = cdiv(
-                max_model_len, block_size * get_total_cp_world_size()
+                max_model_len, block_size * _kv_cache_shards
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 max_num_blocks_per_req = (

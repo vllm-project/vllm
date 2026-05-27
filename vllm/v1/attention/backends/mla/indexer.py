@@ -27,7 +27,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.distributed import get_dcp_group
 
 logger = init_logger(__name__)
 
@@ -304,9 +304,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        # Only DCP shards the KV cache under PCP-real.
+        try:
+            _kv_cache_shards = get_dcp_group().world_size
+        except AssertionError:
+            _kv_cache_shards = 1
         max_num_blocks_per_req = cdiv(
             self.vllm_config.model_config.max_model_len,
-            self.kv_cache_spec.block_size * get_total_cp_world_size(),
+            self.kv_cache_spec.block_size * _kv_cache_shards,
         )
         self.expanded_block_table_buffer = torch.zeros(
             (
