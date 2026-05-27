@@ -708,7 +708,7 @@ class Scheduler(SchedulerInterface):
                 # creates a mismatch between the number
                 # of local and remote blocks.
                 limit_lookahead_tokens = (
-                    and load_kv_async
+                    load_kv_async
                     and self.use_eagle
                 )
                 effective_lookahead_tokens = (
