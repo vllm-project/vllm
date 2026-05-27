@@ -99,9 +99,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // kernel launch.
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
-      "Tensor! q, Tensor kv, Tensor! k_cache, "
+      "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "float eps, int cache_block_size) -> ()");
+      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
 
