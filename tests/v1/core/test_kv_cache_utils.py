@@ -1208,6 +1208,115 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_max_memory_usage_bytes_empty_groups_ignored():
+    """Empty groups from PP projection must not inflate memory estimates.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/43755.
+
+    When PP > 1, _project_kv_cache_groups_to_worker produces groups with
+    empty layer_names for groups whose layers are not on that worker.  These
+    empty groups still carry the original global KVCacheSpec, so without
+    filtering them out _max_memory_usage_bytes_from_groups overcounts memory.
+    """
+    model_config = ModelConfig(max_model_len=512)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    spec = new_kv_cache_spec()  # block_size=16, 2 kv_heads, head_size=64, f32
+
+    # A single populated group is the baseline.
+    populated = KVCacheGroupSpec(["layer0", "layer1", "layer2"], spec)
+    mem_baseline = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, [populated]
+    )
+    assert mem_baseline > 0
+
+    # An empty group next to the populated one must not add any memory.
+    # This is exactly what PP projection produces for a hybrid model when
+    # a worker owns layers from one group but not the other.
+    empty = KVCacheGroupSpec([], spec)
+    mem_with_empty = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, [populated, empty]
+    )
+    assert mem_with_empty == mem_baseline
+
+    # Multiple empty groups must also be harmless.
+    mem_with_many_empty = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, [populated, empty, empty, empty]
+    )
+    assert mem_with_many_empty == mem_baseline
+
+    # All-empty must return 0.
+    assert kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, [empty]) == 0
+    assert (
+        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, [empty, empty])
+        == 0
+    )
+
+
+def test_max_memory_usage_bytes_pp_projection_hybrid_model():
+    """End-to-end: PP projection of a hybrid model feeds correct memory calc.
+
+    Simulates a hybrid model (full attention + sliding window) split across
+    two pipeline stages where each worker only owns one group's layers.
+    After projection each worker gets one populated group and one empty group.
+    The memory estimate must reflect only the populated group.
+    """
+    model_config = ModelConfig(max_model_len=512)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    full_spec = new_kv_cache_spec()
+    sw_spec = new_kv_cache_spec()  # same page_size for uniform-page-size path
+
+    # Two global groups: full-attention layers on stage 0, same-spec on stage 1
+    global_groups = [
+        KVCacheGroupSpec(["full0", "full1", "full2"], full_spec),
+        KVCacheGroupSpec(["sw0", "sw1", "sw2"], sw_spec),
+    ]
+
+    # Worker 0 owns full-attention layers only.
+    worker0_spec = {f"full{i}": full_spec for i in range(3)}
+    proj_w0 = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, worker0_spec
+    )
+    # Projection should produce 2 groups: one populated, one empty.
+    assert len(proj_w0) == 2
+    assert proj_w0[0].layer_names == ["full0", "full1", "full2"]
+    assert proj_w0[1].layer_names == []
+
+    # Worker 1 owns sliding-window layers only.
+    worker1_spec = {f"sw{i}": sw_spec for i in range(3)}
+    proj_w1 = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, worker1_spec
+    )
+    assert len(proj_w1) == 2
+    assert proj_w1[0].layer_names == []
+    assert proj_w1[1].layer_names == ["sw0", "sw1", "sw2"]
+
+    # Memory for each worker must equal memory for its populated group alone.
+    mem_w0 = kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, proj_w0)
+    mem_w1 = kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, proj_w1)
+    mem_full_only = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config,
+        [KVCacheGroupSpec(["full0", "full1", "full2"], full_spec)],
+    )
+    mem_sw_only = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config,
+        [KVCacheGroupSpec(["sw0", "sw1", "sw2"], sw_spec)],
+    )
+
+    assert mem_w0 == mem_full_only
+    assert mem_w1 == mem_sw_only
+    assert mem_w0 > 0
+    assert mem_w1 > 0
+
+    # Global memory (no PP) must be >= either worker's share.
+    mem_global = kv_cache_utils._max_memory_usage_bytes_from_groups(
+        vllm_config, global_groups
+    )
+    assert mem_global >= mem_w0
+    assert mem_global >= mem_w1
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
