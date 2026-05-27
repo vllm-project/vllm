@@ -21,7 +21,10 @@ import asyncio
 import contextlib
 import os
 import signal
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import aiohttp
@@ -121,6 +124,33 @@ def _make_args(**overrides) -> argparse.Namespace:
     )
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def _generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
+    """Generate a self-signed certificate for HTTPS lifecycle tests."""
+    cert_file = cert_dir / "cert.pem"
+    key_file = cert_dir / "key.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(key_file),
+            "-out",
+            str(cert_file),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert_file, key_file
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +280,18 @@ class MockVLLMServer:
     Health state is toggled by the test via set_healthy().
     """
 
-    def __init__(self, port: int, drain_seconds: float = 0.0) -> None:
+    def __init__(
+        self,
+        port: int,
+        drain_seconds: float = 0.0,
+        ssl_keyfile: str | None = None,
+        ssl_certfile: str | None = None,
+    ) -> None:
         self.port = port
         self._healthy = False
         self._drain_seconds = drain_seconds
+        self._ssl_keyfile = ssl_keyfile
+        self._ssl_certfile = ssl_certfile
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task | None = None
 
@@ -288,6 +326,8 @@ class MockVLLMServer:
             port=self.port,
             log_level="warning",
             lifespan="off",
+            ssl_keyfile=self._ssl_keyfile,
+            ssl_certfile=self._ssl_certfile,
         )
         self._server = uvicorn.Server(config)
 
@@ -326,7 +366,11 @@ class MockVLLMServer:
 
 def launch_mock_vllm(child_args: argparse.Namespace, env_updates: dict[str, str]):
     logger.info("Launching mock vLLM on port %s", child_args.port)
-    mock_vllm = MockVLLMServer(port=child_args.port)
+    mock_vllm = MockVLLMServer(
+        port=child_args.port,
+        ssl_keyfile=child_args.ssl_keyfile,
+        ssl_certfile=child_args.ssl_certfile,
+    )
     asyncio.run(mock_vllm.start())
 
 
@@ -334,7 +378,12 @@ def launch_mock_vllm_with_drain(
     child_args: argparse.Namespace, env_updates: dict[str, str]
 ):
     logger.info("Launching mock vLLM with 15s drain on port %s", child_args.port)
-    mock_vllm = MockVLLMServer(port=child_args.port, drain_seconds=10.0)
+    mock_vllm = MockVLLMServer(
+        port=child_args.port,
+        drain_seconds=10.0,
+        ssl_keyfile=child_args.ssl_keyfile,
+        ssl_certfile=child_args.ssl_certfile,
+    )
     asyncio.run(mock_vllm.start())
 
 
@@ -343,15 +392,16 @@ def launch_mock_vllm_with_drain(
 # ---------------------------------------------------------------------------
 
 
-async def _poll_supervisor_health(expected_status: int) -> bool:
+async def _poll_supervisor_health(expected_status: int, use_ssl: bool = False) -> bool:
     """
     Poll GET /health on the supervisor until expected_status is seen.
     A connection error is treated as 503-equivalent when expected_status != 200.
     """
-    url = f"http://127.0.0.1:{_SUPERVISOR_PORT}/health"
+    scheme = "https" if use_ssl else "http"
+    url = f"{scheme}://127.0.0.1:{_SUPERVISOR_PORT}/health"
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, ssl=False if use_ssl else None) as resp:
                 if resp.status != expected_status:
                     print(f"expected: {expected_status=}, got: {resp.status=}")
                     return False
@@ -363,12 +413,15 @@ async def _poll_supervisor_health(expected_status: int) -> bool:
             return True
 
 
-async def _poll_until_api_server_running(port: int, retries: int = 10) -> None:
-    url = f"http://127.0.0.1:{port}/health"
+async def _poll_until_api_server_running(
+    port: int, retries: int = 10, use_ssl: bool = False
+) -> None:
+    scheme = "https" if use_ssl else "http"
+    url = f"{scheme}://127.0.0.1:{port}/health"
     async with aiohttp.ClientSession() as session:
         for _ in range(retries):
             try:
-                async with session.get(url) as resp:
+                async with session.get(url, ssl=False if use_ssl else None) as resp:
                     if resp.status != 200:
                         return
                 await asyncio.sleep(1.0)
@@ -377,22 +430,34 @@ async def _poll_until_api_server_running(port: int, retries: int = 10) -> None:
                 await asyncio.sleep(1.0)
 
 
-async def _set_healthy(port: int) -> None:
-    url = f"http://127.0.0.1:{port}/set_healthy"
-    async with aiohttp.ClientSession() as session, session.get(url) as resp:
+async def _set_healthy(port: int, use_ssl: bool = False) -> None:
+    scheme = "https" if use_ssl else "http"
+    url = f"{scheme}://127.0.0.1:{port}/set_healthy"
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(url, ssl=False if use_ssl else None) as resp,
+    ):
         assert resp.status == 200
 
 
-async def _set_unhealthy(port: int) -> None:
-    url = f"http://127.0.0.1:{port}/set_unhealthy"
-    async with aiohttp.ClientSession() as session, session.get(url) as resp:
+async def _set_unhealthy(port: int, use_ssl: bool = False) -> None:
+    scheme = "https" if use_ssl else "http"
+    url = f"{scheme}://127.0.0.1:{port}/set_unhealthy"
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(url, ssl=False if use_ssl else None) as resp,
+    ):
         assert resp.status == 200
 
 
-async def _kill_server(port: int) -> None:
-    url = f"http://127.0.0.1:{port}/kill"
+async def _kill_server(port: int, use_ssl: bool = False) -> None:
+    scheme = "https" if use_ssl else "http"
+    url = f"{scheme}://127.0.0.1:{port}/kill"
     try:
-        async with aiohttp.ClientSession() as session, session.get(url) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url, ssl=False if use_ssl else None) as resp,
+        ):
             assert resp.status != 200
     except Exception as e:
         assert isinstance(e, aiohttp.ClientConnectorError)
@@ -467,6 +532,34 @@ async def test_basic_lifecycle(monkeypatch):
         for p in supervisor._processes:
             assert not p.is_alive()
         print("everything was cleaned up!")
+
+
+@pytest.mark.asyncio
+async def test_basic_lifecycle_with_ssl(monkeypatch):
+    with tempfile.TemporaryDirectory() as cert_dir:
+        cert_file, key_file = _generate_self_signed_cert(Path(cert_dir))
+        args = _make_args(
+            ssl_keyfile=str(key_file),
+            ssl_certfile=str(cert_file),
+        )
+
+        vllm_server_ports = [_CHILD_PORT_BASE + i for i in range(_N_CHILDREN)]
+
+        async with _run_supervisor(args, monkeypatch) as (supervisor, _task):
+            assert await _poll_supervisor_health(503, use_ssl=True)
+            assert not supervisor.is_ready
+
+            for port in vllm_server_ports:
+                assert await _poll_supervisor_health(503, use_ssl=True)
+                assert not supervisor.is_ready
+                await _poll_until_api_server_running(port, use_ssl=True)
+
+            for port in vllm_server_ports:
+                await _set_healthy(port, use_ssl=True)
+            await asyncio.sleep(1.0)
+
+            assert await _poll_supervisor_health(200, use_ssl=True)
+            assert supervisor.is_ready
 
 
 @pytest.mark.asyncio
