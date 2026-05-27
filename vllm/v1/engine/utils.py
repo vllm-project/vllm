@@ -1185,8 +1185,15 @@ def wait_for_engine_startup(
                 )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
+            # Sometimes a process exits before the process manager updates
+            # its finished process list, so check exit codes directly too.
             finished = proc_manager.finished_procs() if proc_manager else {}
+            # Fallback in case finished_procs() has not updated yet.
+            if not finished and proc_manager is not None:
+                for proc in proc_manager.procs:
+                    if proc.exitcode is not None:
+                        finished[proc.name] = proc.exitcode
+
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
             raise RuntimeError(
