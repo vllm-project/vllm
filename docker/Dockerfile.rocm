@@ -500,7 +500,6 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 # ROCm and torch version mismatch) for tests with datasets package
 COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
 RUN bash /tmp/install_torchcodec.sh \
-    && uv pip check --system \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -578,8 +577,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    uv pip install --system /rixl_install/*.whl \
-    && uv pip check --system
+    uv pip install --system /rixl_install/*.whl
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE

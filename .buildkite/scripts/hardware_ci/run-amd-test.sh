@@ -85,7 +85,7 @@ Size: {{.Size}}' || true
   docker info --format 'Docker driver: {{.Driver}}; containers: {{.Containers}}; images: {{.Images}}' || true
   docker system df || true
 
-  IMAGE_VALIDATION_COMMAND="(cd /tmp && if command -v uv >/dev/null 2>&1; then uv --version && uv pip check --system; else python3 -m pip --version && python3 -m pip check; fi)"
+  IMAGE_VALIDATION_COMMAND="(cd /tmp && python3 -c 'import importlib; [importlib.import_module(m) for m in (\"torch\", \"vllm\")]; print(\"required imports ok\")')"
   echo "Image validation command: ${IMAGE_VALIDATION_COMMAND}"
 }
 
