@@ -648,6 +648,22 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer_name=layer_name,
             )
 
+        # Pack-quantized INT bit widths Marlin/WNA16 can't run (1, 2, 3, 5, 6, 7).
+        # Dispatch to the humming Linear kernel via CompressedTensorsHumming.
+        if (
+            self._is_wNa16_group_channel(weight_quant, input_quant)
+            and format == CompressionFormat.pack_quantized.value
+            and weight_quant.type == QuantizationType.INT.value
+            and 1 <= weight_quant.num_bits <= 8
+        ):
+            from .schemes import CompressedTensorsHumming
+
+            return CompressedTensorsHumming(
+                weight_quant=weight_quant,
+                format_=format,
+                layer_name=layer_name,
+            )
+
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
