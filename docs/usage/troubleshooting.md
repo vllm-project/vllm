@@ -230,6 +230,12 @@ if __name__ == '__main__':
     llm = vllm.LLM(...)
 ```
 
+Code passed through standard input, such as `python -`, also cannot be used
+with the `spawn` multiprocessing start method because Python cannot re-import
+the `<stdin>` module in worker processes. Put the code in a Python file with an
+`if __name__ == '__main__':` guard, or set `VLLM_ENABLE_V1_MULTIPROCESSING=0`
+for local offline debugging.
+
 ## `torch.compile` Error
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:

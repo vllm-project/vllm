@@ -165,6 +165,35 @@ def _maybe_force_spawn():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
+def _check_spawn_stdin_entrypoint(mp_method: str):
+    """Reject `python -` entrypoints when the spawn start method is used.
+
+    Without this guard, the worker process fails with a confusing
+    ``FileNotFoundError: '<stdin>'`` raised from
+    ``multiprocessing.spawn._fixup_main_from_path`` because ``<stdin>`` is
+    not a re-importable path. Other "main not importable" cases (e.g.
+    interactive REPL with no ``__file__``) are left to Python's own
+    handling.
+    """
+    if mp_method != "spawn":
+        return
+
+    import __main__
+
+    if getattr(__main__, "__file__", None) != "<stdin>":
+        return
+
+    raise RuntimeError(
+        "vLLM is using the 'spawn' multiprocessing start method, but the "
+        "current Python entrypoint was read from standard input (`python -`). "
+        "Spawned worker processes must be able to import the main module, and "
+        "standard input cannot be re-imported. Run the code from a real Python "
+        'file guarded by `if __name__ == "__main__":`, or for local offline '
+        "debugging set `VLLM_ENABLE_V1_MULTIPROCESSING=0` before initializing "
+        "vLLM."
+    )
+
+
 def get_mp_context():
     """Get a multiprocessing context with a particular method (spawn or fork).
     By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
@@ -178,6 +207,7 @@ def get_mp_context():
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    _check_spawn_stdin_entrypoint(mp_method)
     return multiprocessing.get_context(mp_method)
 
 
