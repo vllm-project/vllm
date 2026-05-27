@@ -3,6 +3,12 @@
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -234,6 +240,53 @@ def _minimax_moe_topk_sigmoid_quant_impl(
     )
 
 
+def _minimax_moe_topk_sigmoid_quant_baseline_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    _validate_inputs(hidden_states, router_logits, e_score_correction_bias, block_k)
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=router_logits,
+        scoring_func="sigmoid",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=top_k,
+        renormalize=True,
+    )
+    a1q, a1q_scale = per_token_group_quant_fp8(hidden_states, block_k)
+    return topk_weights, topk_ids, a1q, a1q_scale
+
+
+def _minimax_moe_topk_sigmoid_quant_dispatch_impl(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+    max_fused_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if hidden_states.shape[0] <= max_fused_tokens:
+        return _minimax_moe_topk_sigmoid_quant_triton_impl(
+            hidden_states,
+            router_logits,
+            e_score_correction_bias,
+            top_k,
+            block_k,
+        )
+
+    return _minimax_moe_topk_sigmoid_quant_baseline_impl(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    )
+
+
 def _minimax_moe_topk_sigmoid_quant_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -260,10 +313,33 @@ def _minimax_moe_topk_sigmoid_quant_fake(
     return topk_weights, topk_ids, a1q, a1q_scale
 
 
+def _minimax_moe_topk_sigmoid_quant_dispatch_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+    max_fused_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _minimax_moe_topk_sigmoid_quant_fake(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+    )
+
+
 direct_register_custom_op(
     "minimax_moe_topk_sigmoid_quant",
     _minimax_moe_topk_sigmoid_quant_impl,
     fake_impl=_minimax_moe_topk_sigmoid_quant_fake,
+)
+
+direct_register_custom_op(
+    "minimax_moe_topk_sigmoid_quant_dispatch",
+    _minimax_moe_topk_sigmoid_quant_dispatch_impl,
+    fake_impl=_minimax_moe_topk_sigmoid_quant_dispatch_fake,
 )
 
 
@@ -280,4 +356,22 @@ def minimax_moe_topk_sigmoid_quant(
         e_score_correction_bias,
         top_k,
         block_k,
+    )
+
+
+def minimax_moe_topk_sigmoid_quant_dispatch(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    top_k: int,
+    block_k: int,
+    max_fused_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.minimax_moe_topk_sigmoid_quant_dispatch(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        top_k,
+        block_k,
+        max_fused_tokens,
     )

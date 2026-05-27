@@ -44,7 +44,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.minimax_m2_kernels import (
-    minimax_moe_topk_sigmoid_quant,
+    minimax_moe_topk_sigmoid_quant_dispatch,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -151,8 +151,9 @@ class MiniMaxM2MoE(nn.Module):
             and config.num_experts_per_tok == 8
             and config.scoring_func == "sigmoid"
         )
-        # The current Triton fusion wins for small captured decode batches but
-        # loses for prefill/large-M. Keep larger M on the existing unfused path.
+        # Runtime dispatch threshold for the fused topk+quant custom op. Keep
+        # the token-count check inside the opaque op so Dynamo cannot
+        # specialize this forward pass to the trace-time batch size.
         self._minimax_fused_topk_quant_max_tokens = 128
 
     @staticmethod
@@ -208,15 +209,15 @@ class MiniMaxM2MoE(nn.Module):
         if (
             self._minimax_fused_topk_quant_static_ok
             and self.e_score_correction_bias is not None
-            and hidden_states.shape[0] <= self._minimax_fused_topk_quant_max_tokens
         ):
             topk_weights, topk_ids, a1q, a1q_scale = (
-                minimax_moe_topk_sigmoid_quant(
+                minimax_moe_topk_sigmoid_quant_dispatch(
                     hidden_states,
                     router_logits,
                     self.e_score_correction_bias.data,
                     self.experts.top_k,
                     block_k,
+                    self._minimax_fused_topk_quant_max_tokens,
                 )
             )
             return topk_weights, topk_ids, a1q, a1q_scale
