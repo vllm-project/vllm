@@ -494,7 +494,7 @@ def resolve_token_id_placeholder(
         return token, None
     token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
     if token_repr is None:
-        logger.warning(
+        logger.warning_once(
             "resolve_token_id_placeholder: token_id %d has no vocab entry; "
             "substituting empty string",
             token_id,
