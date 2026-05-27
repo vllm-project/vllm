@@ -8,7 +8,6 @@ The public wrappers provide the C4 fused and C128 split kernels.
 from __future__ import annotations
 
 from functools import cache
-from typing import Any
 
 import cutlass
 import cutlass.cute as cute
@@ -1087,7 +1086,7 @@ class SparseAttnNormRopeStoreKernel:
         )
 
 
-def compress_kv_sparse_attn_cutedsl(
+def _compress_kv_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     positions: torch.Tensor,
@@ -1119,7 +1118,7 @@ def compress_kv_sparse_attn_cutedsl(
     )
 
 
-def norm_rope_insert_sparse_attn_cutedsl(
+def _norm_rope_insert_sparse_attn_cutedsl(
     compressed_kv: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -1175,7 +1174,7 @@ def norm_rope_insert_sparse_attn_cutedsl(
     )
 
 
-def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
+def _fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     state_cache: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     positions: torch.Tensor,
@@ -1239,94 +1238,3 @@ def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
         kv_slot_mapping,
         kv_cache_block_size,
     )
-
-
-def compress_norm_rope_store_cutedsl(
-    state_cache: torch.Tensor,
-    num_actual: int,
-    token_to_req_indices: torch.Tensor,
-    positions: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    state_width: int,
-    cos_sin_cache: torch.Tensor,
-    kv_cache: torch.Tensor,
-    k_cache_metadata: Any,
-    pdl_kwargs: dict,
-    head_dim: int,
-    rope_head_dim: int,
-    compress_ratio: int,
-    overlap: bool,
-    use_fp4_cache: bool,
-    rms_norm_weight: torch.Tensor,
-    rms_norm_eps: float,
-    quant_block: int,
-    token_stride: int,
-    scale_dim: int,
-) -> None:
-    if compress_ratio == 4:
-        # For C4A, the single fused kernel is faster than the two-kernel version.
-        fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
-            state_cache,
-            token_to_req_indices,
-            positions,
-            slot_mapping,
-            block_table,
-            block_size,
-            rms_norm_weight,
-            rms_norm_eps,
-            cos_sin_cache,
-            kv_cache,
-            k_cache_metadata.slot_mapping,
-            kv_cache.shape[1],  # paged KV cache block size
-            kv_cache.stride(0),
-            head_size=head_dim,
-            state_width=state_width,
-            rope_head_dim=rope_head_dim,
-            fp8_max=448.0,
-            quant_block=quant_block,
-            token_stride=token_stride,
-            scale_dim=scale_dim,
-            compress_ratio=compress_ratio,
-            overlap=overlap,
-        )
-    else:
-        # For C128, the two-kernel version is faster than the single fused kernel.
-        compressed_kv = torch.empty(
-            (num_actual, head_dim),
-            dtype=torch.float32,
-            device=state_cache.device,
-        )
-        compress_kv_sparse_attn_cutedsl(
-            state_cache,
-            token_to_req_indices,
-            positions,
-            slot_mapping,
-            block_table,
-            block_size,
-            compressed_kv,
-            head_size=head_dim,
-            state_width=state_width,
-            compress_ratio=compress_ratio,
-            overlap=overlap,
-        )
-        norm_rope_insert_sparse_attn_cutedsl(
-            compressed_kv,
-            positions,
-            slot_mapping,
-            rms_norm_weight,
-            rms_norm_eps,
-            cos_sin_cache,
-            kv_cache,
-            k_cache_metadata.slot_mapping,
-            kv_cache.shape[1],  # paged KV cache block size
-            kv_cache.stride(0),
-            head_size=head_dim,
-            rope_head_dim=rope_head_dim,
-            fp8_max=448.0,
-            quant_block=quant_block,
-            token_stride=token_stride,
-            scale_dim=scale_dim,
-            compress_ratio=compress_ratio,
-        )
