@@ -3,6 +3,7 @@ mod types;
 mod validate;
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -12,7 +13,10 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
+use futures::future::try_join_all;
+use futures::stream::SelectAll;
 use futures::{Stream, StreamExt as _, pin_mut};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
@@ -33,6 +37,28 @@ use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
+
+type CompletionEventStream =
+    Pin<Box<dyn Stream<Item = Result<CompletionStreamEvent, ApiError>> + Send>>;
+
+#[derive(Debug, Clone, Copy)]
+struct ChoiceUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+#[derive(Debug)]
+struct CompletionChoiceOutput {
+    choice: CompletionChoice,
+    usage: ChoiceUsage,
+    kv_transfer_params: Option<Value>,
+}
+
+#[derive(Debug)]
+enum CompletionStreamEvent {
+    Chunk(CompletionStreamResponse),
+    Finished(ChoiceUsage),
+}
 
 /// Validate one completions request and proxy it into the shared `vllm-text`
 /// stack.
@@ -60,57 +86,108 @@ pub async fn completions(
     let include_prompt_logprobs = prepared.text_request.sampling_params.prompt_logprobs.is_some();
     let log_request = state.enable_log_requests;
 
-    let text_stream = match state
-        .chat
-        .text()
-        .generate(prepared.text_request)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return server_error!(
-                "failed to submit completion request: {}",
-                error.to_report_string()
-            )
-            .into_response();
-        }
-    };
-
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
+        let mut event_streams: SelectAll<CompletionEventStream> = SelectAll::new();
+        for choice_index in 0..prepared.n {
+            let text_request = match child_text_request(
+                &prepared.text_request,
+                &prepared.request_id,
+                choice_index,
+                prepared.n,
+            ) {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            let text_stream = match state
+                .chat
+                .text()
+                .generate(text_request)
+                .instrument(request_span.clone())
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    return server_error!(
+                        "failed to submit completion request: {}",
+                        error.to_report_string()
+                    )
+                    .into_response();
+                }
+            };
+            event_streams.push(Box::pin(completion_choice_event_stream(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                choice_index,
+                log_request,
+                prepared.echo.clone(),
+                logprobs,
+                prepared.return_token_ids,
+                prepared.return_tokens_as_token_ids,
+            )));
+        }
+
+        let chunk_stream = completion_parallel_chunk_stream(
+            event_streams,
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
             prepared.include_usage,
-            prepared.echo,
-            logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
         Sse::new(sse_stream).into_response()
     } else {
-        let response = match collect_completion(
-            text_stream,
+        let mut choice_futures = Vec::with_capacity(prepared.n as usize);
+        for choice_index in 0..prepared.n {
+            let text_request = match child_text_request(
+                &prepared.text_request,
+                &prepared.request_id,
+                choice_index,
+                prepared.n,
+            ) {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            let text_stream = match state
+                .chat
+                .text()
+                .generate(text_request)
+                .instrument(request_span.clone())
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    return server_error!(
+                        "failed to submit completion request: {}",
+                        error.to_report_string()
+                    )
+                    .into_response();
+                }
+            };
+            choice_futures.push(collect_completion_choice(
+                text_stream,
+                choice_index,
+                prepared.echo.clone(),
+                logprobs,
+                include_prompt_logprobs,
+                prepared.return_token_ids,
+                prepared.return_tokens_as_token_ids,
+            ));
+        }
+
+        let choices = match try_join_all(choice_futures).instrument(request_span.clone()).await {
+            Ok(choices) => choices,
+            Err(error) => return error.into_response(),
+        };
+
+        let response = completion_response_from_choices(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.echo,
-            logprobs,
-            include_prompt_logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
-        )
-        .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+            choices,
+        );
 
         if log_request {
             let usage = response.usage.as_ref();
@@ -128,17 +205,39 @@ pub async fn completions(
     }
 }
 
-async fn collect_completion(
+fn child_text_request(
+    base: &vllm_text::TextRequest,
+    parent_request_id: &str,
+    choice_index: u32,
+    choice_count: u32,
+) -> Result<vllm_text::TextRequest, ApiError> {
+    let mut request = base.clone();
+    if choice_count > 1 {
+        request.request_id = format!("{choice_index}_{parent_request_id}");
+    } else {
+        request.request_id = parent_request_id.to_string();
+    }
+    if let Some(seed) = request.sampling_params.seed {
+        request.sampling_params.seed =
+            Some(seed.checked_add(i64::from(choice_index)).ok_or_else(|| {
+                ApiError::invalid_request(
+                    "`seed + choice index` must fit within a signed 64-bit integer.".to_string(),
+                    Some("seed"),
+                )
+            })?);
+    }
+    Ok(request)
+}
+
+async fn collect_completion_choice(
     stream: impl TextOutputStream,
-    request_id: String,
-    response_model: String,
-    created: u64,
+    choice_index: u32,
     echo: Option<String>,
     requested_logprobs: Option<u32>,
     include_prompt_logprobs: bool,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
-) -> Result<CompletionResponse, ApiError> {
+) -> Result<CompletionChoiceOutput, ApiError> {
     let collected = stream
         .collect_output()
         .await
@@ -176,13 +275,9 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
 
-    Ok(CompletionResponse {
-        id: request_id,
-        object: "text_completion".to_string(),
-        created,
-        model: response_model,
-        choices: vec![CompletionChoice {
-            index: 0,
+    Ok(CompletionChoiceOutput {
+        choice: CompletionChoice {
+            index: choice_index,
             text,
             logprobs,
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
@@ -190,14 +285,35 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
-        }],
-        usage: Some(Usage::from_counts(
-            collected.prompt_token_ids.len() as u32,
-            collected.token_ids.len() as u32,
-        )),
-        system_fingerprint: None,
+        },
+        usage: ChoiceUsage {
+            prompt_tokens: collected.prompt_token_ids.len() as u32,
+            completion_tokens: collected.token_ids.len() as u32,
+        },
         kv_transfer_params: collected.kv_transfer_params,
     })
+}
+
+fn completion_response_from_choices(
+    request_id: String,
+    response_model: String,
+    created: u64,
+    outputs: Vec<CompletionChoiceOutput>,
+) -> CompletionResponse {
+    let prompt_tokens = outputs.first().map_or(0, |output| output.usage.prompt_tokens);
+    let completion_tokens = outputs.iter().map(|output| output.usage.completion_tokens).sum();
+    let kv_transfer_params = outputs.iter().find_map(|output| output.kv_transfer_params.clone());
+
+    CompletionResponse {
+        id: request_id,
+        object: "text_completion".to_string(),
+        created,
+        model: response_model,
+        choices: outputs.into_iter().map(|output| output.choice).collect(),
+        usage: Some(Usage::from_counts(prompt_tokens, completion_tokens)),
+        system_fingerprint: None,
+        kv_transfer_params,
+    }
 }
 
 /// Convert one internal decoded-text stream into OpenAI completions chunks.
@@ -207,6 +323,7 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    choice_index: u32,
     log_request: bool,
     include_usage: bool,
     echo: Option<String>,
@@ -214,6 +331,94 @@ async fn completion_chunk_stream(
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
+) -> Result<(), ApiError> {
+    let events = completion_choice_event_stream(
+        stream,
+        request_id.clone(),
+        response_model.clone(),
+        created,
+        choice_index,
+        log_request,
+        echo,
+        requested_logprobs,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    );
+    pin_mut!(events);
+
+    while let Some(next) = events.next().await {
+        match next? {
+            CompletionStreamEvent::Chunk(chunk) => {
+                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+            }
+            CompletionStreamEvent::Finished(usage) => {
+                if include_usage {
+                    y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        Usage::from_counts(usage.prompt_tokens, usage.completion_tokens),
+                    )))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[try_stream]
+async fn completion_parallel_chunk_stream(
+    stream: impl Stream<Item = Result<CompletionStreamEvent, ApiError>>,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    include_usage: bool,
+    mut y: TryYielder<CompletionSseChunk, ApiError>,
+) -> Result<(), ApiError> {
+    pin_mut!(stream);
+    let mut prompt_tokens = None;
+    let mut completion_tokens = 0_u32;
+
+    while let Some(next) = stream.next().await {
+        match next? {
+            CompletionStreamEvent::Chunk(chunk) => {
+                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+            }
+            CompletionStreamEvent::Finished(usage) => {
+                prompt_tokens.get_or_insert(usage.prompt_tokens);
+                completion_tokens = completion_tokens.saturating_add(usage.completion_tokens);
+            }
+        }
+    }
+
+    if include_usage {
+        y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
+            &request_id,
+            &response_model,
+            created,
+            Usage::from_counts(prompt_tokens.unwrap_or(0), completion_tokens),
+        )))
+        .await;
+    }
+
+    Ok(())
+}
+
+#[try_stream]
+async fn completion_choice_event_stream(
+    stream: impl TextOutputStream,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    choice_index: u32,
+    log_request: bool,
+    echo: Option<String>,
+    requested_logprobs: Option<u32>,
+    return_token_ids: bool,
+    return_tokens_as_token_ids: bool,
+    mut y: TryYielder<CompletionStreamEvent, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
@@ -227,24 +432,36 @@ async fn completion_chunk_stream(
                 debug!("completion stream started");
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
-                    let mut chunk =
-                        delta_chunk(&request_id, &response_model, created, prompt.clone(), None);
+                    let mut chunk = delta_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        choice_index,
+                        prompt.clone(),
+                        None,
+                    );
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
                             choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                         }
                         first_chunk = false;
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                    y.yield_ok(CompletionStreamEvent::Chunk(chunk)).await;
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
-                    let mut chunk =
-                        delta_chunk(&request_id, &response_model, created, String::new(), None);
+                    let mut chunk = delta_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        choice_index,
+                        String::new(),
+                        None,
+                    );
                     if let Some(choice) = chunk.choices.first_mut() {
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
-                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                    y.yield_ok(CompletionStreamEvent::Chunk(chunk)).await;
                 }
             }
             Ok(DecodedTextEvent::TextDelta {
@@ -268,44 +485,45 @@ async fn completion_chunk_stream(
                 } else {
                     None
                 };
-                let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
+                let mut chunk = delta_chunk(
+                    &request_id,
+                    &response_model,
+                    created,
+                    choice_index,
+                    delta,
+                    logprobs,
+                );
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
-                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                y.yield_ok(CompletionStreamEvent::Chunk(chunk)).await;
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
+                    let finish_reason = finished.finish_reason.clone();
                     if log_request {
                         info!(
                             stream = true,
                             model = %response_model,
                             prompt_tokens = finished.prompt_token_count,
                             output_tokens = finished.output_token_count,
-                            finish_reason = finished.finish_reason.as_str(),
+                            finish_reason = finish_reason.as_str(),
                             "completion finished"
                         );
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(final_chunk(
+                    y.yield_ok(CompletionStreamEvent::Chunk(final_chunk(
                         &request_id,
                         &response_model,
                         created,
-                        finished.finish_reason,
+                        choice_index,
+                        finish_reason,
                     )?))
                     .await;
-
-                    if include_usage {
-                        y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
-                            &request_id,
-                            &response_model,
-                            created,
-                            Usage::from_counts(
-                                finished.prompt_token_count as u32,
-                                finished.output_token_count as u32,
-                            ),
-                        )))
-                        .await;
-                    }
+                    y.yield_ok(CompletionStreamEvent::Finished(ChoiceUsage {
+                        prompt_tokens: finished.prompt_token_count as u32,
+                        completion_tokens: finished.output_token_count as u32,
+                    }))
+                    .await;
                 }
             }
             Err(error) => {
@@ -324,11 +542,13 @@ fn delta_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     text: String,
     logprobs: Option<LogProbs>,
 ) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(CompletionStreamChoice {
+        index: choice_index,
         text,
         logprobs,
         ..Default::default()
@@ -340,12 +560,14 @@ fn final_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     finish_reason: FinishReason,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?;
 
     let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(CompletionStreamChoice {
+        index: choice_index,
         finish_reason: Some(finish_reason.to_string()),
         ..Default::default()
     });
@@ -436,7 +658,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk = final_chunk("cmpl-1", "model", 1, FinishReason::stop_eos())
+        let chunk = final_chunk("cmpl-1", "model", 1, 0, FinishReason::stop_eos())
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
@@ -444,21 +666,21 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk =
-            final_chunk("cmpl-1", "model", 1, FinishReason::Length).expect("finish reason valid");
+        let chunk = final_chunk("cmpl-1", "model", 1, 0, FinishReason::Length)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
         let chunk =
-            final_chunk("cmpl-1", "model", 1, FinishReason::Abort).expect("finish reason valid");
+            final_chunk("cmpl-1", "model", 1, 0, FinishReason::Abort).expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Error).is_err());
+        assert!(final_chunk("cmpl-1", "model", 1, 0, FinishReason::Error).is_err());
     }
 
     #[tokio::test]
@@ -526,6 +748,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            0,
             false,
             false,
             None,
