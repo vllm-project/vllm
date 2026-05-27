@@ -713,6 +713,9 @@ class Scheduler(SchedulerInterface):
                     and kv_transfer_config.kv_role == "kv_producer"
                     and self.use_eagle
                     and request.num_computed_tokens == 0
+                limit_lookahead_tokens = (
+                    and load_kv_async
+                    and self.use_eagle
                 )
                 effective_lookahead_tokens = (
                     0 if limit_lookahead_tokens else self.num_lookahead_tokens
