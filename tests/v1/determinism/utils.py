@@ -14,16 +14,24 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
-skip_unsupported = pytest.mark.skipif(
+skip_if_not_cuda = pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
     # Supports testing on Ampere and Ada Lovelace devices.
     # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
     reason="Requires CUDA and >= Ampere (SM80)",
 )
 
-skip_unsupported_xpu = pytest.mark.skipif(
+skip_if_not_xpu = pytest.mark.skipif(
     not (current_platform.is_xpu() and HAS_TRITON),
     reason="Requires Intel XPU device with Triton support",
+)
+
+skip_unsupported_device = pytest.mark.skipif(
+    not (
+        (current_platform.is_cuda() and current_platform.has_device_capability(80))
+        or (current_platform.is_xpu() and HAS_TRITON)
+    ),
+    reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
 )
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
@@ -47,6 +55,10 @@ if os.getenv("VLLM_TEST_MODEL"):
         BACKENDS = ["TRITON_MLA"]
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
+
+XPU_BACKENDS: list[str] = [
+    "TRITON_ATTN",
+]
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
