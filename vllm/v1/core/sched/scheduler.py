@@ -707,12 +707,6 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                kv_transfer_config = self.vllm_config.kv_transfer_config
-                limit_lookahead_tokens = (
-                    kv_transfer_config is not None
-                    and kv_transfer_config.kv_role == "kv_producer"
-                    and self.use_eagle
-                    and request.num_computed_tokens == 0
                 limit_lookahead_tokens = (
                     and load_kv_async
                     and self.use_eagle
