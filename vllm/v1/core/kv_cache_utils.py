@@ -1749,6 +1749,10 @@ def _max_memory_usage_bytes_from_groups(
     model has 8 full attention layers and 9 sliding window layers, they will
     be padded to 9 full + 9 sliding window for uniform group sizes.
     """
+    # Filter out groups with no layers assigned to this worker (PP sharding).
+    # Empty groups still carry the original global spec and would incorrectly
+    # inflate the memory estimate.
+    kv_cache_groups = [g for g in kv_cache_groups if g.layer_names]
     if not kv_cache_groups:
         return 0
 
