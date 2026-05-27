@@ -663,8 +663,7 @@ def gptq_gemm_rdna3(
     )
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                              "gptq_gemm_rdna3"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3"):
 
     @register_fake("_rocm_C::gptq_gemm_rdna3")
     def _gptq_gemm_rdna3_fake(
@@ -680,8 +679,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
         )
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C,
-                                              "gptq_gemm_rdna3_wmma"):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3_wmma"):
 
     @register_fake("_rocm_C::gptq_gemm_rdna3_wmma")
     def _gptq_gemm_rdna3_wmma_fake(

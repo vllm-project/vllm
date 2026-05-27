@@ -44,12 +44,13 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         # The HIP op is registered by the C++ extension; if a user is running
         # against a vLLM build that doesn't include it (e.g. partial rebuild),
         # fall through gracefully to the next kernel in the registry.
-        if not (hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3")):
+        if not (
+            hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3")
+        ):
             return (
                 False,
-                "torch.ops._rocm_C.gptq_gemm_rdna3 missing — "
-                "rebuild C++ extension",
+                "torch.ops._rocm_C.gptq_gemm_rdna3 missing — rebuild C++ extension",
             )
 
         if c.act_type not in (torch.float16, torch.bfloat16):
