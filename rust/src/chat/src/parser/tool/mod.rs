@@ -6,7 +6,7 @@ pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, KimiK2ToolParser,
     Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError,
+    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
