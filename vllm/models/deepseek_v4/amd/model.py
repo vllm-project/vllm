@@ -55,19 +55,13 @@ from vllm.models.deepseek_v4.attention import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-_ROCM_DSV4_CSA_AUX_STREAM_COUNT = 5
-_ROCM_DSV4_CSA_AUX_STREAM_PRIORITY = -1
-
 
 def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
     if not current_platform.is_rocm():
         return None
-    # ROCm DeepSeek-V4 decode overlap uses five streams: three top-level
-    # preparation branches and two C4-indexer sub-branches.
-    return [
-        torch.cuda.Stream(priority=_ROCM_DSV4_CSA_AUX_STREAM_PRIORITY)
-        for _ in range(_ROCM_DSV4_CSA_AUX_STREAM_COUNT)
-    ]
+    # Reserve the five-stream CSA decode topology. The measured ROCm default
+    # overlaps the compressor branch on aux[1] and keeps indexer fan-out off.
+    return [torch.cuda.Stream(priority=-1) for _ in range(5)]
 
 
 class DeepseekV4MLP(nn.Module):
@@ -353,16 +347,6 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
-            indexer_aux_stream = (
-                aux_stream_list[3]
-                if aux_stream_list is not None and len(aux_stream_list) >= 5
-                else None
-            )
-            indexer_aux_streams = (
-                aux_stream_list[3:5]
-                if aux_stream_list is not None and len(aux_stream_list) >= 5
-                else None
-            )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -373,8 +357,6 @@ class DeepseekV4Attention(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
-                aux_stream=indexer_aux_stream,
-                aux_streams=indexer_aux_streams,
             )
 
         mla_modules = DeepseekV4MLAModules(
