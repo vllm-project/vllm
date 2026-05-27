@@ -1115,6 +1115,12 @@ def _fused_pcp_qkv_select_kernel(
     kv_select_len = q_select_len
     k_d_mask = dim_off[None, :] < k_head_dim
     v_d_mask = dim_off[None, :] < v_head_dim
+    # Whole-block guard: when the dim_block starts past v_head_dim, no V
+    # lane is valid for this block. Skip the V load/stores entirely —
+    # masked-out lanes in tl.store still compute the destination pointer
+    # (which is well past the per-row stride for the smaller V buffer),
+    # and Blackwell traps the OOB address even though the store itself
+    # is predicated off.
     block_src_kv_start_loc = kv_start_loc + seq_block_id * kv_select_len
     block_dst_kv_head_start_loc = (
         kv_start_loc // 2 // pcp_world_size * (pcp_rank + 1)
@@ -1131,12 +1137,9 @@ def _fused_pcp_qkv_select_kernel(
         kv_dst_idx_head = block_dst_kv_head_start_loc + kv_offset[:, None]
         kv_dst_idx_tail = block_dst_kv_tail_start_loc + kv_offset[:, None]
         k_val = tl.load(
-            k_ptr + kv_src_idx * k_stride_B + head_id * k_stride_H + dim_off[None, :],
+            k_ptr + kv_src_idx * k_stride_B + head_id * k_stride_H
+            + dim_off[None, :],
             mask=k_d_mask & kv_block_mask,
-        )
-        v_val = tl.load(
-            v_ptr + kv_src_idx * v_stride_B + head_id * v_stride_H + dim_off[None, :],
-            mask=v_d_mask & kv_block_mask,
         )
         if seq_block_id < pcp_rank + 1:
             tl.store(
@@ -1147,14 +1150,6 @@ def _fused_pcp_qkv_select_kernel(
                 k_val,
                 mask=k_d_mask & kv_block_mask,
             )
-            tl.store(
-                out_v_head_ptr
-                + kv_dst_idx_head * n_head * v_head_dim
-                + head_id * v_head_dim
-                + dim_off[None, :],
-                v_val,
-                mask=v_d_mask & kv_block_mask,
-            )
         if seq_block_id < 2 * pcp_world_size - pcp_rank:
             tl.store(
                 out_k_tail_ptr
@@ -1164,14 +1159,30 @@ def _fused_pcp_qkv_select_kernel(
                 k_val,
                 mask=k_d_mask & kv_block_mask,
             )
-            tl.store(
-                out_v_tail_ptr
-                + kv_dst_idx_tail * n_head * v_head_dim
-                + head_id * v_head_dim
+        if dim_block_id * DIM_BLOCK_SIZE < v_head_dim:
+            v_val = tl.load(
+                v_ptr + kv_src_idx * v_stride_B + head_id * v_stride_H
                 + dim_off[None, :],
-                v_val,
                 mask=v_d_mask & kv_block_mask,
             )
+            if seq_block_id < pcp_rank + 1:
+                tl.store(
+                    out_v_head_ptr
+                    + kv_dst_idx_head * n_head * v_head_dim
+                    + head_id * v_head_dim
+                    + dim_off[None, :],
+                    v_val,
+                    mask=v_d_mask & kv_block_mask,
+                )
+            if seq_block_id < 2 * pcp_world_size - pcp_rank:
+                tl.store(
+                    out_v_tail_ptr
+                    + kv_dst_idx_tail * n_head * v_head_dim
+                    + head_id * v_head_dim
+                    + dim_off[None, :],
+                    v_val,
+                    mask=v_d_mask & kv_block_mask,
+                )
 
 
 def fused_pcp_qkv_select(
