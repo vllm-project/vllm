@@ -59,7 +59,6 @@ from vllm.models.deepseek_v4.attention import (
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
-from vllm.models.deepseek_v4.nvidia.ops import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -378,6 +377,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         fast_math: bool,
     ) -> None:
         import vllm.third_party.deep_gemm as deep_gemm
+        from vllm.models.deepseek_v4.nvidia.ops import prepare_megamoe_inputs
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
