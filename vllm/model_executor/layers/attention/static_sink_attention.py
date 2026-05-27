@@ -33,13 +33,10 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    DSAAttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
-    SinkDSAAttentionSpec,
     SinkFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
+    SlidingWindowMLASpec,
 )
 
 logger = init_logger(__name__)
@@ -316,75 +313,36 @@ class StaticSinkMLAAttention(MLAAttention):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        use_composite_kv_cache = self.use_sparse and self.indexer is not None
         # Use max_sliding_window for KV management grouping
         max_sliding_window = getattr(
             vllm_config.model_config.hf_config,
             "max_sliding_window",
             self.sliding_window,
         )
-        if use_composite_kv_cache:
-            if self.sink_len is not None and self.sink_len > 0:
-                return SinkDSAAttentionSpec(
-                    block_size=vllm_config.cache_config.block_size,
-                    num_kv_heads=1,
-                    head_size=self.head_size,
-                    dtype=kv_cache_dtype,
-                    page_size_padded=page_size_padded,
-                    cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                    sink_len=self.sink_len,
-                    indexer_head_size=getattr(
-                        self.indexer,
-                        "composite_kv_cache_head_size",
-                        getattr(self.indexer, "head_dim", None),
-                    ),
-                )
-            else:
-                return DSAAttentionSpec(
-                    block_size=vllm_config.cache_config.block_size,
-                    num_kv_heads=1,
-                    head_size=self.head_size,
-                    dtype=kv_cache_dtype,
-                    page_size_padded=page_size_padded,
-                    cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                    indexer_head_size=getattr(
-                        self.indexer,
-                        "composite_kv_cache_head_size",
-                        getattr(self.indexer, "head_dim", None),
-                    ),
-                )
-
-        if (
-            self.sink_len is not None
-            and self.sink_len > 0
-            and self.sliding_window is not None
-        ):
-            return SinkMLASlidingWindowSpec(
+        if self.sliding_window is not None:
+            assert (
+                not self.use_sparse and self.indexer is None
+            )  # TODO(runze): debug only, remove later
+            return SlidingWindowMLASpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=self.head_size,
                 dtype=kv_cache_dtype,
-                page_size_padded=page_size_padded,
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                sink_len=self.sink_len,
                 sliding_window=max_sliding_window,  # type: ignore[arg-type]
+                compress_ratio=1,
+                alignment=576,
             )
-        if self.sink_len is not None and self.sink_len > 0:
-            return SinkMLAAttentionSpec(
-                block_size=vllm_config.cache_config.block_size,
-                num_kv_heads=1,
-                head_size=self.head_size,
-                dtype=kv_cache_dtype,
-                page_size_padded=page_size_padded,
-                cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                sink_len=self.sink_len,
-            )
+        # TODO(runze): debug only, remove later
+        assert self.use_sparse and self.indexer is not None, (
+            "If sliding window is None, should use DSA"
+        )
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
-            page_size_padded=page_size_padded,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            compress_ratio=1,
+            alignment=576,
         )

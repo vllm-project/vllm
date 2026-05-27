@@ -171,7 +171,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 q_c,
                 positions,
                 self.indexer_rope_emb,
-                attn_layer_name=self.mla_attn.layer_name,
             )
 
         if llama_4_scaling is not None:
@@ -320,7 +319,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
                 q_c,
                 positions,
                 self.indexer_rope_emb,
-                attn_layer_name=self.mla_attn.layer_name,
             )
 
         if llama_4_scaling is not None:

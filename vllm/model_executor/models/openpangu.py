@@ -56,7 +56,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -72,6 +71,9 @@ from vllm.model_executor.layers.mla import (
     StaticSinkMultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -80,6 +82,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+)
+from vllm.model_executor.models.deepseek_v2 import (
+    Indexer as _DeepseekIndexer,
+)
+from vllm.model_executor.models.deepseek_v2 import (
+    _try_load_fp8_indexer_wk,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -100,10 +108,13 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
-from vllm.v1.kv_cache_interface import MomeSpec
+from vllm.v1.kv_cache_interface import SlidingWindowMomeSpec
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -161,6 +172,7 @@ class MomeAttention(MambaBase, CustomOp):
         num_spec_tokens: int,
         q_lora_rank: int,
         kv_lora_rank: int,
+        num_heads: int,
         num_local_heads: int,
         v_head_dim: int,
         vllm_config: VllmConfig,
@@ -172,10 +184,13 @@ class MomeAttention(MambaBase, CustomOp):
         self.dtype = vllm_config.model_config.dtype
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
         self.num_local_heads = num_local_heads
         self.v_head_dim = v_head_dim
         self.o_dim = num_local_heads * v_head_dim
+        self.cache_head_size = q_lora_rank + kv_lora_rank + self.o_dim
         self.prefix = prefix
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         # 3 Conv1d weights for q, kv, o
         # These names match the original weights in the checkpoint
@@ -232,21 +247,21 @@ class MomeAttention(MambaBase, CustomOp):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return (self.qa_conv.weight.dtype,) * 3
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MomeSpec:
-        num_total_tokens = self.kernel_size - 1 + self.num_spec_tokens
-        state_shapes = self.get_state_shape()
-        if is_conv_state_dim_first():
-            shapes = tuple((*s, num_total_tokens) for s in state_shapes)
-        else:
-            shapes = tuple((num_total_tokens, *s) for s in state_shapes)
-        return MomeSpec(
-            block_size=vllm_config.cache_config.block_size,
-            shapes=shapes,
-            dtypes=self.get_state_dtype(),
-            mamba_type=self.mamba_type,
-            kernel_size=self.kernel_size,
-            num_spec_tokens=self.num_spec_tokens,
-            page_size_padded=vllm_config.cache_config.mamba_page_size_padded,
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMomeSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        # FIXME(runze): block_size and sliding_window are hardcoded to be 8 now;
+        # make it general later
+        return SlidingWindowMomeSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=self.cache_head_size,
+            dtype=kv_cache_dtype,
+            sliding_window=8,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            alignment=576,
+            component_dims=(self.q_lora_rank, self.kv_lora_rank, self.o_dim),
         )
 
     def get_attn_backend(self) -> type:
@@ -343,8 +358,7 @@ def mome_attention_fused_op(
     )
     conv_weight = conv_weight.to(hidden_states.dtype)
     conv_state = self_kv_cache[state_indice]
-    if not is_conv_state_dim_first():
-        conv_state = conv_state.transpose(-1, -2)
+    conv_state = conv_state.transpose(-1, -2)
 
     output_chunks = []
 
@@ -424,66 +438,11 @@ direct_register_custom_op(
 )
 
 
-class PanguIndexer(nn.Module):
-    """
-    Pangu Indexer for DSA Attention.
-    """
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: PretrainedConfig,
-        hidden_size: int,
-        q_lora_rank: int,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        topk_indices_buffer: torch.Tensor | None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.config = config
-        self.topk_tokens = config.index_topk
-        self.n_head = config.index_n_heads  # 64
-        self.head_dim = config.index_head_dim  # 128
-        self.rope_dim = config.qk_rope_head_dim  # 64
-        self.q_lora_rank = q_lora_rank  # 1536
-        # no tensor parallel, just replicated
-        self.wq_b = ReplicatedLinear(
-            self.q_lora_rank,
-            self.head_dim * self.n_head,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wq_b",
-        )
-        self.wk = ReplicatedLinear(
-            hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wk",
-        )
-        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
-        self.weights_proj = ReplicatedLinear(
-            hidden_size,
-            self.n_head,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.weights_proj",
-        )
-        self.topk_indices_buffer = topk_indices_buffer
-        self.softmax_scale = self.head_dim**-0.5
-        self.use_composite_kv_cache = True
-        self.composite_kv_cache_head_size = self.head_dim
-
-        self.prefix = prefix
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
-
-        self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        self.sink_len = getattr(config, "param_sink_number", 0)
-        self.num_sink_blocks = self.sink_len // self.vllm_config.cache_config.block_size
-        self.kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
-        # self.topk_tokens += self.sink_len
+class PanguIndexer(_DeepseekIndexer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.k_norm = RMSNorm(self.head_dim, self.config.rms_norm_eps)
+        self.deepgemm_n_head = 32 if self.n_head <= 32 else 64
 
     def forward(
         self,
@@ -491,278 +450,73 @@ class PanguIndexer(nn.Module):
         qr: torch.Tensor,
         positions,
         rotary_emb,
-        # kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        # attn_metadata: Optional[Any] = None,
-        attn_layer_name: str = "",
     ) -> torch.Tensor:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
-        q_pe, q_nope = torch.split(
-            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
 
-        k, _ = self.wk(hidden_states)
-        k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-        )
+        if current_platform.is_rocm():
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
 
-        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            k = self.k_norm(k)
 
-        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            rotary_emb(
+                positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
+            )
+        else:
+            q_pe, q_nope = torch.split(
+                q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
 
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            k = self.k_norm(k)
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
 
-        weights, _ = self.weights_proj(hidden_states)
-        weights = weights * self.softmax_scale * self.n_head**-0.5
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
-        # if attn_metadata is None:
-        #     return self.topk_indices_buffer
+            q = torch.cat([q_pe, q_nope], dim=-1)
+            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
-        # if kv_cache is None:
-        #     forward_context = get_forward_context()
-        #     kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-        # if isinstance(kv_cache, (list, tuple)):
-        # assert len(kv_cache) >= 2, (
-        #     "PanguIndexer expects indexer K cache at kv_cache[1], "
-        #     f"but got {len(kv_cache)} cache tensors."
-        # )
-        # indexer_cache = kv_cache[1]
-        # else:
-        #     indexer_cache = kv_cache
-
-        # if self.topk_indices_buffer is not None and indexer_cache is not None:
-        # indexer_cache = list(kv_cache)
-        return torch.ops.vllm.pangu_sparse_attn_indexer(
-            hidden_states,
-            attn_layer_name,
-            # indexer_cache,
+        q = q.view(-1, self.head_dim)
+        q_fp8, q_scale = per_token_group_quant_fp8(
             q,
-            k,
-            weights,
-            self.topk_tokens,
-            self.head_dim,
-            self.vllm_config.cache_config.block_size,
-            self.sink_len,
-            self.num_sink_blocks,
-            self.topk_indices_buffer,
+            self.quant_block_size,
+            column_major_scales=False,
+            use_ue8m0=self.scale_fmt is not None,
         )
+        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
+        q_scale = q_scale.view(-1, self.n_head, 1)
 
-    def _apply_indexer(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        weights: torch.Tensor,
-        attn_metadata: Any,
-    ):
-        # Native PyTorch implementation for GPU portability (decoupled from NPU ops)
-        block_table = getattr(attn_metadata, "block_table", None)
-        if block_table is None and hasattr(attn_metadata, "decode"):
-            block_table = getattr(attn_metadata.decode, "block_table", None)
+        weights = (
+            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+        )
+        weights = weights.squeeze(-1)
 
-        if block_table is None:
-            return torch.zeros(
-                (query.shape[0], self.topk_tokens),
-                dtype=torch.int32,
-                device=query.device,
+        if self.deepgemm_n_head != self.n_head:
+            pad_heads = self.deepgemm_n_head - self.n_head
+            q_fp8 = torch.cat(
+                [
+                    q_fp8,
+                    q_fp8.new_zeros(q_fp8.shape[0], pad_heads, q_fp8.shape[2]),
+                ],
+                dim=1,
+            )
+            weights = torch.cat(
+                [
+                    weights,
+                    weights.new_zeros(weights.shape[0], pad_heads),
+                ],
+                dim=1,
             )
 
-        block_table = block_table[:, self.num_sink_blocks :]
-        bs = query.shape[0]
-        topk_indices = torch.full(
-            (bs, self.topk_tokens), -1, dtype=torch.int32, device=query.device
-        )
-        num_sink_tokens = min(self.sink_len, self.topk_tokens)
-        if num_sink_tokens > 0:
-            sink_indices = torch.arange(
-                num_sink_tokens, dtype=torch.int32, device=query.device
-            )
-            topk_indices[:, :num_sink_tokens] = sink_indices
-
-        # Map each query token to its request row in the block table. Sparse MLA
-        # metadata already builds this mapping; using query_start_loc directly can
-        # misinterpret a single prefill request as one request per token.
-        token_to_seq = getattr(attn_metadata, "req_id_per_token", None)
-        if token_to_seq is not None:
-            token_to_seq = token_to_seq[:bs].to(device=query.device, dtype=torch.long)
-        else:
-            q_start = getattr(attn_metadata, "query_start_loc", None)
-            num_reqs = getattr(attn_metadata, "num_reqs", block_table.shape[0])
-            if q_start is not None and num_reqs > 0:
-                token_to_seq = torch.zeros(bs, dtype=torch.long, device=query.device)
-                max_reqs = min(int(num_reqs), block_table.shape[0])
-                for s_idx in range(max_reqs):
-                    start = q_start[s_idx]
-                    end = q_start[s_idx + 1]
-                    token_to_seq[start:end] = s_idx
-            else:
-                token_to_seq = torch.arange(bs, device=query.device)
-
-        # Native PyTorch fallback for small-operator DSA
-        for i in range(bs):
-            seq_idx = token_to_seq[i]
-            blocks = block_table[seq_idx]
-            valid_blocks = blocks[blocks >= 0]
-            if len(valid_blocks) == 0:
-                continue
-
-            # Ensure we only pick valid tokens, skipping padding if any
-            block_size = self.vllm_config.cache_config.block_size
-            q_cache = key.view(key.shape[0], -1, self.head_dim)
-            valid_keys = q_cache[valid_blocks, :block_size]
-            flat_keys = valid_keys.reshape(-1, self.head_dim)
-
-            token_q = query[i]  # [n_heads, head_dim]
-            token_w = weights[i]  # [n_heads]
-
-            logits = torch.matmul(token_q, flat_keys.transpose(0, 1))
-            logits = logits * token_w.unsqueeze(-1)
-            total_scores = logits.sum(dim=0)
-
-            k = min(self.topk_tokens - num_sink_tokens, total_scores.shape[0])
-            if k > 0:
-                _, indices = torch.topk(total_scores, k)
-                # Offset indices by sink_len so they map to the correct location
-                # in the padded block_table_tensor used by the sparse backend.
-                topk_indices[i, num_sink_tokens : num_sink_tokens + k] = (
-                    indices.to(torch.int32) + self.sink_len
-                )
-
-        return topk_indices
-
-
-def pangu_sparse_attn_indexer(
-    hidden_states: torch.Tensor,
-    attn_layer_name: str,
-    # kv_cache: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    weights: torch.Tensor,
-    topk_tokens: int,
-    head_dim: int,
-    block_size: int,
-    sink_len: int,
-    num_sink_blocks: int,
-    topk_indices_buffer: torch.Tensor,
-) -> torch.Tensor:
-    attn_metadata = get_forward_context().attn_metadata
-    if attn_metadata is None:
-        return topk_indices_buffer
-
-    forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[attn_layer_name]
-    kv_cache = attn_layer.indexer.kv_cache
-
-    attn_metadata = attn_metadata[attn_layer_name]
-    num_actual_toks = getattr(attn_metadata, "num_actual_tokens", query.shape[0])
-    hidden_states = hidden_states[:num_actual_toks]
-    query = query[:num_actual_toks]
-    key = key[:num_actual_toks]
-    weights = weights[:num_actual_toks]
-
-    slot_mapping = attn_metadata.slot_mapping[:num_actual_toks]
-    q_cache = kv_cache.view(kv_cache.shape[0], -1, key.shape[-1])
-    block_ids = slot_mapping // block_size
-    offsets = slot_mapping % block_size
-    q_cache[block_ids, offsets] = key
-
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
-
-    block_table = getattr(attn_metadata, "block_table", None)
-    if block_table is None and hasattr(attn_metadata, "decode"):
-        block_table = getattr(attn_metadata.decode, "block_table", None)
-
-    bs = hidden_states.shape[0]
-    if block_table is None:
-        topk_indices_buffer[:bs, :topk_tokens] = 0
-        return topk_indices_buffer
-
-    # block_table = block_table[:, num_sink_blocks:]
-    topk_indices = topk_indices_buffer[:bs, :topk_tokens]
-    # num_sink_tokens = min(sink_len, topk_tokens)
-    # if num_sink_tokens > 0:
-    #     sink_indices = torch.arange(
-    #         num_sink_tokens, dtype=torch.int32, device=query.device)
-    #     topk_indices[:, :num_sink_tokens] = sink_indices
-    query_start_loc = getattr(attn_metadata, "query_start_loc", None)
-    seq_lens = getattr(attn_metadata, "seq_lens", None)
-
-    token_to_seq = getattr(attn_metadata, "req_id_per_token", None)
-    if token_to_seq is not None:
-        token_to_seq = token_to_seq[:bs].to(device=query.device, dtype=torch.long)
-    else:
-        num_reqs = getattr(attn_metadata, "num_reqs", block_table.shape[0])
-        if query_start_loc is not None and num_reqs > 0:
-            token_to_seq = torch.zeros(bs, dtype=torch.long, device=query.device)
-            max_reqs = min(int(num_reqs), block_table.shape[0])
-            for seq_idx in range(max_reqs):
-                start = query_start_loc[seq_idx]
-                end = query_start_loc[seq_idx + 1]
-                token_to_seq[start:end] = seq_idx
-        else:
-            token_to_seq = torch.arange(bs, device=query.device)
-
-    q_cache = kv_cache.view(kv_cache.shape[0], -1, head_dim)
-    for i in range(bs):
-        seq_idx = token_to_seq[i]
-        blocks = block_table[seq_idx]
-        valid_blocks = blocks[blocks > 0]
-        if len(valid_blocks) == 0:
-            continue
-
-        valid_keys = q_cache[valid_blocks, :block_size]
-        flat_keys = valid_keys.reshape(-1, head_dim)
-        if query_start_loc is not None and seq_lens is not None:
-            req_q_start = query_start_loc[seq_idx]
-            req_q_end = query_start_loc[seq_idx + 1]
-            q_len = req_q_end - req_q_start
-            q_offset = i - req_q_start
-            visible_len = seq_lens[seq_idx] - q_len + q_offset + 1
-            visible_len = torch.clamp(visible_len, min=0, max=flat_keys.shape[0])
-            visible_len_int = int(visible_len.item())
-            if visible_len_int <= 0:
-                continue
-            flat_keys = flat_keys[:visible_len_int]
-        token_q = query[i]
-        token_w = weights[i]
-        logits = torch.matmul(token_q, flat_keys.transpose(0, 1))
-        logits = logits * token_w.unsqueeze(-1)
-        total_scores = logits.sum(dim=0)
-
-        k = min(topk_tokens, total_scores.shape[0])
-        if k > 0:
-            _, indices = torch.topk(total_scores, k)
-            topk_indices[i, :k] = torch.arange(k, device=query.device)
-    return topk_indices_buffer
-
-
-def pangu_sparse_attn_indexer_fake(
-    hidden_states: torch.Tensor,
-    attn_layer_name: str,
-    # kv_cache: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    weights: torch.Tensor,
-    topk_tokens: int,
-    head_dim: int,
-    block_size: int,
-    sink_len: int,
-    num_sink_blocks: int,
-    topk_indices_buffer: torch.Tensor,
-) -> torch.Tensor:
-    return topk_indices_buffer
-
-
-direct_register_custom_op(
-    op_name="pangu_sparse_attn_indexer",
-    op_func=pangu_sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
-    fake_impl=pangu_sparse_attn_indexer_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
+        return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
 class OpenPanguMLP(nn.Module):
@@ -1075,6 +829,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 num_spec_tokens=spec_token_num,
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
+                num_heads=self.num_heads,
                 num_local_heads=self.num_local_heads,
                 v_head_dim=self.v_head_dim,
                 vllm_config=vllm_config,
@@ -2163,6 +1918,8 @@ class OpenPanguModel(nn.Module):
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".indexer.wk_weights_proj", ".indexer.wk", 0),
+            (".indexer.wk_weights_proj", ".indexer.weights_proj", 1),
         ]
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
@@ -2175,9 +1932,14 @@ class OpenPanguModel(nn.Module):
                 num_redundant_experts=self.num_redundant_experts,
             )
 
+        _pending_wk_fp8: dict = {}
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if "layers" in name:
+                layer_idx = int(name.split("layers.")[-1].split(".")[0])
+                if layer_idx >= self.config.num_hidden_layers:
+                    continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
@@ -2192,6 +1954,11 @@ class OpenPanguModel(nn.Module):
                 mtp_idx = layer_idx - self.config.num_hidden_layers
                 if mtp_idx >= 0 and mtp_idx < self.config.num_nextn_predict_layers:
                     continue  # skip spec decode layers for main model
+
+            if _try_load_fp8_indexer_wk(
+                name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
+            ):
+                continue
 
             flag_dict = {"is_expert_weight": False}
             if (
