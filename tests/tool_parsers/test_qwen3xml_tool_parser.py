@@ -12,6 +12,18 @@ from tests.tool_parsers.common_tests import (
 )
 from tests.tool_parsers.utils import run_tool_extraction
 
+# All current streaming xfails for this parser fail with the same assertion:
+# `StreamingToolReconstructor` in tests/tool_parsers/utils.py requires `id`
+# (and `name`) only on the first delta of each tool_call slot, but the
+# parser sets id=self.current_call_id on every DeltaToolCall it emits,
+# including continuation/args deltas. Fix is localized to the parser's
+# delta-emit sites; once done, remove this constant and these entries.
+_STREAMING_ID_REEMITTED = (
+    "Parser sets id on every delta; OpenAI protocol requires id only on the "
+    "first delta per slot"
+)
+
+
 class TestQwen3xmlToolParser(ToolParserTests):
     @pytest.fixture
     def test_config(self) -> ToolParserTestConfig:
@@ -57,32 +69,22 @@ class TestQwen3xmlToolParser(ToolParserTests):
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers - Qwen3XML has systematic streaming issues
-            # xfail markers - Qwen3XML has systematic streaming issues
-            xfail_streaming={
-                "test_single_tool_call_simple_args": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-                "test_parallel_tool_calls": "Qwen3XML streaming has systematic issues",
-                "test_various_data_types": "Qwen3XML streaming has systematic issues",
-                "test_empty_arguments": "Qwen3XML streaming has systematic issues",
-                "test_surrounding_text": "Qwen3XML streaming has systematic issues",
-                "test_escaped_strings": "Qwen3XML streaming has systematic issues",
-                "test_streaming_reconstruction": (
-                    "Qwen3XML streaming reconstruction has known issues"
-                ),
-                "test_multiple_functions_in_one_tool_call": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-                "test_multiple_empty_functions_in_one_tool_call": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-                "test_three_functions_in_one_tool_call": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-                "test_multi_function_state_resets_between_tool_calls": (
-                    "Qwen3XML streaming has systematic issues"
-                ),
-            },
+            xfail_streaming=dict.fromkeys(
+                [
+                    "test_single_tool_call_simple_args",
+                    "test_parallel_tool_calls",
+                    "test_various_data_types",
+                    "test_empty_arguments",
+                    "test_surrounding_text",
+                    "test_escaped_strings",
+                    "test_streaming_reconstruction",
+                    "test_multiple_functions_in_one_tool_call",
+                    "test_multiple_empty_functions_in_one_tool_call",
+                    "test_three_functions_in_one_tool_call",
+                    "test_multi_function_state_resets_between_tool_calls",
+                ],
+                _STREAMING_ID_REEMITTED,
+            ),
             supports_typed_arguments=False,
         )
 
