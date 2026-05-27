@@ -1091,7 +1091,10 @@ class FusedMoEParallelConfig:
 
     @property
     def use_mori_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "mori"
+        return self.use_all2all_kernels and self.all2all_backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+        )
 
     @property
     def use_nixl_ep_kernels(self):
