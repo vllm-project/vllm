@@ -1186,9 +1186,16 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
+        # Glm46VProcessor uses image_token_id for video frame embeddings;
+        # Glm4vProcessor uses video_token_id.
+        frame_embed_token_id = (
+            hf_processor.video_token_id
+            if isinstance(hf_processor, Glm4vProcessor)
+            else hf_processor.image_token_id
+        )
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
-            placeholder.extend([hf_processor.video_token_id] * num_tokens_per_frame)
+            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
             placeholder.append(eoi_token_id)
             placeholder.extend(frame_idx)
         placeholder.append(eov_token_id)
@@ -1463,9 +1470,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
-            _, metadata = mm_items["video"][item_idx]
-            placeholder = self.info._construct_video_placeholder_glm46v(
-                metadata, grid_thw
+            video, metadata = mm_items["video"][item_idx]
+            placeholder = self.info._construct_video_placeholder(
+                video, metadata, grid_thw
             )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
