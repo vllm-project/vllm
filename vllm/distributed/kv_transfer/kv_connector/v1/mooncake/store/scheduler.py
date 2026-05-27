@@ -371,3 +371,30 @@ class MooncakeStoreScheduler:
                 request.request_id,
             )
         return delay_free_blocks, None
+
+    def reset_store(self) -> bool:
+        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+
+        Routes through the existing LookupKey ZMQ admin channel to worker
+        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+
+        Ordering assumption: caller (typically
+        ``Scheduler.reset_connector_cache``, invoked via
+        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        in-flight Mooncake lookups or transfers. For RL workflows this is
+        satisfied at the step boundary after weight updates and rollout
+        drain. Violating this can allow stale KV to be served on the next
+        request, defeating the hard-reset guarantee.
+
+        Returns True on ACK from worker, False on NACK or RPC error.
+        """
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("Mooncake store reset via remove_all succeeded.")
+            else:
+                logger.warning("Mooncake store reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("Mooncake reset_store RPC failed: %s", e)
+            return False
