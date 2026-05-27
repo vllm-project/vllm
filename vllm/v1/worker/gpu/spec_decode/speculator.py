@@ -66,7 +66,7 @@ class BaseSpeculator(ABC):
         pass
 
 
-class ModelBackedSpeculator(BaseSpeculator):
+class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -206,14 +206,9 @@ class ModelBackedSpeculator(BaseSpeculator):
         )
         return attn_metadata
 
-    def _copy_inputs_from_target(
+    def _copy_request_inputs(
         self,
-        num_tokens: int,
         num_reqs: int,
-        # [num_tokens, hidden_size]
-        last_hidden_states: torch.Tensor,
-        # num_layers x [num_tokens, hidden_size]
-        aux_hidden_states: list[torch.Tensor] | None,
         # [num_reqs]
         idx_mapping: torch.Tensor,
         # [max_num_reqs]
@@ -221,20 +216,6 @@ class ModelBackedSpeculator(BaseSpeculator):
         # [max_num_reqs]
         seeds: torch.Tensor,
     ) -> None:
-        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we maintain the size of input_ids and
-        # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
-        if aux_hidden_states:
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
-        self.hidden_states[:num_tokens].copy_(hidden_states)
-
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,

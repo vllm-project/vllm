@@ -19,16 +19,16 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.spec_decode.cudagraph import (
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     DecodeSpeculatorCudaGraphManager,
     PrefillSpeculatorCudaGraphManager,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import ModelBackedSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 logger = init_logger(__name__)
 
 
-class AutoRegressiveSpeculator(ModelBackedSpeculator):
+class AutoRegressiveSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -162,20 +162,31 @@ class AutoRegressiveSpeculator(ModelBackedSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        if aux_hidden_states:
-            assert self.method == "eagle3"
-
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
+        max_query_len = input_batch.num_scheduled_tokens.max()
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
             max_seq_len + self.num_speculative_steps, self.max_model_len
         )
-        self._copy_inputs_from_target(
-            num_tokens,
+
+        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
+        # number of rejected tokens, we maintain the size of input_ids and
+        # hidden_states the same as the target model's. This means, we pad each
+        # request's query length to include any rejected positions. By doing so,
+        # we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model.
+        if aux_hidden_states:
+            assert self.method == "eagle3"
+            hidden_states = self.model.combine_hidden_states(
+                torch.cat(aux_hidden_states, dim=-1)
+            )
+        else:
+            hidden_states = last_hidden_states
+        self.hidden_states[:num_tokens].copy_(hidden_states)
+
+        self._copy_request_inputs(
             num_reqs,
-            last_hidden_states,
-            aux_hidden_states,
             input_batch.idx_mapping,
             temperature,
             seeds,
@@ -201,7 +212,7 @@ class AutoRegressiveSpeculator(ModelBackedSpeculator):
             # Use the actual number of tokens without padding added by
             # the target model during FULL cudagraph.
             input_batch.num_tokens,
-            input_batch.num_scheduled_tokens.max(),
+            max_query_len,
         )
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,

@@ -54,8 +54,7 @@ class PrefillSpeculatorCudaGraphManager(CudaGraphManager):
 
 
 class DecodeSpeculatorCudaGraphManager(CudaGraphManager):
-    """CudaGraphManager for draft decode, building its own attention metadata
-    from scratch."""
+    """CudaGraphManager for draft decode, building its own attention metadata."""
 
     def capture(
         self,
