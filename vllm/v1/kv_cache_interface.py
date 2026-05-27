@@ -183,7 +183,15 @@ class KVCacheLayout(Enum):
 
     @property
     def layer_stride_order(self) -> tuple[int, ...]:
-        """4D permutation [B, H, N, C] for per-layer tensors (drops L)."""
+        """4D permutation [B, H, N, C] for per-layer tensors (drops L).
+
+        TODO(RFC #42082, part 3): non-layer-compact layouts (BLHNC, BHLNC)
+        interleave layers within a block and cannot be expressed as an
+        independent 4D per-layer view. Callers that want a per-layer view
+        under those layouts must wait for the connector refactor (part 3),
+        which switches to 5D views with meta tensors so the per-layer
+        slicing is no longer needed.
+        """
         if not self.is_layer_compact:
             compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
             raise ValueError(
