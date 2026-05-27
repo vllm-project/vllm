@@ -93,6 +93,7 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
 @triton.jit
 def _topk_topp_kernel(
     LOGITS,
+    LOGITS_STRIDE_0,
     BUFFER,
     PERCENTILE_TO_STD_TABLE,
     NORMAL_CDF_TO_SIGMA_TABLE,
@@ -110,7 +111,7 @@ def _topk_topp_kernel(
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
-        LOGITS_ROW = LOGITS + row_id * VOCAB_SIZE
+        LOGITS_ROW = LOGITS + row_id * LOGITS_STRIDE_0
         BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
 
         final_pivot = -float("inf")
@@ -975,25 +976,30 @@ def apply_top_k_top_p_triton(
     to the remaining k values (by probability).
 
     Args:
-        logits: [batch_size, vocab_size] float32 tensor, modified in-place
+        logits: [batch_size, vocab_size] float32 tensor. The returned tensor
+            may alias this input or be a new contiguous tensor for unsupported
+            layouts.
         k: [batch_size] int32 tensor of top-k values per row, or None to disable top-k
         p: [batch_size] float32 tensor of top-p values per row (0 to 1),
             or None to disable top-p
         mask_value: Value for masked positions (default: -inf)
 
     Returns:
-        The logits tensor (modified in-place)
+        The masked logits tensor. It may or may not be modified in-place.
     """
     assert logits.ndim == 2
     assert logits.dtype == torch.float32
-
     batch_size, vocab_size = logits.shape
-
     topk_enabled = k is not None
     topp_enabled = p is not None
 
     if batch_size == 0 or not (topk_enabled or topp_enabled):
         return logits
+
+    # The Triton kernel supports arbitrary row strides, but it still assumes
+    # the vocab dimension is laid out contiguously within each row.
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
 
     if k is not None:
         assert k.ndim == 1 and k.shape[0] == batch_size
@@ -1034,6 +1040,7 @@ def apply_top_k_top_p_triton(
 
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
+        logits.stride(0),
         buffer,
         percentile_to_std_table,
         normal_cdf_to_sigma_table,
