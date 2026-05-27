@@ -392,6 +392,14 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    """Indices to restore the original order of KV in prefill context parallelism"""
+
+    global_num_scheduled_tokens: torch.Tensor | None = None
+    """(batch_size,), GLOBAL (pre-PCP-partition) scheduled token counts per request.
+    Used by PCP to correctly compute num_computed_tokens, since with PCP
+    query_start_loc is local but seq_lens is global."""
+
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
@@ -455,10 +463,22 @@ class CommonAttentionMetadata:
         return self._num_computed_tokens_cpu
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
-        """Compute num_computed_tokens on device (seq_lens - query_lens)."""
+        """Compute num_computed_tokens on device.
+
+        With PCP, query_start_loc is local (partitioned) but seq_lens is
+        global, so ``seq_lens - query_lens`` gives the wrong result. When
+        global_num_scheduled_tokens is available we use
+        ``seq_lens - global_num_scheduled_tokens`` instead, which is always
+        correct since seq_lens = num_computed + num_scheduled (both global).
+        """
         if self._num_computed_tokens_cache is None:
-            query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-            self._num_computed_tokens_cache = self.seq_lens - query_lens
+            if self.global_num_scheduled_tokens is not None:
+                self._num_computed_tokens_cache = (
+                    self.seq_lens - self.global_num_scheduled_tokens
+                )
+            else:
+                query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
+                self._num_computed_tokens_cache = self.seq_lens - query_lens
         return self._num_computed_tokens_cache
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -489,6 +509,9 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            global_num_scheduled_tokens=maybe_slice_reqs(
+                self.global_num_scheduled_tokens
+            ),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 
@@ -702,7 +725,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl(or ops) supports MTP
-    # when cp_kv_cache_interleave_size > 1
+    # when dcp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False
 
     # some attention backends might not always want to return lse

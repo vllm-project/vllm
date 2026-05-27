@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_dcp_group,
+    get_pcp_group,
+    get_tp_group,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -190,7 +195,7 @@ def _cp_lse_common(
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
-        return cp_attn_out
+        return cp_attn_out, cp_attn_lse
 
     if ctx is None:
         ctx = CPTritonContext()
@@ -252,6 +257,76 @@ def cp_lse_ag_out_ar(
     out = cp_group.all_reduce(out)
 
     if return_lse:
+        return out, lse
+    return out
+
+
+# Backward compatibility alias.
+DCPTritonContext = CPTritonContext
+
+
+def dcp_prepare_query(query: torch.Tensor) -> torch.Tensor:
+    """Prepare query for DCP decode attention.
+
+    Two cases based on DCP configuration:
+    - Case 1 (DCP = PCP): No all-gather needed, ranks already have same heads.
+    - Case 2 (DCP = TP * PCP): All-gather across TP to get all heads.
+    """
+    dcp_group = get_dcp_group()
+    tp_group = get_tp_group()
+
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        pcp_world_size = 1
+
+    dcp_spans_tp = dcp_group.world_size > pcp_world_size
+    if dcp_spans_tp:
+        return tp_group.all_gather(query, dim=1)
+    return query
+
+
+def dcp_reduce_output(
+    attn_output: torch.Tensor,
+    attn_lse: torch.Tensor,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Reduce DCP partial attention outputs across the DCP group.
+
+    Two cases based on DCP configuration:
+    - Case 1 (DCP = PCP): All-reduce only (no scatter, same heads).
+    - Case 2 (DCP = TP * PCP): All-reduce across DCP, then slice to TP-local heads.
+    """
+    dcp_group = get_dcp_group()
+    tp_group = get_tp_group()
+
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        pcp_world_size = 1
+
+    dcp_spans_tp = dcp_group.world_size > pcp_world_size
+
+    if not dcp_spans_tp:
+        return cp_lse_ag_out_ar(
+            attn_output,
+            attn_lse,
+            dcp_group,
+            ctx=ctx,
+            return_lse=return_lse,
+            is_lse_base_on_e=True,
+        )
+
+    out, lse = _cp_lse_common(
+        attn_output, attn_lse, dcp_group, ctx=ctx, is_lse_base_on_e=True
+    )
+    out = dcp_group.all_reduce(out)
+    tp_rank = tp_group.rank_in_group
+    tp_num_heads = out.shape[1] // tp_group.world_size
+    out = out[:, tp_num_heads * tp_rank : tp_num_heads * (tp_rank + 1), :]
+    if return_lse:
+        lse = lse[:, tp_num_heads * tp_rank : tp_num_heads * (tp_rank + 1)]
         return out, lse
     return out
 
