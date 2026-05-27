@@ -62,13 +62,6 @@ __device__ __forceinline__ float toFloat(T value) {
     }
 }
 
-#ifndef USE_ROCM
-inline bool supportsPdlOnCurrentDevice() {
-    const auto* props = at::cuda::getCurrentDeviceProperties();
-    return props != nullptr && props->major >= 9;
-}
-#endif
-
 // Scoring function enums
 enum ScoringFunc {
   SCORING_SOFTMAX = 0, // apply softmax
@@ -272,7 +265,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
 */
 
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType,
-          typename InputType = float, ScoringFunc SF = SCORING_SOFTMAX, bool ENABLE_PDL = false>
+          typename InputType = float, ScoringFunc SF>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGating(const InputType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
@@ -324,14 +317,6 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     // We compute row offset for each thread sub-group
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
-
-
-#if !defined(USE_ROCM) && defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) && \
-    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-    if constexpr (ENABLE_PDL) {
-        asm volatile("griddepcontrol.wait;");
-    }
-#endif
 
     // Threads with indices out of bounds should early exit here.
     if (thread_row >= num_rows)
@@ -592,14 +577,6 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
             }
         }
     }
-
-#if !defined(USE_ROCM) && defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) && \
-    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-    if constexpr (ENABLE_PDL) {
-        asm volatile("griddepcontrol.launch_dependents;");
-    }
-#endif
-
 }
 
 namespace detail
@@ -620,7 +597,7 @@ struct TopkConstants
 template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename IndType, typename InputType, ScoringFunc SF>
 void topkGatingLauncherHelper(const InputType* input, const bool* finished, float* output, IndType* indices,
     int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
-    const float* bias, bool enable_pdl, cudaStream_t stream)
+    const float* bias, cudaStream_t stream)
 {
     static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM, InputType>;
@@ -630,27 +607,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
-#if !defined(USE_ROCM) && defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
-    if (enable_pdl && supportsPdlOnCurrentDevice()) {
-        cudaLaunchConfig_t config;
-        config.gridDim = num_blocks;
-        config.blockDim = block_dim;
-        config.dynamicSmemBytes = 0;
-        config.stream = stream;
-        cudaLaunchAttribute attrs[1];
-        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-        attrs[0].val.programmaticStreamSerializationAllowed = 1;
-        config.numAttrs = 1;
-        config.attrs = attrs;
-        cudaLaunchKernelEx(
-            &config,
-            topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, true>,
-            input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias);
-        return;
-    }
-#endif
-    topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, false>
-        <<<num_blocks, block_dim, 0, stream>>>(
+    topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF><<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias);
 }
 
@@ -662,7 +619,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
                              IndType, InputType, SF>(                         \
         gating_output, nullptr, topk_weights, topk_indices,                   \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,  \
-        bias, enable_pdl, stream);
+        bias, stream);
 #else
   #define LAUNCH_TOPK(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                    \
     if (WARP_SIZE == 64) {                                                     \
@@ -670,13 +627,13 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
                                IndType, InputType, SF>(                        \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
-          bias, enable_pdl, stream);                                           \
+          bias, stream);                                                       \
     } else if (WARP_SIZE == 32) {                                              \
       topkGatingLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32, MAX_BYTES,       \
                                IndType, InputType, SF>(                        \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
-          bias, enable_pdl, stream);                                           \
+          bias, stream);                                                       \
     } else {                                                                   \
       assert(false &&                                                          \
              "Unsupported warp size. Only 32 and 64 are supported for ROCm");  \
@@ -695,7 +652,6 @@ void topkGatingKernelLauncher(
     const int topk,
     const bool renormalize,
     const float* bias,
-    bool enable_pdl,
     cudaStream_t stream) {
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -789,7 +745,6 @@ void dispatch_topk_launch(
     torch::Tensor& softmax_workspace,
     int num_tokens, int num_experts, int topk, bool renormalize,
     std::optional<torch::Tensor> bias,
-    bool enable_pdl,
     cudaStream_t stream)
  {
     const float* bias_ptr = nullptr;
@@ -810,7 +765,7 @@ void dispatch_topk_launch(
             token_expert_indices.data_ptr<int>(),
             softmax_workspace.data_ptr<float>(),
             num_tokens, num_experts, topk, renormalize,
-            bias_ptr, enable_pdl, stream);
+            bias_ptr, stream);
     } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
         vllm::moe::topkGatingKernelLauncher<uint32_t, ComputeType, SF>(
             reinterpret_cast<const ComputeType*>(gating_output.data_ptr()),
@@ -819,7 +774,7 @@ void dispatch_topk_launch(
             token_expert_indices.data_ptr<int>(),
             softmax_workspace.data_ptr<float>(),
             num_tokens, num_experts, topk, renormalize,
-            bias_ptr, enable_pdl, stream);
+            bias_ptr, stream);
     } else {
         TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
         vllm::moe::topkGatingKernelLauncher<int64_t, ComputeType, SF>(
@@ -829,7 +784,7 @@ void dispatch_topk_launch(
             token_expert_indices.data_ptr<int>(),
             softmax_workspace.data_ptr<float>(),
             num_tokens, num_experts, topk, renormalize,
-            bias_ptr, enable_pdl, stream);
+            bias_ptr, stream);
     }
 }
 
@@ -839,8 +794,7 @@ void topk_softmax(
     torch::Tensor& token_expert_indices,        // [num_tokens, topk]
     torch::Tensor& gating_output,               // [num_tokens, num_experts]
     bool renormalize,
-    std::optional<torch::Tensor> bias,
-    bool enable_pdl)
+    std::optional<torch::Tensor> bias)
 {
     const int num_experts = gating_output.size(-1);
     const auto num_tokens = gating_output.numel() / num_experts;
@@ -858,15 +812,15 @@ void topk_softmax(
     if (gating_output.scalar_type() == at::ScalarType::Float) {
         dispatch_topk_launch<float, vllm::moe::SCORING_SOFTMAX>(gating_output, topk_weights, topk_indices,
             token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else if (gating_output.scalar_type() == at::ScalarType::Half) {
         dispatch_topk_launch<__half, vllm::moe::SCORING_SOFTMAX>(gating_output, topk_weights, topk_indices,
             token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
         dispatch_topk_launch<__nv_bfloat16, vllm::moe::SCORING_SOFTMAX>(gating_output, topk_weights, topk_indices,
             token_expert_indices, softmax_workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else {
         TORCH_CHECK(false, "Unsupported gating_output data type: ", gating_output.scalar_type());
     }
@@ -878,8 +832,7 @@ void topk_sigmoid(
     torch::Tensor& token_expert_indices,        // [num_tokens, topk]
     torch::Tensor& gating_output,               // [num_tokens, num_experts]
     bool renormalize,
-    std::optional<torch::Tensor> bias,
-    bool enable_pdl)
+    std::optional<torch::Tensor> bias)
 {
     const int num_experts = gating_output.size(-1);
     const auto num_tokens = gating_output.numel() / num_experts;
@@ -897,15 +850,15 @@ void topk_sigmoid(
     if (gating_output.scalar_type() == at::ScalarType::Float) {
         dispatch_topk_launch<float, vllm::moe::SCORING_SIGMOID>(gating_output, topk_weights, topk_indices,
             token_expert_indices, workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else if (gating_output.scalar_type() == at::ScalarType::Half) {
         dispatch_topk_launch<__half, vllm::moe::SCORING_SIGMOID>(gating_output, topk_weights, topk_indices,
             token_expert_indices, workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
         dispatch_topk_launch<__nv_bfloat16, vllm::moe::SCORING_SIGMOID>(gating_output, topk_weights, topk_indices,
             token_expert_indices, workspace, num_tokens, num_experts, topk, renormalize,
-            bias, enable_pdl, stream);
+            bias, stream);
     } else {
         TORCH_CHECK(false, "Unsupported gating_output data type: ", gating_output.scalar_type());
     }

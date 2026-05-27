@@ -20,7 +20,6 @@ def vllm_topk_softmax(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
-    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -28,7 +27,6 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
-        enable_pdl=enable_pdl,
     )
 
     return topk_weights, topk_indices
@@ -40,7 +38,6 @@ def vllm_topk_sigmoid(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool = False,
-    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_sigmoid(
         topk_weights,
@@ -48,7 +45,6 @@ def vllm_topk_sigmoid(
         token_expert_indices,
         gating_output,
         renormalize,
-        enable_pdl=enable_pdl,
     )
 
     return topk_weights, topk_indices
@@ -77,7 +73,6 @@ def fused_topk(
     renormalize: bool,
     indices_type: torch.dtype | None = None,
     scoring_func: str = "softmax",
-    enable_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -97,30 +92,20 @@ def fused_topk(
     )
 
     if scoring_func == "softmax":
-        use_rocm_aiter = rocm_aiter_ops.is_fused_moe_enabled()
-        topk_func = dispatch_topk_softmax_func(use_rocm_aiter=use_rocm_aiter)
-        pdl_kwargs = {} if use_rocm_aiter else {"enable_pdl": enable_pdl}
+        topk_func = dispatch_topk_softmax_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
         topk_weights, topk_ids = topk_func(
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            **pdl_kwargs,
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
 
         return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
-        use_rocm_aiter = rocm_aiter_ops.is_fused_moe_enabled()
-        topk_func = dispatch_topk_sigmoid_func(use_rocm_aiter=use_rocm_aiter)
-        pdl_kwargs = {} if use_rocm_aiter else {"enable_pdl": enable_pdl}
+        topk_func = dispatch_topk_sigmoid_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
         topk_weights, topk_ids = topk_func(
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            **pdl_kwargs,
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
 
         return topk_weights, topk_ids, token_expert_indices
@@ -139,7 +124,6 @@ class FusedTopKRouter(BaseRouter):
         renormalize: bool = True,
         eplb_state: EplbLayerState | None = None,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        enable_pdl: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -149,7 +133,6 @@ class FusedTopKRouter(BaseRouter):
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
-        self.enable_pdl = enable_pdl
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -177,7 +160,6 @@ class FusedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             indices_type=indices_type,
             scoring_func=self.scoring_func,
-            enable_pdl=self.enable_pdl,
         )
 
         return topk_weights, topk_ids
