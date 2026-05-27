@@ -65,6 +65,13 @@ class RequestArgs(NamedTuple):
     limit_min_tokens: int  # Use negative value for no limit
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
+    # Whether to send the non-standard `conversation_id` field in each
+    # request payload. Required by the disaggregated multi-turn proxy
+    # (examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py)
+    # for cross-turn KV cache reuse. Default off so the benchmark is
+    # compatible with strict OpenAI-compatible endpoints that reject
+    # unknown fields with HTTP 400.
+    send_conversation_id: bool
 
 
 class BenchmarkArgs(NamedTuple):
@@ -226,6 +233,13 @@ async def send_request(
         "temperature": 0.0,
     }
 
+    # `conversation_id` is a non-standard extension consumed by the
+    # disaggregated multi-turn proxy
+    # (examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py)
+    # to key cross-turn KV cache reuse. It is documented in
+    # docs/features/nixl_connector_usage.md. Strict OpenAI-compatible
+    # endpoints (e.g. AI Dynamo's frontend) reject unknown fields with
+    # HTTP 400, so the caller opts in only when targeting the proxy.
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
 
@@ -413,7 +427,10 @@ async def send_turn(
         if max_tokens == NUM_TOKENS_FROM_DATASET:
             max_tokens = max(1, answer_num_tokens)
 
-    # Send the current conversation to LLM and get a response
+    # Send the current conversation to LLM and get a response.
+    # Only forward `conv_id` on the wire when the user opted in via
+    # `--send-conversation-id`; otherwise the payload stays
+    # OpenAI-schema-compliant and works against strict endpoints.
     response: ServerResponse = await send_request(
         session,
         messages,
@@ -423,7 +440,7 @@ async def send_turn(
         min_tokens,
         max_tokens,
         req_args.timeout_sec,
-        conversation_id=conv_id,
+        conversation_id=conv_id if req_args.send_conversation_id else None,
     )
 
     if response.valid is False:
@@ -880,6 +897,7 @@ def get_client_config(
         limit_min_tokens=args.limit_min_tokens,
         limit_max_tokens=args.limit_max_tokens,
         timeout_sec=args.request_timeout_sec,
+        send_conversation_id=args.send_conversation_id,
     )
 
     return client_args, req_args
@@ -1435,6 +1453,22 @@ async def main() -> None:
         default=False,
         action="store_true",
         help="Disable stream/streaming mode (set 'stream' to False in the API request)",
+    )
+
+    parser.add_argument(
+        "--send-conversation-id",
+        default=False,
+        action="store_true",
+        help=(
+            "Inject a `conversation_id` field into each Chat Completions "
+            "payload. This is a non-standard OpenAI extension consumed by "
+            "vLLM's disaggregated multi-turn proxy "
+            "(examples/disaggregated/disaggregated_serving/"
+            "disagg_proxy_multiturn.py) to key cross-turn KV cache reuse. "
+            "Leave disabled (default) when targeting strict "
+            "OpenAI-compatible endpoints; enable when benchmarking the "
+            "disaggregated proxy."
+        ),
     )
 
     parser.add_argument(
