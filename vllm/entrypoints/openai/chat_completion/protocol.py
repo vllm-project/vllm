@@ -41,6 +41,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -225,7 +226,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "part of the standard OpenAI API specification."
         ),
     )
-    thinking_token_budget: int | None = None
+    thinking_token_budget: ThinkingTokenBudget = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -245,6 +246,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
@@ -464,17 +473,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            documents=self.documents,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                    documents=self.documents,
-                    reasoning_effort=self.reasoning_effort,
-                ),
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
@@ -491,6 +510,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_output_tokens or 0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
@@ -900,7 +920,9 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     - The ``n`` parameter must be 1 (or omitted).
     """
 
-    messages: list[list[ChatCompletionMessageParam]] = Field(..., min_length=1)
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.

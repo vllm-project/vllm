@@ -1882,7 +1882,16 @@ class Scheduler(SchedulerInterface):
         return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
-        return len(self.finished_req_ids) > 0
+        if self.finished_req_ids:
+            return True
+        if self.connector is None:
+            return False
+        # Finished requests waiting on delayed connector cleanup remain in
+        # self.requests after they have been removed from scheduling queues.
+        num_in_queues = (
+            len(self.waiting) + len(self.skipped_waiting) + len(self.running)
+        )
+        return len(self.requests) > num_in_queues
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
@@ -1936,8 +1945,16 @@ class Scheduler(SchedulerInterface):
 
     def reset_connector_cache(self) -> bool:
         if self.connector is None:
-            logger.warning("reset_connector called but no KV connector is configured.")
-            return False
+            # No connector attached -> nothing to reset, treat as success so
+            # callers that unconditionally request a connector reset (e.g. as
+            # part of a cache-clearing cascade after a weight update) don't
+            # see reset_prefix_cache() flip to False purely because they
+            # didn't configure a connector.
+            logger.debug(
+                "reset_connector requested but no KV connector is configured; "
+                "treating as no-op success."
+            )
+            return True
 
         if self.connector.reset_cache() is False:
             return False
